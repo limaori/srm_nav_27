@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="3"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode name="NavigateRecovery"
+                  number_of_retries="10">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="3.0">
+          <RecoveryNode name="ComputePathThroughPoses"
+                        number_of_retries="1">
+            <ReactiveSequence>
+              <!-- radius 是"离车多近就把这个航点当成已到达并从列表里删掉"的半径(nav2 默认 0.5)。
+                   原来写 0.7: 车旁边 0.7 m 内的航点会被静默删掉, 车不会去,
+                   但整段 navigate_through_poses 仍然报成功(reached), 看起来像"没到就说到了"。
+                   收到 0.25 后, 只有真的贴近航点才会跳过它。 -->
+              <RemovePassedGoals input_goals="{goals}"
+                                 output_goals="{goals}"
+                                 radius="0.25"/>
+              <ComputePathThroughPoses goals="{goals}"
+                                       path="{path}"
+                                       planner_id="GridBased"/>
+            </ReactiveSequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode name="FollowPath"
+                      number_of_retries="10">
+          <FollowPath path="{path}"
+                      controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <!-- 同 navigate_to_pose 那份: 脱困速度 1.0 -> 0.2 m/s。
+               该动作由 srm27_nav_behaviors/BackUpFreeSpace 实现, 不是真倒车,
+               而是朝最空方向开, 并且绕过 velocity_smoother 的限速。 -->
+          <BackUp backup_dist="1.0"
+                  backup_speed="0.2"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

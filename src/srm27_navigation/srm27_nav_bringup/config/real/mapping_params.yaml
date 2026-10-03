@@ -1,0 +1,107 @@
+livox_ros_driver2:
+  ros__parameters:
+    xfer_format: 4
+    multi_topic: 0
+    data_src: 0
+    publish_freq: 10.0
+    output_data_type: 0
+    frame_id: livox_frame
+    cmdline_input_bd_code: livox0000000001
+    lvx_file_path: ""
+
+point_lio:
+  ros__parameters:
+    point_filter_num: 4
+    filter_size_surf: 0.2
+    filter_size_map: 0.2
+    ivox_nearby_type: 18
+    common:
+      lid_topic: livox/lidar
+      imu_topic: livox/imu
+    prior_pcd:
+      enable: false
+    mapping:
+      extrinsic_est_en: false
+      acc_norm: 1.0
+      ivox_grid_resolution: 0.5
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    odometry:
+      publish_odometry_without_downsample: false
+    publish:
+      path_en: false
+      scan_publish_en: true
+      tf_send_en: false
+    pcd_save:
+      interval: -1
+
+loam_interface:
+  ros__parameters:
+    state_estimation_topic: aft_mapped_to_init
+    registered_scan_topic: cloud_registered
+    odom_frame: odom
+    base_frame: base_link
+    lidar_frame: livox_imu
+    planarize_pose: false
+
+sensor_scan_generation:
+  ros__parameters:
+    lidar_frame: livox_imu
+    base_frame: base_link
+    robot_base_frame: base_link
+    publish_tf: true
+
+pointcloud_to_laserscan:
+  ros__parameters:
+    target_frame: livox_scan
+    transform_tolerance: 0.1
+    queue_size: 20
+    min_intensity: 0.0
+    max_intensity: 255.0
+    angle_min: -3.141592653589793
+    angle_max: 3.141592653589793
+    angle_increment: 0.008726646259971648
+    scan_time: 0.1
+    range_min: 0.5
+    range_max: 20.0
+    use_inf: true
+
+slam_toolbox:
+  ros__parameters:
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+    mode: mapping
+    use_map_saver: true
+    throttle_scans: 1
+    transform_publish_period: 0.02
+    map_update_interval: 1.0
+    resolution: 0.05
+    min_laser_range: 0.5
+    max_laser_range: 20.0
+    minimum_time_interval: 0.1
+    transform_timeout: 0.5
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45

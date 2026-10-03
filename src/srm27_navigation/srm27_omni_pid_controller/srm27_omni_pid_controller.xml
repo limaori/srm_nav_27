@@ -1,0 +1,9 @@
+<class_libraries>
+    <library path="srm27_omni_pid_controller">
+        <class type="srm27_omni_pid_controller::OmniPidPursuitController" base_class_type="nav2_core::Controller">
+            <description>
+                srm27_omni_pid_controller
+            </description>
+        </class>
+    </library>
+</class_libraries>

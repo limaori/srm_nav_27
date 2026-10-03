@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<robot name="srm_sentry">
+  <link name="base_footprint" />
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.15" />
+      <geometry><cylinder radius="0.27" length="0.2" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15" />
+      <geometry><cylinder radius="0.27" length="0.2" /></geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.15" />
+      <mass value="8.2" />
+      <inertia ixx="0.17677833333333334" ixy="0" ixz="0" iyy="0.17677833333333334" iyz="0" izz="0.29889" />
+    </inertial>
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint" /><child link="base_link" />
+  </joint>
+  <link name="gimbal_yaw" />
+  <joint name="gimbal_yaw_joint" type="fixed">
+    <origin xyz="0 0 0.1376" />
+    <parent link="base_link" /><child link="gimbal_yaw" />
+  </joint>
+  <link name="gimbal_pitch" />
+  <joint name="gimbal_pitch_joint" type="fixed">
+    <origin xyz="0 0 0.16" />
+    <parent link="gimbal_yaw" /><child link="gimbal_pitch" />
+  </joint>
+  <link name="front_mid360" />
+  <joint name="front_mid360_joint" type="fixed">
+    <origin xyz="0.15 -0.15 0.22" rpy="-0.06981317007977318 0 -1.5707963267948966" />
+    <parent link="base_link" /><child link="front_mid360" />
+  </joint>
+  <link name="livox_imu" />
+  <joint name="livox_imu_joint" type="fixed">
+    <parent link="front_mid360" /><child link="livox_imu" />
+  </joint>
+  <link name="livox_scan" />
+  <joint name="livox_scan_joint" type="fixed">
+    <origin xyz="0.15 -0.15 0.22" />
+    <parent link="base_link" /><child link="livox_scan" />
+  </joint>
+  <link name="front_left_wheel">
+    <visual>
+      <geometry><cylinder radius="0.075" length="0.04" /></geometry>
+      <material name="wheel_black"><color rgba="0.05 0.05 0.05 1" /></material>
+    </visual>
+    <collision><geometry><cylinder radius="0.075" length="0.04" /></geometry></collision>
+  </link>
+  <joint name="front_left_wheel_joint" type="fixed">
+    <origin xyz="0.18 0.18 0.075" rpy="-1.5707963267948966 0 -0.7853981633974483" />
+    <parent link="base_link" /><child link="front_left_wheel" />
+  </joint>
+  <link name="rear_left_wheel">
+    <visual>
+      <geometry><cylinder radius="0.075" length="0.04" /></geometry>
+      <material name="wheel_black"><color rgba="0.05 0.05 0.05 1" /></material>
+    </visual>
+    <collision><geometry><cylinder radius="0.075" length="0.04" /></geometry></collision>
+  </link>
+  <joint name="rear_left_wheel_joint" type="fixed">
+    <origin xyz="-0.18 0.18 0.075" rpy="-1.5707963267948966 0 0.7853981633974483" />
+    <parent link="base_link" /><child link="rear_left_wheel" />
+  </joint>
+  <link name="front_right_wheel">
+    <visual>
+      <geometry><cylinder radius="0.075" length="0.04" /></geometry>
+      <material name="wheel_black"><color rgba="0.05 0.05 0.05 1" /></material>
+    </visual>
+    <collision><geometry><cylinder radius="0.075" length="0.04" /></geometry></collision>
+  </link>
+  <joint name="front_right_wheel_joint" type="fixed">
+    <origin xyz="0.18 -0.18 0.075" rpy="-1.5707963267948966 0 -2.356194490192345" />
+    <parent link="base_link" /><child link="front_right_wheel" />
+  </joint>
+  <link name="rear_right_wheel">
+    <visual>
+      <geometry><cylinder radius="0.075" length="0.04" /></geometry>
+      <material name="wheel_black"><color rgba="0.05 0.05 0.05 1" /></material>
+    </visual>
+    <collision><geometry><cylinder radius="0.075" length="0.04" /></geometry></collision>
+  </link>
+  <joint name="rear_right_wheel_joint" type="fixed">
+    <origin xyz="-0.18 -0.18 0.075" rpy="-1.5707963267948966 0 2.356194490192345" />
+    <parent link="base_link" /><child link="rear_right_wheel" />
+  </joint>
+</robot>

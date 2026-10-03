@@ -1,0 +1,12 @@
+/standard_robot_pp_ros2:
+  ros__parameters:
+    device_name: /dev/ttyACM0
+    baud_rate: 115200
+    flow_control: none
+    parity: none
+    stop_bits: "1"
+    # [诊断] 打开后会在终端打印收发两端的原始 hex:
+    #   RECV ...  <- 从下位机收到的整包 (如果一条都不出现, 说明底盘完全没回传)
+    #   SEND ...  <- 实际发往下位机的整包 (含 vx/vy/wz 和 is_recovering, 用于确认发的内容对不对)
+    # 排查完请改回 false (否则日志量大)。
+    debug_print_hex: true

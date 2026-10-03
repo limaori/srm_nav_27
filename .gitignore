@@ -1,0 +1,33 @@
+# ROS 2 / colcon output
+/build/
+/install/
+/log/
+/devel/
+/.cache/
+/.roslog/
+/log_diag/
+/**/__pycache__/
+*.py[cod]
+
+# Runtime data and logs
+*.log
+*.db3
+*.mcap
+*.bag
+*.bag2
+*.pcap
+*~
+调试日志.md
+
+# Local editor files
+.vscode/
+.idea/
+
+# Generated map and visualization artifacts
+/*.pcd
+/src/srm27_navigation/point_lio/PCD/*.pcd
+/*.pgm
+/*.gv
+/*.pdf
+symlink
+sentry_*/
