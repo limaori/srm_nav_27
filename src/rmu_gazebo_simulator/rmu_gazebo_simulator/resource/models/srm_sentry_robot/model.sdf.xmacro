@@ -24,6 +24,8 @@
             <initial_color>${global_initial_color}</initial_color>
         </plugin>
         <plugin filename="MecanumDrive2" name="ignition::gazebo::systems::MecanumDrive2">
+            <!-- Drive planar motion directly; the cylinder model stalls under wrench control. -->
+            <velocity_control>true</velocity_control>
             <odom_publish_frequency>50</odom_publish_frequency>
             <chassis_link>chassis</chassis_link>
             <front_left_joint>front_left_wheel_joint</front_left_joint>

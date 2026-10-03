@@ -85,6 +85,12 @@ https://github.com/user-attachments/assets/ae4c19a0-4c73-46a0-95bd-909734da2a42
     `config/real/nav2_params_upstream.yaml`（上游原版对照）；建图参数与 RViz 配置为
     `config/real/mapping_params.yaml`、`rviz/mapping.rviz`。
 
+    车体模型随包提供，实车入口**不依赖任何外部工作区**：`urdf/sentry_robot_cylinder.xacro`
+    是 SRM 实车模型的本地副本（`urdf/srm_robot.urdf` 仅作独立调试备用），雷达 mesh 为
+    `meshes/mid360.stl`。xacro 内写的是 `package://pb_rm_simulation/meshes/mid360.stl`，
+    `real_mapping_launch.py` 与 `real_robot_state_publisher_launch.py` 加载时会把它改写为
+    `package://srm27_nav_bringup/meshes/mid360.stl`，文件缺失时直接报错退出。
+
 ## 2. Quick Start
 
 ### 2.1 Option 1: Docker

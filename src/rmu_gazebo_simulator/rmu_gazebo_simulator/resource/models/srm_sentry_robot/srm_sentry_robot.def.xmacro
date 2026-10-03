@@ -43,19 +43,11 @@
         <!--rear_right wheel link and joint-->
         <xmacro_block name="chassis_wheel_l" prefix="rear_right" parent="chassis" pose="-0.18 -0.18 0.075 0 0 0"/>
 
-        <joint name="gimbal_yaw_odom_joint" type="revolute">
+        <!-- Reference frames must not introduce an unactuated yaw degree of freedom. -->
+        <joint name="gimbal_yaw_odom_joint" type="fixed">
             <pose relative_to='chassis'>0 0 ${gimbal_yaw_height} 0 0 0</pose>
             <parent>chassis</parent>
             <child>gimbal_yaw_odom</child>
-            <axis>
-                <xyz>0 0 1</xyz>
-                <limit>
-                    <effort>100</effort>
-                    <velocity>50</velocity>
-                    <lower>-1.79769e+308</lower>
-                    <upper>1.79769e+308</upper>
-                </limit>
-            </axis>
         </joint>
         <link name="gimbal_yaw_odom">
             <pose relative_to="gimbal_yaw_odom_joint">0 0 0 0 0 0</pose>

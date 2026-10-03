@@ -1,6 +1,6 @@
 # SRM 哨兵 Fortress 模型
 
-底盘和轮组尺寸来自 `/home/srm/srm_auto_sentry/src/pb_rmsimulation/src/rm_nav_bringup/urdf/sentry_robot_cylinder.xacro`：底盘为半径 0.27 m、高 0.20 m 的圆柱，质量 8.2 kg；四轮半径 0.075 m、宽 0.04 m，轮心位于 `(±0.18, ±0.18, 0.075)`。
+底盘和轮组尺寸来自 `srm27_nav_bringup` 包内的 `urdf/sentry_robot_cylinder.xacro`（SRM 实车模型的本地副本，上游为 `~/srm_auto_sentry` 的 `rm_nav_bringup`）：底盘为半径 0.27 m、高 0.20 m 的圆柱，质量 8.2 kg；四轮半径 0.075 m、宽 0.04 m，轮心位于 `(±0.18, ±0.18, 0.075)`。
 
 MID360 安装位姿与本工作区 SRM 实车入口一致：`xyz = 0.15 -0.15 0.22`，`rpy = -0.06981317007977318 0 -1.5707963267948966`。仿真继续使用 `front_mid360` 坐标系，点云和 IMU 话题保持为机器人命名空间下的 `livox/lidar` 和 `livox/imu`。
 

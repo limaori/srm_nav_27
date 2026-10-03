@@ -22,6 +22,7 @@ ament_auto_package(
   INSTALL_TO_SHARE
   launch
   map
+  meshes
   pcd
   config
   urdf

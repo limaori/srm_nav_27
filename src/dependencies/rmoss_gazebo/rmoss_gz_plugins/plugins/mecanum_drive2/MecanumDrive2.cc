@@ -86,6 +86,8 @@ public:
     double odomPublishFrequency{50.0};
     std::chrono::steady_clock::duration lastOdomSimTime{};
     bool odomPublishInitialized{false};
+    // Optional body-frame velocity control for navigation simulation.
+    bool velocityControl{false};
     //velocity cmd
     msgs::Twist targetVel;
     std::mutex targetVelMutex;
@@ -142,6 +144,7 @@ void MecanumDrive2::Configure(const Entity &_entity,
         if (this->dataPtr->odomPublishFrequency <= 0.0)
             this->dataPtr->odomPublishFrequency = 50.0;
     }
+    this->dataPtr->velocityControl = _sdf->Get<bool>("velocity_control", false).first;
     //init PID
     this->dataPtr->xPid.Init(100, 0, 0, 0, 0, 100, -100, 0);
     this->dataPtr->yPid.Init(500, 0, 0, 0, 0, 200, -200, 0);
@@ -165,6 +168,8 @@ void MecanumDrive2::PreUpdate(const ignition::gazebo::UpdateInfo &_info,
     {
         _ecm.CreateComponent(this->dataPtr->chassisLink, components::AngularVelocity());
     }
+    if (_info.paused)
+        return;
     //mutex for targetVel
     msgs::Twist targetVel;
     {
@@ -179,6 +184,19 @@ void MecanumDrive2::PreUpdate(const ignition::gazebo::UpdateInfo &_info,
     {
         this->dataPtr->initPose = chassisPose;
         this->dataPtr->initFlag = true;
+    }
+    if (this->dataPtr->velocityControl)
+    {
+        // MecanumDrive2 approximates mecanum motion with a chassis wrench,
+        // rather than driving wheel joints. With the sentry cylinder model,
+        // that wrench cannot overcome ground contact reliably. Apply the
+        // commanded planar velocity while preserving gravity and tilt motion.
+        // Gazebo expects these velocities in the link (body) frame.
+        chassisLink.SetLinearVelocity(
+            _ecm, math::Vector3d(targetVel.linear().x(), targetVel.linear().y(), linearVel.Z()));
+        chassisLink.SetAngularVelocity(
+            _ecm, math::Vector3d(angularVel.X(), angularVel.Y(), targetVel.angular().z()));
+        return;
     }
     //for linear velocity control
     double xErr = linearVel.X() - targetVel.linear().x();
