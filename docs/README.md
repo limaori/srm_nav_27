@@ -5,5 +5,6 @@
 - [Controller comparison](局部规划器相关(ai).md): current controller and alternatives.
 - [MINCO/MPC migration notes](局部规划器迁移MINCO_MPC方案(ai).md): staged design proposal.
 - [TDT navigation notes](抄tdt开源.md): upstream navigation implementation review.
+- [SRM simulation and independent rotation plan](SRM仿真与导航自转控制实施方案.md): SRM-only simulation, planar Nav2 velocity, and separate chassis rotation control.
 
 Build output, runtime logs, rosbag files, and generated diagnostic plots are kept outside this documentation tree.
