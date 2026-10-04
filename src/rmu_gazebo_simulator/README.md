@@ -1,5 +1,23 @@
 # rmu_gazebo_simulator
 
+> **本工作空间内的改动说明（SRM 仿真）**
+>
+> 本包现在只提供**场地素材**：世界 SDF（`resource/worlds`）、GUI 配置
+> （`resource/ign`）和 MID360 资源（`resource/models/mid360`）。
+>
+> SRM 机器人模型、传感器桥接、底盘速度执行插件和初始位姿都移到了
+> `srm27_gazebo_simulator`，避免新旧两套底盘执行器同时存在：
+>
+> * 旧 SRM 模型（含装甲、灯条、射击、云台关节链）连同 `spawn_robots.launch.py`、
+>   `config/gz_world.yaml`、`config/base_params.yaml`、`config/ros_gz_bridge.yaml`
+>   已删除；
+> * `bringup_sim.launch.py` 已下线，运行时直接报错并提示替代入口；
+> * 新的 SRM 入口：`ros2 launch srm27_gazebo_simulator srm_sim.launch.py`；
+> * 只启动场地世界（不含机器人）：`ros2 launch rmu_gazebo_simulator gazebo.launch.py`。
+>
+> 下面保留的是上游 README 原文，其中关于底盘/云台/射击控制的说明在本工作空间
+> 已不再适用。
+
 ## 1. Introduction
 
 rmu_gazebo_simulator 是基于 Gazebo (Ignition 字母版本) 的仿真环境，为 RoboMaster University 中的机器人算法开发提供仿真环境，方便测试 AI 算法，加快开发效率。

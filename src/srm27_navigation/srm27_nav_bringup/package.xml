@@ -18,6 +18,11 @@
   <exec_depend>navigation2</exec_depend>
   <exec_depend>nav2_common</exec_depend>
   <exec_depend>srm27_nav_plugins</exec_depend>
+  <exec_depend>srm27_robot_description</exec_depend>
+  <exec_depend>srm27_chassis_control</exec_depend>
+  <exec_depend>srm27_gazebo_simulator</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>srm27_navigation</exec_depend>
   <exec_depend>srm27_teleop_twist_joy</exec_depend>
   <exec_depend>livox_ros_driver2</exec_depend>

@@ -1,44 +1,69 @@
 #!/usr/bin/env bash
 # =============================================================
-# 一键启动 rmuc_2025 地图的仿真 NAV 导航 (不做 SLAM 建图)
+# SRM 仿真 NAV 导航 + 独立自转测试 (一键启动)
 #
-#   标签页 1: Gazebo 仿真 (世界 + 机器人 + 传感器 + 仿真真值里程计)
-#   标签页 2: Nav2 导航栈 + RViz (加载已有栅格地图 + 真值里程计)
-#   标签页 3: 键鼠控制 (可选, 直接给底盘发 chassis_cmd)
+#   标签页 1: SRM Gazebo 仿真 (世界 + SRM 圆柱底盘 + 雷达 + 速度执行)
+#   标签页 2: 速度合成 + Nav2 导航栈 + RViz (含独立自转测试发送器)
+#   标签页 3: 手柄自转 (可选, 默认关闭; 需要手柄, 输出 remap 到 rotation_cmd)
+#
+# 速度链路 (与实施方案 3.3 一致):
+#   Nav2 controller ─cmd_vel_nav─┐
+#                                ├─ srm_cmd_mux ─cmd_vel_sim─► SRM 速度适配器 → Gazebo
+#   rotation_test_sender ─ rotation_controller ─ rotation_velocity ┘
+#
+#   导航只产生 vx/vy; mux 丢弃导航输入的 angular.z。自转由独立自转链路给出。
 #
 # 模式说明 (本脚本只做导航):
 #   slam:=False  use_pcd_localization:=False
 #     -> 由 map_server 加载现成的 PGM/YAML 地图, map->odom 为静态 TF,
-#        odom->base_footprint 由 simulation_ground_truth_odometry 给出;
+#        odom->base_link 由 simulation_ground_truth_odometry 给出;
 #        不启动 slam_toolbox / Point-LIO / small_gicp_relocalization。
 #   如果需要建图或重定位, 请另起 launch (slam:=True 或 use_pcd_localization:=True),
 #   不要与本脚本同时运行, 否则多个节点会争抢 map->odom。
 #
 # 用法:
-#   ./script/start_sim_nav.sh                          # rmuc_2025 + 隧道地图(默认)
-#   ./script/start_sim_nav.sh -m rmuc_2025             # 换成普通场地地图
-#   ./script/start_sim_nav.sh -m /abs/path/map.yaml    # 用绝对路径地图
-#   ./script/start_sim_nav.sh --no-rviz --no-teleop    # 只跑 Gazebo + 导航
-#   DRY_RUN=1 ./script/start_sim_nav.sh                # 只打印将执行的命令
+#   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认), 不自转
+#   ./script/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
+#   ./script/start_sim_nav.sh -w srm_empty --run               # 空场, Gazebo 直接开始运行
+#   ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
+#   ./script/start_sim_nav.sh --rotation-mode periodic \
+#       --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
+#   ./script/start_sim_nav.sh --no-rviz --no-rotation          # 只跑仿真 + 导航
+#   DRY_RUN=1 ./script/start_sim_nav.sh                        # 只打印将执行的命令
 #
 # 参数:
-#   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025
+#   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
 #   -m, --map     <名字|绝对路径>  地图名(自动补 .yaml)或 YAML 绝对路径
-#   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params.yaml
+#   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params_srm.yaml
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
-#       --teleop / --no-teleop    是否启动键鼠控制 (默认启动)
+#       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
+#       --run / --no-run           Gazebo 是否直接开始运行 (默认暂停, 手动点播放)
+#       --smoother / --no-smoother velocity_smoother 是否串联 (默认串联)
+#       --rotation-mode <stop|constant|periodic>   自转模式 (默认 stop)
+#       --rotation-speed <rad/s>  恒速模式角速度
+#       --rotation-offset <rad/s> 周期模式平均角速度
+#       --rotation-amplitude <rad/s> 周期模式变化幅度
+#       --rotation-period <s>     周期
+#       --rotation-phase <rad>    初相位
+#       --rotation-wave <sine|square> 周期波形
+#       --rotation / --no-rotation 是否启动自转测试发送器 (默认启动, stop 模式)
+#       --teleop / --no-teleop    手柄自转标签页 (默认关闭)
 #   -h, --help                显示本帮助
 #
 # 环境变量:
-#   WORLD MAP MAP_NAME PARAMS_FILE USE_RVIZ ENABLE_TELEOP
-#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS
-#   TELEOP_V TELEOP_W USE_COMPOSITION DRY_RUN SRM27_WS_DIR
+#   WORLD MAP MAP_NAME PARAMS_FILE USE_RVIZ USE_GUI RUN_IMMEDIATELY
+#   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
+#   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
+#   START_ROTATION_SENDER ENABLE_TELEOP
+#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR
 #
 # 说明:
-#   - Gazebo 世界由 rmu_gazebo_simulator/config/gz_world.yaml 的 world 字段决定,
-#     bringup_sim.launch.py 没有 world 参数; 本脚本会检测 -w 与该文件是否一致。
+#   - Gazebo 世界、SRM 初始位姿和速度参数统一由
+#     srm27_gazebo_simulator/config/srm_sim.yaml 给出; -w 会覆盖其中的 world。
 #   - 地图与参数文件一律使用绝对路径; 地图可直接给名字 (在 map/simulation/ 下解析)。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
+#   - 控制清单：导航速度 cmd_vel_nav、自转请求 rotation_cmd、自转输出
+#     rotation_velocity、合成命令 cmd_vel_sim; 诊断在 /<ns>/diagnostics。
 # =============================================================
 
 set -euo pipefail
@@ -47,18 +72,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="${SRM27_WS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PKG_SRC="$WS_DIR/src/srm27_navigation/srm27_nav_bringup"
-SIM_SRC="$WS_DIR/src/rmu_gazebo_simulator/rmu_gazebo_simulator"
+SIM_SRC="$WS_DIR/src/srm27_gazebo_simulator"
 
 # ---------- 可配置项 ----------
 OPEN_MODE="${OPEN_MODE:-tab}"                # tab: 同一窗口多标签页; window: 每命令独立窗口
 TERMINAL="${TERMINAL:-gnome-terminal}"
-ROBOT_NS="${ROBOT_NS:-red_standard_robot1}"  # 与 nav_simulation_launch.py 的 namespace 默认值一致
+ROBOT_NS="${ROBOT_NS:-red_standard_robot1}"  # 与 nav_srm_simulation_launch.py 的 namespace 默认值一致
 USE_COMPOSITION="${USE_COMPOSITION:-False}"
-TELEOP_V="${TELEOP_V:-0.8}"
-TELEOP_W="${TELEOP_W:-0.8}"
 USE_RVIZ="${USE_RVIZ:-True}"
-ENABLE_TELEOP="${ENABLE_TELEOP:-1}"
+USE_GUI="${USE_GUI:-true}"
+RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-false}"
+USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
+ENABLE_TELEOP="${ENABLE_TELEOP:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+
+START_ROTATION_SENDER="${START_ROTATION_SENDER:-1}"
+ROTATION_MODE="${ROTATION_MODE:-stop}"
+ROTATION_SPEED="${ROTATION_SPEED:-0.0}"
+ROTATION_OFFSET="${ROTATION_OFFSET:-0.0}"
+ROTATION_AMPLITUDE="${ROTATION_AMPLITUDE:-0.0}"
+ROTATION_PERIOD="${ROTATION_PERIOD:-4.0}"
+ROTATION_PHASE="${ROTATION_PHASE:-0.0}"
+ROTATION_SINE_WAVE="${ROTATION_SINE_WAVE:-true}"
 
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
@@ -82,6 +117,26 @@ while [ $# -gt 0 ]; do
     -p|--params)  PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
     --rviz)       USE_RVIZ="True"; shift ;;
     --no-rviz)    USE_RVIZ="False"; shift ;;
+    --gui)        USE_GUI="true"; shift ;;
+    --no-gui)     USE_GUI="false"; shift ;;
+    --run)        RUN_IMMEDIATELY="true"; shift ;;
+    --no-run)     RUN_IMMEDIATELY="false"; shift ;;
+    --smoother)   USE_VELOCITY_SMOOTHER="True"; shift ;;
+    --no-smoother) USE_VELOCITY_SMOOTHER="False"; shift ;;
+    --rotation-mode)      ROTATION_MODE="${2:?--rotation-mode 需要 stop|constant|periodic}"; shift 2 ;;
+    --rotation-speed)     ROTATION_SPEED="${2:?--rotation-speed 需要 rad/s}"; shift 2 ;;
+    --rotation-offset)    ROTATION_OFFSET="${2:?--rotation-offset 需要 rad/s}"; shift 2 ;;
+    --rotation-amplitude) ROTATION_AMPLITUDE="${2:?--rotation-amplitude 需要 rad/s}"; shift 2 ;;
+    --rotation-period)    ROTATION_PERIOD="${2:?--rotation-period 需要秒}"; shift 2 ;;
+    --rotation-phase)     ROTATION_PHASE="${2:?--rotation-phase 需要弧度}"; shift 2 ;;
+    --rotation-wave)      case "${2:?--rotation-wave 需要 sine|square}" in
+                            sine)   ROTATION_SINE_WAVE="true" ;;
+                            square) ROTATION_SINE_WAVE="false" ;;
+                            *) echo "[错误] --rotation-wave 只支持 sine 或 square" >&2; exit 2 ;;
+                          esac
+                          shift 2 ;;
+    --rotation)     START_ROTATION_SENDER="1"; shift ;;
+    --no-rotation)  START_ROTATION_SENDER="0"; shift ;;
     --teleop)     ENABLE_TELEOP="1"; shift ;;
     --no-teleop)  ENABLE_TELEOP="0"; shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -102,8 +157,10 @@ if [ "$DRY_RUN" != "1" ] && ! command -v "$TERMINAL" >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ "$DRY_RUN" != "1" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+if [ "$DRY_RUN" != "1" ] && [ "$USE_GUI" = "true" ] \
+   && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   echo "[警告] 未检测到 DISPLAY / WAYLAND_DISPLAY, Gazebo 与 RViz 的图形界面可能起不来。" >&2
+  echo "[警告] 可以改用 --no-gui --no-rviz。" >&2
 fi
 
 if [ "$DRY_RUN" != "1" ] && ! command -v flock >/dev/null 2>&1; then
@@ -123,17 +180,20 @@ if [ ! -d "$MAP_DIR" ]; then
 fi
 
 if [ -z "$PARAMS_FILE" ]; then
-  PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params.yaml"
+  PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
   if [ ! -f "$PARAMS_FILE" ]; then
-    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params.yaml"
+    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm.yaml"
   fi
 fi
 
-# Gazebo 实际加载的世界取自 gz_world.yaml, 而不是 launch 参数。
-GZ_WORLD_YAML="$SIM_SRC/config/gz_world.yaml"
+# Gazebo 世界与 SRM 初始位姿由 srm27_gazebo_simulator/config/srm_sim.yaml 给出。
+SIM_CONFIG="$SIM_SRC/config/srm_sim.yaml"
+if [ ! -f "$SIM_CONFIG" ]; then
+  SIM_CONFIG="$WS_DIR/install/srm27_gazebo_simulator/share/srm27_gazebo_simulator/config/srm_sim.yaml"
+fi
 GZ_WORLD=""
-if [ -f "$GZ_WORLD_YAML" ]; then
-  GZ_WORLD="$(sed -n 's/^world:[[:space:]]*//p' "$GZ_WORLD_YAML" | head -n 1)"
+if [ -f "$SIM_CONFIG" ]; then
+  GZ_WORLD="$(sed -n 's/^world:[[:space:]]*//p' "$SIM_CONFIG" | head -n 1)"
   GZ_WORLD="${GZ_WORLD%\"}"; GZ_WORLD="${GZ_WORLD#\"}"
   GZ_WORLD="${GZ_WORLD%\'}"; GZ_WORLD="${GZ_WORLD#\'}"
 fi
@@ -215,10 +275,30 @@ norm_bool() {
 }
 USE_RVIZ="$(norm_bool "$USE_RVIZ")"
 
-if [ "$GZ_WORLD" != "$WORLD" ]; then
-  echo "[警告] Gazebo 实际加载的世界是 '$GZ_WORLD' (来自 $GZ_WORLD_YAML)," >&2
-  echo "[警告] 而不是 '$WORLD'。该文件没有 launch 参数, 需要修改:" >&2
-  echo "[警告]   $GZ_WORLD_YAML   ->   world: \"$WORLD\"" >&2
+norm_switch() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)  echo "true" ;;
+    0|false|no|off) echo "false" ;;
+    *)              echo "$1" ;;
+  esac
+}
+USE_GUI="$(norm_switch "$USE_GUI")"
+RUN_IMMEDIATELY="$(norm_switch "$RUN_IMMEDIATELY")"
+ROTATION_SINE_WAVE="$(norm_switch "$ROTATION_SINE_WAVE")"
+
+if [ -n "$WORLD_FROM_USER" ] && [ -n "$GZ_WORLD" ] && [ "$GZ_WORLD" != "$WORLD" ]; then
+  echo "[提示] 世界由 srm_sim.yaml 的 '$GZ_WORLD' 覆盖为 '$WORLD'。"
+fi
+
+case "$ROTATION_MODE" in
+  stop|constant|periodic) ;;
+  *) echo "[错误] --rotation-mode 只支持 stop / constant / periodic" >&2; exit 2 ;;
+esac
+
+if [ "$START_ROTATION_SENDER" = "0" ] || [ "$START_ROTATION_SENDER" = "false" ] || [ "$START_ROTATION_SENDER" = "no" ]; then
+  START_ROTATION_SENDER="False"
+else
+  START_ROTATION_SENDER="True"
 fi
 
 if [ "$ENABLE_TELEOP" = "0" ] || [ "$ENABLE_TELEOP" = "false" ] || [ "$ENABLE_TELEOP" = "no" ]; then
@@ -229,10 +309,10 @@ fi
 
 # ---------- 进程检测 / 清理 ----------
 # 方括号包住首字符, 避免 pgrep 匹配到自身命令行。
-GAZEBO_PATTERN='(^|/)(gzserver|gzclient|gazebo)([[:space:]]|$)|[i]gn[[:space:]]+gazebo|[g]z[[:space:]]+sim|[r]os2[[:space:]]+launch[[:space:]]+rmu_gazebo_simulator[[:space:]]+bringup_sim\.launch\.py'
-GAZEBO_RESIDUAL_PATTERN='[/]ros_gz_bridge/parameter_bridge[[:space:]]+/clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock|[/]ros_gz_bridge/parameter_bridge.*__ns:=/red_standard_robot1|[/]rmoss_gz_base/rmua19_robot_base.*__ns:=/red_standard_robot1|[r]obot_state_publisher.*__ns:=/red_standard_robot1'
-NAV_PATTERN='[r]os2[[:space:]]+launch[[:space:]]+srm27_nav_bringup[[:space:]]+nav_simulation_launch\.py'
-TELEOP_PATTERN='[t]est_chassis_cmd\.py'
+GAZEBO_PATTERN='(^|/)(gzserver|gzclient|gazebo)([[:space:]]|$)|[i]gn[[:space:]]+gazebo|[g]z[[:space:]]+sim|[r]os2[[:space:]]+launch[[:space:]]+(srm27_gazebo_simulator|rmu_gazebo_simulator)'
+GAZEBO_RESIDUAL_PATTERN='[/]ros_gz_bridge/parameter_bridge[[:space:]]+/clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock|[s]rm_velocity_adapter|[r]obot_state_publisher.*__ns:=/red_standard_robot1'
+NAV_PATTERN='[r]os2[[:space:]]+launch[[:space:]]+srm27_nav_bringup[[:space:]]+(nav_srm_simulation_launch|nav_simulation_launch)\.py'
+TELEOP_PATTERN='[s]rm27_teleop_twist_joy_node'
 
 GAZEBO_LOCK_FILE="${SRM27_GAZEBO_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/srm27_sentry_gazebo.lock}"
 
@@ -301,13 +381,23 @@ printf '工作空间  : %s\n' "$WS_DIR"
 printf '地图      : %s\n' "$MAP_FILE"
 printf '参数文件  : %s\n' "$PARAMS_FILE"
 printf '定位方式  : 静态地图 + 仿真真值里程计 (slam:=False, use_pcd_localization:=False)\n'
-printf 'RViz      : %s    键鼠控制: %s\n' "$USE_RVIZ" "$([ "$ENABLE_TELEOP" = 1 ] && echo 开启 || echo 关闭)"
-printf '终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
+printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
+printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
+printf '自转测试  : 发送器 %s  模式 %s' "$START_ROTATION_SENDER" "$ROTATION_MODE"
+case "$ROTATION_MODE" in
+  constant) printf '  角速度 %s rad/s' "$ROTATION_SPEED" ;;
+  periodic) printf '  offset %s + amplitude %s, period %s s, phase %s rad, %s' \
+      "$ROTATION_OFFSET" "$ROTATION_AMPLITUDE" "$ROTATION_PERIOD" "$ROTATION_PHASE" \
+      "$([ "$ROTATION_SINE_WAVE" = "true" ] && echo 正弦 || echo 方波)" ;;
+esac
+printf '\n终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
 echo
+
+SIM_CMD="ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=${WORLD} gui:=${USE_GUI} run_immediately:=${RUN_IMMEDIATELY}"
 
 if [ "$DRY_RUN" != "1" ]; then
   mkdir -p "$(dirname "$GAZEBO_LOCK_FILE")"
-  echo "[1/3] 启动 Gazebo 仿真..."
+  echo "[1/3] 启动 SRM Gazebo 仿真..."
   cleanup_orphaned_gazebo
 
   if process_running "$GAZEBO_PATTERN" || gazebo_lock_held; then
@@ -316,42 +406,58 @@ if [ "$DRY_RUN" != "1" ]; then
     GAZEBO_LOCK_FILE_Q="$(printf '%q' "$GAZEBO_LOCK_FILE")"
     # 释放 FD 9 后终端才会进入保留 shell, 否则锁会被一直持有,
     # 导致旧 Gazebo 退出后下一次仿真仍起不来。
-    GAZEBO_CMD="exec 9>${GAZEBO_LOCK_FILE_Q}; if ! flock -n 9; then echo '[跳过] 另一个启动脚本已占用 Gazebo 锁。'; else ros2 launch rmu_gazebo_simulator bringup_sim.launch.py; fi; flock -u 9; exec 9>&-"
+    GAZEBO_CMD="exec 9>${GAZEBO_LOCK_FILE_Q}; if ! flock -n 9; then echo '[跳过] 另一个启动脚本已占用 Gazebo 锁。'; else ${SIM_CMD}; fi; flock -u 9; exec 9>&-"
     open_term "SRM27 Gazebo 仿真" "$GAZEBO_CMD"
   fi
 else
-  echo "[1/3] Gazebo 仿真 (dry-run)..."
-  open_term "SRM27 Gazebo 仿真" "ros2 launch rmu_gazebo_simulator bringup_sim.launch.py"
+  echo "[1/3] SRM Gazebo 仿真 (dry-run)..."
+  open_term "SRM27 Gazebo 仿真" "$SIM_CMD"
 fi
 
-echo "[2/3] 启动导航栈 + RViz..."
+echo "[2/3] 启动速度合成 + 导航栈 + RViz..."
 MAP_FILE_Q="$(printf '%q' "$MAP_FILE")"
 PARAMS_FILE_Q="$(printf '%q' "$PARAMS_FILE")"
-NAV_CMD="ros2 launch srm27_nav_bringup nav_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False use_pcd_localization:=False use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}"
-start_once "SRM27 导航 + RViz" "$NAV_PATTERN" "$NAV_CMD"
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False use_pcd_localization:=False use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE}"
+start_once "SRM27 导航 + 速度合成 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ "$ENABLE_TELEOP" = "1" ]; then
-  echo "[3/3] 启动键鼠控制..."
+  echo "[3/3] 启动手柄自转 (输出 remap 到 rotation_cmd)..."
   start_once \
-    "SRM27 键鼠控制" \
+    "SRM27 手柄自转" \
     "$TELEOP_PATTERN" \
-    "ros2 run rmoss_gz_base test_chassis_cmd.py --ros-args -r __ns:=/${ROBOT_NS}/robot_base -p v:=${TELEOP_V} -p w:=${TELEOP_W}"
+    "ros2 run srm27_teleop_twist_joy srm27_teleop_twist_joy_node --ros-args -r __ns:=/${ROBOT_NS} -r cmd_vel:=rotation_cmd -p use_sim_time:=true"
 else
-  echo "[3/3] 跳过键鼠控制 (--no-teleop)。"
+  echo "[3/3] 跳过手柄自转 (--no-teleop)。自转请用 --rotation-mode 选择模式。"
 fi
 
 cat <<EOF
 
 启动流程处理完成。
   - 导航栈刚起时打印 "waiting for clock" 属正常, 等 Gazebo 起来后会自行继续。
+  - Gazebo 若不是直接运行(--run), 需要点播放后仿真才推进。
   - Gazebo 里车出现后, 在 RViz 用 "2D Goal Pose" / "Nav2 Goal" 下发目标点。
 
-验证 (新终端):
+速度链路检查 (新终端):
   cd '$WS_DIR' && source install/setup.bash
-  ros2 topic hz /${ROBOT_NS}/velodyne_points            # 仿真点云经 ign_sim_pointcloud_tool 转换后
-  ros2 topic echo /${ROBOT_NS}/odometry --once          # 仿真真值里程计
-  ros2 run tf2_ros tf2_echo map gimbal_yaw_fake         # 完整 TF 链: map->odom->base_footprint->...->gimbal_yaw_fake
-  ros2 topic list | grep small_gicp                     # 本模式应为空输出
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav --once         # 导航平移速度 (angular.z 应为 0)
+  ros2 topic echo /${ROBOT_NS}/rotation_velocity --once   # 独立自转速度
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # 合成后的最终执行命令
+  ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
+  ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
+  ros2 run tf2_ros tf2_echo map base_link                 # 完整 TF 链: map->odom->base_link
+  ros2 topic echo /${ROBOT_NS}/diagnostics --once         # 合成与超时状态
+
+切换自转模式 (无需重启导航):
+  ros2 service call /${ROBOT_NS}/rotation_test_sender/disable std_srvs/srv/Trigger
+  ros2 param set /${ROBOT_NS}/rotation_test_sender rotation_mode periodic
+  ros2 param set /${ROBOT_NS}/rotation_test_sender offset 1.0
+  ros2 param set /${ROBOT_NS}/rotation_test_sender amplitude 0.5
+  ros2 param set /${ROBOT_NS}/rotation_test_sender period 4.0
+  ros2 service call /${ROBOT_NS}/rotation_test_sender/enable std_srvs/srv/Trigger
+
+急停 (清零并保持零速):
+  ros2 service call /${ROBOT_NS}/srm_cmd_mux/stop_all std_srvs/srv/Trigger
+  ros2 service call /${ROBOT_NS}/srm_cmd_mux/resume_all std_srvs/srv/Trigger
 
 清理残留:
   ./script/kill_gzb.sh && ./script/kill_rviz.sh

@@ -37,9 +37,59 @@ def yaw_from_quaternion(q):
     )
 
 
+def rpy_to_quaternion(roll, pitch, yaw):
+    """固定轴 rpy 转四元数，用于把几何外参换算成 TF。"""
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+
+
+def load_lidar_extrinsic():
+    """从 srm27_robot_description 的几何 YAML 读取 base_link -> 雷达外参。
+
+    外参只在几何 YAML 里定义一次，避免这里再写一份硬编码数值与模型漂移。
+    读取失败时回退到 SRM 的当前安装值，并打印告警。
+    """
+    fallback = {
+        "link_name": "front_mid360",
+        "xyz": [0.15, -0.15, 0.22],
+        "rpy": [-0.06981317007977318, 0.0, -1.5707963267948966],
+    }
+    try:
+        from srm27_robot_description import load_geometry
+
+        lidar = load_geometry()["lidar"]
+        return {
+            "link_name": lidar["link_name"],
+            "xyz": [float(value) for value in lidar["xyz"]],
+            "rpy": [float(value) for value in lidar["rpy"]],
+        }
+    except Exception as error:  # noqa: BLE001 - 回退必须给出可见原因
+        print(
+            "[warning] 无法从 srm27_robot_description 读取雷达外参"
+            f"（{error}），使用内置 SRM 默认值。",
+            flush=True,
+        )
+        return fallback
+
+
 class SimulationGroundTruthOdometry(Node):
     def __init__(self):
         super().__init__("simulation_ground_truth_odometry")
+        # 导航速度参考系：SRM 使用真实随底盘自转的 base_link。
+        self.base_frame = self.declare_parameter("base_frame", "base_link").value
+        lidar_extrinsic = load_lidar_extrinsic()
+        self.lidar_frame = self.declare_parameter(
+            "lidar_frame", lidar_extrinsic["link_name"]
+        ).value
+        self.lidar_translation = lidar_extrinsic["xyz"]
+        self.lidar_rotation = rpy_to_quaternion(*lidar_extrinsic["rpy"])
         self.initial_pose = None
         self.zero_pose_since = None
         self.zero_pose_grace_ns = 2_000_000_000
@@ -140,7 +190,7 @@ class SimulationGroundTruthOdometry(Node):
         transform = TransformStamped()
         transform.header.stamp = stamp.to_msg()
         transform.header.frame_id = "odom"
-        transform.child_frame_id = "base_footprint"
+        transform.child_frame_id = self.base_frame
         transform.transform.translation.x = x
         transform.transform.translation.y = y
         transform.transform.rotation.z = math.sin(relative_yaw / 2.0)
@@ -172,18 +222,20 @@ class SimulationGroundTruthOdometry(Node):
         # sensor_scan_generation consumes a lidar pose together with the cloud.
         # Publish the same stable pose with the lidar child frame so this path
         # works without Point-LIO/loam_interface in simulation odometry mode.
-        # Fixed model extrinsic: base_footprint -> chassis (0, 0, 0.076),
-        # chassis -> front_mid360 (0.16, 0, 0.18), roll=30 deg, yaw=90 deg.
+        # 外参取自 srm27_robot_description 的几何 YAML（base_link -> front_mid360）。
         lidar_tf = TransformStamped().transform
-        lidar_tf.translation.x = 0.16
-        lidar_tf.translation.z = 0.256
-        lidar_tf.rotation.x = 0.1830127
-        lidar_tf.rotation.y = 0.1830127
-        lidar_tf.rotation.z = 0.6830127
-        lidar_tf.rotation.w = 0.6830127
+        lidar_tf.translation.x = self.lidar_translation[0]
+        lidar_tf.translation.y = self.lidar_translation[1]
+        lidar_tf.translation.z = self.lidar_translation[2]
+        (
+            lidar_tf.rotation.x,
+            lidar_tf.rotation.y,
+            lidar_tf.rotation.z,
+            lidar_tf.rotation.w,
+        ) = self.lidar_rotation
         lidar_transform = TransformStamped()
         lidar_transform.header = transform.header
-        lidar_transform.child_frame_id = "front_mid360"
+        lidar_transform.child_frame_id = self.lidar_frame
         lidar_transform.transform = self._compose(transform.transform, lidar_tf)
         lidar_odom = Odometry()
         lidar_odom.header = lidar_transform.header

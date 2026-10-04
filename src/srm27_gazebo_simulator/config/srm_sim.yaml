@@ -1,0 +1,38 @@
+# SRM 仿真入口配置。
+#
+# 世界、SRM 初始位姿和速度执行参数都写在这一份文件里，launch 不再重复写偏移，
+# 避免 Gazebo 世界、SRM 初始位姿、栅格地图和 odom 原点互相错位。
+
+# 场地世界名。先在 srm27_gazebo_simulator/worlds/<world>.sdf 里找，
+# 找不到再到 rmu_gazebo_simulator 的 resource/worlds/<world>_world.sdf 找。
+# 可选：rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
+world: "rmuc_2025"
+
+# 世界 SDF 绝对路径。留空表示按上面的规则自动解析。
+world_sdf: ""
+
+# Gazebo GUI 配置。留空表示使用 rmu_gazebo_simulator 提供的配置。
+gui_config: ""
+
+# 是否启动 Gazebo GUI 客户端。
+gui: true
+
+robot:
+  name: "red_standard_robot1"
+  x: 3.4
+  y: 9.5
+  z: 0.28
+  yaw: 0.0
+
+# 速度执行链路参数。mux 是 cmd_vel_sim 的唯一发布者。
+velocity:
+  # ROS 侧最终速度命令话题（相对机器人命名空间）。
+  cmd_vel_topic: "cmd_vel_sim"
+  # Gazebo Transport 命令话题（相对模型名，Gazebo 会自动加 <model>/ 前缀）。
+  gz_command_topic: "cmd_vel"
+  # Gazebo Transport 真值里程计话题（相对模型名），桥接为 chassis_odometry_gt。
+  odom_topic: "odometry"
+  # 适配器与执行插件的命令超时（秒）；输入中断后清零全部速度。
+  command_timeout: 0.1
+  # 适配器向 Gazebo 转发命令的频率（Hz）。
+  publish_rate: 200.0

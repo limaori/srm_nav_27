@@ -8,8 +8,9 @@
 #   1) 用本包内的 urdf/sentry_robot_cylinder.xacro（SRM 实车模型的本地副本，不再
 #      依赖任何外部工作区），并把 lidar_xyz / lidar_rpy 作为 xacro 的外参映射注入
 #      （雷达安装位姿只在这里定义一次）；
-#   2) 把 xacro 里的 package://pb_rm_simulation/meshes/... mesh 改写成本包内的
-#      package://srm27_nav_bringup/meshes/...（pb_rm_simulation 不在本工作空间）；
+#   2) mesh 直接指向 srm27_robot_description 包内的 mid360.stl 副本；若仍是历史遗留的
+#      package://pb_rm_simulation/meshes/... 前缀，加载时改写成描述包内的同路径资源
+#      （pb_rm_simulation 不在本工作空间）；
 #   3) 追加两个 link 与固定关节:
 #        livox_imu  : 挂在 livox_frame 下，偏移取 -mapping.extrinsic_T
 #        livox_scan : 挂在 base_link 下，偏移取 lidar_xyz（二维投影用的水平系）
@@ -83,15 +84,17 @@ def launch_setup(context):
     ).toxml()
     robot = ET.fromstring(robot_xml)
 
-    # mesh 改写: pb_rm_simulation 不在本工作空间, 指向本包内的同路径副本
+    # mesh 解析: xacro 已指向 srm27_robot_description 包内的副本;
+    # 若还有历史遗留的 pb_rm_simulation 前缀, 一并改写为描述包内的同路径资源。
+    description_dir = Path(get_package_share_directory("srm27_robot_description"))
     for mesh in robot.iter("mesh"):
         filename = mesh.attrib["filename"]
         prefix = "package://pb_rm_simulation/"
         if filename.startswith(prefix):
             relative = filename.removeprefix(prefix)
-            if not (bringup_dir / relative).is_file():
-                raise FileNotFoundError(bringup_dir / relative)
-            mesh.set("filename", f"package://srm27_nav_bringup/{relative}")
+            if not (description_dir / relative).is_file():
+                raise FileNotFoundError(description_dir / relative)
+            mesh.set("filename", f"package://srm27_robot_description/{relative}")
 
     for child, parent, translation in [
         ("livox_imu", "livox_frame", [-value for value in imu_translation]),

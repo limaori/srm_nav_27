@@ -1,5 +1,11 @@
 # 将 TDT 导航算法移植到 `srm27_sentry_ws`
 
+> [!NOTE]
+> 本文写于 SRM 仿真重构之前。下文链路图中的 `fake_vel_transform` 属于**旧步兵链路**，
+> SRM 仿真已删除该层：导航速度出口为 `cmd_vel_nav`，再由 `srm_cmd_mux` 与独立自转合成为
+> `cmd_vel_sim`（见 [`SRM仿真与自转控制实现(ai).md`](./SRM仿真与自转控制实现%28ai%29.md)）。
+> 算法移植、Costmap 与行为树相关的结论不受影响。
+
 ## 目标
 
 TDT 仓库开源的是二维栅格导航算法组件，主要包括：

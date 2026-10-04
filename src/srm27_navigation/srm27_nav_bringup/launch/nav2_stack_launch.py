@@ -55,6 +55,9 @@ def generate_launch_description():
     map_to_odom_x = LaunchConfiguration("map_to_odom_x")
     map_to_odom_y = LaunchConfiguration("map_to_odom_y")
     map_to_odom_yaw = LaunchConfiguration("map_to_odom_yaw")
+    use_fake_vel_transform = LaunchConfiguration("use_fake_vel_transform")
+    use_velocity_smoother = LaunchConfiguration("use_velocity_smoother")
+    cmd_vel_nav_topic = LaunchConfiguration("cmd_vel_nav_topic")
 
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {"use_sim_time": use_sim_time, "yaml_filename": map_yaml_file}
@@ -152,6 +155,21 @@ def generate_launch_description():
     declare_map_to_odom_x_cmd = DeclareLaunchArgument("map_to_odom_x", default_value="0.0")
     declare_map_to_odom_y_cmd = DeclareLaunchArgument("map_to_odom_y", default_value="0.0")
     declare_map_to_odom_yaw_cmd = DeclareLaunchArgument("map_to_odom_yaw", default_value="0.0")
+    declare_use_fake_vel_transform_cmd = DeclareLaunchArgument(
+        "use_fake_vel_transform",
+        default_value="True",
+        description="是否启动 fake_vel_transform（旧步兵 gimbal_yaw_fake 链路）",
+    )
+    declare_use_velocity_smoother_cmd = DeclareLaunchArgument(
+        "use_velocity_smoother",
+        default_value="True",
+        description="True: controller→velocity_smoother→cmd_vel_nav；False: controller 直接输出",
+    )
+    declare_cmd_vel_nav_topic_cmd = DeclareLaunchArgument(
+        "cmd_vel_nav_topic",
+        default_value="cmd_vel_nav2_result",
+        description="导航链路最终平移速度出口话题（相对命名空间）",
+    )
 
     # Specify the actions
     bringup_cmd_group = GroupAction(
@@ -218,6 +236,9 @@ def generate_launch_description():
                     "use_composition": use_composition,
                     "use_respawn": use_respawn,
                     "container_name": "nav2_container",
+                    "use_fake_vel_transform": use_fake_vel_transform,
+                    "use_velocity_smoother": use_velocity_smoother,
+                    "cmd_vel_nav_topic": cmd_vel_nav_topic,
                 }.items(),
             ),
         ]
@@ -246,6 +267,9 @@ def generate_launch_description():
     ld.add_action(declare_map_to_odom_x_cmd)
     ld.add_action(declare_map_to_odom_y_cmd)
     ld.add_action(declare_map_to_odom_yaw_cmd)
+    ld.add_action(declare_use_fake_vel_transform_cmd)
+    ld.add_action(declare_use_velocity_smoother_cmd)
+    ld.add_action(declare_cmd_vel_nav_topic_cmd)
 
     # Add the actions to launch all of the navigation nodes
     ld.add_action(bringup_cmd_group)

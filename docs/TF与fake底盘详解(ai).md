@@ -1,5 +1,13 @@
 # TF 树与 fake 虚拟底盘详解
 
+> [!WARNING]
+> **历史资料（旧步兵链路）**：本文描述的 `fake_vel_transform` / `gimbal_yaw_fake` /
+> `base_footprint` / 仿真 `MecanumDrive2` 底盘链路属于**旧步兵方案**，已从 SRM 仿真中删除
+> （见 [`SRM仿真与导航自转控制实现(ai).md`](./SRM仿真与自转控制实现%28ai%29.md)）。
+> SRM 仿真与实车现在统一使用真实随底盘自转的 `base_link`，TF 链为
+> `map → odom → base_link → front_mid360 / *_wheel`。阅读本文时请把其中的 frame 名与节点
+> 当作旧链路对照，不要照抄到当前配置。
+
 > 简明版在 `调试日志——by maori.md` 的 `2026-10-4` 两节，这里是完整版。
 >
 > **路径说明**：下面的文件名 + 行号基于 `/home/srm/pb2025_sentry_ws`（那里逐个核对过）。
