@@ -68,7 +68,8 @@ https://github.com/user-attachments/assets/ae4c19a0-4c73-46a0-95bd-909734da2a42
     ```plaintext
     srm27_nav_bringup/launch/
     ├── nav_real_launch.py                       # 实车导航入口
-    ├── nav_simulation_launch.py                 # 仿真导航入口
+    ├── nav_srm_simulation_launch.py             # SRM 仿真导航入口（当前使用）
+    ├── nav_simulation_launch.py                 # 已弃用：转发到 nav_srm_simulation_launch.py
     ├── nav_multi_simulation_launch.py           # 多机仿真导航入口
     ├── real_mapping_launch.py                   # 实车 MID360 建图入口
     ├── real_robot_state_publisher_launch.py     # 实车整车 TF（SRM 模型 + 雷达外参）
@@ -84,6 +85,14 @@ https://github.com/user-attachments/assets/ae4c19a0-4c73-46a0-95bd-909734da2a42
     实车参数两份按用途命名：`config/real/nav2_params_srm.yaml`（SRM 车当前使用）、
     `config/real/nav2_params_upstream.yaml`（上游原版对照）；建图参数与 RViz 配置为
     `config/real/mapping_params.yaml`、`rviz/mapping.rviz`。
+
+    车体模型随包提供，实车入口**不依赖任何外部工作区**：`urdf/sentry_robot_cylinder.xacro`
+    是 SRM 实车模型的本地副本（`urdf/srm_robot.urdf` 仅作独立调试备用）。
+    xacro 内的雷达 mesh 已指向 `srm27_robot_description` 包内的副本
+    （`package://srm27_robot_description/meshes/mid360.stl`），不再引用不在本工作空间的
+    `package://pb_rm_simulation/`；历史遗留下述前缀仍会被 launch 改写，
+    `real_mapping_launch.py` 与 `real_robot_state_publisher_launch.py` 加载时会把它改写为
+    `package://srm27_nav_bringup/meshes/mid360.stl`，文件缺失时直接报错退出。
 
 ## 2. Quick Start
 
@@ -116,7 +125,7 @@ docker run -it --rm --name srm27_navigation \
 
 - Ubuntu 22.04
 - ROS: [Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-- 配套仿真包（Option）：[rmu_gazebo_simulator](https://github.com/SMBU-PolarBear-Robotics-Team/rmu_gazebo_simulator)
+- 配套仿真包（Option）：[srm27_gazebo_simulator](../srm27_gazebo_simulator/RESOURCE_SOURCES.md)
 - Install [small_icp](https://github.com/koide3/small_gicp):
 
     ```bash
@@ -170,7 +179,7 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 导航模式：
 
 ```bash
-ros2 launch srm27_nav_bringup nav_simulation_launch.py \
+ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
 world:=rmuc_2025 \
 slam:=False
 ```
@@ -178,9 +187,17 @@ slam:=False
 建图模式：
 
 ```bash
-ros2 launch srm27_nav_bringup nav_simulation_launch.py \
+ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
 slam:=True
 ```
+
+一键启动（Gazebo + 速度合成 + 导航 + RViz）推荐用
+[`script/start_sim_nav.sh`](../../script/start_sim_nav.sh)，自转测试模式见
+[SRM 仿真与自转控制实现(ai)](../../docs/SRM仿真与自转控制实现(ai).md)。
+
+> [!NOTE]
+> `nav_simulation_launch.py` 已改为转发到 `nav_srm_simulation_launch.py` 的弃用壳，
+> 默认参数文件改为 `config/simulation/nav2_params_srm.yaml`。
 
 保存栅格地图：`ros2 run nav2_map_server map_saver_cli -f <YOUR_MAP_NAME>  --ros-args -r __ns:=/red_standard_robot1`
 
@@ -238,7 +255,7 @@ use_robot_state_pub:=True
 |  |  | 在实车模式，`world` 参数名称与栅格地图和先验点云图的文件名称相同 | string | "" |
 | 🤖 🖥️ | `map` | 要加载的地图文件的完整路径。默认路径自动基于 `world` 参数构建 | string | 仿真: [rmuc_2025.yaml](./srm27_nav_bringup/map/simulation/rmuc_2025.yaml); 实车: 自动填充 |
 | 🤖 🖥️ | `prior_pcd_file` | 要加载的先验 pcd 文件的完整路径。默认路径自动基于 `world` 参数构建 | string | 仿真: [rmuc_2025.pcd](./srm27_nav_bringup//pcd/real/); 实车: 自动填充 |
-| 🤖 🖥️ | `params_file` | 用于所有启动节点的 ROS2 参数文件的完整路径 | string | 仿真: [nav2_params.yaml](./srm27_nav_bringup/config/simulation/nav2_params.yaml); 实车: [nav2_params.yaml](./srm27_nav_bringup/config/real/nav2_params_upstream.yaml) |
+| 🤖 🖥️ | `params_file` | 用于所有启动节点的 ROS2 参数文件的完整路径 | string | 仿真: [nav2_params_srm.yaml](./srm27_nav_bringup/config/simulation/nav2_params_srm.yaml); 实车: [nav2_params.yaml](./srm27_nav_bringup/config/real/nav2_params_upstream.yaml) |
 | 🤖🖥️ | `rviz_config_file` | 要使用的 RViz 配置文件的完整路径 | string | [nav2_default_view.rviz](./srm27_nav_bringup/rviz/nav2_default_view.rviz) |
 | 🤖 🖥️ | `autostart` | 自动启动 nav2 栈 | bool | True |
 | 🤖 🖥️ | `use_composition` | 是否使用 Composable Node 形式启动 | bool | True |
@@ -251,6 +268,26 @@ use_robot_state_pub:=True
 
 ### 2.5 手柄控制
 
-默认情况下，PS4 手柄控制已开启。键位映射关系详见 [nav2_params.yaml](./srm27_nav_bringup/config/simulation/nav2_params.yaml) 中的 `teleop_twist_joy_node` 部分。
+默认情况下，PS4 手柄控制已开启。键位映射关系详见
+[nav2_params_srm.yaml](./srm27_nav_bringup/config/simulation/nav2_params_srm.yaml) 中的
+`teleop_twist_joy_node` 部分。
+
+> [!IMPORTANT]
+> SRM 仿真速度链路（`cmd_vel_nav` → `srm_cmd_mux` → `cmd_vel_sim` → SRM 速度插件）目前只由
+> 导航平移与独立自转两路输入合成，手柄并未接入；`script/start_sim_nav.sh --teleop` 会把
+> 手柄输出的角速度 remap 到 `rotation_cmd`，即"手柄控制自转"。
+
+## 2.6 独立自转测试
+
+自转由独立链路给出，不由 Nav2 控制器产生：
+
+```text
+rotation_test_sender → rotation_cmd → rotation_controller → rotation_velocity → srm_cmd_mux
+```
+
+`rotation_mode` 支持 `stop` / `constant` / `periodic`；`periodic` 下 `offset` 为平均角速度、
+`amplitude` 为非负变化幅度、`period` 为周期、`sine_wave` 选择正弦或方波。波形时间取仿真时间，
+从"启用"或"波形参数改变"时开始计算。实现与实测细节见
+[SRM 仿真与自转控制实现(ai)](../../docs/SRM仿真与自转控制实现(ai).md)。
 
 ![teleop_twist_joy.gif](https://raw.githubusercontent.com/LihanChen2004/picx-images-hosting/master/teleop_twist_joy.5j4aav3v3p.gif)

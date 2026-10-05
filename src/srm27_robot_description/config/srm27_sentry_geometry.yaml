@@ -1,0 +1,72 @@
+# SRM 哨兵机器人几何与外参的唯一定义（仿真与实车共用）。
+#
+# 本文件是 URDF、SDF 和启动脚本共同读取的单一数据源；修改尺寸或安装位姿
+# 只需改这里，不要再分别改 urdf/ 与 sdf/ 下的文件。
+#
+# 坐标系约定（全仓库统一）：
+#   x 前、y 左、z 上；base_link 与实际底盘刚性固定，随底盘自转。
+#
+# 来源：srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro（SRM 实车模型副本）。
+# 这些数值是当前简化模型的参数，不视作已经标定的整车动力学参数。
+
+robot:
+  name: srm_sentry
+  base_link: base_link
+
+chassis:
+  radius: 0.27
+  length: 0.20
+  # 圆柱几何中心相对 base_link 原点的高度。base_link 原点在地面高度。
+  center_z: 0.15
+  mass: 8.2
+
+wheel:
+  radius: 0.075
+  width: 0.04
+  mass: 0.5
+  # 轮子与地面的摩擦系数；轮子绕 y 轴自由转动，避免固定轮接触卡住底盘。
+  mu: 0.2
+  joint_effort: 1.0e+10
+  joint_velocity: 1.0e+10
+  # 轮心相对 base_link 的位置（x 前、y 左）。四个轮子绕 y 轴转动。
+  positions:
+    front_left: [0.18, 0.18, 0.075]
+    front_right: [0.18, -0.18, 0.075]
+    rear_left: [-0.18, 0.18, 0.075]
+    rear_right: [-0.18, -0.18, 0.075]
+
+lidar:
+  # 帧名保持 front_mid360，与现有 ros_gz_bridge、点云处理与定位链路一致。
+  link_name: front_mid360
+  # 相对 base_link 的安装位姿。
+  xyz: [0.15, -0.15, 0.22]
+  rpy: [-0.06981317007977318, 0.0, -1.5707963267948966]
+  # URDF 使用包内 mesh 副本；SDF 使用 srm27_gazebo_simulator 提供的 model:// 资源。
+  mesh_urdf: package://srm27_robot_description/meshes/mid360.stl
+  mesh_urdf_scale: 0.001
+  mesh_urdf_origin_xyz: [0.025, -0.0265, -0.025]
+  mesh_urdf_origin_rpy: [1.5707963267948966, 0.0, 3.141592653589793]
+  mesh_sdf: model://mid360/meshes/mid360.dae
+  mesh_sdf_origin_rpy: [0.0, 0.0, 3.141592653589793]
+  mass: 0.005
+  update_rate: 20
+  samples: 1875
+  horizontal_min_angle: 0.0
+  horizontal_max_angle: 6.2831852
+  vertical_samples: 32
+  vertical_min_angle: -0.12217304764
+  vertical_max_angle: 0.90757121104
+  range_min: 0.1
+  range_max: 40.0
+  noise_stddev: 0.01
+
+imu:
+  # 底盘 IMU 挂在 base_link 上，帧名保持 chassis_imu 供现有链路使用。
+  sensor_name: chassis_imu
+  update_rate: 200
+
+# 导航碰撞检查用的整车外接包络半径。
+# 圆柱半径 0.27 m 不是整车最大边界：轮组外廓（0.18+0.075 对角 ≈ 0.25）、
+# 雷达偏置安装（0.15, -0.15）和传感器外形都需要覆盖。
+collision:
+  envelope_radius: 0.33

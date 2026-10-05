@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+
+<!--
+  SRM 哨兵车体模型（公共版本）。
+
+  几何数值与 config/srm27_sentry_geometry.yaml 保持一致：
+    底盘半径 0.27 m、高 0.20 m、质量 8.2 kg；
+    四轮半径 0.075 m、宽 0.04 m、轮心 (±0.18, ±0.18, 0.075)；
+    MID360 安装位姿由 xyz / rpy 参数给出（实车入口传入标定值）。
+
+  本文件不再引用 package://pb_rm_simulation/，mesh 指向本包内的副本。
+  仿真使用的 SDF 由 srm27_robot_description 的 model_builder 由同一份 YAML 生成，
+  两条路径不会各自漂移。
+
+  注意：base_link 是与底盘刚性固定的坐标系，随底盘自转；导航的速度参考系、
+  odom -> base_link 都使用它。模型里没有 gimbal_yaw / gimbal_yaw_fake。
+-->
+
+<robot name="srm_sentry"
+  xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:property name="length_wheel" value="0.04" />
+  <xacro:property name="radius_wheel" value="0.075" />
+  <xacro:property name="chassis_radius" value="0.27" />
+  <xacro:property name="chassis_length" value="0.2" />
+  <xacro:property name="chassis_mass" value="8.2" />
+  <xacro:property name="PI" value="3.1415926"/>
+
+  <xacro:macro name="default_inertial" params="mass">
+    <inertial>
+      <mass value="${mass}" />
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01" />
+    </inertial>
+  </xacro:macro>
+
+  <!-- base_link to livox_frame -->
+  <xacro:arg name="xyz" default="0.15 -0.15 0.22" />
+  <xacro:arg name="rpy" default="-0.06981317007977318 0 -1.5707963267948966" />
+
+  <!--robot body-->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder radius="${chassis_radius}" length="${chassis_length}"/>
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0.15"/>
+      <material name="white">
+        <color rgba="1 1 1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="${chassis_radius}" length="${chassis_length}"/>
+      </geometry>
+      <origin rpy="0 0 0" xyz="0 0 0.15"/>
+    </collision>
+    <xacro:default_inertial mass="${chassis_mass}"/>
+  </link>
+
+  <!-- wheels -->
+  <xacro:macro name="srm_wheel" params="name x y">
+    <link name="${name}">
+      <visual>
+        <geometry>
+          <cylinder length="${length_wheel}" radius="${radius_wheel}"/>
+        </geometry>
+        <origin rpy="1.5707963267948966 0 0" xyz="0 0 0"/>
+        <material name="black">
+          <color rgba="0.05 0.05 0.05 1"/>
+        </material>
+      </visual>
+      <collision>
+        <geometry>
+          <cylinder length="${length_wheel}" radius="${radius_wheel}"/>
+        </geometry>
+        <origin rpy="1.5707963267948966 0 0" xyz="0 0 0"/>
+      </collision>
+      <xacro:default_inertial mass="0.5"/>
+    </link>
+    <joint name="base_to_${name}" type="revolute">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <origin rpy="0 0 0" xyz="${x} ${y} ${radius_wheel}"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-1.7976931348623157e+308" upper="1.7976931348623157e+308"
+             effort="1e+10" velocity="1e+10"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- 左前 / 左后 / 右前 / 右后 -->
+  <xacro:srm_wheel name="wheel_1" x="0.18" y="0.18"/>
+  <xacro:srm_wheel name="wheel_2" x="-0.18" y="0.18"/>
+  <xacro:srm_wheel name="wheel_3" x="0.18" y="-0.18"/>
+  <xacro:srm_wheel name="wheel_4" x="-0.18" y="-0.18"/>
+
+  <!-- Livox-Mid360 -->
+  <link name="front_mid360">
+    <visual>
+      <origin xyz="0.025 -0.0265 -0.025" rpy="${pi/2} 0 ${pi}"/>
+      <geometry>
+        <mesh filename="package://srm27_robot_description/meshes/mid360.stl"
+              scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1.0 1" />
+      </material>
+    </visual>
+  </link>
+
+  <joint name="livox_joint" type="fixed">
+    <origin xyz="$(arg xyz)" rpy="$(arg rpy)" />
+    <parent link="base_link"/>
+    <child link="front_mid360"/>
+  </joint>
+
+</robot>

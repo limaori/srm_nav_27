@@ -5,10 +5,12 @@
 #   livox_scan），与当前 SRM 仿真模型的坐标系保持一致。
 #
 # 模型构建逻辑与 real_mapping_launch.py 完全一致（那是实车建图验证过的版本）:
-#   1) 用 source_workspace 下的 sentry_robot_cylinder.xacro，并把 lidar_xyz /
-#      lidar_rpy 作为 xacro 的外参映射注入（雷达安装位姿只在这里定义一次）；
-#   2) 把 xacro 里的 package://pb_rm_simulation/... mesh 改写成工作空间里的真实
-#      文件路径（该包不在本工作空间，ament 找不到）；
+#   1) 用本包内的 urdf/sentry_robot_cylinder.xacro（SRM 实车模型的本地副本，不再
+#      依赖任何外部工作区），并把 lidar_xyz / lidar_rpy 作为 xacro 的外参映射注入
+#      （雷达安装位姿只在这里定义一次）；
+#   2) mesh 直接指向 srm27_robot_description 包内的 mid360.stl 副本；若仍是历史遗留的
+#      package://pb_rm_simulation/meshes/... 前缀，加载时改写成描述包内的同路径资源
+#      （pb_rm_simulation 不在本工作空间）；
 #   3) 追加两个 link 与固定关节:
 #        livox_imu  : 挂在 livox_frame 下，偏移取 -mapping.extrinsic_T
 #        livox_scan : 挂在 base_link 下，偏移取 lidar_xyz（二维投影用的水平系）
@@ -38,10 +40,7 @@ from launch_ros.descriptions import ParameterValue
 
 def launch_setup(context):
     bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
-    source_workspace = Path(LaunchConfiguration("source_workspace").perform(context))
-    source_root = source_workspace / "src/pb_rmsimulation/src"
-    robot_file = source_root / "rm_nav_bringup/urdf/sentry_robot_cylinder.xacro"
-    mesh_root = source_root / "rm_simulation/pb_rm_simulation"
+    robot_file = bringup_dir / "urdf/sentry_robot_cylinder.xacro"
     params_file = LaunchConfiguration("params_file").perform(context)
     lidar_config = LaunchConfiguration("lidar_config").perform(context)
 
@@ -85,14 +84,17 @@ def launch_setup(context):
     ).toxml()
     robot = ET.fromstring(robot_xml)
 
-    # mesh 路径改写: pb_rm_simulation 不在本工作空间
+    # mesh 解析: xacro 已指向 srm27_robot_description 包内的副本;
+    # 若还有历史遗留的 pb_rm_simulation 前缀, 一并改写为描述包内的同路径资源。
+    description_dir = Path(get_package_share_directory("srm27_robot_description"))
     for mesh in robot.iter("mesh"):
         filename = mesh.attrib["filename"]
-        if filename.startswith("package://pb_rm_simulation/"):
-            mesh_file = mesh_root / filename.removeprefix("package://pb_rm_simulation/")
-            if not mesh_file.is_file():
-                raise FileNotFoundError(mesh_file)
-            mesh.set("filename", mesh_file.resolve().as_uri())
+        prefix = "package://pb_rm_simulation/"
+        if filename.startswith(prefix):
+            relative = filename.removeprefix(prefix)
+            if not (description_dir / relative).is_file():
+                raise FileNotFoundError(description_dir / relative)
+            mesh.set("filename", f"package://srm27_robot_description/{relative}")
 
     for child, parent, translation in [
         ("livox_imu", "livox_frame", [-value for value in imu_translation]),
@@ -128,11 +130,6 @@ def launch_setup(context):
 def generate_launch_description():
     bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
     arguments = [
-        (
-            "source_workspace",
-            "/home/srm/srm_auto_sentry",
-            "Workspace containing the original robot xacro and meshes",
-        ),
         (
             "params_file",
             str(bringup_dir / "config/real/nav2_params_srm.yaml"),

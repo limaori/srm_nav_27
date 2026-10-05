@@ -1,4 +1,4 @@
-standard_robot_pp_ros2:
+srm27_nav_protocol:
   ros__parameters:
     device_name: /dev/ttyACM0
     baud_rate: 115200

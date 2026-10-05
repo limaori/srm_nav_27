@@ -1,5 +1,11 @@
 # 局部规划器相关(ai)
 
+> [!NOTE]
+> 本文写于 SRM 仿真重构之前。文中出现的 `gimbal_yaw_fake` 是**旧步兵链路** frame，
+> 已从 SRM 仿真与 `nav2_params_srm.yaml` 中删除；当前控制器把路径变换到代价地图的机器人系，
+> 即真实随底盘自转的 `base_link`（见 `srm27_omni_pid_pursuit_controller.cpp` 的
+> `costmap_ros_->getBaseFrameID()`）。其余关于控制器结构与局限的描述仍然适用。
+
 本项目的局部控制器跟踪全局规划器给出的路径。当前结构是：
 
 ```text

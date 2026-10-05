@@ -39,14 +39,6 @@ repositories:
     type: git
     url: https://github.com/SMBU-PolarBear-Robotics-Team/BehaviorTree.ROS2.git
     version: humble
-  src/rmu_gazebo_simulator:
-    type: git
-    url: https://github.com/SMBU-PolarBear-Robotics-Team/rmu_gazebo_simulator.git
-    version: main
-  src/standard_robot_pp_ros2:
-    type: git
-    url: https://github.com/SMBU-PolarBear-Robotics-Team/standard_robot_pp_ros2.git
-    version: main
   src/srm27_navigation:
     type: git
     url: https://github.com/SMBU-PolarBear-Robotics-Team/pb2025_sentry_nav.git

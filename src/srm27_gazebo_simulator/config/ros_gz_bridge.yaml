@@ -1,0 +1,43 @@
+# SRM 仿真用的 ros_gz_bridge 映射。
+#
+# <robot_name> 在 spawn 时替换为实际机器人名（默认 red_standard_robot1），
+# 话题结构与现有导航链路保持一致：
+#   - /clock                  仿真时钟
+#   - chassis_odometry_gt     SRM 速度插件的真值里程计（供对照与空场调试）
+#   - joint_states            关节状态与 TF
+#   - livox/lidar, livox/imu  雷达点云与 IMU，继续走现有点云/定位链路
+#
+# 底盘速度命令不走 bridge：它由 srm_velocity_adapter 以校验+超时清零的方式
+# 直接写入 Gazebo Transport，避免桥接直通绕过校验。
+
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "ignition.msgs.Clock"
+  direction: "GZ_TO_ROS"
+
+# SRM 自有速度插件的真值里程计
+- ros_topic_name: "/<robot_name>/chassis_odometry_gt"
+  gz_topic_name: "/<robot_name>/odometry"
+  ros_type_name: "nav_msgs/msg/Odometry"
+  gz_type_name: "ignition.msgs.Odometry"
+  direction: "GZ_TO_ROS"
+
+# JointStatePublisher
+- ros_topic_name: "/<robot_name>/joint_states"
+  gz_topic_name: "/world/default/model/<robot_name>/joint_state"
+  ros_type_name: "sensor_msgs/msg/JointState"
+  gz_type_name: "ignition.msgs.Model"
+  direction: "GZ_TO_ROS"
+
+- ros_topic_name: "/<robot_name>/livox/lidar"
+  gz_topic_name: "/world/default/model/<robot_name>/link/front_mid360/sensor/front_mid360_lidar/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "ignition.msgs.PointCloudPacked"
+  direction: "GZ_TO_ROS"
+
+- ros_topic_name: "/<robot_name>/livox/imu"
+  gz_topic_name: "/world/default/model/<robot_name>/link/front_mid360/sensor/front_mid360_imu/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "ignition.msgs.IMU"
+  direction: "GZ_TO_ROS"

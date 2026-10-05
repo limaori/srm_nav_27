@@ -1,0 +1,54 @@
+# SRM 底盘控制链路配置。
+#
+# 本文件只描述 srm_cmd_mux / rotation_controller / rotation_test_sender 三个节点；
+# 速度限幅与超时的权威默认值也在这里，便于一次性调整测试范围。
+
+srm_cmd_mux:
+  ros__parameters:
+    use_sim_time: True
+    # 输入
+    nav_topic: "cmd_vel_nav"              # 导航平移速度（车体系，wz 会被丢弃）
+    rotation_topic: "rotation_velocity"   # 独立自转速度（只取 angular.z）
+    # 输出：mux 是 cmd_vel_sim 的唯一发布者
+    output_topic: "cmd_vel_sim"
+    publish_rate: 200.0                   # 合成频率（Hz）
+    # 超时清零
+    nav_timeout: 0.3                      # 导航输入超时（s）
+    rotation_timeout: 0.1                 # 自转输入超时（s）
+    # 限幅
+    vx_max: 0.5                           # 前向速度上限（m/s）
+    vy_max: 0.5                           # 左向速度上限（m/s）
+    v_max: 0.5                            # 平移合速度上限（m/s，按向量模长）
+    wz_max: 2.0                           # 自转角速度上限（rad/s）
+    diagnostics_period: 0.5               # 诊断发布周期（s）
+
+rotation_controller:
+  ros__parameters:
+    use_sim_time: True
+    input_topic: "rotation_cmd"
+    output_topic: "rotation_velocity"
+    publish_rate: 200.0
+    request_timeout: 0.5                  # 自转请求超时（s）
+    max_angular_accel: 0.0                # 角加速度上限（rad/s^2），0 表示不限制
+    wz_max: 2.0
+    diagnostics_period: 0.5
+
+rotation_test_sender:
+  ros__parameters:
+    use_sim_time: True
+    output_topic: "rotation_cmd"
+    publish_rate: 200.0
+    enabled: True
+    # stop | constant | periodic
+    rotation_mode: "stop"
+    # 恒速模式的有符号角速度（rad/s）
+    angular_speed: 0.0
+    # 周期模式：平均角速度与非负变化幅度（rad/s）
+    offset: 0.0
+    amplitude: 0.0
+    # 周期（s）与初相位（rad）
+    period: 4.0
+    phase: 0.0
+    # true 为正弦，false 为方波
+    sine_wave: True
+    diagnostics_period: 0.5

@@ -91,7 +91,7 @@ docker run -it --rm --name srm27_navigation \
 
 - Ubuntu 22.04
 - ROS: [Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-- Simulation package（Option）：[rmu_gazebo_simulator](https://github.com/SMBU-PolarBear-Robotics-Team/rmu_gazebo_simulator)
+- Simulation package（Option）：[srm27_gazebo_simulator](../srm27_gazebo_simulator/RESOURCE_SOURCES.md)
 - Install [small_icp](https://github.com/koide3/small_gicp):
 
     ```bash
