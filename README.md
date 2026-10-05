@@ -326,11 +326,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 | 脚本 | 用途 |
 | --- | --- |
-| `script/srm_regression.sh` | 回归运行器：一次跑完测试矩阵（空场基本运动 + 自转叠加 + 场地导航），自动落盘 CSV / rosbag / metadata / 汇总 |
-| `script/start_sim.sh` | 只启动 SRM Gazebo 仿真，参数透传给 `srm_sim.launch.py` |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
-| `script/clean_sim_processes.sh` | 清理本工作空间的全部仿真残留进程（Gazebo / 桥接 / 速度适配器 / Nav2 / RViz） |
-| `script/diag_nav_abort.sh` | 单次安全的导航诊断：启动前检查残留、独立进程组启动、内存看门狗、日志落到 `log_diag/nav_abort/` |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
 ```bash

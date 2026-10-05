@@ -293,6 +293,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except rclpy.executors.ExternalShutdownException:
+        # launch 用 SIGINT 收尾时，rclpy 的信号处理会先把 context 关掉，
+        # spin 于是抛 ExternalShutdownException 而不是 KeyboardInterrupt。
+        # 不捕获会以退出码 1 结束，在 launch 日志里被记成 "[ERROR] process has died"，
+        # 掩盖真正的异常；这里按正常退出处理。
+        pass
     finally:
         node.destroy_node()
         rclpy.try_shutdown()
