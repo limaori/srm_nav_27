@@ -294,15 +294,18 @@ rotation_controller
 - 检查目标是否到达；
 - 规划失败或卡住时执行恢复行为。
 
-恢复行为包括：
+`behavior_server` 加载的恢复插件（**不一定被行为树使用**）：
 
 - 原地旋转 `Spin`；
-- 后退 `BackUpFreeSpace`；
+- 后退 `BackUpFreeSpace`（当前行为树实际使用的 `BackUp` 就是它）；
 - 沿航向行驶 `DriveOnHeading`；
 - 辅助遥控；
 - 等待。
 
-行为树本次未修改；恢复行为输出的角速度分量同样由 mux 丢弃。
+行为树本次未修改。当前行为树实际使用的恢复动作是 `ClearEntireCostmap`（服务调用）与
+`BackUp`（`srm27_nav_behaviors/BackUpFreeSpace`，只输出 `linear.x` / `linear.y`），
+**脱困逻辑不涉及旋转**，因此与 mux 丢弃导航 `angular.z` 的规则不冲突；
+`behavior_server` 虽然加载了 `spin` 插件，但行为树没有使用它。
 
 ### 11. 诊断
 

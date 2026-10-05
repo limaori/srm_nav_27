@@ -82,6 +82,9 @@ srm27_chassis_control/
 srm27_gazebo_simulator/
 ├── config/srm_sim.yaml                 # 世界名、Gazebo GUI、SRM 初始位姿、速度执行参数
 ├── config/ros_gz_bridge.yaml           # /clock、真值里程计、joint_states、雷达点云与 IMU
+├── resource/                          # 比赛场地、MID-360 模型和 GUI 配置
+├── launch/gazebo.launch.py             # 只启动场地和时钟桥接
+├── env-hooks/gazebo.dsv.in             # 注册本包资源搜索路径
 ├── worlds/srm_empty.sdf                # 空场调试世界（物理步长 1 ms）
 ├── launch/srm_sim.launch.py            # 仿真入口
 ├── plugins/srm_velocity_system/        # SRM 自有 Gazebo Fortress system 插件
@@ -101,7 +104,7 @@ srm27_gazebo_simulator/
 - `srm_velocity_adapter` 订阅 ROS 侧 `cmd_vel_sim`（车体系），校验 NaN/Inf（含非有限值时按零速处理并计数），
   转成 `ignition.msgs.Twist` 发布到 `<robot_name>/cmd_vel`；守护线程用**单调时钟**做超时清零并持续发零速。
 - **底盘速度命令不走 `ros_gz_bridge.yaml`**：由适配器直接写 Gazebo Transport，避免桥接直通绕过校验。
-- 本包只提供 SRM 模型与仿真入口；场地素材（世界 SDF、GUI 配置、mid360 模型）由 `rmu_gazebo_simulator` 提供。
+- 本包同时提供 SRM 仿真入口和 `resource/` 下的场地、GUI、MID-360 素材；旧仿真包已删除。资源来源与许可证见包内 `RESOURCE_SOURCES.md` 和 `LICENSE`。
 
 ---
 
@@ -218,8 +221,12 @@ wz = clamp(rotation_wz, -wz_max, wz_max)     # 自转独立限幅，与平移无
 
 ### 3.3 导航 `wz` 的所有权
 
-- 控制器参数 `enable_rotation: false`、`use_rotate_to_heading: false`，导航链路本就不应产生自转角速度。
-- 恢复行为与行为树同样输出到导航速度出口，其中若出现角速度分量也会被 mux 丢弃。
+- 控制器参数 `enable_rotation: false`、`use_rotate_to_heading: false`，导航链路本就不应产生自转角速度
+  （源码里 `angular_vel = enable_rotation_ ? … : 0.0`，实测 `cmd_vel_nav.angular.z` 恒为 0）。
+- 恢复/脱困逻辑按设计**只使用平移速度，不涉及旋转**：行为树里实际用到的是
+  `ClearEntireCostmap`（服务调用，不经过速度话题）与 `BackUp`
+  （`srm27_nav_behaviors/BackUpFreeSpace`，源码里只写 `linear.x` / `linear.y`）。
+  因此"丢弃导航 `wz`"不会让任何恢复动作失效，这条规则与脱困链路并不冲突。
 - 自转角速度的**唯一**来源是 `rotation_velocity`，因此“导航平移 + 底盘自转”不会互相覆盖。
 - 计时全部用**单调时钟**（`twist_watchdog`），只有周期波形用仿真时间；暂停时波形相位自然冻结。
 
@@ -262,11 +269,20 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 
 | 脚本 | 用途 |
 | --- | --- |
+| `script/srm_regression.sh` | 回归运行器：一次跑完 §5/§8 的测试矩阵，自动落盘 CSV / rosbag / metadata / 汇总 |
 | `script/clean_sim_processes.sh` | 清理本工作空间的全部仿真残留进程（Gazebo / bridge / 适配器 / Nav2 / RViz） |
 | `script/diag_nav_abort.sh` | 单次安全的导航诊断：启动前检查残留、独立进程组启动、内存看门狗、日志落到 `log_diag/nav_abort/` |
 | `script/kill_gzb.sh` / `script/kill_rviz.sh` | 分别清理 Gazebo 与 RViz |
 
 `diag_nav_abort.sh` 可用环境变量调整场景：`WORLD`、`GOAL_X`、`GOAL_Y`。
+
+采集类可执行文件（安装在 `srm27_nav_bringup` 下，`ros2 run` 直接调用）：
+
+| 可执行文件 | 用途 |
+| --- | --- |
+| `srm_velocity_monitor.py` | 同时采样 `cmd_vel_nav` / `rotation_velocity` / `cmd_vel_sim` / 实际里程计，写 CSV 并输出汇总；`--csv <文件>` 可离线重算口径 |
+| `srm_regression_metadata.py` | 写出 `metadata.yaml`：世界、地图、参数文件、git 提交、包版本、物理步长、噪声参数 |
+| `simulation_ground_truth_odometry.py` | 仿真真值里程计（`base_frame` 默认 `base_link`） |
 
 ### 4.2 手动 bringup（不用脚本）
 
@@ -307,15 +323,25 @@ ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
 # 只跑仿真（headless，直接运行）
 ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=srm_empty gui:=false run_immediately:=true
 
-# 手动下发纯平移 / 纯自转命令（车体系）
-ros2 topic pub -r 20 /red_standard_robot1/cmd_vel_sim geometry_msgs/msg/Twist \
-  "{linear: {x: 0.3}, angular: {z: 0.0}}"
-ros2 topic pub -r 20 /red_standard_robot1/cmd_vel_sim geometry_msgs/msg/Twist \
-  "{linear: {x: 0.3, y: 0.3}, angular: {z: 1.0}}"
+# 手动下发：平移走导航入口，自转走自转入口，都经过 mux（推荐）
+ros2 topic pub -r 50 /red_standard_robot1/cmd_vel_nav geometry_msgs/msg/Twist \
+  "{linear: {x: 0.3, y: 0.0}, angular: {z: 0.0}}"      # 纯 vx
+ros2 topic pub -r 50 /red_standard_robot1/cmd_vel_nav geometry_msgs/msg/Twist \
+  "{linear: {x: 0.5, y: 0.5}, angular: {z: 0.0}}"      # 对角，会被限到 0.5 m/s
+ros2 topic pub -r 20 /red_standard_robot1/rotation_cmd geometry_msgs/msg/Twist \
+  "{angular: {z: 1.0}}"                                # 独立自转
+
+# 观察合成结果
+ros2 topic echo /red_standard_robot1/cmd_vel_sim
 ```
 
+> [!NOTE]
+> `cmd_vel_sim` 的**唯一发布者**是 `srm_cmd_mux`。上面的命令走的是它的两路输入；
+> 只有在**没有启动** `srm_cmd_mux` 时，才建议直接往 `cmd_vel_sim` 发命令做单点调试。
+> 直接发 `cmd_vel_sim` 会绕过限幅、超时清零与 `wz` 所有权规则。
+
 世界解析顺序：`srm27_gazebo_simulator/worlds/<world>.sdf` →
-`rmu_gazebo_simulator/resource/worlds/<world>_world.sdf`；`world_sdf:=<绝对路径>` 优先级最高。
+`srm27_gazebo_simulator/resource/worlds/<world>_world.sdf`；`world_sdf:=<绝对路径>` 优先级最高。
 Gazebo 默认**以暂停启动**，`run_immediately:=true` 才直接运行。
 
 ### 4.4 旧入口的当前状态
@@ -323,8 +349,8 @@ Gazebo 默认**以暂停启动**，`run_immediately:=true` 才直接运行。
 | 旧入口 / 旧组件 | 状态 |
 | --- | --- |
 | `srm27_nav_bringup nav_simulation_launch.py` | 已改为**弃用壳**，转发到 `nav_srm_simulation_launch.py`，默认参数文件改成 `nav2_params_srm.yaml` |
-| `rmu_gazebo_simulator bringup_sim.launch.py` | 已**下线**，运行时直接报错并提示替代入口 |
-| `rmu_gazebo_simulator` 的 SRM 模型、`spawn_robots.launch.py`、`gz_world.yaml`、`base_params.yaml`、`ros_gz_bridge.yaml` | 已删除 |
+| 旧仿真包及 `bringup_sim.launch.py` | 已删除；SRM 入口为 `srm27_gazebo_simulator srm_sim.launch.py`，纯场地入口为同包 `gazebo.launch.py` |
+| 旧仿真包的 SRM 模型、`spawn_robots.launch.py`、`gz_world.yaml`、`base_params.yaml`、`ros_gz_bridge.yaml` | 已删除 |
 | `MecanumDrive2` 底盘插件、`rmoss_gz_base` 底盘/云台控制器 | SRM 链路不再使用，替换为 `srm_velocity_system` + `srm_velocity_adapter` |
 | `gimbal_yaw_fake` / `fake_vel_transform` | 旧步兵链路；SRM 仿真已删除该链路，`use_fake_vel_transform` 默认 `True` 仅为兼容其他配置保留 |
 
@@ -340,7 +366,22 @@ Gazebo 默认**以暂停启动**，`run_immediately:=true` 才直接运行。
 
 ## 5. 测试矩阵怎么跑
 
-在空场（`world:=srm_empty`）先做前四组，确认符号与量值正确，再进场地叠导航。
+推荐直接用回归运行器，它把下面的场景一次性跑完并自动落盘：
+
+```bash
+./script/srm_regression.sh                       # 空场 + 场地全部场景
+./script/srm_regression.sh --session field       # 只跑空场（纯 vx/vy/对角/wz/叠加/超时）
+./script/srm_regression.sh --session nav         # 只跑场地导航三组
+./script/srm_regression.sh --session field --cases vx,vy   # 指定场景
+RECORD_CLOUDS=1 ./script/srm_regression.sh --session field # 额外记录点云（体积大）
+```
+
+运行器保证：启动前检查残留（有残留直接退出）、每个 session 只起一套仿真栈、
+按进程组回收全部子进程、可用内存低于 1.5 GB 时自动停止、每个场景单独落盘。
+结果见 `log_diag/regression_<时间戳>/`（结构与实测数据见 §6）。
+
+也可以手工按矩阵逐项验证。在空场（`world:=srm_empty`）先做前四组，
+确认符号与量值正确，再进场地叠导航。
 
 | 场景 | 下发方式 | 期望结果 |
 | --- | --- | --- |
@@ -367,7 +408,25 @@ ros2 topic echo /<ns>/diagnostics --once        # 超时 / 限幅 / 丢弃计数
 ros2 run tf2_ros tf2_echo map base_link         # 完整 TF 链
 ```
 
-记录时必须能区分三件事：**导航请求的速度**、**合成后的执行命令**、**实际运动速度**（`odometry` twist）。
+自动记录（方案 §8）用两个入口：
+
+```bash
+# 1) 只做指标采集：CSV（三路速度 + 位姿）+ 终端汇总
+ros2 run srm27_nav_bringup srm_velocity_monitor.py --ros-args \
+  -r __ns:=/<ns> -p duration:=60 -p actual_topic:=odometry -p output:=/tmp/run.csv
+
+# 2) 完整 rosbag + metadata.yaml（世界/模型参数、git 提交、包版本、物理步长）
+ros2 launch srm27_nav_bringup srm_simulation_record_launch.py \
+  namespace:=<ns> world:=rmuc_2025 map:=<地图 yaml> params_file:=<参数 yaml> \
+  case:=nav_plain
+```
+
+`actual_topic` 必须显式指定：空场（没有导航栈）用 `chassis_odometry_gt`
+（插件的 Link 系真值速度，世界绝对位姿），场地用 `odometry`（导航侧相对里程计）。
+两者位姿坐标系不同，不能让监视器在运行中自动切换，否则轨迹会跳变。
+
+记录时必须能区分三件事：**导航请求的速度**、**合成后的执行命令**、**实际运动速度**；
+`velocity.csv` 里分别对应 `nav_*` / `cmd_*` / `act_*` 三组列。
 诊断消息里的关键字段：`nav_wz_dropped_count`（导航角速度被丢弃的次数）、`non_finite_*_count`、
 `translation_scale`、`clamped`、`nav_timeout`、`rotation_timeout`、`target_wz`、`output_wz`、`waveform_time`。
 
@@ -437,28 +496,54 @@ colcon test-result --verbose
   uncrustify、cppcheck、xmllint 也通过。
 - 全工作空间 `colcon build`（43 个包）成功；`colcon test-result` 汇总 58 个用例 0 失败。
 
-**导航端到端**（`world:=rmuc_2025` + `map:=rmuc_2025_tunnel.yaml`，headless，单套仿真栈）
+**完整回归（`script/srm_regression.sh`，一次一套仿真栈，headless）**
 
-- 生命周期节点 `controller_server` / `bt_navigator` / `velocity_smoother` 全部 `active`。
-- TF 链完整：`map → odom → base_link → front_mid360` 均可查。
-- `compute_path_to_pose` 到 `map(1.5, 1.5)` 返回 `SUCCEEDED`。
-- `navigate_to_pose` 到 `map(1.5, 1.5)` 返回 **`SUCCEEDED`**；真值里程计最终停在
-  `(1.414, 1.400)`，与目标相差约 0.13 m（`xy_goal_tolerance` 为 0.15 m），
-  到达后 `cmd_vel_sim` 全零、位置不再变化。
-- 到点后把自转发送器切到 `constant, angular_speed=1.0`：`rotation_velocity=1.0`，
-  `cmd_vel_sim=(0, 0, wz=1.0)`，里程计姿态随之变化 —— 说明"导航平移 + 独立自转"的
-  合成在整条链路上成立。
+空场 session（`world:=srm_empty`）——Phase 1 四种基本运动 + Phase 2 自转叠加。
+表中"命令"是 `cmd_vel_sim`，"实际"来自速度插件的真值里程计 `chassis_odometry_gt`
+（空场没有导航栈，因此没有 `odometry`）：
 
-指标：每次运行至少记录 `/clock`、`cmd_vel_nav`、`rotation_cmd`、`rotation_velocity`、
-`cmd_vel_sim`、`odometry`、TF、原始点云、IMU、`terrain_map`、`behavior_tree_log` 与
-`diagnostics`；诊断与超时状态在 `/<ns>/diagnostics`。
+| 场景 | 合成命令 `cmd_vel_sim` | 实际速度 | 轨迹 / yaw | 结论 |
+| --- | --- | --- | --- | --- |
+| 纯 `vx` | `vx=+0.300` | `vx=+0.299`（偏差 0.002） | (3.400, 9.500) → (5.937, 9.500)，路程 2.537 m，y 完全不变 | 前向正确 |
+| 纯 `vy` | `vy=+0.300` | `vy=+0.298`（偏差 0.002） | (5.937, 10.282) → (5.937, 12.005)，路程 1.723 m，x 完全不变 | 左移正确 |
+| 对角 `vx+vy` | 输入 `(0.5, 0.5)` → 输出各 `+0.354` | `+0.354 / +0.352` | (5.937, 12.005) → (8.921, 14.972)，路程 4.208 m，45° | 按向量模长限到 0.5 m/s |
+| 纯 `wz=+1.0` | `wz=+1.000` | `wz=+0.990` | 位置不变，累计 yaw **+10.871 rad**（≈11 s × 1 rad/s） | 逆时针，速率正确 |
+| 纯 `wz=-1.0` | `wz=-1.000` | `wz=-0.990` | 位置不变，累计 yaw **−10.277 rad** | 符号与正转完全对称 |
+| 平移+恒速自转 | `vx=+0.250`，`wz=+1.000` | `vx=+0.242`，`wz=+0.990` | 位置改变且累计 yaw +10.713 rad，路程 2.111 m（曲线轨迹） | 平移与自转同时生效 |
+| 平移+周期自转 | `vx=+0.250`，`wz` 峰值 +1.500、均值 +0.970 | `wz` 峰值 +1.491、均值 +0.960 | 路程 3.095 m，累计 yaw +14.377 rad | 正弦（offset 1.0±0.5，T=4 s）符合预期 |
+| 超时清零 | 只发 5 s 的 `vx=+0.300` | 命令段 `vx=+0.300`（偏差 0.002） | 命令结束后尾段约 6 s **位移 0.001 m**，期间 `wz` 仍为 +1.000 | 平移超时清零、自转不受影响 |
+
+场地 session（`world:=rmuc_2025` + `rmuc_2025_tunnel.yaml`）——Phase 3 四组回归中的三组
+（"静止导航"即到点后不再发速度，由下表"命令结束后位移"一列体现）：
+
+| 场景 | 目标（map） | `cmd_vel_sim` | 实际速度 | 轨迹 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 平移导航（不自转） | (1.5, 1.5) | `vx/y≈0.35`，`wz=0` | `vx=+0.351`、`vy=+0.350` | (0.012, 0.012) → (1.424, 1.411)，1.988 m | **`SUCCEEDED`** |
+| 导航 + 恒速自转 `wz=+1.0` | (0.0, 0.0) | `wz=+1.000` 全程 | `wz` 均值 +0.991 | (1.424, 1.402) → (0.084, 0.023)，1.996 m，累计 yaw +85.5 rad | **`SUCCEEDED`** |
+| 导航 + 周期自转（offset 1.0±0.5） | (1.5, 1.5) | `wz` 峰值 +1.500、均值 +1.004 | `wz` 峰值 +1.491、均值 +0.995 | (0.084, 0.023) → (1.403, 1.288)，2.132 m，累计 yaw +86.9 rad | **`SUCCEEDED`** |
+
+以上 11 个场景中，**"导航输入中非零 wz" 全部为 0 次**，即 Nav2 从未下发自转角速度，
+与 §3.3 的约定一致；`cmd_vel_sim` 的 `wz` 始终等于 `rotation_velocity` 的 `wz`。
+
+**回归产物**（可直接用于复现与对照）：
+
+- 汇总报告：`log_diag/regression_REPORT.md`（最新一轮全部 11 个场景），
+  原始数据在 `log_diag/regression_<时间戳>/`，每个场景目录下的
+  `metadata.yaml`（世界/模型参数、git 提交、包版本、物理步长、噪声参数）、
+  `velocity.csv`（三路速度 + 位姿逐点采样）、`summary.txt`（运行时汇总）、
+  `summary_replay.txt`（同口径离线重算）、`bag/`（rosbag，zstd 压缩）、`goal.log`。
+- 三种速度在同一份 CSV 里分列存放：`nav_*`（导航请求）、`cmd_*`（合成后执行命令）、
+  `act_*`（实际运动速度），满足方案 §8 的区分要求。
+- 不重跑仿真也能重算口径：
+  `python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_velocity_monitor.py --csv <velocity.csv>`。
 
 ---
 
 ## 7. 已知边界与注意事项
 
 1. **只支持单机器人**：命名空间、Gazebo 模型名、TF 与话题都按单机约定；多机需要重新设计命名与 TF 划分。
-2. **行为树与手柄接入未纳入本次改动**：导航行为树沿用现有 XML，恢复行为中的角速度分量由 mux 丢弃；
+2. **行为树与手柄接入未纳入本次改动**：导航行为树沿用现有 XML；脱困逻辑只用平移
+   （`ClearEntireCostmap` + `BackUpFreeSpace`），不涉及旋转，与 mux 丢弃导航 `wz` 的规则不冲突；
    手柄自转只是 `--teleop` 标签页的可选输出（remap 到 `rotation_cmd`），默认关闭。
 3. **速度级执行不做轮毂动力学**：插件直接设置 Link 平面速度，没有轮速 PID、力矩控制或打滑建模，
    因此**不能用它评估真实的底盘动力学性能**，只能观察“导航平移叠加自转”的运动学效果。
@@ -474,7 +559,7 @@ colcon test-result --verbose
    `odom → base_link` 由对应定位链路提供；需要对照实际运动时应改用定位链路的 `odometry` 与
    `registered_scan`，不要再去找真值话题。
 8. **旧入口仍可运行但会打印弃用提示**：`nav_simulation_launch.py` 是转发壳；
-   `rmu_gazebo_simulator bringup_sim.launch.py` 已下线，调用会直接抛错。
+   旧仿真包及其 `bringup_sim.launch.py` 已删除；场地与传感器资源已迁入新包。
    新旧底盘执行器互斥，不要同时启动两套仿真。
 9. **参数以 YAML 为准**：`config/srm_chassis_control.yaml`、`config/srm_sim.yaml`、
    `config/srm27_sentry_geometry.yaml` 分别是底盘控制、仿真入口与几何的权威来源；
@@ -488,6 +573,10 @@ colcon test-result --verbose
     同一位置的假象，原因是有 5～6 套残留的仿真/Nav2 进程同时在跑（重复的
     `static_transform_publisher`、真值里程计与代价地图互相干扰）。清理干净后同一条命令
     立即 `SUCCEEDED`。调试导航前务必先做残留检查。
+12. **不变量：脱困与导航都不写自转角速度**：恢复/脱困只用平移（见 §3.3），
+    `controller_server` 在 `enable_rotation: false` 下 `angular.z` 恒为 0，
+    自转角速度的唯一来源是 `rotation_velocity`。如果将来引入确实需要旋转的恢复动作，
+    必须同时明确它的角速度所有权，不能直接把导航 `wz` 直通给底盘。
 
 > [!WARNING]
 > **仿真调试时不要同时运行多套仿真栈。** Gazebo Fortress 会加载 ogre2 渲染与

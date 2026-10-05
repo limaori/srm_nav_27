@@ -37,7 +37,7 @@ def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory("srm27_bringup")
 
-    serial_bringup_dir = get_package_share_directory("standard_robot_pp_ros2")
+    serial_bringup_dir = get_package_share_directory("srm27_nav_protocol")
     navigation_bringup_dir = get_package_share_directory("srm27_nav_bringup")
     bt_bringup_dir = get_package_share_directory("srm27_behavior")
 
@@ -186,7 +186,7 @@ def generate_launch_description():
     start_serial_driver_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                serial_bringup_dir, "launch", "standard_robot_pp_ros2.launch.py"
+                serial_bringup_dir, "launch", "srm27_nav_protocol.launch.py"
             )
         ),
         condition=IfCondition(PythonExpression(["not ", use_robot_state_pub])),

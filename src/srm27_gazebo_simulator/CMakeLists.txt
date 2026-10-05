@@ -51,13 +51,17 @@ install(TARGETS srm_velocity_system srm_velocity_adapter
 )
 
 ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/srm_velocity_system.dsv.in")
+ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/gazebo.dsv.in")
 
 install(DIRECTORY
   config
   launch
   worlds
+  resource
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(FILES LICENSE RESOURCE_SOURCES.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

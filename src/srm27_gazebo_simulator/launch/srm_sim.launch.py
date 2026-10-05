@@ -54,7 +54,7 @@ def _load_config(pkg_share, config_file=""):
 
 
 def _resolve_world_sdf(pkg_share, config, world_override="", world_sdf_override=""):
-    """按配置解析世界 SDF：先找本包 worlds/，再找 rmu_gazebo_simulator。"""
+    """按配置解析本包世界 SDF：先找 worlds/，再找 resource/worlds/。"""
     if world_sdf_override:
         if not os.path.isfile(world_sdf_override):
             raise FileNotFoundError(f"world_sdf 不存在: {world_sdf_override}")
@@ -70,8 +70,7 @@ def _resolve_world_sdf(pkg_share, config, world_override="", world_sdf_override=
     if os.path.isfile(local):
         return local
 
-    arena_share = get_package_share_directory("rmu_gazebo_simulator")
-    arena = os.path.join(arena_share, "resource", "worlds", f"{world}_world.sdf")
+    arena = os.path.join(pkg_share, "resource", "worlds", f"{world}_world.sdf")
     if os.path.isfile(arena):
         return arena
 
@@ -92,7 +91,7 @@ def _launch_setup(context):
         world_sdf_override=LaunchConfiguration("world_sdf").perform(context),
     )
     gui_config = config.get("gui_config") or os.path.join(
-        get_package_share_directory("rmu_gazebo_simulator"),
+        pkg_share,
         "resource",
         "ign",
         "gui.config",

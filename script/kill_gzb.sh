@@ -14,7 +14,7 @@ fi
 # ros2 launch 被强制结束后，子进程可能被 systemd --user 接管，继续留在
 # 后台。尤其是 /clock bridge 仍会发布时钟，下一次启动仿真时会造成两个
 # 时钟源同时写入 /clock。因此这里也要清理这些“孤儿”仿真进程。
-PATTERN='(^|/)(gzserver|gzclient|gazebo)([[:space:]]|$)|[i]gn[[:space:]]+gazebo|[g]z[[:space:]]+sim|[r]os2[[:space:]]+launch[[:space:]]+(srm27_gazebo_simulator|rmu_gazebo_simulator)|[/]ros_gz_bridge/parameter_bridge[[:space:]]+/clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock|[/]ros_gz_bridge/parameter_bridge.*__ns:=/red_standard_robot1|[s]rm_velocity_adapter|[r]obot_state_publisher.*__ns:=/red_standard_robot1'
+PATTERN='(^|/)(gzserver|gzclient|gazebo)([[:space:]]|$)|[i]gn[[:space:]]+gazebo|[g]z[[:space:]]+sim|[r]os2[[:space:]]+launch[[:space:]]+srm27_gazebo_simulator|[/]ros_gz_bridge/parameter_bridge[[:space:]]+/clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock|[/]ros_gz_bridge/parameter_bridge.*__ns:=/red_standard_robot1|[s]rm_velocity_adapter|[r]obot_state_publisher.*__ns:=/red_standard_robot1'
 
 TARGET_UID="$(id -u)"
 

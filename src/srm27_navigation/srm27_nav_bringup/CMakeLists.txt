@@ -5,6 +5,8 @@ find_package(ament_cmake_auto REQUIRED)
 
 install(PROGRAMS
   scripts/simulation_ground_truth_odometry.py
+  scripts/srm_regression_metadata.py
+  scripts/srm_velocity_monitor.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

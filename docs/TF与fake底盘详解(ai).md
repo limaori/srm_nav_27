@@ -122,7 +122,7 @@ Livox MID360 ──> /livox/lidar + /livox/imu
 2. **frame 名必须和车体模型配套**：上游 `nav2_params.yaml` 要 `base_footprint / gimbal_yaw / front_mid360`，SRM 的 `srm_nav2_params.yaml` 要 `base_link / livox_frame / livox_imu / livox_scan`。混用会满屏 TF 报错，而且 GICP 构造时死等 TF、把整个 launch 卡住。`start_real_nav.sh:339` 有自检。
 3. **仿真里 `odom → base_footprint` 别双发**：纯真值模式下 `sensor_scan_generation` 的 `publish_tf` 被 launch 强制为 false（`navigation_launch.py:196-213`）。两个广播者抢同一条边 → 车体抖。
 4. **Point-LIO 自己不发 TF**：`publish.tf_send_en: False`（`srm_nav2_params.yaml:117`、`srm_slam.yaml:34`），它默认的 `camera_init → aft_mapped` 不参与 TF 树。
-5. **实车底盘串口节点不发 TF、也不发里程计**：`standard_robot_pp_ros2.cpp` 里只有 referee 话题的 publisher 和 `cmd_vel` 的 subscription。所以实车 `odom → base_link` **100% 来自 Point-LIO**。（上游文档说"云台关节 TF 由串口模块提供"，在这台车上不成立。）
+5. **实车底盘串口节点不发 TF、也不发里程计**：`srm27_nav_protocol.cpp` 里只有 referee 话题的 publisher 和 `cmd_vel` 的 subscription。所以实车 `odom → base_link` **100% 来自 Point-LIO**。（上游文档说"云台关节 TF 由串口模块提供"，在这台车上不成立。）
 6. **`livox_imu` 是 LIO 和 URDF 的接头**：Point-LIO 输出的就是这一系的位姿，URDF 里这条固定边把它换算成 `base_link`。所以 `extrinsic_T`（参数文件）和 `lidar_xyz/lidar_rpy`（launch）必须是同一次标定的结果。错一个，车在地图里就整体斜一个固定角——能跑，但一直蹭墙，很难查。
 
 ---

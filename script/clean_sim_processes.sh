@@ -5,7 +5,7 @@
 patterns=(
   'srm27_gazebo_simulator' 'srm27_nav_bringup' 'srm27_chassis_control'
   'srm_velocity_adapter' 'srm_cmd_mux' 'rotation_controller' 'rotation_test_sender'
-  'rmu_gazebo_simulator' 'ign gazebo' 'gz sim' 'ruby.*gazebo'
+  'ign gazebo' 'gz sim' 'ruby.*gazebo'
   'ros_gz_bridge' 'ros_gz_sim'
   'static_transform_publisher' 'simulation_ground_truth_odometry'
   'terrainAnalysis' 'map_server' 'lifecycle_manager'
@@ -21,6 +21,6 @@ for _ in 1 2 3; do
   done
   sleep 1
 done
-left=$(pgrep -af 'srm27|rmu_gazebo|ign gazebo|gz sim|ros_gz|nav2_|terrainAnalysis|component_container|rviz2' 2>/dev/null | grep -v clean_sim.sh | wc -l)
+left=$(pgrep -af 'srm27|ign gazebo|gz sim|ros_gz|nav2_|terrainAnalysis|component_container|rviz2' 2>/dev/null | grep -v clean_sim.sh | wc -l)
 echo "剩余相关进程数: $left"
 exit 0

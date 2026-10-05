@@ -41,7 +41,7 @@ lidar:
   # 相对 base_link 的安装位姿。
   xyz: [0.15, -0.15, 0.22]
   rpy: [-0.06981317007977318, 0.0, -1.5707963267948966]
-  # URDF 使用包内 mesh 副本；SDF 复用 rmoss_gz_resources 提供的 model:// 资源。
+  # URDF 使用包内 mesh 副本；SDF 使用 srm27_gazebo_simulator 提供的 model:// 资源。
   mesh_urdf: package://srm27_robot_description/meshes/mid360.stl
   mesh_urdf_scale: 0.001
   mesh_urdf_origin_xyz: [0.025, -0.0265, -0.025]

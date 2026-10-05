@@ -25,7 +25,7 @@ cd "$WS"
 LEFTOVER_PATTERNS=(
   'srm27_gazebo_simulator' 'srm27_nav_bringup' 'srm27_chassis_control'
   'srm_velocity_adapter' 'srm_cmd_mux' 'rotation_controller' 'rotation_test_sender'
-  'rmu_gazebo_simulator' 'ign gazebo' 'gz sim' 'ruby.*gazebo' 'ros_gz_bridge'
+  'ign gazebo' 'gz sim' 'ruby.*gazebo' 'ros_gz_bridge'
   'static_transform_publisher' 'simulation_ground_truth_odometry' 'terrainAnalysis'
   'map_server' 'lifecycle_manager' 'controller_server' 'planner_server'
   'bt_navigator' 'behavior_server' 'velocity_smoother' 'waypoint_follower'

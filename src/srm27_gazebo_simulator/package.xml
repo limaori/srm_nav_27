@@ -14,7 +14,9 @@
   <depend>diagnostic_msgs</depend>
 
   <exec_depend>srm27_robot_description</exec_depend>
-  <exec_depend>rmu_gazebo_simulator</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>ros_gz_sim</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

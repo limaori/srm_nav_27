@@ -1,3 +1,5 @@
+> 历史记录：文中的旧仿真包及其入口现已删除；当前仿真入口为 `ros2 launch srm27_gazebo_simulator srm_sim.launch.py`，场地资源位于该包的 `resource/`。下文保留当时的命令与路径。
+
 # 2026-8-10
 ## 1.连接WSL远程桌面
 win+R,输入mstsc,连接

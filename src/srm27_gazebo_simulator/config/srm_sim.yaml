@@ -4,14 +4,14 @@
 # 避免 Gazebo 世界、SRM 初始位姿、栅格地图和 odom 原点互相错位。
 
 # 场地世界名。先在 srm27_gazebo_simulator/worlds/<world>.sdf 里找，
-# 找不到再到 rmu_gazebo_simulator 的 resource/worlds/<world>_world.sdf 找。
-# 可选：rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
+# 找不到再到本包 resource/worlds/<world>_world.sdf 找。
+# 可选：rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty / empty
 world: "rmuc_2025"
 
 # 世界 SDF 绝对路径。留空表示按上面的规则自动解析。
 world_sdf: ""
 
-# Gazebo GUI 配置。留空表示使用 rmu_gazebo_simulator 提供的配置。
+# Gazebo GUI 配置。留空表示使用本包 resource/ign/gui.config。
 gui_config: ""
 
 # 是否启动 Gazebo GUI 客户端。
