@@ -454,8 +454,8 @@ controller_server:
       use_rotate_to_heading_treshold: 0.1
       min_approach_linear_velocity: 0.4
       approach_velocity_scaling_dist: 1.0
-      v_linear_min: -2.5
-      v_linear_max: 2.5
+      v_linear_min: -1.5
+      v_linear_max: 1.5
       v_angular_min: -1.0
       v_angular_max: 1.0
       curvature_min: 0.4
@@ -647,10 +647,10 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # 禁止导航控制底盘自转 (ω 恒为 0)，底盘朝向由云台控制。
     # behavior_server 的 Spin 恢复行为不走本话题，不受影响。
-    max_velocity: [0.5, 0.5, 0.0]      # 硬上限: 首跑限速, 跑通后再放 (yaw 钳 0)
-    min_velocity: [-2.5, -2.5, 0.0]    # yaw 下限同样钳 0
-    max_accel: [1.0, 1.0, 1.5]         # 随限速等比降低
-    max_decel: [-1.0, -1.0, -1.5]      # 随限速等比降低
+    max_velocity: [1.5, 1.5, 0.0]      # 硬上限: 首跑限速, 跑通后再放 (yaw 钳 0)
+    min_velocity: [-1.5, -1.5, 0.0]    # yaw 下限同样钳 0
+    max_accel: [3.0, 3.0, 0.0]         # 随限速等比降低
+    max_decel: [-3.0, -3.0, 0.0]      # 随限速等比降低
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
