@@ -390,3 +390,9 @@ TF 是一棵相对位姿的树，每条边 = 一个刚体变换；两帧之间�
 # 2026-10-6
 ### 远程控制
 nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉，然后再todesk接进去
+
+### 1006建圖腳本
+```bash
+./script/start_real_slam.sh                #开始扫图
+./script/start_real_slam.sh --save 227_1006  #扫完之后存地图到maps文件夹
+```

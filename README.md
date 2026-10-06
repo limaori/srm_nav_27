@@ -340,6 +340,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | 脚本 | 用途 |
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
+| `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
@@ -357,11 +358,40 @@ map ──► odom ──► base_link ──┬─► front_mid360
 ./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
 ```
 
+实车建图（SLAM）：
+
+```bash
+./script/start_real_slam.sh -h                   # 打印脚本头部的完整用法
+./script/start_real_slam.sh                      # 起建图链路（雷达驱动 + Point-LIO + slam_toolbox + RViz + 底盘串口）
+./script/start_real_slam.sh --joy                # 顺带起手柄，推杆走车、边走边建图
+./script/start_real_slam.sh --no-rviz            # 无头 NUC（无图形界面）
+./script/start_real_slam.sh --save xjl0914       # 存图 -> maps/xjl0914/{pgm,yaml,posegraph,data}
+./script/start_real_slam.sh --save xjl0914 --force
+./script/start_real_slam.sh --save xjl0914 --wait 30   # 服务还没就绪时最多等 30 秒
+./script/start_real_slam.sh --save-pcd           # 另让 Point-LIO 退出时落盘累积点云
+./script/start_real_slam.sh --list-maps          # 列出工作区现有地图
+./script/start_real_slam.sh -n                   # 只解析并打印将执行的命令
+./script/start_real_slam.sh --stop               # 先发零速，再结束建图链路节点
+```
+
+> [!IMPORTANT]
+> 存图是**两步**：先起链路并保持运行（车跑一圈），再在另一个终端 `--save`。
+> `--save` 只是调用 `slam_toolbox` 的在线服务，把内存里的位姿图写到磁盘，它不会自己起链路。
+> 链路没跑时脚本会说清是「没在跑」还是「跑了但没开 `use_map_saver`」——两种情况处理办法不同。
+
+存图由 `slam_toolbox` 的两个服务共同完成：`/slam_toolbox/save_map` 写 `.pgm` + `.yaml`（Nav2 用），
+`/slam_toolbox/serialize_map` 写 `.posegraph` + `.data`（位姿图）。脚本按 `maps/<名字>/` 落盘，
+并以"四个文件是否都非空"判定成败，同时回显两个服务的响应码便于排查。
+服务是否可用用 `--no-daemon` 做全新发现来判断：ros2 daemon 缓存里会留下已退出节点的服务名，
+查缓存会得到假阳性，进而对着不存在的服务发请求并挂住。
+建图与导航都会发布 `map → odom`，两者不能并行；脚本启动前会检测导航栈并在冲突时拒绝启动。
+
 > [!WARNING]
-> `srm27_nav_protocol` 在后台线程里按固定频率重发**最近一次**收到的速度，源码中没有超时
-> 清零逻辑，因此**杀掉发速度的节点后车不会自己停**。停节点前先发零速
-> （`ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"`），或直接按物理急停；
-> `--stop` 已内置"先发零速再结束进程"。
+> `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的
+> `cmd_vel` 就把控制量归零，启动时也先发零速帧。所以旧文档里"杀掉发速度的节点后车不会自己停"
+> 的说法已不成立——但这只是兜底，不要把车身安全寄托在它上面：停节点前仍先发零速
+> （`ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"`），物理急停始终是第一手段；
+> `--stop` 已内置"先发零速再结束进程"。（`start_real_nav.sh` 头部与结尾仍写着旧说法，待同步。）
 
 仿真：
 
@@ -392,7 +422,7 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 要真正自转需显式指定 `--rotation-mode`。
 
 > [!NOTE]
-> 实车一键脚本 `script/start_real_nav.sh` 已回到工作区（见 §5.2 与 §7.3）。`start_real_slam.sh` 与另外两个仿真脚本（`start_slam.sh`、`start_nav_reloc.sh`）仍不在工作区中（git 历史里可找回）；实车建图请用 `start_real_nav.sh --slam`。
+> 实车一键脚本 `script/start_real_nav.sh` 与实车建图脚本 `script/start_real_slam.sh` 均已回到工作区（见 §5.2 与 §7.3）。两个仿真脚本（`start_slam.sh`、`start_nav_reloc.sh`）仍不在工作区中（git 历史里可找回）。实车建图用 `start_real_slam.sh`；只想"边建图边导航"可用 `start_real_nav.sh --slam`（不产出可保存的地图文件）。
 
 ### 5.3 四种定位方式（互斥）
 

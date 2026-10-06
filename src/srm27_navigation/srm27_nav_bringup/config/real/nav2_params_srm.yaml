@@ -423,7 +423,7 @@ controller_server:
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      xy_goal_tolerance: 0.4
       yaw_goal_tolerance: 6.28
     FollowPath:
       plugin: "srm27_omni_pid_controller::OmniPidPursuitController"
