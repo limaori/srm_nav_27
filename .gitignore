@@ -17,7 +17,7 @@
 *.bag2
 *.pcap
 *~
-调试日志.md
+
 
 # Local editor files
 .vscode/
@@ -31,3 +31,7 @@
 /*.pdf
 symlink
 sentry_*/
+
+# Cartographer raw map artifacts (大体积二进制，仅保留 pgm/yaml)
+*.posegraph
+*.data
