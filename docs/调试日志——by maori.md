@@ -386,3 +386,7 @@ TF 是一棵相对位姿的树，每条边 = 一个刚体变换；两帧之间�
 阶段一：角度源设 0，先关掉那个 −θ；
 阶段二：角度源 = `s`（下位机回传），Nav2 的 `robot_base_frame` 全改 `base_link_fake`。
 交给底盘前速度要转 `R(−s)`；`angular.z` 只在一处加自旋；
+
+# 2026-10-6
+### 远程控制
+nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉，然后再todesk接进去
