@@ -386,3 +386,22 @@ TF 是一棵相对位姿的树，每条边 = 一个刚体变换；两帧之间�
 阶段一：角度源设 0，先关掉那个 −θ；
 阶段二：角度源 = `s`（下位机回传），Nav2 的 `robot_base_frame` 全改 `base_link_fake`。
 交给底盘前速度要转 `R(−s)`；`angular.z` 只在一处加自旋；
+
+# 2026-10-6
+### 远程控制
+nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉，然后再todesk接进去
+
+### 1006建圖腳本
+```bash
+./script/start_real_slam.sh                #开始扫图
+./script/start_real_slam.sh --save 227_1006  #另起终端，扫完之后存地图到maps文件夹
+```
+
+### 存路径点
+1.先起导航栈./script/start_real_nav.sh
+2.另起终端：./script/start_waypoints.sh --save-file missions/文件名.yaml --record-only
+3.点publish point,选点，终端会有“记下航点 #1: (1.00, -1.00, yaw 0.00) [map]  共 1 个”
+4.另起终端保存：ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
+
+### 跑存好的路径点
+./script/start_waypoints.sh --file missions/文件名.yaml

@@ -10,12 +10,19 @@
                         number_of_retries="1">
             <ReactiveSequence>
               <!-- radius 是"离车多近就把这个航点当成已到达并从列表里删掉"的半径(nav2 默认 0.5)。
-                   原来写 0.7: 车旁边 0.7 m 内的航点会被静默删掉, 车不会去,
-                   但整段 navigate_through_poses 仍然报成功(reached), 看起来像"没到就说到了"。
-                   收到 0.25 后, 只有真的贴近航点才会跳过它。 -->
+                   改动史与约束(它和 goal 容差、航点间距、控制器前瞻是一组, 别单独调):
+                     - 0.7: 车旁边 0.7 m 内的航点被静默删掉, 车不会去, 但整段
+                       navigate_through_poses 仍报成功(reached), 像"没到就说到了"。
+                     - 0.25: 车切内弯擦过途经点(偏离量常 >0.25 m)时删不掉它, 下一个
+                       3 Hz 周期重规划又把路径绕回该点 → 车折返, 反复后进度检查器判
+                       "Failed to make progress"。配合控制器前瞻收紧(0.6/0.3/0.6)后放宽到 0.35。
+                     - 约束: radius < general_goal_checker.xy_goal_tolerance(实车 0.4),
+                       否则最后一个航点会在判定到达前被删、车掉头往回走;
+                       radius < 航点间距, 否则连下一个航点一起被删;
+                       radius > 车实际擦过航点的偏移量, 否则折返。 -->
               <RemovePassedGoals input_goals="{goals}"
                                  output_goals="{goals}"
-                                 radius="0.25"/>
+                                 radius="0.35"/>
               <ComputePathThroughPoses goals="{goals}"
                                        path="{path}"
                                        planner_id="GridBased"/>
