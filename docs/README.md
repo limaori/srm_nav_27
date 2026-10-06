@@ -7,6 +7,7 @@
 - [Controller comparison](局部规划器相关(ai).md): current controller and alternatives.
 - [MINCO migration implementation plan](迁移minco实施方案%28ai%29.md): 基于中科大 2025 技术报告、当前 SRM 代码和北理 navi_minco_bit 的迁移方案，含源码复用清单、接口修正、MINCO/MPC 设计、阶段验收与回退；测试从 0.5 m/s 起步，上限 1.0 m/s。(AI 生成)
 - [MINCO/MPC migration notes](局部规划器迁移MINCO_MPC方案(ai).md): staged design proposal.
+- [MINCO migration implementation record](minco迁移实施记录(ai).md): P0/P1/P2 落地记录 —— 新增 vendor/core/controller 三个包、odometry 语义修复、MPC 与 MINCO 关键实现选择、构建/测试/启动命令、未完成项与已知缺口。(AI 生成)
 - [TDT navigation notes](tdt开源.md): upstream navigation implementation review.
 - [SRM simulation and independent rotation plan](SRM仿真与导航自转控制实施方案.md): SRM-only simulation, planar Nav2 velocity, and separate chassis rotation control.
 - [SRM simulation and rotation implementation notes](SRM仿真与自转控制实现(ai).md): 落地说明 —— 三个新包的职责、速度/自转接口表、合成与安全优先级、启动方式、测试矩阵与实测结论。(AI 生成)

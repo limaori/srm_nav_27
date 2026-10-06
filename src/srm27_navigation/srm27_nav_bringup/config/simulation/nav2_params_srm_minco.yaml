@@ -1,3 +1,24 @@
+# SRM 哨兵仿真导航参数（MINCO + MPC 变体）。
+#
+# 由 config/simulation/nav2_params_srm.yaml 派生：感知/定位/代价地图/全局规划全部保持
+# 不变，只替换 controller_server 的 FollowPath 实现为
+# srm27_minco_controller::MincoMpcController，并把速度层统一到同一测试档位。
+#
+# 关键约定（见 docs/迁移minco实施方案(ai).md §8.1、§9.1、§10.1）：
+#   * 阶段一 yaw_policy.mode = xy_only：MPC 只控平移（angular.z 参考恒为 0，且角速度
+#     上下限为 0），自转仍由独立自转链路 srm_cmd_mux + rotation_controller 负责；
+#     此阶段不宣称已完成 SE(2) 控制。
+#   * 平移合速度上限 0.5 m/s（用户指定的测试起点），后续按 0.75 -> 1.0 m/s 逐级提升，
+#     提速时必须同步 srm27_chassis_control/config/srm_chassis_control.yaml 的
+#     vx_max/vy_max/v_max 与 velocity_smoother 的上下界。
+#   * 加速度/角速度仍是联调建议值，不能当作已辨识的制动能力；TrajectoryValidator 的
+#     制动减速度参数必须来自实车辨识。
+#   * nav2_params_srm.yaml（Omni）保留为迁移期 A/B 对照与回退配置。
+#
+# 用法：
+#   PARAMS_FILE=/home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
+#   ROTATION_MODE=stop USE_VELOCITY_SMOOTHER=False bash script/start_sim_nav.sh
+
 # SRM 哨兵仿真导航参数。
 #
 # 由 config/simulation/nav2_params.yaml 派生的 SRM 版本：
@@ -360,54 +381,116 @@ controller_server:
   ros__parameters:
     use_sim_time: True                                  # 是否使用仿真时钟
     odom_topic: odometry                                # 输入里程计话题
-    controller_frequency: 20.0                          # 控制器运行频率（Hz）
+    controller_frequency: 50.0                          # 控制器运行频率（Hz）
     min_x_velocity_threshold: 0.001                     # X速度死区阈值（米/秒）
-    min_y_velocity_threshold: 0.001                     # Y速度死区阈值（米/秒），0.5 会抹掉低速横移反馈
+    min_y_velocity_threshold: 0.001                     # Y速度死区阈值（米/秒）
     min_theta_velocity_threshold: 0.001                 # 角速度死区阈值（弧度/秒）
     failure_tolerance: 0.3                              # 控制器允许的失败容差
-    progress_checker_plugins: ["progress_checker"]     # 进度检查器列表
-    goal_checker_plugins: ["general_goal_checker"]     # 目标检查器列表
-    controller_plugins: ["FollowPath"]                 # 路径控制器列表
+    progress_checker_plugins: ["progress_checker"]      # 进度检查器列表
+    goal_checker_plugins: ["general_goal_checker"]      # 目标检查器列表
+    controller_plugins: ["FollowPath"]                  # 路径控制器列表
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"  # 进度检查器插件
       required_movement_radius: 0.5                     # 要求移动的最小半径（米）
       movement_time_allowance: 10.0                      # 允许不移动的最长时间（秒）
+    # 终点必须按“已停稳”验收：SimpleGoalChecker 只检查位姿，不能保证到达时速度为零。
     general_goal_checker:
       stateful: True                                    # 是否保存目标检查状态
-      plugin: "nav2_controller::SimpleGoalChecker"      # 目标检查器插件
+      plugin: "nav2_controller::StoppedGoalChecker"     # 位姿 + 停止速度双条件
       xy_goal_tolerance: 0.15                           # 平面位置容差（米）
-      yaw_goal_tolerance: 6.28                           # 航向角容差（弧度）
+      yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
+      trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
+      rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）
+
+    # MINCO + MPC 局部规划控制器。
+    # 阶段一（P2）：model=velocity_integrator、yaw_policy.mode=xy_only，MPC 只控平移，
+    # 自转仍由独立自转链路负责；two_pass_reference 关闭，报告式 fine 启发式关闭。
     FollowPath:
-      plugin: "srm27_omni_pid_controller::OmniPidPursuitController" # 全向PID跟踪控制器
-      translation_kp: 3.0                               # 平移比例增益
-      translation_ki: 0.1                               # 平移积分增益
-      translation_kd: 0.3                               # 平移微分增益
-      enable_rotation: false                            # 是否启用独立旋转控制
-      rotation_kp: 3.0                                  # 旋转比例增益
-      rotation_ki: 0.1                                  # 旋转积分增益
-      rotation_kd: 0.3                                  # 旋转微分增益
-      transform_tolerance: 0.1                          # TF变换容差（秒）
-      min_max_sum_error: 1.0                            # 误差积分限幅
-      lookahead_dist: 2.0                               # 基准前视距离（米）
-      use_velocity_scaled_lookahead_dist: true           # 是否按速度缩放前视距离
-      lookahead_time: 1.0                               # 速度缩放前视时间（秒）
-      min_lookahead_dist: 0.5                           # 最小前视距离（米）
-      max_lookahead_dist: 1.0                           # 最大前视距离（米）
-      use_interpolation: false                           # 是否插值路径点
-      use_rotate_to_heading: false                       # 是否先旋转到路径方向
-      use_rotate_to_heading_treshold: 0.1                # 旋转到路径方向阈值（弧度）
-      min_approach_linear_velocity: 0.5                  # 接近目标时的最小线速度（米/秒）
-      approach_velocity_scaling_dist: 1.0                # 开始减速的距离（米）
-      v_linear_min: -2.5                                 # 最小线速度（米/秒）
-      v_linear_max: 2.5                                  # 最大线速度（米/秒）
-      v_angular_min: -3.0                                # 最小角速度（弧度/秒）
-      v_angular_max: 3.0                                 # 最大角速度（弧度/秒）
-      curvature_min: 0.4                                # 低曲率阈值
-      curvature_max: 0.7                                # 高曲率阈值
-      reduction_ratio_at_high_curvature: 0.5            # 高曲率时的速度降低比例
-      curvature_forward_dist: 0.7                       # 曲率计算前向距离（米）
-      curvature_backward_dist: 0.3                      # 曲率计算后向距离（米）
-      max_velocity_scaling_factor_rate: 0.9             # 速度缩放因子最大变化率
+      plugin: "srm27_minco_controller::MincoMpcController"
+      planning_frame: odom                              # 局部规划坐标系（连续 odom）
+      base_frame: base_link                             # 车体系（速度输出坐标系）
+      odom_topic: odometry                              # 状态适配输入话题
+      replan_frequency: 10.0                            # 后台重规划频率（Hz）
+      planning_horizon: 2.0                             # 局部路径截取视野（米）
+      planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）
+      state_timeout: 0.10                               # 状态允许的最大年龄（秒）
+      map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
+      trajectory_max_age: 0.30                          # 轨迹允许的最大年龄（秒）
+      build_grace_period: 1.0                           # 无可用轨迹时的零输出宽限（秒）
+      diagnostics_period: 0.5                           # 诊断发布周期（秒）
+      publish_visualization: True                       # 是否发布轨迹/预测可视化
+
+      state:                                            # 状态适配层
+        max_sample_gap: 0.20                            # 差分速度可用的最大采样间隔（秒）
+        max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
+        max_yaw_jump: 1.20                              # 航向跳变阈值（弧度）
+        velocity_filter_alpha: 0.35                     # 速度一阶低通系数（0 表示关闭）
+
+      minco:                                            # MINCO 优化器
+        polynomial_order: 5                             # 只支持五次多项式
+        two_stage_optimization: True                    # PRE + FINELY 两阶段
+        enable_report_fine_heuristic: False             # 报告式通道启发式（默认关闭）
+        nominal_piece_duration: 0.30                    # 名义段时长（秒）
+        min_piece_duration: 0.05                        # 段时长下限（秒）
+        max_piece_duration: 1.00                        # 段时长上限（秒）
+        pre_time_ratio_min: 0.90                        # PRE 段时长比例下限
+        pre_time_ratio_max: 1.10                        # PRE 段时长比例上限
+        samples_per_piece: 8                            # 每段数值积分采样点数
+        max_iterations: 150                             # L-BFGS 最大迭代次数
+        gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
+        w_jerk: 1.0                                     # jerk 能量权重
+        w_time: 10.0                                    # 总时长权重
+        w_obstacle: 100.0                               # 障碍软约束权重
+        w_velocity: 20.0                                # 速度软约束权重
+        w_acceleration: 2.0                             # 加速度软约束权重
+        w_time_ratio: 1.0                               # PRE 段时长比例惩罚权重
+        soft_hinge_beta: 20.0                           # 软 hinge 平滑系数
+        resample_step: 0.10                             # 前端弧长重采样步长（米）
+        corner_speed_ratio: 0.35                        # 转角处最低速度比例
+        min_pieces: 2                                   # 最少段数
+        max_pieces: 12                                  # 最多段数
+        terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
+
+      limits:                                           # 有效约束（必须与 mux/smoother 一致）
+        max_linear_speed: 0.50                          # 平移合速度上限（米/秒）
+        max_linear_accel: 0.30                          # 平移合加速度上限（米/秒^2）
+        max_angular_speed: 0.30                         # 角速度上限（弧度/秒）
+        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2）
+
+      mpc:                                              # MPC 求解器
+        model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
+        prediction_dt: 0.02                             # 预测步长（秒）
+        prediction_steps: 30                            # 预测步数
+        two_pass_reference: False                       # 报告式第二次采样/求解
+        command_lookahead: 0.0                          # 命令前瞻（秒），未标定前为 0
+        qp_deadline_ms: 5.0                             # QP 性能门槛（毫秒），超过只计数不停车
+        # 复用持久求解器 + 热启动：H 与约束矩阵在运行期固定，每周期只有梯度/上下界变化。
+        # 实测 N=30、K=8、含输入差分约束：冷启动约 8~15 ms，热启动平均约 0.5 ms；
+        # 冷启动已在 activate() 里预热，不在 50 Hz 控制回调内发生。
+        use_hot_start: True
+        q_position: 20.0                                # 位置误差权重
+        q_yaw: 5.0                                      # 航向误差权重
+        q_velocity: 1.0                                 # 六维模型平移速度权重
+        q_omega: 0.5                                    # 六维模型角速度权重
+        r_translation: 1.0                              # 平移输入权重
+        r_angular: 1.0                                  # 自转输入权重
+        r_input_change: 0.0                             # 输入变化惩罚权重
+        use_tangent_normal_weight: False                # 是否按切线/法向分别加权
+        q_along_track: 20.0                             # 沿轨迹权重（启用时生效）
+        q_cross_track: 40.0                             # 垂直轨迹权重（启用时生效）
+        speed_polygon_sides: 8                          # 合速度内接正多边形边数
+        enforce_input_change: True                      # 是否施加输入差分约束
+
+      yaw_policy:                                       # 航向策略
+        mode: xy_only                                   # 阶段一：MPC 不产生自转
+        stop_rotation_on_goal: True                     # 到点后停止自转参考
+        narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
+        allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
+
+      safety:                                           # 几何与安全
+        robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
+        clearance_margin: 0.05                          # 额外净空裕量（米）
+        unknown_is_obstacle: True                       # 未知区域按不可通行处理
 
 
 local_costmap:
@@ -594,10 +677,11 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    max_velocity: [2.5, 2.5, 3.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-2.5, -2.5, -3.0]                       # 最小速度[x,y,yaw]
-    max_accel: [4.5, 4.5, 5.0]                             # 最大加速度[x,y,yaw]
-    max_decel: [-4.5, -4.5, -5.0]                          # 最大减速度[x,y,yaw]
+    # 与 FollowPath.limits 保持一致：初期测试档位为平移合速度 0.5 m/s（方案 §9.1、§10.1）。
+    max_velocity: [0.5, 0.5, 0.3]                          # 最大速度[x,y,yaw]
+    min_velocity: [-0.5, -0.5, -0.3]                       # 最小速度[x,y,yaw]
+    max_accel: [1.0, 1.0, 1.0]                             # 最大加速度[x,y,yaw]
+    max_decel: [-1.0, -1.0, -1.0]                          # 最大减速度[x,y,yaw]
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]

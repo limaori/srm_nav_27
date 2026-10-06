@@ -34,7 +34,13 @@
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>terrain_analysis</exec_depend>
   <exec_depend>terrain_analysis_ext</exec_depend>
+  <!-- Omni 控制器：迁移期保留为 A/B 对照与回退；正式切换完成后按方案 §12.3 移除。 -->
   <exec_depend>srm27_omni_pid_controller</exec_depend>
+  <!-- MINCO + MPC 迁移新增：核心算法库与 FollowPath 控制器插件。 -->
+  <exec_depend>srm27_minco_core</exec_depend>
+  <exec_depend>srm27_minco_controller</exec_depend>
+  <exec_depend>srm27_minco_vendor</exec_depend>
+  <exec_depend>srm27_qpoases_vendor</exec_depend>
   <exec_depend>small_gicp_relocalization</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
