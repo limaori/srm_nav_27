@@ -136,8 +136,12 @@ srm_nav_27/
 | `teleop_gimbal_keyboard` | 键盘控制云台 |
 
 > [!NOTE]
-> 仿真与实车的速度出口不同：**实车**是 `cmd_vel_controller → /cmd_vel → srm27_nav_protocol`；
+> 仿真与实车的速度出口不同：**实车**是
+> `controller_server → cmd_vel_controller → velocity_smoother → cmd_vel_nav2_result → fake_vel_transform → cmd_vel_chassis → srm27_nav_protocol`；
 > **仿真**是 `cmd_vel_nav → srm_cmd_mux → cmd_vel_sim → srm_velocity_adapter → SrmVelocitySystem`。
+> 注意底盘串口节点订阅的是 **`cmd_vel_chassis`**（不是 `/cmd_vel`，见 `srm27_nav_protocol.cpp`），
+> `fake_vel_transform` 就是这一级改名的地方；若绕过它，必须把导航出口话题直接设成 `cmd_vel_chassis`，
+> 否则链路断开、车不动。
 
 ---
 
@@ -163,10 +167,19 @@ Livox Mid-360 ──► livox_ros_driver2 ──► Point-LIO ──► loam_int
 Theta* 全局规划 ──► SimpleSmoother ──► OmniPID 局部控制
                                             │
                                             v
-                                   cmd_vel_controller ──► /cmd_vel
-                                            │
-                                            v
-                              srm27_nav_protocol ──► 串口 ──► 下位机 C 板
+                                   cmd_vel_controller ──► velocity_smoother
+                                                                │
+                                                                v
+                                                  cmd_vel_nav2_result
+                                                                │
+                                                                v
+                                                     fake_vel_transform
+                                                                │
+                                                                v
+                                                        cmd_vel_chassis
+                                                                │
+                                                                v
+                                              srm27_nav_protocol ──► 串口 ──► 下位机 C 板
 ```
 
 ### 3.2 仿真链路
@@ -326,8 +339,31 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 | 脚本 | 用途 |
 | --- | --- |
+| `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
+
+实车：
+
+```bash
+./script/start_real_nav.sh -h                    # 打印脚本头部的完整用法
+./script/start_real_nav.sh                       # 默认 --lio + 自动选地图，启动全链路
+./script/start_real_nav.sh -m xjl0914            # 指定地图（maps/ 下的名字）
+./script/start_real_nav.sh --reloc --prior-pcd /abs/map.pcd
+./script/start_real_nav.sh --slam                # 边建图边导航
+./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系）
+./script/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
+./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令
+./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
+```
+
+> [!WARNING]
+> `srm27_nav_protocol` 在后台线程里按固定频率重发**最近一次**收到的速度，源码中没有超时
+> 清零逻辑，因此**杀掉发速度的节点后车不会自己停**。停节点前先发零速
+> （`ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"`），或直接按物理急停；
+> `--stop` 已内置"先发零速再结束进程"。
+
+仿真：
 
 ```bash
 ./script/start_sim_nav.sh -h                    # 打印脚本头部的完整用法
@@ -356,7 +392,7 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 要真正自转需显式指定 `--rotation-mode`。
 
 > [!NOTE]
-> 实车一键脚本（`start_real_nav.sh`、`start_real_slam.sh`）与另外两个仿真脚本（`start_slam.sh`、`start_nav_reloc.sh`）当前不在工作区中（git 历史里仍可找回）。实车启动请直接使用 §7.3 的 `ros2 launch` 入口。
+> 实车一键脚本 `script/start_real_nav.sh` 已回到工作区（见 §5.2 与 §7.3）。`start_real_slam.sh` 与另外两个仿真脚本（`start_slam.sh`、`start_nav_reloc.sh`）仍不在工作区中（git 历史里可找回）；实车建图请用 `start_real_nav.sh --slam`。
 
 ### 5.3 四种定位方式（互斥）
 
@@ -366,12 +402,16 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 | --- | --- | --- | --- |
 | `--slam` | `slam_toolbox` | 否 | 边跑边建图，不需要先验地图 |
 | `--reloc` | `small_gicp_relocalization` | 先验 PCD | 与先验点云做 GICP 配准 |
-| `--lio` | 静态 TF | 否 | 只用 Point-LIO 里程计（`use_lio_odometry:=True`），**实车推荐** |
+| `--lio` | 静态 TF | 否 | 只用 Point-LIO 里程计（`use_lio_odometry:=True`），**实车推荐**；`start_real_nav.sh` 的默认方式 |
+| `--static` | 静态 TF | 先验栅格图 | 只加载栅格图、没有任何里程计来源，仅当车体模块自己发 `odom → base_link` 时可用 |
 | 默认 | 静态 TF | 先验栅格图 | `map_server` 加载 PGM，需要外部里程计；SRM 仿真下由 `simulation_ground_truth_odometry` 提供 `odom → base_link`，即 `start_sim_nav.sh` 使用的模式 |
 
 > [!WARNING]
 > `slam`、`use_pcd_localization`、`use_lio_odometry` 三者与默认模式互斥，否则会有多个节点争抢
 > `map → odom` 或 `odom → base_link`。仿真真值里程计只在三者都不启用时才启动。
+> `start_real_nav.sh` 把四个模式做成显式互斥开关，同时给两个会直接报错退出（而不是后者覆盖前者）；
+> `--lio` / `--static` 下 `map → odom` 是静态 TF，其数值 `--map-to-odom X Y YAW` 表示
+> **起步点在地图坐标系里的位姿**，车不停在地图原点时必须显式指定，否则 RViz 与全局代价地图都会错位。
 
 ---
 
@@ -437,22 +477,38 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --paralle
 
 ### 7.3 运行
 
-实车：一键脚本 `script/start_real_nav.sh` 当前不在工作区中（git 历史里可找回，`--lio` / `--reloc` / `--slam` 三者互斥，见 §5.3）。它内部等价于按顺序启动三层：
+实车：推荐一键脚本 `script/start_real_nav.sh`（用法见 §5.2；`--lio` / `--reloc` / `--slam` / `--static`
+四者互斥，见 §5.3，默认 `--lio`）。它内部等价于按顺序启动六层：
 
 ```bash
-# 1) 整车 TF：SRM 车体模型 + 雷达外参，参数必须用 SRM 那份
+# 1) 雷达驱动（nav2_stack_launch.py 不负责起驱动，必须单独启动）
+ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
+  -r __node:=livox_ros_driver2 \
+  --params-file /absolute/path/to/config/real/nav2_params_srm.yaml \
+  -p user_config_path:=/absolute/path/to/config/real/mid360_user_config.json
+
+# 2) 整车 TF：SRM 车体模型 + 雷达外参，参数必须用 SRM 那份
 ros2 launch srm27_nav_bringup real_robot_state_publisher_launch.py \
   use_sim_time:=False \
   params_file:=/absolute/path/to/config/real/nav2_params_srm.yaml
 
-# 2) 导航栈：slam / use_pcd_localization / use_lio_odometry 按 §5.3 选择，默认静态 map→odom
+# 3) 底盘串口：/cmd_vel_chassis 的唯一消费者
+ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
+
+# 4) 导航栈：slam / use_pcd_localization / use_lio_odometry 按 §5.3 选择
 ros2 launch srm27_nav_bringup nav2_stack_launch.py \
   map:=/absolute/path/to/<YOUR_MAP>.yaml \
   params_file:=/absolute/path/to/config/real/nav2_params_srm.yaml \
   use_sim_time:=False
 
-# 3) RViz / 手柄 / 底盘串口节点：见 §5.1 的入口层 launch 列表
+# 5) RViz / 6) 手柄：见 §5.1 的入口层 launch 列表
 ```
+
+> [!NOTE]
+> 雷达驱动那两行不是多余的：驱动代码里的节点名是 `livox_driver_node`，而参数文件顶层键是
+> `livox_ros_driver2`，ROS 2 按节点名匹配 `--params-file`，对不上时整段参数被忽略；且参数里
+> `user_config_path` 用的是 launch 专有的 `$(find-pkg-share ...)` 语法，`ros2 run` 不会展开。
+> `start_real_nav.sh` 已内置这两处处理。
 
 整车总入口：
 
