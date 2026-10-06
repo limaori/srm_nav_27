@@ -341,6 +341,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
 | `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
+| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`。替代 RViz Nav2 面板的途经点模式，避免 `navigate_through_poses` 的航点折返问题 |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
@@ -385,6 +386,33 @@ map ──► odom ──► base_link ──┬─► front_mid360
 服务是否可用用 `--no-daemon` 做全新发现来判断：ros2 daemon 缓存里会留下已退出节点的服务名，
 查缓存会得到假阳性，进而对着不存在的服务发请求并挂住。
 建图与导航都会发布 `map → odom`，两者不能并行；脚本启动前会检测导航栈并在冲突时拒绝启动。
+
+航点任务（导航栈起来之后用）：
+
+```bash
+./script/start_waypoints.sh                       # 点选模式：RViz 点航点，再调 ~/start 开始
+./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点
+./script/start_waypoints.sh --save-file m.yaml    # 只收集，~/save 存盘（教点模式）
+./script/start_waypoints.sh --retry 2 --timeout 30 --on-failure skip --loop
+```
+
+服务：`/waypoint_mission/{start,stop,clear,save}`（`std_srvs/srv/Trigger`）；
+RViz 点选用工具栏的 **Publish Point**（发 `/clicked_point`）或 **2D Goal Pose**（发 `/goal_pose`），
+航点会以 latched `MarkerArray` 发布在 `/waypoint_mission/waypoints` 上便于核对。
+
+> [!WARNING]
+> Nav2 面板里那个 **Nav2 Goal**（rviz 插件 `nav2_rviz_plugins/GoalTool`）**不发 `/goal_pose`**——
+> 它直接下发 `navigate_to_pose` action，所以航点脚本收不到任何点选（点了像没反应），而且车会立刻自己走。
+> `rviz/nav2_default_view.rviz` 原本工具栏里只有它，现已补上 `Publish Point` 与 `2D Goal Pose`
+> （改 `.rviz` 不用 `colcon build`，但**要重启 RViz**）。
+> 另外 `srm27_behavior` 的 `PubNav2Goal` 也往 `goal_pose` 发 `PoseStamped`，同时跑行为树时它的目标会被脚本当成航点记录。
+
+它用**逐个航点独立导航**（每个点一个 `NavigateToPose`）替代面板途经点模式的
+`NavigateThroughPoses`，所以 `RemovePassedGoals` 与"路径绕回旧航点"的折返问题不存在；
+代价是每个点会各自收敛一次（点密时全程略慢）。速度仍走 Nav2 → velocity_smoother →
+fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门狗照旧生效。
+因为它不经过 `RemovePassedGoals`，`xy_goal_tolerance` 与航点删除半径的耦合约束也随之消失，
+收紧到达容差不再有副作用。
 
 > [!WARNING]
 > `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的

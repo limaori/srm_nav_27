@@ -394,5 +394,14 @@ nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉�
 ### 1006建圖腳本
 ```bash
 ./script/start_real_slam.sh                #开始扫图
-./script/start_real_slam.sh --save 227_1006  #扫完之后存地图到maps文件夹
+./script/start_real_slam.sh --save 227_1006  #另起终端，扫完之后存地图到maps文件夹
 ```
+
+### 存路径点
+1.先起导航栈./script/start_real_nav.sh
+2.另起终端：./script/start_waypoints.sh --save-file missions/文件名.yaml --record-only
+3.点publish point,选点，终端会有“记下航点 #1: (1.00, -1.00, yaw 0.00) [map]  共 1 个”
+4.另起终端保存：ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
+
+### 跑存好的路径点
+./script/start_waypoints.sh --file missions/文件名.yaml

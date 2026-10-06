@@ -438,9 +438,17 @@ controller_server:
       min_max_sum_error: 1.0
       lookahead_dist: 2.0
       use_velocity_scaled_lookahead_dist: true
-      lookahead_time: 1.0
-      min_lookahead_dist: 0.5
-      max_lookahead_dist: 1.0
+      # 前瞻 = 速度 × lookahead_time, 再夹到 [min, max](见 omni_pid_pursuit_controller.cpp
+      # getLookAheadDistance: 开启速度缩放时 lookahead_dist 不参与计算)。
+      # 原 1.0/0.5/1.0: 0.5 m/s 时前瞻 1.0 m, 车切内弯擦过途经点(偏离量同量级),
+      # 而规划路径的硬余量只有 robot_radius=0.33 m(见 costmap 的 robot_radius 注释),
+      # 切弯就是往障碍那侧偏、吃掉这点余量 —— 所以收紧到 0.6/0.3/0.6。
+      # 代价: 前瞻过小会让方向对横向误差过敏(前瞻 0.3 m 时 10 cm 误差≈18°,
+      # 且 enable_rotation=false 时方向变化直接变成横向平移速度), 表现为路径两侧"画龙"。
+      # 若实车观察到画龙, 回退到 0.8/0.4/0.8(这三个参数支持运行时 ros2 param set, 不必重启)。
+      lookahead_time: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.6
       use_interpolation: false
       use_rotate_to_heading: false
       use_rotate_to_heading_treshold: 0.1

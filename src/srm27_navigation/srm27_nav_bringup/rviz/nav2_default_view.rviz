@@ -561,6 +561,28 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: initialpose
     - Class: nav2_rviz_plugins/GoalTool
+    # 下面两个是 rviz 内置工具, 之前这份配置里没有, 导致工具栏只剩上面那个 Nav2 面板的
+    # GoalTool —— 它直接下发 navigate_to_pose action, **不发 /goal_pose**。所以
+    # script/waypoint_mission.py(以及 srm27_behavior 的 PubNav2Goal 约定)收不到点选。
+    # 用法区分:
+    #   Publish Point  (发 /clicked_point) —— 教点用这个最稳, 只给位置, 不被别的节点消费
+    #   2D Goal Pose   (发 /goal_pose)     —— 需要航点朝向时用(按住拖出箭头)
+    #   面板里的 Nav2 Goal (GoalTool)      —— 普通导航用: 点一下车立刻开始走
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
   Transformation:
     Current:
       Class: rviz_default_plugins/TF

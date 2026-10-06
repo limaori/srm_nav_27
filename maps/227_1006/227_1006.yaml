@@ -1,7 +1,7 @@
 image: 227_1006.pgm
 mode: trinary
 resolution: 0.05
-origin: [-3, -7.66, 0]
+origin: [-2.9, -3.85, 0]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.25
