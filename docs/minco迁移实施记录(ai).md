@@ -39,10 +39,11 @@
 
 ### 2.2 速度链一致性（方案 §2.2）
 
-- 仿真 MINCO 配置把 `FollowPath.limits`、`velocity_smoother` 上下界统一到 **平移合速度 0.5 m/s**（用户指定的测试起点），
-  而 `srm_cmd_mux` 本来就是 `v_max: 0.5`，因此三层一致，正常运动不应再出现“上游要 2.5、执行端只给 0.5”的长期裁剪。
-- 实车 MINCO 配置把 smoother 的 `min_velocity` 从 `[-2.5, -2.5, 0]` 改为对称的 `[-0.5, -0.5, -0.3]`，
-  并在注释中写明：启用 SE(2) 阶段必须同步提高 yaw 界。
+- 仿真与实车的有效限速已统一到**实车现有链路**（详见 §6.3）：平移 1.5 m/s、加速度 3.0 m/s²、
+  角速度 1.0 rad/s；`FollowPath.limits`、`velocity_smoother`、`srm_cmd_mux` 三层用同一组值，
+  正常运动不应再出现“上游要 1.5、执行端只给 0.5”的长期裁剪。
+- 实车 MINCO 配置把 smoother 的 `min_velocity` 从 `[-2.5, -2.5, 0]` 改为与 `max_velocity` 对称的值，
+  并在注释中写明：启用 SE(2) 阶段必须同步放开 yaw 界。
 - `min_y_velocity_threshold` 在实车配置中由 0.5 调到 0.001（低速横移反馈不再被抹成零）。
 - 目标检查器由 `SimpleGoalChecker` 改为 `nav2_controller::StoppedGoalChecker`（方案 §7.4：终点必须按停稳验收）。
 
@@ -325,6 +326,232 @@ ros2 topic hz  /red_standard_robot1/FollowPath/mpc_prediction
 顺带澄清一处**看起来像问题、实际不是**的现象：`/odometry` 只有 `simulation_ground_truth_odometry`
 一个发布者，启动脚本已经按 `has_odometry_source` 把 `sensor_scan_generation` 的 `odometry`
 remap 到了 `sensor_odometry`（该话题当前 0 个订阅者），不存在两个 odometry 发布者抢状态的问题。
+
+## 6.2 第二次仿真运行：软约束权重未标定导致候选轨迹被一律拒绝（已修复）
+
+修掉 `valid_until` 之后，第二次运行换了一个失败点：
+
+```text
+[WARN] MincoMpcController: 规划失败 (validation_failed): max speed exceeds the effective limit   ×2
+[ERROR] MincoMpcController: no validated trajectory available yet                                ×22
+[WARN] [follow_path] [ActionServer] Aborting handle.                                             ×22
+```
+
+### 根因（离线复现的数据）
+
+用一个与仿真一致的算例离线复现（2 m 局部路径、`v_max=0.5`、`a_max=0.3`、静止起步、
+`horizon=2.0`、`nominal_piece_duration=0.3`），变更权重扫描：
+
+| `w_velocity` | `w_acceleration` | 最大速度（上限 0.50） | 最大加速度（上限 0.30） | 总时长 |
+|---:|---:|---:|---:|---:|
+| 20 | 2（**原配置**） | **0.614 超** | **0.637 超** | 4.62 s |
+| 60 | 20 | 0.488 | 0.446 超 | 5.54 s |
+| 60 | 150 | 0.487 | 0.312 超 | 6.18 s |
+| **60** | **300（新配置）** | **0.480** | **0.276** | 6.48 s |
+| 100 | 500 | 0.453 | 0.253 | 6.83 s |
+
+MINCO 的速度/加速度是**软约束**，其最优点由 `w_time`（把速度往上拉）与 `w_velocity`/
+`w_acceleration`（往下压）的平衡决定。原配置下平衡点落在 0.61 m/s 与 0.64 m/s²，
+**两条硬上限同时被越过**；而 `TrajectoryValidator` 按硬上限判定，于是每一条候选轨迹都被
+丢弃 → 控制器永远拿不到轨迹 → FollowPath 反复 abort → BT 反复 recovery（用户看到的“20 多次”）。
+这与方案 §13 里那条 P1 风险是同一件事：**上游一直产出一个下游永远不接受的速度**。
+
+### 同时发现的收敛问题
+
+原配置 `lbfgs_past = 0`（关闭基于函数值下降率的判据），只剩梯度阈值这一个停止条件，
+而这个问题的量纲跨度极大，梯度阈值根本达不到 —— 实测**两个阶段都跑满迭代上限**
+（302/302，耗时 17 ms）。打开 `lbfgs_past = 3` 后 **52 次迭代收敛、耗时 3.1 ms**，结果质量不变。
+
+### 处理
+
+| 位置 | 改动 |
+|---|---|
+| 两份 MINCO 配置 | `w_velocity: 20 → 60`、`w_acceleration: 2 → 300`（附上实测依据的注释） |
+| `minco_optimizer` | 新增 `lbfgs_past` 配置并接通到 L-BFGS 的下降率判据；配置默认值 `w_velocity/w_acceleration` 同步提高 |
+| `minco_optimizer` | 新增 `rescaleDurations()`：按倍数拉伸段时长并用**同一组内部路标点与首末边界条件**重建轨迹（位置几何基本不变，速度 ≈ /k、加速度 ≈ /k²） |
+| `planning_worker` | 优化成功后先算极值：越限则做最多 2 次确定性时间拉伸修复，再进入验证；修复次数与累计倍数进入诊断（`speed_repair_count` / `time_scale`） |
+| `minco_mpc_controller` | **失败路径也发布 `diagnostics`**（之前只有成功路径发布），现场可以直接 `ros2 topic echo .../diagnostics` 看原因 |
+| `trajectory_validator` | 越限报错带上实测值与门槛（`max speed 0.614000 exceeds the effective limit 0.510000`），不再只说“超速” |
+
+修复的兜底效果（离线实测）：
+
+| 场景 | 优化输出 | 拉伸修复后 |
+|---|---|---|
+| 原权重 20 / 2 | 0.614 / 0.637 | 1 次 ×1.457 → **0.421 / 0.300** |
+| 极端坏权重 5 / 1 | 0.976 / 0.839 | 1 次 ×1.951 → **0.500 / 0.220** |
+
+新增回归测试 `MincoOptimizerRescale.PreservesBoundariesAndReducesExtrema`
+（边界 p/v/a 不变、经过点不变、极值按 1/k 与 1/k² 下降、非法入参被拒）。测试总数 **369**，全部通过。
+
+### 参数含义提醒
+
+`limits.max_linear_accel = 0.30 m/s²` 是**很保守**的值：2 m 的局部路径在
+`v_max=0.5` 下的时间最优梯形就需要约 5.7 s，而现在是 6.5 s。若希望动作更果断，
+应当先做制动能力辨识，再提高 `max_linear_accel`（方案 §10 P5），而不是靠调软约束权重。
+
+## 6.3 限速对齐：仿真 = 实车（本次改动）
+
+**实车实际链路**（`script/start_real_nav.sh`）：
+
+```text
+controller_server ─cmd_vel_controller─► velocity_smoother ─cmd_vel_nav2_result─┐
+                                                fake_vel_transform ─► cmd_vel_chassis ─► srm27_nav_protocol ─► 串口
+```
+
+实车**不使用 `srm_cmd_mux`**，因此其有效限速由 smoother 与串口协议决定：
+smoother `max_velocity [1.5, 1.5, 0.0]`、`max_accel [3.0, 3.0, 0.0]`（yaw 钳 0），
+串口 `max_vx/vy 2.5`、`max_wz 1.0` ⇒ **有效平移 1.5 m/s、有效导航 yaw 0**。
+
+仿真链路是 `controller → cmd_vel_nav/cnt_vel_controller → srm_cmd_mux → cmd_vel_sim → Gazebo`，
+唯一的限幅点是 mux，而它原本是 `v_max: 0.5` —— 这就是“仿真和实车不一样”的来源。
+
+对齐后的结果：
+
+| 层 | 实车 | 仿真（改前） | 仿真（改后） |
+|---|---|---|---|
+| controller 平移上限 | Omni `v_linear_max 1.5` | Omni `2.5` / MINCO `limits 0.5` | Omni `1.5` / MINCO `limits 1.5` |
+| controller 平移加速度 | smoother `3.0` | MINCO `limits 0.3` | MINCO `limits 3.0` |
+| controller 角速度 | Omni `v_angular_max 1.0`（smoother 再钳 0） | Omni `3.0` / MINCO `0.3` | Omni `1.0` / MINCO `1.0` |
+| `velocity_smoother` | `[1.5,1.5,0.0]` / `[3.0,3.0,0.0]` | `[2.5,2.5,3.0]` / `[4.5,4.5,5.0]`（Omni）、`[0.5,0.5,0.3]` / `[1,1,1]`（MINCO） | 全部 `[1.5,1.5,0.0]` / `[3.0,3.0,0.0]` |
+| `srm_cmd_mux` | 不使用 | `v_max 0.5`、`wz_max 2.0` | `v_max 1.5`、`wz_max 1.0` |
+| 串口协议 | `2.5 / 2.5 / 1.0` | 不涉及 | 不涉及 |
+
+**同时必须重新标定 `w_jerk`。** 限速提高后，原来按 0.5 m/s 档位看起来正常的 `w_jerk = 1.0`
+会严重压制速度：最小 jerk 目标下，2 m 起停实测只跑到 **1.116/1.5 m/s、耗时 3.36 s**，
+而该场景的理论时间最优是 1.83 s —— 也就是说仿真车会以 74% 的限速跑，无法代表实车行为。
+
+| `w_jerk` | 最大速度（上限 1.5） | 最大加速度（上限 3.0） | 2 m 起停耗时 |
+|---:|---:|---:|---:|
+| 1.0（改前） | 1.116 | 1.023 | 3.36 s |
+| **0.2（改后）** | **1.438** | **1.721** | 2.59 s |
+| 0.05 | 1.469 | 2.342 | 2.27 s |
+
+取 `w_jerk = 0.2`：速度用到 96% 的上限，加速度只用掉 57%（留出避障余量），
+并且在低限速档（0.5/0.3）下仍然达标（0.481/0.289）——两档都验证过。
+
+**停车距离复核**（方案 §6.1 的 `d_stop = v·latency + v²/(2a) + 外形`）：
+1.5 m/s、latency 0.1 s、a = 3.0 m/s²、包络 0.33 m ⇒ `0.15 + 0.375 + 0.33 ≈ 0.86 m`，
+仍小于 `planning_horizon = 2.0 m`，覆盖检查通过。**注意**：这里用的是配置里的 3.0 m/s²，
+它来自实车 smoother 的既有值，**不是实车辨识得到的制动能力**；正式提速前仍必须按方案 §10 P5 做辨识。
+
+**未一并改动、需要单独决策的三项：**
+
+1. `min_y_velocity_threshold`：实车 Omni 配置是 `0.5`，仿真 Omni 是 `0.001`。**没有把仿真改成 0.5** ——
+   方案 §2.2 明确指出 0.5 会把全向底盘的低速横移反馈抹成零；实车 MINCO 配置已是 0.001。
+   建议把实车 Omni 也改到 0.001，而不是把仿真改坏。
+2. `rotation_controller.wz_max` / `rotation_test_sender.wz_max` 仍是 `2.0`（仿真自转测试链路）。
+   mux 已钳到 1.0，所以最终输出与实车一致；这两个是仿真测试工具，未动。
+3. 实车侧自身存在一处**不一致**（本次未改，属于实车配置问题）：
+   `src/srm27_nav_protocol/config/srm27_nav_protocol.yaml` 是 `max_vx/vy 2.5`，
+   而 `src/srm27_bringup/params/node_params.yaml` 是 `0.5`，后者注释却写着“与前者保持一致”。
+   `start_real_nav.sh` 实际加载的是前者（2.5）。需要确认哪个才是实车想要的串口上限。
+
+## 6.4 第三次仿真运行：车完全不动（速度层 MPC 起步自锁，已修复）
+
+修掉权重问题后，轨迹本身完全正常（`minco_trajectory` 最大速度 1.43 m/s、净空 0.587 m、
+规划 4.5 ms），但**车一步都不往前走**：BT 报 `Failed to make progress`、反复 recovery，
+实测 `cmd_vel_nav` 的 `vx` 在 **±0.01 m/s 之间来回变号**，机器人原地缓慢倒退 0.36 m。
+
+现场抓到的关键数据（`FollowPath/diagnostics`）：
+
+```text
+planning_result      = success        minimum_clearance   = 0.587
+maximum_speed        = 1.433          projection_progress = 0.0155 s   ← 进度卡在 0
+requested_vx         = -0.0133        trajectory_age      = 0.012 s
+```
+
+### 根因：速度层 MPC 在“轨迹从静止起步”时必然自锁
+
+离线把「参考 + MPC」整条链按同一配置闭环复现，结论明确：
+
+1. 速度层 MPC 的决策量**就是速度**，参考按当前投影进度采样；MINCO 轨迹从静止起步，
+   所以 `u_ref(0) = 0`。
+2. 手工重建 QP（与 `MpcSolver` 逐位一致：`U*` 的 `vx[0] = -0.0065` 完全相同）算出三个候选解的
+   目标函数值：**`U* = 0.0023`、`U = Uref = 0.0077`、`U = 0 = 6.32`** ——
+   也就是说"先不动、把加速后置"**确实是数学上的最优**，求解器没有任何问题。
+3. 于是每周期第 0 拍命令 ≈ 0 → 车不动 → 投影进度永远停在 0 → 参考永远是"从静止起步"，
+   形成自锁。`projection_progress = 0.0155 s` 就是这个自锁的直接证据。
+
+顺带排除了两个嫌疑：**热启动不是原因**（热启动与冷启动结果逐位相同，只是 0 次 vs 60 次迭代）。
+
+### 修复：命令前瞻（方案 §7.4）
+
+取预测序列里 `t_now + 前瞻` 那一拍作为输出速度，而不是第 0 拍。闭环实测（1.0 s 内）：
+
+| 前瞻 | 1.0 s 位移 | 末速 |
+|---:|---:|---:|
+| 0（改前） | **-0.002 m** | ~0（自锁） |
+| 0.10 s | 0.175 m | 0.217 m/s |
+| **0.20 s（新配置）** | **0.325 m** | 0.279 m/s |
+| 0.40 s | 0.630 m | 0.868 m/s |
+
+也曾试过"参考前置时间"（把参考按 `progress + lead + i*h` 采样），**单独使用反而更差**
+（2.0 s 才走 0.03 m、速度 −0.073 m/s），因此没有保留这个参数，只保留前瞻。
+
+改动：`mpc.command_lookahead: 0.0 → 0.20`（代码默认值与两份 MINCO 配置同步）。
+**实车必须按实测的执行延迟重新标定**，0.20 s 只是仿真（无内环延迟）下的标定值。
+
+新增回归测试 `test_mpc_startup.cpp`（3 个用例）：
+
+| 用例 | 断言 |
+|---|---|
+| `PositiveLookaheadStartsFromRest` | 前瞻 0.20 s 时 1.0 s 内前进 > 0.15 m、末速 > 0.10 m/s |
+| `ZeroLookaheadStallsFromRest` | 前瞻 0 时几乎不动（< 0.05 m）—— 把失败模式固化，防止回归 |
+| `CommandAtReturnsTheRequestedPredictionStep` | 前瞻取拍正确、两拍之间为线性插值 |
+
+测试总数 **375**，全部通过。
+
+## 6.5 第四次仿真运行：车来回走、不沿红线（验证阈值两侧不一致，已修复）
+
+车能动之后的现象是**来回走、不沿规划红线**。抓到的数据：
+
+| 量 | 值 | 说明 |
+|---|---|---|
+| `minimum_clearance` | **1.33 m** | 轨迹几何完全正常 |
+| `maximum_speed` / `maximum_acceleration` | 1.43 / 1.72 | 都在上限之内 |
+| `planning_time_ms` | 4~7 ms | 规划很快 |
+| `requested_vx` | **0** | 控制器根本没输出速度 |
+| `projection_progress` | **0** | 从未开始跟踪 |
+| odom x 轨迹 | 5.55 → 4.10 | 被 recovery 一路往回拖 |
+
+即：**工作线程算出的轨迹很好，却在验证阶段被拒**，控制器永远拿不到轨迹 → 输出零 →
+BT 的 `BackUpFreeSpace` 反复把车往回带，看起来就是"来回走"。日志里的失败原因是
+`safe prefix is shorter than the MPC window plus stopping time`。
+
+### 根因：工作线程与控制线程用了两套校验配置
+
+`planning_worker.cpp` 自己拼了一份 `TrajectoryValidatorConfig`，只填了半径/裕量/速度/加速度，
+**没有**填 `braking_deceleration` 与 `reaction_latency`，于是用了 core 默认值
+`a_brake = 0.3 m/s²`。要求的安全前缀变成：
+
+```text
+required = reaction_latency + v / a_brake = 0.1 + 1.5 / 0.3 = 5.1 s
+```
+
+而任何 2 m 局部视野的轨迹都到不了 5.1 s ⇒ **每条候选轨迹都被拒绝**。
+
+这个坑在 0.5 m/s 档看不出来（要求 1.77 s，能过），**是提速到 1.5 m/s 才暴露的**；
+也就是说它一直存在，只是被旧的测试速度掩盖了。这也正好是方案 §6.1 强调"制动能力必须是
+实测可保证的值"的原因——它直接决定轨迹能否被放行。
+
+### 修复
+
+| 位置 | 改动 |
+|---|---|
+| `PlanningRequest` | 新增 `TrajectoryValidatorConfig validator_config`，由控制器填入 |
+| `minco_mpc_controller` | 抽出 `makeValidatorConfig()`，控制周期内的复验与后台工作线程**共用同一份**配置（只有速度/加速度上限按当前有效约束覆盖） |
+| `planning_worker` | 直接使用请求里的配置，不再自行拼装、不再依赖 core 默认值 |
+| 新增参数 `safety.braking_deceleration` | 显式配置有效制动减速度，`0` 表示退化为使用 `limits.max_linear_accel`；**必须按实车制动辨识填写**（方案 §6.1、§10 P5） |
+
+离线复核（同一场景：2 m 直线 + 前方厚墙）：
+
+```text
+修正前（a_brake=0.3） 要求前缀 5.1 s  -> 必然失败
+修正后（a_brake=3.0） 要求前缀 0.6 s，实际有效前缀 2.59 s -> 通过
+墙前绕行净空 0.490 m（要求 0.33+0.05=0.38 m），与 w_obstacle 在 100~1000 之间取值无关
+```
+
+因此这次没有调整障碍权重——障碍项本身够强，问题完全在验证阈值上。
 
 ## 7. 未完成项与后续阶段
 
