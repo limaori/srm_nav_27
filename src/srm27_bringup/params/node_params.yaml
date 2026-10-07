@@ -5,6 +5,14 @@ srm27_nav_protocol:
     flow_control: none
     parity: none
     stop_bits: "1"
+    # 协议 §6: 100 Hz 定频单帧 / 500 ms 看门狗 / 上位机自己限幅
+    # (默认值与 srm27_nav_protocol/config/srm27_nav_protocol.yaml 保持一致)
+    send_rate_hz: 100.0
+    cmd_timeout_sec: 0.5
+    max_vx: 0.5
+    max_vy: 0.5
+    max_wz: 1.0
+    debug_print_hex: false
     set_detector_color: true
     record_rosbag: true
     debug: false

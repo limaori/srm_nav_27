@@ -292,6 +292,40 @@ ros2 topic hz  /red_standard_robot1/FollowPath/mpc_prediction
 时间分量 **8.7e-9 ~ 8.9e-9**（无 ESDF / 有 ESDF / 段时长比例惩罚 / 参考吸引四种场景）；
 报告式启发式模式下 **6.8e-3**，测试明确断言“此模式下梯度与差分不一致是预期行为”。
 
+## 6.1 首次仿真运行暴露的问题（已修复）
+
+第一次真机（Gazebo）联调时，日志给出的结论是：**迁移链路本身是通的，卡在一处元数据 bug 上**。
+
+日志证据（`~/.ros/log/controller_server_*.log`）：
+
+```text
+[INFO] Created controller : FollowPath of type srm27_minco_controller::MincoMpcController
+[INFO] MincoMpcController 已配置: planning_frame=odom base_frame=base_link horizon=2.00 m
+       replan=10.0 Hz v_max=0.50 m/s a_max=0.30 m/s^2 yaw_mode=xy_only
+[INFO] MincoMpcController: QP 求解器预热完成
+[INFO] MincoMpcController: 新导航会话 #1 (路径版本 1)
+[WARN] MincoMpcController: 规划失败 (validation_failed): trajectory coefficients/durations/continuity check failed
+[ERROR] MincoMpcController: no validated trajectory available yet      ← ×68
+[WARN] [follow_path] [ActionServer] Aborting handle.                   ← ×68
+```
+
+即：插件加载、参数读取、QP 预热、会话编号、Theta* 全局规划**全部正常**，MINCO 也已经产出了
+候选轨迹，只是候选轨迹在**独立验证**这一步被拒。原因是 `PlanningWorker` 把
+`valid_until` 留成了 `0`，而 `generated_stamp`/`valid_after` 是当前 ROS 时间：
+
+| 位置 | 缺陷 | 影响 | 处理 |
+|---|---|---|---|
+| `planning_worker.cpp` | `valid_until = 0.0`，而 `valid_after = request_stamp`（约 1.79e9） | `Trajectory2D::sanityCheck()` 判定“有效期早于生效时刻”，**每一条候选轨迹都被拒**，控制器永远拿不到轨迹 → FollowPath 反复 abort → BT 进入恢复行为（日志里能看到两次 BackUpFreeSpace） | 增加 `PlanningRequest::validity_window`，由控制器的 `trajectory_max_age` 填入，`valid_until = request_stamp + validity_window` |
+| `trajectory_2d.cpp` | `sanityCheck()` 把 `valid_until == 0` 当作“有效期早于生效时刻” | 两个模块对 `0` 的语义不一致（`TrajectoryValidator` 里 `0` 表示“不检查过期”） | 统一为“`0` = 未设置有效期”，只有设置了非零有效期时才检查顺序 |
+| `trajectory_validator.cpp` | 自检失败时把具体原因丢掉，只报 `coefficients/durations/continuity check failed` | 现场无法判断是时长、系数、连续性还是时间元数据的问题，只能靠猜 | 把 `sanityCheck` 的具体原因拼进 `reason` |
+
+并补了回归测试 `Trajectory2DSanityCheck.UnsetValidityWindowWithFutureValidAfter_Passes`，
+用例注释直接写明这个失败模式的现场表现。测试总数 **368**，全部通过。
+
+顺带澄清一处**看起来像问题、实际不是**的现象：`/odometry` 只有 `simulation_ground_truth_odometry`
+一个发布者，启动脚本已经按 `has_odometry_source` 把 `sensor_scan_generation` 的 `odometry`
+remap 到了 `sensor_odometry`（该话题当前 0 个订阅者），不存在两个 odometry 发布者抢状态的问题。
+
 ## 7. 未完成项与后续阶段
 
 | 阶段 | 内容 | 状态 |

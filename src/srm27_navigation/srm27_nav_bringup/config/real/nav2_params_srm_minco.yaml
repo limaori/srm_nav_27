@@ -447,7 +447,10 @@ controller_server:
     general_goal_checker:
       stateful: True                                    # 是否保存目标检查状态
       plugin: "nav2_controller::StoppedGoalChecker"     # 位姿 + 停止速度双条件
-      xy_goal_tolerance: 0.15                           # 平面位置容差（米）
+      # 与实车 Omni 配置保持一致（main 已由 0.15 放宽到 0.4）：航点跳过半径 0.35 必须小于
+      # 本容差，否则最后一个航点会在判定到达前被删掉、车掉头往回走（见 behavior_trees/
+      # navigate_through_poses_w_replanning_and_recovery.xml 的约束说明）。
+      xy_goal_tolerance: 0.40                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
       trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
       rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）

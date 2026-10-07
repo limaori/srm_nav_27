@@ -336,7 +336,9 @@ bool TrajectoryValidator::validate(
                           _report.continuity_max_velocity < 1.0e-5 &&
                           _report.continuity_max_acceleration < 1.0e-4;
   if (!_report.coefficients_ok || !_report.continuity_ok) {
-    _report.reason = "trajectory coefficients/durations/continuity check failed";
+    // 不要把具体原因吞掉：只报“自检失败”会让现场无法定位是时长、系数、连续性还是
+    // 有效期元数据出的问题（实际就是这么埋过一次 bug）。
+    _report.reason = "trajectory sanity check failed: " + sanity_reason;
     return false;
   }
   _report.boundary_ok = true;

@@ -302,7 +302,9 @@ bool Trajectory2D::sanityCheck(std::string * _reason) const
   if (!isFinite(generated_stamp) || !isFinite(valid_after) || !isFinite(valid_until)) {
     return fail("non-finite time metadata");
   }
-  if (valid_until < valid_after) {
+  // `valid_until == 0` 表示“未设置有效期”，与 `TrajectoryValidator::validate()` 中
+  // “valid_until > 0 才检查过期”的语义保持一致；只有真的设置了有效期时才要求顺序正确。
+  if (valid_until > 0.0 && valid_until < valid_after) {
     return fail("valid_until earlier than valid_after");
   }
   return true;

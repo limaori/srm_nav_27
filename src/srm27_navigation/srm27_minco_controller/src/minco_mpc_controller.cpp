@@ -766,6 +766,7 @@ void MincoMpcController::requestReplan(
   planning_request.request_stamp = _now_stamp;
   planning_request.request_steady = _now_steady;
   planning_request.local_path_horizon = planning_horizon_;
+  planning_request.validity_window = trajectory_max_age_;
   // 距离场以只读快照交给工作线程；工作线程不持有 costmap 锁。
   planning_request.esdf = std::const_pointer_cast<const srm27_minco_core::Esdf2D>(esdf_);
   planning_request.use_warm_start = decision.use_warm_start && has_warm_start_;

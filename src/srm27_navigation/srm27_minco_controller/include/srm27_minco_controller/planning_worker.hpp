@@ -58,6 +58,8 @@ struct PlanningRequest
   double request_steady{0.0};
   /// \brief 局部路径截取视野长度（m）。
   double local_path_horizon{2.0};
+  /// \brief 产出轨迹的有效期（s）：`valid_until = request_stamp + validity_window`。
+  double validity_window{1.0};
   /// \brief 地图/距离场快照（由控制线程在锁内复制后建立，工作线程只读）。
   std::shared_ptr<const srm27_minco_core::Esdf2D> esdf{};
   /// \brief 是否使用热启动初值。

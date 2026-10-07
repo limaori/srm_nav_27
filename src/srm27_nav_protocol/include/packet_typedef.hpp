@@ -1,6 +1,7 @@
 #ifndef SRM27_NAV_PROTOCOL__PACKET_TYPEDEF_HPP_
 #define SRM27_NAV_PROTOCOL__PACKET_TYPEDEF_HPP_
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <iostream>
@@ -214,11 +215,16 @@ struct ReceiveSefdefinedData
 /* Send data                                            */
 /********************************************************/
 
+// [协议 §2.1] 上→下 数据段长度固定 12 字节, 整帧固定 19 字节。
+// 这个方向【没有】cmd_id —— 帧头 5 字节之后直接就是数据段。
+constexpr uint16_t DATA_LENGTH_CMD = 12;
+constexpr std::size_t FRAME_LENGTH_CMD = 5 + DATA_LENGTH_CMD + 2;   // 19
+
 struct SendRobotCmdData
 {
   HeaderFrame frame_header;
 
-  // 自定义数据段
+  // 数据段: 只有 vx / vy / wz 三个 float32
   struct
   {
     float vx;
@@ -226,11 +232,28 @@ struct SendRobotCmdData
     float wz;
   } __attribute__((packed)) speed_vector;
 
-  // 决策状态：0=正常巡逻，1=回血中
-  uint8_t is_recovering;
-
   uint16_t checksum;
 } __attribute__((packed));
+
+// [协议 §2.1] 用静态断言把帧长钉死。
+// 原实现里数据段多了一个 `uint8_t is_recovering;` 决策状态字节, 使
+//   sizeof(SendRobotCmdData) = 20 -> data_length = 20-5-2 = 13, 整帧 20 字节,
+// 而下位机只接受 data_length == 12, 于是整帧被静默丢弃(CRC 全对也没用),
+// 表现就是"软件链路全对但车不动"。
+// 有了这个断言, 以后谁再往数据段里加字段会在编译期直接失败,
+// 而不是发出一个下位机不认的帧。
+static_assert(
+  sizeof(SendRobotCmdData) == FRAME_LENGTH_CMD,
+  "SendRobotCmdData 必须严格 19 字节: 数据段只能是 vx/vy/wz 三个 float32。"
+  "加字段会让 data_length != 12, 下位机会整帧丢弃 (协议 §2.1)。");
+
+// [协议 §4.1] 下→上 整帧 = 9 + data_length, 所以某个包的数据段长度
+// 应当等于 sizeof(T) - 9。用于接收侧长度自检, 避免把包认错。
+template <typename T>
+constexpr bool receive_length_matches(uint16_t data_length)
+{
+  return data_length == sizeof(T) - 9;
+}
 
 /********************************************************/
 /* template                                             */

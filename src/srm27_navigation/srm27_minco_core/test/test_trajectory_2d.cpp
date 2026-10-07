@@ -402,6 +402,27 @@ TEST(Trajectory2DSanityCheck, DiscontinuousTrajectory_FailsWithReason)
   EXPECT_FALSE(trajectory.sanityCheck(nullptr));
 }
 
+/// \brief 回归测试：`valid_after` 在未来、`valid_until` 未设置（0）时必须被接受。
+///
+/// 这是 MINCO 规划线程最初的写法（只设 generated_stamp / valid_after，valid_until 留 0）。
+/// `0` 的语义是“未设置有效期”，与 `TrajectoryValidator::validate()` 中
+/// “valid_until > 0 才检查过期”一致；若在这里把它当成“有效期已过期”，
+/// 所有候选轨迹都会在系数自检阶段被判死，现场表现为 controller_server 反复
+/// "no validated trajectory available yet" 而机器人完全不动。
+TEST(Trajectory2DSanityCheck, UnsetValidityWindowWithFutureValidAfter_Passes)
+{
+  Trajectory2D trajectory = makeContinuousTrajectory();
+  trajectory.generated_stamp = 1.0e6;
+  trajectory.valid_after = 1.0e6;
+  trajectory.valid_until = 0.0;  // 未设置有效期
+  std::string reason;
+  EXPECT_TRUE(trajectory.sanityCheck(&reason)) << reason;
+
+  // 未设置有效期的轨迹也必须能通过验证器的时效检查（不会有“已过期”的误判）。
+  trajectory.valid_after = 0.0;
+  EXPECT_TRUE(trajectory.sanityCheck(&reason)) << reason;
+}
+
 TEST(Trajectory2DSanityCheck, InvalidValidityWindow_Fails)
 {
   Trajectory2D trajectory = makeContinuousTrajectory();

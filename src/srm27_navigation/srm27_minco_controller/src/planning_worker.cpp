@@ -316,7 +316,10 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   trajectory.versions = _request.versions;
   trajectory.generated_stamp = _request.request_stamp;
   trajectory.valid_after = _request.request_stamp;
-  trajectory.valid_until = 0.0;
+  // 必须给出**真正的**有效期：`Trajectory2D::sanityCheck()` 会检查
+  // `valid_until >= valid_after`，只把 valid_until 留 0 会让候选轨迹在自检阶段
+  // 就被判死（表现为 validation_failed 且说不出具体原因）。
+  trajectory.valid_until = _request.request_stamp + _request.validity_window;
   trajectory.terminal_is_global_goal = terminal_reached;
 
   const double validation_begin = steadyNow();

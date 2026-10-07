@@ -1,16 +1,18 @@
 #include "srm27_nav_protocol.hpp"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <deque>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <rm_decision_interfaces/msg/robot_control.hpp>
 
 #include "crc_func.h"
 #include "packet_typedef.hpp"
 
-std::atomic<bool> is_usb_ok_{false};
+// 发送线程与 cmd_vel 回调之间共享发送状态的互斥量
 std::mutex send_mutex_;
 
 #define USB_NOT_OK_SLEEP_TIME 1000   // (ms)
@@ -37,6 +39,8 @@ Srm27NavProtocolNode::Srm27NavProtocolNode(const rclcpp::NodeOptions & options)
 
 Srm27NavProtocolNode::~Srm27NavProtocolNode()
 {
+  // 注意顺序: 必须先 join 发送线程 —— 它退出前会补发零速帧 (协议 §6.3),
+  // 而这需要串口还开着。端口在下面所有线程 join 完之后才 close。
   if (send_thread_.joinable()) send_thread_.join();
   if (receive_thread_.joinable()) receive_thread_.join();
   if (serial_port_protect_thread_.joinable()) serial_port_protect_thread_.join();
@@ -72,9 +76,7 @@ void Srm27NavProtocolNode::createSubscription()
   cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
     "cmd_vel_chassis", 10,
     std::bind(&Srm27NavProtocolNode::CmdVelCallback, this, std::placeholders::_1));
-  robot_control_sub_ = this->create_subscription<rm_decision_interfaces::msg::RobotControl>(
-    "robot_control", 10,
-    std::bind(&Srm27NavProtocolNode::RobotControlCallback, this, std::placeholders::_1));
+  // 移除了 robot_control 订阅 (is_recovering 在标准 19 字节帧里没有位置, 见 hpp 注释)
 }
 
 void Srm27NavProtocolNode::getParams()
@@ -157,6 +159,35 @@ void Srm27NavProtocolNode::getParams()
     RCLCPP_ERROR(get_logger(), "The debug_print_hex provided was invalid");
     throw ex;
   }
+
+  // ---- 协议 §3.3 / §6 相关参数 ----
+  send_rate_hz_ = declare_parameter<double>("send_rate_hz", 100.0);
+  cmd_timeout_sec_ = declare_parameter<double>("cmd_timeout_sec", 0.5);
+  max_vx_ = declare_parameter<double>("max_vx", 0.5);
+  max_vy_ = declare_parameter<double>("max_vy", 0.5);
+  max_wz_ = declare_parameter<double>("max_wz", 1.0);
+
+  if (!(send_rate_hz_ > 0.0)) {
+    throw std::invalid_argument{"send_rate_hz 必须 > 0"};
+  }
+  // 19 字节在 115200 baud 下约占 1.65 ms, 超过 200 Hz 就没有帧间空闲,
+  // 会退化成背靠背连发, 违反协议 §6.2。推荐 100 Hz (§6.1)。
+  if (send_rate_hz_ > 200.0) {
+    throw std::invalid_argument{"send_rate_hz 不能超过 200 (协议 §6.1/§6.2: 推荐 100 Hz 且帧间需空闲)"};
+  }
+  if (!(cmd_timeout_sec_ > 0.0)) {
+    throw std::invalid_argument{"cmd_timeout_sec 必须 > 0"};
+  }
+  if (!(max_vx_ > 0.0) || !(max_vy_ > 0.0) || !(max_wz_ > 0.0)) {
+    throw std::invalid_argument{"max_vx / max_vy / max_wz 必须 > 0"};
+  }
+
+  RCLCPP_INFO(
+    get_logger(),
+    "协议参数: 上→下 %zu 字节 (data_length=%u), 发送 %.1f Hz, 看门狗 %.0f ms, "
+    "限幅 vx<=%.3f vy<=%.3f wz<=%.3f",
+    FRAME_LENGTH_CMD, static_cast<unsigned>(DATA_LENGTH_CMD), send_rate_hz_,
+    cmd_timeout_sec_ * 1000.0, max_vx_, max_vy_, max_wz_);
 }
 
 void Srm27NavProtocolNode::serialPortProtect()
@@ -600,18 +631,20 @@ void Srm27NavProtocolNode::publishSefdefined(ReceiveSefdefinedData & sefdefined)
 /********************************************************/
 void Srm27NavProtocolNode::sendData()
 {
-  SendRobotCmdData local_data_copy;
   RCLCPP_INFO(get_logger(), "Start sendData!");
 
-  // 更新发送帧头
+  // [协议 §2.1] 帧长 19 字节 / 数据段 12 字节, 由 packet_typedef.hpp 里的
+  // static_assert 在编译期钉死; 这里不再用 sizeof 现算, 避免将来静默漂移。
   send_robot_cmd_data_.frame_header.sof = SOF_SEND;
   send_robot_cmd_data_.frame_header.seq = 0;
-  // DataLength = Total - Header(5) - CRC16(2)
-  send_robot_cmd_data_.frame_header.data_length = sizeof(SendRobotCmdData) - 5 - 2;
-  // TEST
-  // send_robot_cmd_data_.speed_vector.vx = 0f;
-  // send_robot_cmd_data_.speed_vector.vy = 0.002f;
-  // send_robot_cmd_data_.speed_vector.wz = 0.003f;
+  send_robot_cmd_data_.frame_header.data_length = DATA_LENGTH_CMD;
+
+  SendRobotCmdData local_data_copy{};
+
+  // [协议 §6.1] 定频节奏。周期以"上一帧实际发完之后"为基准计算,
+  // 这样任何情况下相邻两帧之间都至少有 period 的空闲, 不会背靠背 (§6.2)。
+  const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+    std::chrono::duration<double>(1.0 / send_rate_hz_));
   int retry_count = 0;
 
   while (rclcpp::ok()) {
@@ -621,45 +654,37 @@ void Srm27NavProtocolNode::sendData()
       continue;
     }
 
-    {  // FIX. 只在拷贝数据时加锁
+    {  // 组帧: 只在取状态和递增 seq 时加锁; 打包与 write 都在锁外
       std::lock_guard<std::mutex> lk(send_mutex_);
-      // FIX: 自增在拷贝前完成，避免循环开始后被拷贝覆盖
+      // 自增在拷贝前完成，避免循环开始后被拷贝覆盖
       send_robot_cmd_data_.frame_header.seq++;
       local_data_copy = send_robot_cmd_data_;
+      // 速度字段每帧现填: 看门狗(§6.3) + NaN/Inf 兜底(§6.4) + 限幅(§6.5)
+      fillSpeedVector(local_data_copy);
     }
 
     try {
-      // 1. 帧头 CRC8 (HeaderFrame 5 bytes)
+      // 1. 帧头 CRC8: 覆盖偏移 0-3, 结果写在偏移 4
       append_CRC8_check_sum(
         reinterpret_cast<unsigned char *>(&local_data_copy), sizeof(HeaderFrame));
 
-      // // --- DEBUG: 打印帧头校验信息 ---
-      // RCLCPP_INFO(
-      //   get_logger(), "Send Header CRC8 OK! SOF:0x%02X, DataLen:%d, ID:0x%04X, CRC8:0x%02X",
-      //   local_data_copy.frame_header.sof, local_data_copy.frame_header.data_length, ID_ROBOT_CMD,
-      //   local_data_copy.frame_header.crc);
-      // // ----------------------------
-
-      // 2. 整包 CRC16
+      // 2. 整包 CRC16: 覆盖偏移 0-16, 低字节写在偏移 17
       append_CRC16_check_sum(
         reinterpret_cast<uint8_t *>(&local_data_copy), sizeof(SendRobotCmdData));
 
       std::vector<uint8_t> send_data = toVector(local_data_copy);
 
       // [诊断] 打开 debug_print_hex 时打印实际发出去的整包 hex。
-      // 原来是注释状态, 于是 debug_print_hex 只对接收端(RECV)生效, 看不到发送内容。
-      // 排查"软件链路全对但下位机没反应"时, 这行能直接区分
-      // "字节根本没发出去" 和 "发了但下位机不认"。
-      // 关闭方式: 把 config/srm27_nav_protocol.yaml 里 debug_print_hex 设回 false
-      // (本打印受该参数控制, 平时不影响性能)。
+      // 排查"字节根本没发出去"和"发了但下位机不认"时, 这行能直接区分两者。
+      // 注意它会影响定频心跳, 平时必须保持 false (§6.6)。
       if (debug_print_hex_) {
         uint16_t crc16_value = (static_cast<uint16_t>(send_data[send_data.size() - 1]) << 8) |
                                send_data[send_data.size() - 2];
         RCLCPP_INFO(
-          get_logger(), "SEND len=%zu crc16=0x%04X vx=%.3f vy=%.3f wz=%.3f recovering=%u",
-          send_data.size(), crc16_value,
-          local_data_copy.speed_vector.vx, local_data_copy.speed_vector.vy,
-          local_data_copy.speed_vector.wz, local_data_copy.is_recovering);
+          get_logger(), "SEND len=%zu data_length=%u crc16=0x%04X vx=%.4f vy=%.4f wz=%.4f",
+          send_data.size(), static_cast<unsigned>(local_data_copy.frame_header.data_length),
+          crc16_value, local_data_copy.speed_vector.vx, local_data_copy.speed_vector.vy,
+          local_data_copy.speed_vector.wz);
         printHex("SEND", ID_ROBOT_CMD, send_data);
       }
 
@@ -669,23 +694,166 @@ void Srm27NavProtocolNode::sendData()
       is_usb_ok_ = false;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // 等满一个周期再发下一帧。以"上一帧刚发完"为基准, 所以被抢占时
+    // 只会顺延、不会补发, 天然满足"每帧之间要有空闲间隔"(§6.2)。
+    std::this_thread::sleep_until(std::chrono::steady_clock::now() + period);
+  }
+
+  // [协议 §6.3] 正常结束 / Ctrl-C / 异常都要补发零速帧。
+  // 此刻串口仍然打开 —— 析构函数是先 join 本线程, 之后才 close 端口。
+  sendZeroFramesOnExit();
+}
+
+void Srm27NavProtocolNode::fillSpeedVector(SendRobotCmdData & frame)
+{
+  // 调用者必须已持有 send_mutex_
+  const auto now = std::chrono::steady_clock::now();
+
+  double vx = 0.0;
+  double vy = 0.0;
+  double wz = 0.0;
+
+  // [协议 §6.3] 看门狗: 控制量超过 cmd_timeout_sec_ 没更新就自动归零。
+  // 同时覆盖"进程刚起来还没收到 cmd_vel"的情况 —— 启动即发零速帧。
+  const bool fresh = has_cmd_vel_ &&
+    std::chrono::duration<double>(now - last_cmd_vel_time_).count() <= cmd_timeout_sec_;
+
+  if (fresh) {
+    vx = cmd_vx_;
+    vy = cmd_vy_;
+    wz = cmd_wz_;
+    if (watchdog_active_) {
+      RCLCPP_INFO(get_logger(), "看门狗解除: cmd_vel 已恢复更新");
+      watchdog_active_ = false;
+    }
+  } else if (!watchdog_active_) {
+    if (has_cmd_vel_) {
+      RCLCPP_WARN(
+        get_logger(), "看门狗触发: %.0f ms 未收到 cmd_vel, 控制量归零 (协议 §6.3)",
+        cmd_timeout_sec_ * 1000.0);
+    } else {
+      RCLCPP_INFO(get_logger(), "尚未收到 cmd_vel, 先发零速帧 (协议 §6.3)");
+    }
+    watchdog_active_ = true;
+  }
+
+  // [协议 §6.4] 兜底再挡一次 NaN/Inf, 确保任何路径都不会把坏值发到下位机
+  if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(wz)) {
+    RCLCPP_ERROR(get_logger(), "控制量含 NaN/Inf, 本帧按零速发送 (协议 §6.4)");
+    vx = 0.0;
+    vy = 0.0;
+    wz = 0.0;
+  }
+
+  // [协议 §6.5] 自己做限幅 —— 协议层不限幅, 限幅是上位机的责任
+  bool clamped = false;
+  if (std::abs(vx) > max_vx_) {
+    vx = std::copysign(max_vx_, vx);
+    clamped = true;
+  }
+  if (std::abs(vy) > max_vy_) {
+    vy = std::copysign(max_vy_, vy);
+    clamped = true;
+  }
+  if (std::abs(wz) > max_wz_) {
+    wz = std::copysign(max_wz_, wz);
+    clamped = true;
+  }
+  if (clamped) {
+    if (!clamping_active_) {
+      RCLCPP_WARN(
+        get_logger(),
+        "限幅生效: 收到 vx=%.4f vy=%.4f wz=%.4f, 已截到 (%.3f, %.3f, %.3f) "
+        "(协议 §6.5; 需要更大请调 max_vx/max_vy/max_wz)",
+        cmd_vx_, cmd_vy_, cmd_wz_, max_vx_, max_vy_, max_wz_);
+      clamping_active_ = true;
+    }
+  } else {
+    clamping_active_ = false;
+  }
+
+  frame.speed_vector.vx = static_cast<float>(vx);
+  frame.speed_vector.vy = static_cast<float>(vy);
+  frame.speed_vector.wz = static_cast<float>(wz);
+}
+
+void Srm27NavProtocolNode::sendZeroFramesOnExit()
+{
+  // [协议 §6.3] 协议没有超时保护 —— 下位机一直使用最后一次收到的有效指令。
+  // 所以退出路径必须补发零速帧, 否则底盘会保持退出前的速度一直跑下去。
+  if (!is_usb_ok_) {
+    RCLCPP_WARN(
+      get_logger(),
+      "串口不可用, 无法补发零速帧 —— 请立即用物理急停确认底盘已停! (协议 §6.3)");
+    return;
+  }
+
+  SendRobotCmdData zero{};
+  zero.frame_header.sof = SOF_SEND;
+  zero.frame_header.data_length = DATA_LENGTH_CMD;
+  zero.speed_vector.vx = 0.0f;
+  zero.speed_vector.vy = 0.0f;
+  zero.speed_vector.wz = 0.0f;
+  {
+    std::lock_guard<std::mutex> lk(send_mutex_);
+    zero.frame_header.seq = send_robot_cmd_data_.frame_header.seq;
+  }
+
+  // 连发若干帧, 保证在关串口前下位机一定收到至少一个有效零速帧
+  constexpr int kZeroFrameCount = 10;   // 10 帧 × 10 ms ≈ 100 ms
+  int sent = 0;
+  for (int i = 0; i < kZeroFrameCount; ++i) {
+    zero.frame_header.seq++;
+    try {
+      append_CRC8_check_sum(
+        reinterpret_cast<unsigned char *>(&zero), sizeof(HeaderFrame));
+      append_CRC16_check_sum(
+        reinterpret_cast<uint8_t *>(&zero), sizeof(SendRobotCmdData));
+      serial_driver_->port()->send(toVector(zero));
+      ++sent;
+    } catch (const std::exception & ex) {
+      RCLCPP_ERROR(get_logger(), "补发零速帧失败: %s", ex.what());
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  if (sent == kZeroFrameCount) {
+    RCLCPP_INFO(get_logger(), "退出前已补发 %d 个零速帧 (协议 §6.3)", sent);
+  } else {
+    RCLCPP_ERROR(
+      get_logger(), "退出前只补发了 %d/%d 个零速帧 —— 请用物理急停确认底盘已停!",
+      sent, kZeroFrameCount);
   }
 }
 
 void Srm27NavProtocolNode::CmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
-  std::lock_guard<std::mutex> lk(send_mutex_);
-  send_robot_cmd_data_.speed_vector.vx = msg->linear.x;
-  send_robot_cmd_data_.speed_vector.vy = msg->linear.y;
-  send_robot_cmd_data_.speed_vector.wz = msg->angular.z;
-}
+  const double vx = msg->linear.x;
+  const double vy = msg->linear.y;
+  const double wz = msg->angular.z;
 
-void Srm27NavProtocolNode::RobotControlCallback(
-  const rm_decision_interfaces::msg::RobotControl::SharedPtr msg)
-{
   std::lock_guard<std::mutex> lk(send_mutex_);
-  send_robot_cmd_data_.is_recovering = msg->is_recovering ? 1u : 0u;
+
+  // [协议 §6.4] 不要发送 NaN/Inf: 解算异常时退回零速, 而不是把坏值发下去
+  if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(wz)) {
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "cmd_vel 含 NaN/Inf (vx=%.4f vy=%.4f wz=%.4f), 按零速处理 (协议 §6.4)",
+      vx, vy, wz);
+    cmd_vx_ = 0.0;
+    cmd_vy_ = 0.0;
+    cmd_wz_ = 0.0;
+  } else {
+    cmd_vx_ = vx;
+    cmd_vy_ = vy;
+    cmd_wz_ = wz;
+  }
+
+  // 只要收到消息就算"有控制量", 包括被判为 NaN 后置零的那次 ——
+  // 否则看门狗会同时报警, 掩盖真正的原因。
+  has_cmd_vel_ = true;
+  last_cmd_vel_time_ = std::chrono::steady_clock::now();
 }
 
 void Srm27NavProtocolNode::printHex(

@@ -121,7 +121,10 @@ sensor_scan_generation:
     #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
     #   * twist 表达在 child_frame_id 下，父系差分速度会旋转到车体系；
     #   * 重复时间戳/时间倒退/过大间隔/位姿跳变都不产生速度尖峰。
-    max_sample_gap: 0.20            # 差分速度可用的最大采样间隔（秒）
+    # 仿真真值的 lidar_odometry 只有约 3.5 Hz（间隔 0.25~0.30 s）；真值模式下本节点的
+    # odometry 输出被 remap 到 sensor_odometry 且无订阅者，0.20 s 会每帧刷告警。
+    # 放宽到 0.40 s 仍保留“长间隔不产生差分速度”的保护。
+    max_sample_gap: 0.40            # 差分速度可用的最大采样间隔（秒）
     max_position_jump: 0.75         # 单次采样允许的最大平移跳变（米）
     max_yaw_jump: 1.20              # 单次采样允许的最大航向跳变（弧度）
 
