@@ -195,7 +195,8 @@ colcon test-result --verbose
 ```
 
 单元测试覆盖（方案 §11.1 的“数学与接口测试”行）。当前状态：**14 个 gtest 套件、200 个用例全部通过**，
-`clang_format`（49 个受维护文件）与 `copyright` 检查通过：
+`clang_format`（49 个受维护文件）与 `copyright` 检查通过；另有 **2 个 Python 几何回归套件
+（15 个用例）**，见 §6.8.4：
 
 | 文件 | 覆盖内容 |
 |---|---|
@@ -720,6 +721,134 @@ MPC **不控制航向**，机器人是**平移（含横移）沿路径走、机�
 所以即使把 yaw 模式改成 `follow_tangent`，仿真里机头也不会转 —— 那属于方案 §8.1 的
 `NAV_SE2`（P4）改造范围，本次未做。
 
+## 6.8 第七轮：按坡道取证修复感知几何链路（只改几何，不动安全阈值）
+
+现场取证与修复方案见 `log/diagnostics/penultimate_goal_20261008/`（`report.md`、`repair_plan.md`）。
+方案要求按"修坐标变换 → 同坡道验证 → 再处理规划边界"推进；本批只做**修**这一步，
+**没有**调整 0.38 m 碰撞阈值、MPC 权重、`optimization_clearance_margin`、摩擦或质量。
+
+### 6.8.1 真值里程计只发 yaw，丢掉高度与 roll/pitch（已修复）
+
+| 位置 | 修复前 | 修复后 |
+|---|---|---|
+| `SrmVelocitySystem.cc`（真值里程计姿态） | `Quaterniond(0, 0, chassisPose.Yaw())` | `chassisPose.Rot()`（完整姿态） |
+| 同文件 twist | 只发 `angular.z` | `angular.x/y/z` 全发 |
+| `simulation_ground_truth_odometry.py` | 相对位姿只算 x/y/yaw，`translation.z` 恒为 0 | `odom -> base_link` 为完整三维相对位姿（位置含 z、姿态含 roll/pitch） |
+
+为什么必须改：`terrain_analysis` / `terrain_analysis_ext` 的 `odometryHandler`
+（`terrainAnalysis.cpp:105-117`）**本来就是按三维雷达位姿写的**（`getRPY` 出 roll/pitch/yaw，
+并读 `position.z`）；`sensor_scan_generation` 也用 `lidar_odometry` 的完整变换把点云变到 odom。
+真值链路只喂二维位姿，等于让地形算法在**被压平的位姿**上工作。
+
+补抓数据里的直接证据（复算脚本 `log/diagnostics/penultimate_goal_20261008/pose_chain_impact.py`，
+输出 `pose_chain_impact.txt`，数据是同目录 `replay_samples.jsonl` 的 1019 个对齐样本）：
+
+* 底盘 IMU（`chassis_imu` 挂在 `base_link` 上、安装位姿为单位）与真值里程计 `gt` 的 **yaw 最大差
+  0.158°**——两者同系，说明坐标系约定没问题；
+* 但同一时刻 `gt` 的姿态是**纯 yaw**（`q = [0, 0, 0.01133, 0.99994]`），与 IMU 姿态的最大夹角
+  **10.007°**（roll 4.24°、pitch −9.07° 被丢掉）；
+* 适配器输出 `odom.z` 恒为 `0.000`，而真值高度已到 0.36 m（相对出生点 0.16 m）。
+
+odom 系定义（写下来避免再次漂移）：
+
+* 原点 = 出生**位置**（含 z），姿态只取**出生航向** → odom 始终重力对齐、z 轴竖直。
+* 高度基准 = 出生点地面高度，**不再每条消息把 z 归零**。
+* `odom -> base_link` 的 TF 与 `odometry` 消息里的位姿是**同一个完整三维位姿**；只有 twist 保持
+  平面（Nav2 的速度接口是平面的，高度方向与 roll/pitch 角速度留在 Gazebo 真值话题里）。
+
+### 6.8.2 `_compose()` 把第二个变换的四元数分量当成了平移（已修复）
+
+修复前：
+
+```python
+sx, sy, sz, sw = second.rotation.x, ...   # 取的是四元数分量
+tx = 2.0 * (qy * sz - qz * sy)            # 却当成平移代入叉乘
+```
+
+即"用 first 旋转 second 的平移"这一步的**输入取错了字段**。方案里的最小复现（first 只 yaw 90°、
+second 只有平移 `(0.15, -0.15, 0.22)` 且旋转为单位四元数）：正确 `(0.15, 0.15, 0.22)`，
+缺陷实现返回 `(0.15, -0.15, 0.22)`，相差 0.30 m。
+
+用真实外参（含 -4° 安装俯仰、-90° 安装偏航）离线复算旧实现与被测实现的雷达位置差：
+
+| 底盘姿态 | 旧实现误差 |
+|---|---|
+| 平地、yaw = 0 | 0.000 m（所以长期没被发现） |
+| yaw = 90° | 0.349 m |
+| 坡面姿态（roll 4.36°、pitch −9.01°） | 0.161 m |
+| roll 4.36°、pitch −9.01°、yaw 90° | 0.216 m |
+| 一般姿态 | 最大 0.525 m |
+
+对**点云**的影响远大于雷达自身那 0.16~0.17 m：两条链路之间是一个刚体变换，姿态差 10° 意味着
+点云被整体转错了 10°，距离越远的点偏得越多。用补抓里姿态最陡的样本（roll 4.238°、pitch
+−9.067°，实测雷达位置偏差 0.1715 m）复算，球面上最坏方向的点位移：
+
+| 点到雷达的距离 | 旧链路点位误差 |
+|---|---|
+| 1 m | 0.35 m |
+| 3 m | 0.70 m |
+| 5 m | 1.04 m |
+
+这足以把坡面点云放到错误的格子里（`terrain_analysis` 的 `intensity` 是"相对车体平面的高度"，
+点云本身被转错就等于障碍/可通行判断跟着错）。
+
+修复方式：把纯几何抽成 `scripts/srm_nav_pose_math.py`（**只依赖标准库**），`_compose()` 改为调用
+`compose_pose()`——平移只允许用 second 的平移参与 first 的旋转，旋转用四元数乘法，两者是互相
+独立的变量。`rotate_vector()` 走四元数三明治乘积而**不是**手写展开式：手写展开式正是这次出错
+的地方，现在只有一个实现需要验证。
+
+### 6.8.3 二维/三维边界核对（方案第 4 项，结论：无需改动）
+
+| 检查项 | 结论 |
+|---|---|
+| 规划状态是否显式提取 x/y/yaw | 是。`StateAdapter::stateAt()` 只取 `position.x/y` 与 `tf2::getYaw()`（`state_adapter.cpp:207-210`） |
+| 速度是否"先三维车体系、再取平面分量" | 是**单次**旋转：真值 twist 在车体系，`bodyToOdomVelocity(yaw, v)` 转到 odom，不存在二次旋转。已知近似：只按 yaw 旋转、忽略车体俯仰，误差量级 `1-cos(pitch)`（坡面 9° 约 1.3%）；本批不改，避免动已标定的速度链路 |
+| 输出命令是否仍在真实车体系 | 是。`odomToBodyVelocity(yaw_at_actuation, v)` 一次旋转，`frame_id = base_link`（`minco_mpc_controller.cpp:1150-1200`） |
+| 规划系转换是否引入额外旋转 | `planning_frame: odom` 与里程计同系，`stateAt()` 不走 TF 分支，速度也不做二次旋转 |
+
+### 6.8.4 回归测试与验收条件
+
+新增 2 个测试套件（用普通 Python 入口而不是 pytest：本机 pytest11 插件与
+`launch_testing`/较新 `pluggy` 不兼容，与 `srm27_robot_description/test/test_model_builder.py`
+的做法一致）：
+
+| 测试 | 用例 | 覆盖 |
+|---|---|---|
+| `test/test_pose_math.py` | 8 | 单位变换、非零外参、90° yaw（含 0.30 m 复现）、±10° pitch、组合 rpy、非零初始 yaw、静态点世界坐标回环、500 组随机位姿对**独立旋转矩阵**参照 |
+| `test/test_ground_truth_odometry_pose.py` | 7 | 用**真实节点**+合成 Gazebo 真值：TF 与 `odometry` 位姿一致且带 roll/pitch/z、`lidar_odometry` == TF 位姿 ∘ 几何 YAML 外参、外参随姿态旋转、静态点回环、平地行为与修复前一致（z=0、纯 yaw）、抖动保持整体位姿 |
+
+参照实现刻意用**旋转矩阵**（不经过四元数）：否则"把四元数分量当平移"这类缺陷会在被测与参照里
+同时出现而测不出来。
+
+```bash
+source install/setup.bash
+colcon test --packages-select srm27_nav_bringup \
+  --ctest-args -R "pose_math|ground_truth_odometry_pose"
+# 期望：2/2 passed；每个套件逐条打印 PASS
+```
+
+验收条件：
+
+* 车体转向或上下坡时，雷达外参平移跟着旋转；TF 与 `lidar_odometry` 给出同一个雷达位姿。
+* 静态场景的点云世界坐标在上/下坡过程中保持一致（测试用固定点回环表达）。
+* 平地行为与修复前完全一致（z = 0、姿态只剩 yaw），不影响已标定的二维导航。
+* 碰撞阈值 0.38 m、MPC 权重、`optimization_clearance_margin` 全部未改。
+
+`colcon test --packages-select srm27_nav_bringup` 会同时跑该包的 lint 用例，其中两个失败
+**与本次改动无关且在本批之前就存在**：`copyright`（`launch/real_mapping_launch.py`、
+`launch/real_robot_state_publisher_launch.py` 缺版权声明）；`pep257`（全仓库中文 docstring 的
+D400/D415，`model_builder.py`、`navigation_launch.py` 等既有文件同样报）。新增文件的 docstring
+风格与包内既有脚本一致，未新增规则类型，也未改 lint 配置。
+
+### 6.8.5 本批未做
+
+1. **同坡道对照重跑**（由用户在仿真里执行）：固定地图/起终点/参数，对齐 `cmd_vel_sim`、真值位移、
+   底盘 IMU、`terrain_map`、`local_costmap`、原始局部路径、MINCO 曲线与拒绝坐标，判断"坡面误标"
+   与"MINCO 切近真实障碍"哪一个是主因。
+2. **终点短轨迹**（方案第三批）：末端无碰撞且满足停车条件时，把末端静止状态延拓覆盖剩余 MPC
+   窗口；**不**降低全局 `required_prefix_duration`，也**不**因 `terminal` 标志跳过制动/净空检查。
+3. 不换 MPC 模型、不调大加速度、不动轮地摩擦系数、不加电机扭矩模型。
+
 ## 7. 未完成项与后续阶段
 
 | 阶段 | 内容 | 状态 |
@@ -738,9 +867,10 @@ MPC **不控制航向**，机器人是**平移（含横移）沿路径走、机�
    但工作线程目前一律做完整（或热启动）优化，没有实现“保留安全前缀 + 只重规划后半段”的求解。
 3. **窄通道几何**：阶段一使用圆形 0.33 m 包络，`yaw_policy.narrow_track` 的净空阈值只是占位；
    把雷达移到大 yaw 后的活动外参适配（方案 §5.5）完全没有实施。
-4. **仿真/实车验证**：本记录中的所有“已实现”都只到“编译 + 单元测试”为止，
-   没有一条闭环轨迹在 Gazebo 或实车上跑过。P2 的验收场景（空场前进/横移/斜移/停止/抢占）
-   全部未执行。
+4. **仿真/实车验证**：Gazebo 仿真已跑过多轮（§6.1–§6.8 都是现场运行后的修复），但 P2 的验收场景
+   （空场前进/横移/斜移/停止/抢占）仍未逐项跑完；**实车一次都没跑过**。
+   MINCO YAML 里的加速度、制动减速度、延迟都是占位/仿真标定值（§6.8.1 的 `command_lookahead`
+   明确按仿真标定），上实车前必须按方案 §10 的 P5 重新辨识。
 5. **TF 无超时查询的日志噪声**：`StateAdapter` 在 `planning_frame != odom` 且变换不可用时会
    调用 tf2 的 `lookupTransform`（超时为 0，不会阻塞），tf2 自身会打印一条 ERROR 级
    “需要专用线程”提示。正常配置下 `planning_frame == odom`，不会走到这条路径；

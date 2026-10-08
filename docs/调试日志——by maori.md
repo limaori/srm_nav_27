@@ -425,4 +425,15 @@ script/start_sim_nav.sh -w srm_empty -m 227_1006
 -w参数是gazebo世界名 
 -m参数是地图名
 
-### 验证minco仿真
+# 2026-10-8
+### 两种局部规划器/控制器仿真测试
+##### 启动omnipid(空gzb世界+rmuc2025地图)
+```bash
+./script/start_sim_nav.sh -w srm_empty -m rmuc_2025
+```
+##### 启动minco+mpc(空gzb世界+rmuc2025地图)
+```bash
+./script/start_sim_nav.sh -w srm_empty -m rmuc_2025 \
+  -p /home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
+  --rotation-mode stop
+  ```
