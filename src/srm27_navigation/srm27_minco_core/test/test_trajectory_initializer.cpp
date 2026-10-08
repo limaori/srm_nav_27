@@ -26,6 +26,24 @@
 
 namespace minco = srm27_minco_core;
 
+TEST(TrajectoryInitializerTest, MovingTerminalRespectsSpeedAndReachability)
+{
+  minco::TrajectoryInitializer::Config config;
+  config.terminal_is_global_goal = false;
+  config.terminal_speed = 10.0;
+  minco::TrajectoryInitialGuess guess;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    {Eigen::Vector2d(0, 0), Eigen::Vector2d(0.02, 0)}, Eigen::Vector2d::Zero(), config, guess,
+    nullptr));
+  EXPECT_LE(guess.tail_velocity.norm(), config.max_speed);
+  EXPECT_LE(guess.tail_velocity.norm(), std::sqrt(2.0 * config.max_accel * 0.02) + 1.0e-9);
+  EXPECT_GT(guess.tail_velocity.x(), 0.0);
+  config.terminal_speed = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(minco::TrajectoryInitializer::initialize(
+    {Eigen::Vector2d(0, 0), Eigen::Vector2d(1, 0)}, Eigen::Vector2d::Zero(), config, guess,
+    nullptr));
+}
+
 namespace
 {
 

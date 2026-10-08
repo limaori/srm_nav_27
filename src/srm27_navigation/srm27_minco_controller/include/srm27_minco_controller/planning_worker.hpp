@@ -100,6 +100,8 @@ struct PlanningResult
   std::string status{"none"};
   /// \brief 失败原因或附加说明。
   std::string reason{};
+  std::string terminal_reason{"invalid"};
+  double terminal_speed{0.0};
   /// \brief 各阶段耗时（ms）。
   double esdf_time_ms{0.0};
   double frontend_time_ms{0.0};
@@ -172,15 +174,6 @@ private:
 
   /// \brief 执行一次规划（纯计算，不触碰 ROS 与锁）。
   static PlanningResult plan(const PlanningRequest & _request);
-
-  /// \brief 从全局/局部折线中截取局部可执行段（方案 §6.3 第一阶段）。
-  ///
-  /// 规则：从当前投影附近开始，按弧长累计到 `_horizon`，遇到地图外（距离场查询
-  /// 无效）立即截断，保证不会把规划段指向地图边界以外。
-  static std::vector<Eigen::Vector2d> extractLocalPath(
-    const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position, double _horizon,
-    const srm27_minco_core::Esdf2D & _esdf, bool _terminal_is_global_goal,
-    bool * _terminal_reached);
 
   std::thread thread_{};
   mutable std::mutex mutex_{};

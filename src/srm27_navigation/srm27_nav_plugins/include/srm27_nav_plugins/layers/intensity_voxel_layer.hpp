@@ -61,13 +61,17 @@ protected:
     double * max_x, double * max_y);
 
 private:
-  bool publish_voxel_;
+  bool publish_voxel_{false};
   rclcpp::Publisher<nav2_msgs::msg::VoxelGrid>::SharedPtr voxel_pub_;
   nav2_voxel_grid::VoxelGrid voxel_grid_;
-  double z_resolution_, origin_z_;
-  double min_obstacle_intensity_, max_obstacle_intensity_;
-  unsigned int unknown_threshold_, mark_threshold_, size_z_;
+  // ObstacleLayer::onInitialize() can call our virtual matchSize() before parameters load.
+  double z_resolution_{0.05}, origin_z_{0.0};
+  double min_obstacle_intensity_{0.1}, max_obstacle_intensity_{2.0};
+  unsigned int unknown_threshold_{15}, mark_threshold_{0}, size_z_{16};
   rclcpp::Clock::SharedPtr clock_;
+  bool has_previous_bounds_{false};
+  double previous_min_x_{0.0}, previous_min_y_{0.0};
+  double previous_max_x_{0.0}, previous_max_y_{0.0};
 
   inline bool worldToMap3DFloat(
     double wx, double wy, double wz, double & mx, double & my, double & mz)

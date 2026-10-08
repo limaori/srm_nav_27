@@ -48,6 +48,8 @@ TEST(DiagnosticsTest, ContainsAllRequiredMetricKeys)
 {
   srm27_minco_controller::ControllerDiagnostics diagnostics;
   diagnostics.planning_result = "success";
+  diagnostics.terminal_reason = "planning_horizon";
+  diagnostics.terminal_speed = 0.8;
   diagnostics.esdf_time_ms = 0.11;
   diagnostics.frontend_time_ms = 0.22;
   diagnostics.pre_time_ms = 1.0;
@@ -88,6 +90,8 @@ TEST(DiagnosticsTest, ContainsAllRequiredMetricKeys)
   EXPECT_EQ(array.header.frame_id, "odom");
   EXPECT_EQ(array.status.front().level, 0);
   EXPECT_EQ(array.status.front().message, "success");
+  EXPECT_EQ(valueOf(array, "terminal_reason"), "planning_horizon");
+  EXPECT_EQ(valueOf(array, "terminal_speed"), "0.8");
 
   // 方案 §11.3 列出的指标必须全部存在。
   const std::vector<std::string> required = {

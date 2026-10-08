@@ -414,7 +414,7 @@ controller_server:
       base_frame: base_link                             # 车体系（速度输出坐标系）
       odom_topic: odometry                              # 状态适配输入话题
       replan_frequency: 10.0                            # 后台重规划频率（Hz）
-      planning_horizon: 2.0                             # 局部路径截取视野（米）
+      planning_horizon: 3.0                             # 局部路径截取视野（米），与 8 m 局部地图配套
       planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）
       state_timeout: 0.10                               # 状态允许的最大年龄（秒）
       map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
@@ -470,7 +470,7 @@ controller_server:
         corner_speed_ratio: 0.35                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
-        terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
+        terminal_speed: 0.8                             # 仅视野截断且制动延伸已验证时保留；目标/地图/障碍边界停稳
 
       # 有效约束：与实车整条速度链对齐（实车 smoother max_velocity 1.5 / max_accel 3.0，
       # 串口 max_wz 1.0），并同步 srm_cmd_mux 的 vx_max/vy_max/v_max/wz_max。
@@ -536,8 +536,8 @@ local_costmap:
       global_frame: odom                                  # 局部地图坐标系
       robot_base_frame: base_link                   # 机器人坐标系
       rolling_window: true                                # 是否使用跟随机器人移动的窗口
-      width: 5                                             # 局部地图宽度（米）
-      height: 5                                            # 局部地图高度（米）
+      width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
+      height: 8                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
       robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层

@@ -479,6 +479,23 @@ TEST(TrackingReferenceBuilderTest, Build_TerminalTaperConvergesToZeroVelocity)
   EXPECT_NEAR(result.z_ref(1, kSteps - 1), trajectory.endPosition().y(), 1e-9);
 }
 
+TEST(TrackingReferenceBuilderTest, MapBoundaryStopUsesTerminalTaperWithoutBeingGoal)
+{
+  auto trajectory = makeStraightTrajectory(3, 2.0, 0.5);
+  trajectory.terminal_requires_stop = true;
+  ASSERT_FALSE(trajectory.terminal_is_global_goal);
+  srm27_minco_core::MpcModel model;
+  ASSERT_TRUE(model.configure(trackingModelConfig()));
+  TangentYawProvider provider;
+  srm27_minco_core::TrackingReferenceBuilder builder;
+  ASSERT_TRUE(builder.configure(trackingConfig()));
+  srm27_minco_core::TrackingReferenceResult result;
+  ASSERT_TRUE(builder.build(trajectory, makeState(2.9, 0), model, provider, result));
+  EXPECT_TRUE(result.near_terminal);
+  EXPECT_LT(result.u_ref.col(0).head<2>().norm(), 0.5);
+  EXPECT_NEAR(result.u_ref.col(kSteps - 1).head<2>().norm(), 0.0, 1.0e-12);
+}
+
 TEST(TrackingReferenceBuilderTest, Build_SecondPassMatchesFirstPassWhenAligned)
 {
   const srm27_minco_core::Trajectory2D trajectory = makeStraightTrajectory(3, 2.0, 0.5);

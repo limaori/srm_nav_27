@@ -252,7 +252,8 @@ bool TrackingReferenceBuilder::assemble(
   }
 
   const double total = _trajectory.totalDuration();
-  const bool terminal_stop = _trajectory.terminal_is_global_goal;
+  const bool terminal_stop =
+    _trajectory.terminal_is_global_goal || _trajectory.terminal_requires_stop;
   const double slowdown = config_.goal_slowdown_time;
 
   _result.z_ref = Eigen::MatrixXd::Zero(nz, steps);

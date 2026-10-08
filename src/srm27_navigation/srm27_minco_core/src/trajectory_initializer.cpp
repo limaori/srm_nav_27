@@ -142,7 +142,8 @@ bool TrajectoryInitializer::initialize(
     !_config.max_speed || _config.max_speed <= 0.0 || _config.max_accel <= 0.0 ||
     _config.max_brake <= 0.0 || _config.resample_step <= 0.0 || _config.min_piece_duration <= 0.0 ||
     _config.max_piece_duration < _config.min_piece_duration ||
-    _config.nominal_piece_duration <= 0.0 || !_head_velocity.allFinite()) {
+    _config.nominal_piece_duration <= 0.0 || !_head_velocity.allFinite() ||
+    !std::isfinite(_config.terminal_speed) || _config.terminal_speed < 0.0) {
     return fail("invalid initializer configuration or head velocity");
   }
 
@@ -196,8 +197,9 @@ bool TrajectoryInitializer::initialize(
       std::sqrt(speed[i - 1] * speed[i - 1] + 2.0 * _config.max_accel * segment_length[i - 1]);
     speed[i] = std::min(speed_limit[i], reachable);
   }
-  const double tail_speed =
-    _config.terminal_is_global_goal ? 0.0 : std::max(0.0, _config.terminal_speed);
+  const double tail_speed = _config.terminal_is_global_goal
+                              ? 0.0
+                              : std::clamp(_config.terminal_speed, 0.0, _config.max_speed);
   speed.back() = std::min(speed.back(), tail_speed);
   for (std::size_t i = sample_count - 1; i > 0; --i) {
     const double reachable =
@@ -287,7 +289,7 @@ bool TrajectoryInitializer::initialize(
   _guess.tail_position = points.back();
   _guess.tail_velocity = _config.terminal_is_global_goal
                            ? Eigen::Vector2d::Zero()
-                           : Eigen::Vector2d(tail_speed * tail_direction);
+                           : Eigen::Vector2d(speed.back() * tail_direction);
   _guess.tail_acceleration = Eigen::Vector2d::Zero();
   return true;
 }

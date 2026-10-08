@@ -280,8 +280,10 @@ bool TrajectoryValidator::checkCollision(
   step = std::max(step, 1.0e-4);
 
   bool collision_free = true;
-  for (double t = low; t < high + 1.0e-12; t += step) {
-    const double sample_time = std::min(t, high);
+  // Include the endpoint even when the duration is not an integer multiple of step.
+  const int sample_count = std::max(1, static_cast<int>(std::ceil((high - low) / step)));
+  for (int i = 0; i <= sample_count; ++i) {
+    const double sample_time = low + (high - low) * (static_cast<double>(i) / sample_count);
     const Eigen::Vector2d sample_position = _trajectory.positionAt(sample_time);
     const EsdfQueryResult query = _esdf.query(sample_position.x(), sample_position.y());
     if (!query.valid) {
@@ -407,6 +409,19 @@ bool TrajectoryValidator::validate(
     config_.reaction_latency + current_speed / config_.braking_deceleration;
   _report.required_prefix_duration =
     std::max(config_.required_prefix_duration, _report.required_stop_time);
+  // A short stopping trajectory can fill the remainder of the MPC window by holding
+  // its already collision-checked endpoint. Never extend a moving local endpoint, and
+  // still require the physical trajectory to cover the identified stopping time.
+  const bool terminal_stop =
+    _trajectory.terminal_is_global_goal || _trajectory.terminal_requires_stop;
+  const bool ends_at_rest =
+    _trajectory.endVelocity().norm() <= 1.0e-4 && _trajectory.endAcceleration().norm() <= 1.0e-4;
+  if (
+    terminal_stop && ends_at_rest &&
+    _trajectory.totalDuration() + 1.0e-6 >= _report.required_stop_time) {
+    _report.effective_prefix_duration =
+      std::max(_report.effective_prefix_duration, config_.required_prefix_duration);
+  }
   _report.coverage_ok =
     _report.effective_prefix_duration + 1.0e-6 >= _report.required_prefix_duration;
   if (!_report.coverage_ok) {
@@ -440,9 +455,9 @@ bool TrajectoryValidator::validate(
       return false;
     }
   }
-  if (_trajectory.terminal_is_global_goal && _trajectory.endVelocity().norm() > 0.05) {
+  if (terminal_stop && !ends_at_rest) {
     _report.timing_ok = false;
-    _report.reason = "global-goal trajectory does not end at rest";
+    _report.reason = "stopping trajectory does not end at rest";
     return false;
   }
 

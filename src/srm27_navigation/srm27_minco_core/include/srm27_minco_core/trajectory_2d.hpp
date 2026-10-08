@@ -157,6 +157,9 @@ public:
   double valid_until{0.0};
   /// \brief 终点是否为最终导航目标（否则只是局部终点）。
   bool terminal_is_global_goal{false};
+  /// \brief Map/obstacle boundaries also require stopping, without becoming navigation goals.
+  bool terminal_requires_stop{false};
+  std::string terminal_reason{"unspecified"};
   /// \brief 新轨迹切换/拼接时保留的旧轨迹前缀时长（s）。
   double committed_prefix_duration{0.0};
   /// \brief 净空采样。

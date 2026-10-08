@@ -825,6 +825,8 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
   diagnostics_.validation_time_ms = result.validation_time_ms;
   diagnostics_.planning_time_ms = result.total_time_ms;
   diagnostics_.planning_result = result.status;
+  diagnostics_.terminal_reason = result.terminal_reason;
+  diagnostics_.terminal_speed = result.terminal_speed;
   diagnostics_.minimum_clearance = result.min_clearance;
   diagnostics_.maximum_speed = result.max_speed;
   diagnostics_.maximum_acceleration = result.max_acceleration;
@@ -1024,6 +1026,8 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 6) 已提交轨迹在最新地图上的复验（版本变化或按固定周期）。
   auto trajectory = std::atomic_load(&trajectory_);
   if (trajectory) {
+    diagnostics_.terminal_reason = trajectory->terminal_reason;
+    diagnostics_.terminal_speed = trajectory->endVelocity().norm();
     diagnostics_.trajectory_age = std::max(0.0, now_stamp - trajectory->generated_stamp);
     // 复验节流：最多每 0.2 s（且不慢于重规划周期）在最新地图上完整复验一次。
     // 地图在这期间变化过也照样按该节流执行 —— 新轨迹由工作线程在最新地图上验证，

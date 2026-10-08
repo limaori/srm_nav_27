@@ -76,6 +76,8 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
 
   std::vector<diagnostic_msgs::msg::KeyValue> & values = status.values;
   addString(values, "planning_result", _diagnostics.planning_result);
+  addString(values, "terminal_reason", _diagnostics.terminal_reason);
+  addNumber(values, "terminal_speed", _diagnostics.terminal_speed);
   addNumber(values, "esdf_time_ms", _diagnostics.esdf_time_ms);
   addNumber(values, "frontend_time_ms", _diagnostics.frontend_time_ms);
   addNumber(values, "pre_time_ms", _diagnostics.pre_time_ms);

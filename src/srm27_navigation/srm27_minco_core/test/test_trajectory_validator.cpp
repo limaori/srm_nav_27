@@ -841,3 +841,71 @@ TEST(TrajectoryValidatorTest, Validate_RequiredStopTimeGrowsWithSpeed)
   EXPECT_FALSE(very_fast_report.coverage_ok);
   EXPECT_GT(very_fast_report.required_stop_time, trajectory.totalDuration());
 }
+
+TEST(TrajectoryValidatorTest, CollisionCheckIncludesFractionalLastSample)
+{
+  auto config = MakeConfig();
+  config.sample_dt = 0.1;
+  config.max_sample_spacing = 1.0;
+  config.max_linear_speed = 1.0;
+  minco::TrajectoryValidator validator;
+  ASSERT_TRUE(validator.configure(config));
+  const auto esdf = MakeWallEsdf(kStamp);
+  const auto trajectory = MakeConstantVelocityTrajectory(P(-0.72, 0), P(0.8, 0), 0.29);
+  ASSERT_GT(esdf.query(-0.56, 0).distance, config.robot_radius + config.clearance_margin);
+  ASSERT_LT(
+    esdf.query(trajectory.endPosition().x(), 0).distance,
+    config.robot_radius + config.clearance_margin);
+  double clearance = 0.0;
+  double violation = 0.0;
+  EXPECT_FALSE(validator.checkCollision(trajectory, esdf, 0, 0.29, clearance, violation));
+  EXPECT_NEAR(violation, 0.29, 1.0e-9);
+}
+
+TEST(TrajectoryValidatorTest, ShortStoppingTrajectoryHoldsEndpointForPredictionWindow)
+{
+  minco::TrajectoryValidator validator;
+  ASSERT_TRUE(validator.configure(MakeConfig()));
+  const auto esdf = MakeWallEsdf(kStamp);
+  for (bool global_goal : {false, true}) {
+    minco::Trajectory2D trajectory;
+    minco::Trajectory2D::Coefficients x{};
+    minco::Trajectory2D::Coefficients y{};
+    const double duration = 0.4;
+    const double distance = 0.005;
+    x[0] = -2.0;
+    y[0] = -3.0;
+    x[3] = 10 * distance / std::pow(duration, 3);
+    x[4] = -15 * distance / std::pow(duration, 4);
+    x[5] = 6 * distance / std::pow(duration, 5);
+    ASSERT_TRUE(trajectory.addPiece(x, y, duration));
+    trajectory.generated_stamp = kStamp;
+    trajectory.terminal_is_global_goal = global_goal;
+    trajectory.terminal_requires_stop = !global_goal;
+    minco::TrajectoryValidationReport report;
+    EXPECT_TRUE(validator.validate(trajectory, esdf, MakeState(-2, -3, 0), kStamp, report))
+      << report.reason;
+    EXPECT_NEAR(report.effective_prefix_duration, 0.6, 1.0e-9);
+    EXPECT_TRUE(report.coverage_ok);
+    // A stationary tail is not permission to ignore the current physical braking time.
+    EXPECT_FALSE(validator.validate(trajectory, esdf, MakeState(-2, -3, 0.2), kStamp, report));
+    EXPECT_FALSE(report.coverage_ok);
+  }
+}
+
+TEST(TrajectoryValidatorTest, MovingHorizonCannotUseStationaryTailCoverage)
+{
+  minco::TrajectoryValidator validator;
+  ASSERT_TRUE(validator.configure(MakeConfig()));
+  auto trajectory = MakeConstantVelocityTrajectory(P(-2, -3), P(0.02, 0), 0.4);
+  trajectory.generated_stamp = kStamp;
+  minco::TrajectoryValidationReport report;
+  EXPECT_FALSE(
+    validator.validate(trajectory, MakeWallEsdf(kStamp), MakeState(-2, -3, 0), kStamp, report));
+  EXPECT_FALSE(report.coverage_ok);
+  // Merely setting a stop flag must not manufacture a stationary endpoint.
+  trajectory.terminal_requires_stop = true;
+  EXPECT_FALSE(
+    validator.validate(trajectory, MakeWallEsdf(kStamp), MakeState(-2, -3, 0), kStamp, report));
+  EXPECT_FALSE(report.coverage_ok);
+}

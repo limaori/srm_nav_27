@@ -12,6 +12,7 @@ ament_auto_find_build_dependencies()
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/costmap_adapter.cpp
   src/diagnostics.cpp
+  src/local_path.cpp
   src/minco_mpc_controller.cpp
   src/planning_worker.cpp
   src/state_adapter.cpp
@@ -36,6 +37,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_yaw_policy ${PROJECT_NAME})
   ament_add_gtest(test_diagnostics test/test_diagnostics.cpp)
   target_link_libraries(test_diagnostics ${PROJECT_NAME})
+  ament_add_gtest(test_local_path test/test_local_path.cpp)
+  target_link_libraries(test_local_path ${PROJECT_NAME})
+  ament_add_gtest(test_planning_worker test/test_planning_worker.cpp)
+  target_link_libraries(test_planning_worker ${PROJECT_NAME})
   # 状态适配层需要真实节点/话题/TF，属于集成测试但仍不依赖 Gazebo。
   ament_add_gtest(test_state_adapter test/test_state_adapter.cpp)
   target_link_libraries(test_state_adapter ${PROJECT_NAME})

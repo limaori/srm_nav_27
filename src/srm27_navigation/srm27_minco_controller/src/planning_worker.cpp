@@ -20,6 +20,7 @@
 #include <limits>
 #include <sstream>
 
+#include "srm27_minco_controller/local_path.hpp"
 #include "srm27_minco_core/kinematics.hpp"
 
 namespace srm27_minco_controller
@@ -36,9 +37,6 @@ double steadyNow()
            .count() *
          1.0e-9;
 }
-
-/// \brief 弧长重采样上限，防止异常长的输入路径拖长前端耗时。
-constexpr double kMaxLocalPathLength = 20.0;
 
 }  // namespace
 
@@ -147,93 +145,6 @@ void PlanningWorker::run()
   }
 }
 
-std::vector<Eigen::Vector2d> PlanningWorker::extractLocalPath(
-  const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position, double _horizon,
-  const srm27_minco_core::Esdf2D & _esdf, bool _terminal_is_global_goal, bool * _terminal_reached)
-{
-  std::vector<Eigen::Vector2d> local;
-  if (_terminal_reached != nullptr) {
-    *_terminal_reached = false;
-  }
-  if (_path.size() < 2 || !_position.allFinite() || !(_horizon > 0.0)) {
-    return local;
-  }
-
-  // 1) 找到距当前位置最近的路点作为局部起点。
-  std::size_t nearest = 0;
-  double nearest_distance = std::numeric_limits<double>::infinity();
-  for (std::size_t i = 0; i < _path.size(); ++i) {
-    const double distance = (_path[i] - _position).squaredNorm();
-    if (distance < nearest_distance) {
-      nearest_distance = distance;
-      nearest = i;
-    }
-  }
-
-  // 2) 以当前位置为起点，沿路径向前累计弧长。
-  local.push_back(_position);
-  double accumulated = 0.0;
-  bool truncated_by_map = false;
-  bool truncated_by_length = false;
-  for (std::size_t i = nearest + 1; i < _path.size(); ++i) {
-    const Eigen::Vector2d & point = _path[i];
-    if (!point.allFinite()) {
-      break;
-    }
-    const double segment = (point - local.back()).norm();
-    if (segment < 1.0e-6) {
-      continue;
-    }
-    if (accumulated + segment > _horizon || accumulated > kMaxLocalPathLength) {
-      // 在超出视野的线段上按剩余长度插值出局部终点。
-      const double remaining = std::max(0.0, _horizon - accumulated);
-      if (remaining > 1.0e-3) {
-        const Eigen::Vector2d direction = (point - local.back()) / segment;
-        local.push_back(local.back() + direction * remaining);
-      }
-      truncated_by_length = true;
-      break;
-    }
-    // 3) 走出地图有效区域前必须能停下：直接截断。
-    const srm27_minco_core::EsdfQueryResult query = _esdf.query(point.x(), point.y());
-    if (!query.valid) {
-      truncated_by_map = true;
-      break;
-    }
-    local.push_back(point);
-    accumulated += segment;
-  }
-
-  // 兜底：最近点已经是路径最后一个点（或剩余点都被地图边界截断）时，上面的循环一个点都
-  // 加不进来，局部路径会退化成"只有当前位置"→ 被判为空 → 终点附近永远生不出减速/停止轨迹
-  // （现场表现为 9 次 `no_path: local path is empty after clipping`）。
-  // 这里至少补上路径终点，让终点附近仍有一条"当前位置 -> 终点"的短路径可用。
-  if (local.size() < 2) {
-    const Eigen::Vector2d & path_end = _path.back();
-    const double remaining_distance = (path_end - _position).norm();
-    if (remaining_distance > 1.0e-3) {
-      const srm27_minco_core::EsdfQueryResult end_query = _esdf.query(path_end.x(), path_end.y());
-      if (end_query.valid) {
-        local.push_back(path_end);
-      }
-    }
-  }
-
-  if (local.size() < 2) {
-    // 真的没有可走的局部路径：位置已经落在路径终点上（或终点在地图外），返回空。
-    // 调用方据此按"已在终点"处理，而不是报一个笼统的 no_path。
-    local.clear();
-    return local;
-  }
-  if (_terminal_reached != nullptr) {
-    const bool reached_global_end = (local.back() - _path.back()).norm() < 0.05;
-    (void)truncated_by_length;
-    (void)truncated_by_map;
-    *_terminal_reached = _terminal_is_global_goal && reached_global_end;
-  }
-  return local;
-}
-
 PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 {
   using srm27_minco_core::MincoOptimizer;
@@ -257,20 +168,33 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 
   // 1) 局部路径裁剪。
   const double frontend_begin = steadyNow();
-  bool terminal_reached = false;
-  const std::vector<Eigen::Vector2d> local_path = extractLocalPath(
-    _request.path, _request.state.position(), _request.local_path_horizon, *_request.esdf,
-    _request.terminal_is_global_goal, &terminal_reached);
+  LocalPathConfig path_config;
+  path_config.horizon = _request.local_path_horizon;
+  path_config.required_clearance =
+    _request.validator_config.robot_radius + _request.validator_config.clearance_margin;
+  path_config.terminal_speed = _request.initializer_config.terminal_speed;
+  path_config.max_speed = _request.limits.max_linear_speed;
+  path_config.braking_deceleration = _request.validator_config.braking_deceleration;
+  path_config.reaction_latency = _request.validator_config.reaction_latency;
+  const LocalPathResult clipped = extractLocalPath(
+    _request.path, _request.state.position(), *_request.esdf, path_config,
+    _request.terminal_is_global_goal);
+  const auto & local_path = clipped.points;
+  const bool terminal_reached = clipped.end == LocalPathEnd::kGlobalGoal;
+  result.local_path = local_path;
+  result.terminal_reason = toString(clipped.end);
+  result.terminal_speed = clipped.terminal_speed;
   if (local_path.size() < 2) {
     // 走到这里说明"当前位置已经就是路径终点"或"终点在地图外"。
     // 前者不该报错：由目标检查器和控制器一起完成停车，重复报 no_path 只会制造噪声，
     // 并被上层误判成规划失败。
-    const double distance_to_end = (_request.path.back() - _request.state.position()).norm();
-    result.status =
-      (distance_to_end <= _request.terminal_reached_radius) ? "already_at_goal" : "no_path";
-    result.reason = (distance_to_end <= _request.terminal_reached_radius)
-                      ? "robot is already at the path end"
-                      : "local path is empty after clipping";
+    const double distance_to_end = _request.path.empty()
+                                     ? std::numeric_limits<double>::infinity()
+                                     : (_request.path.back() - _request.state.position()).norm();
+    const bool at_goal = terminal_reached && distance_to_end <= _request.terminal_reached_radius;
+    result.status = at_goal ? "already_at_goal" : "no_path";
+    result.reason = at_goal ? "robot is already at the path end"
+                            : "local path is empty after clipping: " + result.terminal_reason;
     result.frontend_time_ms = (steadyNow() - frontend_begin) * 1.0e3;
     result.local_path = local_path;
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
@@ -281,8 +205,10 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   TrajectoryInitializer::Config initializer_config = _request.initializer_config;
   initializer_config.max_speed = _request.limits.max_linear_speed;
   initializer_config.max_accel = _request.limits.max_linear_accel;
-  initializer_config.max_brake = _request.limits.max_linear_accel;
+  initializer_config.max_brake =
+    std::min(_request.limits.max_linear_accel, _request.validator_config.braking_deceleration);
   initializer_config.terminal_is_global_goal = terminal_reached;
+  initializer_config.terminal_speed = clipped.terminal_speed;
 
   TrajectoryInitialGuess guess;
   std::string reason;
@@ -294,6 +220,7 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
     return result;
   }
+  result.terminal_speed = guess.tail_velocity.norm();
   result.frontend_time_ms = (steadyNow() - frontend_begin) * 1.0e3;
 
   // 3) MINCO 优化（PRE / FINELY 两阶段）。
@@ -378,6 +305,8 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   // 就被判死（表现为 validation_failed 且说不出具体原因）。
   trajectory.valid_until = _request.request_stamp + _request.validity_window;
   trajectory.terminal_is_global_goal = terminal_reached;
+  trajectory.terminal_requires_stop = result.terminal_speed <= 1.0e-6;
+  trajectory.terminal_reason = result.terminal_reason;
 
   const double validation_begin = steadyNow();
   TrajectoryValidationReport report;
@@ -395,7 +324,8 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     // 这里带上首次违例的时间与位置（odom 下）以及关键数值，便于直接定位。
     std::ostringstream detail;
     detail.precision(4);
-    detail << report.reason;
+    detail << report.reason << " | terminal=" << result.terminal_reason
+           << " terminal_speed=" << result.terminal_speed;
     const double total = trajectory.totalDuration();
     if (report.first_violation_time > 0.0 && report.first_violation_time < total) {
       const Eigen::Vector2d violation_position = trajectory.positionAt(report.first_violation_time);

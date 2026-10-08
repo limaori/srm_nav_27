@@ -32,6 +32,8 @@ struct ControllerDiagnostics
 {
   // 规划阶段
   std::string planning_result{"idle"};
+  std::string terminal_reason{"none"};
+  double terminal_speed{0.0};
   double esdf_time_ms{0.0};
   double frontend_time_ms{0.0};
   double pre_time_ms{0.0};

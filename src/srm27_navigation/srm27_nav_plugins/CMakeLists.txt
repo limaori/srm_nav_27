@@ -27,6 +27,11 @@ if(BUILD_TESTING)
   set(ament_cmake_clang_tidy_CONFIG_FILE "${CMAKE_SOURCE_DIR}/.clang-tidy")
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_intensity_voxel_layer test/test_intensity_voxel_layer.cpp)
+  target_link_libraries(test_intensity_voxel_layer srm27_costmap_layers)
+  set_tests_properties(test_intensity_voxel_layer PROPERTIES ENVIRONMENT
+    "ROS_HOME=${CMAKE_BINARY_DIR}/ros_home;ROS_LOG_DIR=${CMAKE_BINARY_DIR}/ros_home/log")
 endif()
 
 pluginlib_export_plugin_description_file(nav2_core behavior_plugin.xml)
