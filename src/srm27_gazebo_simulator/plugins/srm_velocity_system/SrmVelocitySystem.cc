@@ -348,14 +348,19 @@ void SrmVelocitySystemPrivate::UpdateOdometry(
   msg.mutable_pose()->mutable_position()->set_x(chassisPose.X());
   msg.mutable_pose()->mutable_position()->set_y(chassisPose.Y());
   msg.mutable_pose()->mutable_position()->set_z(chassisPose.Z());
-  ignition::msgs::Set(
-      msg.mutable_pose()->mutable_orientation(),
-      ignition::math::Quaterniond(0.0, 0.0, chassisPose.Yaw()));
+  // 真值位姿保留**完整三维姿态**（含 roll/pitch），不再压成只有 yaw：
+  // 下游真值里程计适配器要用完整底盘位姿组合雷达外参、变换点云并喂给地形分析，
+  // 只发 yaw 会让上坡时的雷达位姿失真（实测 pitch 约 -9°，车前方 1 m 的点高度
+  // 误差约 0.2 m）。二维导航需要的 x/y/yaw 由状态适配层显式提取，不在这一层压平。
+  ignition::msgs::Set(msg.mutable_pose()->mutable_orientation(), chassisPose.Rot());
 
-  // Link 坐标系的真实执行速度，供"实际运动速度"与指令对照。
+  // Link 坐标系的真实执行速度，供"实际运动速度"与指令对照；角速度同样保留三维，
+  // 便于事后判断爬坡时的俯仰/横滚角速度是真实存在还是链路误差。
   msg.mutable_twist()->mutable_linear()->set_x(linearVel.X());
   msg.mutable_twist()->mutable_linear()->set_y(linearVel.Y());
   msg.mutable_twist()->mutable_linear()->set_z(linearVel.Z());
+  msg.mutable_twist()->mutable_angular()->set_x(angularVel.X());
+  msg.mutable_twist()->mutable_angular()->set_y(angularVel.Y());
   msg.mutable_twist()->mutable_angular()->set_z(angularVel.Z());
 
   msg.mutable_header()->mutable_stamp()->CopyFrom(
