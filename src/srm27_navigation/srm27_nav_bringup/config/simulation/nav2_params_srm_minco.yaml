@@ -8,9 +8,12 @@
 #   * 阶段一 yaw_policy.mode = xy_only：MPC 只控平移（angular.z 参考恒为 0，且角速度
 #     上下限为 0），自转仍由独立自转链路 srm_cmd_mux + rotation_controller 负责；
 #     此阶段不宣称已完成 SE(2) 控制。
-#   * 平移合速度上限 0.5 m/s（用户指定的测试起点），后续按 0.75 -> 1.0 m/s 逐级提升，
-#     提速时必须同步 srm27_chassis_control/config/srm_chassis_control.yaml 的
-#     vx_max/vy_max/v_max 与 velocity_smoother 的上下界。
+#   * 平移合速度上限 3.0 m/s（当前仿真提速档，2026-10-09 由 1.5 提升）。三处必须同步：
+#     本文件 FollowPath.limits.max_linear_speed、velocity_smoother 的上下界、
+#     srm27_chassis_control/config/srm_chassis_control.yaml 的 vx_max/vy_max/v_max。
+#     任何一处留低，最终执行速度都会被它钳住。
+#   * 加速度上限仍为 3.0 m/s²：3.0 m/s 下 0→满速约需 1.0 s、制动距离约 1.5 m，
+#     落在 planning_horizon 3.0 m 与 8 m 局部地图内。
 #   * 加速度/角速度仍是联调建议值，不能当作已辨识的制动能力；TrajectoryValidator 的
 #     制动减速度参数必须来自实车辨识。
 #   * nav2_params_srm.yaml（Omni）保留为迁移期 A/B 对照与回退配置。
@@ -472,11 +475,12 @@ controller_server:
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.8                             # 仅视野截断且制动延伸已验证时保留；目标/地图/障碍边界停稳
 
-      # 有效约束：与实车整条速度链对齐（实车 smoother max_velocity 1.5 / max_accel 3.0，
-      # 串口 max_wz 1.0），并同步 srm_cmd_mux 的 vx_max/vy_max/v_max/wz_max。
+      # 有效约束：仿真提速档 3.0 m/s，已同步 velocity_smoother 上下界与 srm_cmd_mux 的
+      # vx_max/vy_max/v_max；实车链路仍按 smoother max_velocity 1.5 / max_accel 3.0、
+      # 串口 max_wz 1.0 执行，本文件不代表实车限速。
       # 阶段一 yaw_policy.mode = xy_only，MPC 的角速度权限实际为 0，max_angular_* 只对未来模式生效。
       limits:                                           # 有效约束（必须与 mux/smoother 一致）
-        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
+        max_linear_speed: 3.00                          # 平移合速度上限（米/秒）
         max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
         max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
         max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
@@ -711,10 +715,11 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 与实车 velocity_smoother 完全一致（实车 yaw 钳 0；阶段一导航命令 wz 本来也为 0，
-    # 自转走 rotation_velocity 独立链路、不经 smoother）。
-    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
+    # 仿真提速档：平移上限 3.0 m/s，与 FollowPath.limits.max_linear_speed 及 srm_cmd_mux
+    # 的 vx_max/vy_max/v_max 保持一致。yaw 仍钳 0（阶段一导航命令 wz 本来也为 0，
+    # 自转走 rotation_velocity 独立链路、不经 smoother）；实车 smoother 仍为 1.5。
+    max_velocity: [3.0, 3.0, 0.0]                          # 最大速度[x,y,yaw]
+    min_velocity: [-3.0, -3.0, 0.0]                        # 最小速度[x,y,yaw]
     max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
     max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
     odom_topic: "odometry"                                # 里程计反馈话题
