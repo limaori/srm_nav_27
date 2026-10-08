@@ -9,8 +9,8 @@ srm27_nav_protocol:
     # (默认值与 srm27_nav_protocol/config/srm27_nav_protocol.yaml 保持一致)
     send_rate_hz: 100.0
     cmd_timeout_sec: 0.5
-    max_vx: 0.5
-    max_vy: 0.5
+    max_vx: 2.5
+    max_vy: 2.5
     max_wz: 1.0
     debug_print_hex: false
     set_detector_color: true

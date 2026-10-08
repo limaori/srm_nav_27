@@ -30,6 +30,7 @@
 #include "srm27_minco_core/smooth_cost.hpp"
 #include "srm27_minco_core/trajectory_2d.hpp"
 #include "srm27_minco_core/trajectory_initializer.hpp"
+#include "srm27_minco_core/trajectory_validator.hpp"
 #include "srm27_minco_core/types.hpp"
 
 using srm27_minco_core::CellState;
@@ -1076,6 +1077,95 @@ TEST(MincoOptimizerWarmStart, OptimizeSucceedsWithWarmStart)
 // ---------------------------------------------------------------------------
 // 5) evaluateObjective 的输入校验
 // ---------------------------------------------------------------------------
+
+/// \brief `rescaleDurations` 的回归测试：确定性时间拉伸修复。
+///
+/// 现场背景：MINCO 的速度/加速度是软约束，最优点可能轻微越过硬上限，而验证器按硬上限
+/// 判定 —— 越限即整条丢弃，机器人会完全不动。修复手段是“同一组路标点与首末边界条件、
+/// 段时长整体放大 k”，因此必须验证：边界 p/v/a 不变、经过点不变、速度约降为 1/k、
+/// 加速度约降为 1/k²，且非法入参被拒绝。
+TEST(MincoOptimizerRescale, PreservesBoundariesAndReducesExtrema)
+{
+  MincoOptimizer optimizer;
+  srm27_minco_core::MincoOptimizerConfig config;
+  config.two_stage = false;
+  config.w_time_ratio = 0.0;
+  std::string reason;
+  ASSERT_TRUE(optimizer.configure(config, &reason)) << reason;
+
+  const TrajectoryInitialGuess guess = makeStraightGuess(1.0);
+  Limits2D limits;
+  limits.max_linear_speed = 0.5;
+  limits.max_linear_accel = 0.3;
+
+  MincoOptimizeResult result;
+  ASSERT_TRUE(optimizer.optimize(guess, limits, result));
+  ASSERT_EQ(result.status, SolveStatus::kSuccess) << result.message;
+
+  srm27_minco_core::TrajectoryValidator validator;
+  srm27_minco_core::TrajectoryValidatorConfig validator_config;
+  validator_config.robot_radius = config.robot_radius;
+  validator_config.clearance_margin = config.clearance_margin;
+  validator_config.max_linear_speed = limits.max_linear_speed;
+  validator_config.max_linear_accel = limits.max_linear_accel;
+  ASSERT_TRUE(validator.configure(validator_config, &reason)) << reason;
+
+  const Trajectory2D & original = result.trajectory;
+  double speed_before = 0.0;
+  double accel_before = 0.0;
+  ASSERT_TRUE(validator.computeExtrema(original, speed_before, accel_before));
+
+  const double scale = 1.5;
+  Trajectory2D repaired;
+  ASSERT_TRUE(optimizer.rescaleDurations(original, scale, repaired));
+
+  // 段数与时长：整体放大 k。
+  ASSERT_EQ(repaired.pieceCount(), original.pieceCount());
+  EXPECT_NEAR(repaired.totalDuration(), original.totalDuration() * scale, 1e-9);
+  for (int i = 0; i < repaired.pieceCount(); ++i) {
+    EXPECT_NEAR(
+      repaired.durations()[static_cast<std::size_t>(i)],
+      original.durations()[static_cast<std::size_t>(i)] * scale, 1e-9);
+  }
+
+  // 首末 p/v/a 保持不变：修复不能改变边界条件。
+  EXPECT_NEAR((repaired.startPosition() - original.startPosition()).norm(), 0.0, 1e-9);
+  EXPECT_NEAR((repaired.endPosition() - original.endPosition()).norm(), 0.0, 1e-9);
+  EXPECT_NEAR((repaired.startVelocity() - original.startVelocity()).norm(), 0.0, 1e-9);
+  EXPECT_NEAR((repaired.endVelocity() - original.endVelocity()).norm(), 0.0, 1e-9);
+  EXPECT_NEAR((repaired.startAcceleration() - original.startAcceleration()).norm(), 0.0, 1e-9);
+  EXPECT_NEAR((repaired.endAcceleration() - original.endAcceleration()).norm(), 0.0, 1e-9);
+
+  // 经过点保持不变（MINCO 语义）。
+  double accumulated = 0.0;
+  for (int i = 0; i + 1 < original.pieceCount(); ++i) {
+    accumulated += original.durations()[static_cast<std::size_t>(i)];
+    const Eigen::Vector2d before = original.positionAt(accumulated);
+    double accumulated_repaired = 0.0;
+    for (int j = 0; j <= i; ++j) {
+      accumulated_repaired += repaired.durations()[static_cast<std::size_t>(j)];
+    }
+    const Eigen::Vector2d after = repaired.positionAt(accumulated_repaired);
+    EXPECT_NEAR((after - before).norm(), 0.0, 1e-9) << "经过点 i=" << i;
+  }
+
+  // 极值下降：速度约 1/k，加速度约 1/k²（几何略有变化，故只断言方向与量级）。
+  double speed_after = 0.0;
+  double accel_after = 0.0;
+  ASSERT_TRUE(validator.computeExtrema(repaired, speed_after, accel_after));
+  EXPECT_LT(speed_after, speed_before);
+  EXPECT_LT(accel_after, accel_before);
+  EXPECT_NEAR(speed_after, speed_before / scale, 0.25 * speed_before / scale);
+  EXPECT_NEAR(accel_after, accel_before / (scale * scale), 0.4 * accel_before / (scale * scale));
+
+  // 修复后的轨迹仍必须是自洽的。
+  EXPECT_TRUE(repaired.sanityCheck(&reason)) << reason;
+
+  // 非法入参：缩水（<1）与空轨迹都必须被拒绝。
+  Trajectory2D rejected;
+  EXPECT_FALSE(optimizer.rescaleDurations(original, 0.5, rejected));
+  EXPECT_FALSE(optimizer.rescaleDurations(Trajectory2D(), 1.5, rejected));
+}
 
 TEST(MincoOptimizerObjective, RejectsNonFiniteInputs)
 {

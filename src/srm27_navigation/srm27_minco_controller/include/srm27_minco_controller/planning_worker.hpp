@@ -50,6 +50,14 @@ struct PlanningRequest
   srm27_minco_core::MincoOptimizerConfig minco_config{};
   /// \brief 前端配置快照。
   srm27_minco_core::TrajectoryInitializer::Config initializer_config{};
+  /// \brief 轨迹校验器配置快照。
+  ///
+  /// **必须由控制器与自身 `validator_` 用同一份配置填入**：发布前验证和控制周期内的
+  /// 复验用的是同一套阈值，否则会出现"工作线程认为通过、控制线程复验判死"或反之。
+  /// 早期版本在这里用 core 默认值（制动减速度 0.3 m/s²），于是要求的安全前缀
+  /// = 0.1 + 1.5/0.3 = 5.1 s，比任何 2 m 局部轨迹都长，导致每条候选轨迹都被拒
+  /// （现场表现为车被 recovery 反复拖来拖去）。
+  srm27_minco_core::TrajectoryValidatorConfig validator_config{};
   /// \brief 局部终点是否就是全局导航目标。
   bool terminal_is_global_goal{true};
   /// \brief 请求时的 ROS 时间（秒）。
@@ -60,6 +68,11 @@ struct PlanningRequest
   double local_path_horizon{2.0};
   /// \brief 产出轨迹的有效期（s）：`valid_until = request_stamp + validity_window`。
   double validity_window{1.0};
+  /// \brief 判定"已经到达路径终点"的距离半径（m）。
+  ///
+  /// 与 Nav2 目标检查器的 `xy_goal_tolerance` 同量级：机器人落在该半径内时，
+  /// 局部路径为空是正常情况（已经到点），不应被当成规划失败反复告警。
+  double terminal_reached_radius{0.20};
   /// \brief 地图/距离场快照（由控制线程在锁内复制后建立，工作线程只读）。
   std::shared_ptr<const srm27_minco_core::Esdf2D> esdf{};
   /// \brief 是否使用热启动初值。
@@ -96,12 +109,22 @@ struct PlanningResult
   double total_time_ms{0.0};
   /// \brief 优化迭代次数。
   int iterations{0};
+  /// \brief 因软约束轻微越限而触发的确定性时间拉伸修复次数。
+  int speed_repair_count{0};
+  /// \brief 累计时间拉伸倍数（1 表示未修复）。速度按 1/倍数、加速度按 1/倍数² 下降。
+  double time_scale{1.0};
   /// \brief 优化后的最小净空与最大速度/加速度。
   double min_clearance{0.0};
   double max_speed{0.0};
   double max_acceleration{0.0};
   /// \brief 端到端时延：从请求到结果产出（ms）。
   double latency_ms{0.0};
+
+  /// \brief 本次规划实际使用的局部参考折线（规划坐标系，m）。
+  ///
+  /// 用于诊断"车不沿全局红线走"：把它和全局路径、MINCO 曲线一起在 RViz 里对比，
+  /// 就能分清是"规划器拿到的局部路径就不对（抓取/坐标系问题）"还是"轨迹对但跟踪不上"。
+  std::vector<Eigen::Vector2d> local_path{};
 };
 
 /// \brief 后台规划线程：MINCO 前端 + 优化 + 独立验证。

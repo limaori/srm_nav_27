@@ -553,6 +553,173 @@ required = reaction_latency + v / a_brake = 0.1 + 1.5 / 0.3 = 5.1 s
 
 因此这次没有调整障碍权重——障碍项本身够强，问题完全在验证阈值上。
 
+## 6.6 第五轮：按现场取证修复恢复逻辑与感知链路
+
+现场报告（20:53:45 `Goal failed`；7 条轨迹校验碰撞告警 → 121 次控制中止 / 115 次清图 /
+5 次脱困；脱困成功后 FollowPath 约 1 ms 再次失败）。逐条核对源码后确认并修复：
+
+### 6.6.1 恢复/重试沿用已超时的建轨计时（已修复）
+
+`invalidateTrajectory()` 里对宽限计时的处理是：
+
+```cpp
+if (map_version_ == 0) { build_start_stamp_ = -1.0; }
+else if (build_start_stamp_ < 0.0) { build_start_stamp_ = _now_stamp; }
+```
+
+地图建好之后就**再也不会清零**。于是：一次失败把 `build_start_stamp_` 设为 t0 →
+1 s 后抛异常 → BT 脱困 → 同一个目标重新下发 FollowPath（终点未变，被判为"路径刷新"，
+连 `invalidateTrajectory` 都不会调用）→ 下一拍 `now - t0` 早已大于 1 s → **立刻再次抛异常**，
+BT 陷入 recovery 循环。这正是报告里"约 1 ms 就再次失败"的机制。
+
+修复（两处）：
+
+* `invalidateTrajectory()`：无条件 `build_start_stamp_ = -1.0`（该函数本身代表一次新的建轨尝试）；
+* `fail()` 抛异常**之前**清零：本次 FollowPath 就此结束，下一次调用属于新尝试，应重新获得完整宽限。
+
+### 6.6.2 地形感知链路：QoS 不兼容 + 坐标系错误（已修复）
+
+发布端自己的日志给出了铁证：
+
+```text
+[WARN] ign_sim_pointcloud_tool: New subscription discovered on topic
+       '/red_standard_robot1/velodyne_points', requesting incompatible QoS.
+       No messages will be sent to it. Last incompatible policy: RELIABILITY_QOS_POLICY
+```
+
+在线端点也一致：`velodyne_points` 的发布端是 **BEST_EFFORT**（`ign_sim_pointcloud_tool`
+用 `rclcpp::SensorDataQoS()`），而 `terrain_analysis` / `terrain_analysis_ext` 用默认的
+**RELIABLE** 订阅 → 不兼容、完全收不到点云。
+
+**QoS 修复**：两个地形节点的点云订阅改为 `rclcpp::SensorDataQoS()`。这样既与 BEST_EFFORT
+发布端兼容，也与 RELIABLE 发布端兼容（实车 LIO 走 RELIABLE），无需再改发布端。
+
+**坐标系修复**：`terrain_analysis` 的约定是"点云在 odom、用 `lidar_odometry` 的雷达位姿
+逐点相减"（`point.x - vehicleX`，输出 `terrain_map` 的 `frame_id = "odom"`）。而仿真的
+`velodyne_points` 是**雷达系**，直接喂进去会把雷达系坐标当 odom 用，生成错误地形图。
+修复分两步：
+
+1. `sensor_scan_generation` 的输出统一为 **odom 表达**：输入已是 odom（实车的
+   `registered_scan`）直接透传；输入是雷达系（仿真的 `velodyne_points`）用**同一采样时刻、
+   未经 `suppressJitter` 过滤**的雷达位姿变换到 odom；其它坐标系按采样时刻查 TF，查不到就
+   跳过本次发布（不使用单位变换伪装）。
+2. `navigation_launch.py` 中两个地形节点的输入从 `velodyne_points` 改为 `sensor_scan`
+   （非组合与组合两条路径都改；`sensor_scan_generation` 自己的订阅仍保持 `velodyne_points`）。
+
+顺带说明：`suppressJitter` 只服务于 RViz 显示，不能污染后端的几何——这也是"用未过滤位姿做变换"
+的原因。
+
+### 6.6.3 轨迹校验失败改为可定位（已改进）
+
+原先只报一句 `trajectory collides with the raw obstacle set`。现在失败原因会带上
+首次违例的时间与位置以及关键数值，例如：
+
+```text
+trajectory collides with the raw obstacle set | t=1.2400s/ 2.5900s pos=(1.31, -0.42)
+| 最小净空=0.2810m 需要=0.3800m 有效前缀=2.5900s 需要=0.6000s 最大速度=1.4312 最大加速度=1.7204
+```
+
+这样复跑时可以直接在 RViz 里对照该点判断是"地图把某处标成了障碍"还是"优化器没绕开"，
+不必再靠猜。
+
+### 6.6.4 关于其余现象
+
+* `Goal failed` 的直接原因很可能是"感知链路断了 ⇒ 局部代价地图没有障碍 ⇒ MINCO 在空白图上
+  规划 ⇒ 候选轨迹被独立验证判定会撞上原始障碍"。6.6.2 修好后应显著减少；**但必须复跑确认**，
+  本次没有运行仿真，不能声称已解决。
+* QP 超预算（最高 10.43 ms）属性能门槛告警，解仍被采用（§6.2 已说明），不是导航失败的首要证据。
+* RViz 丢帧与扫描里程计间隔告警同样不是首要证据。
+
+## 6.7 第六轮：按现场取证修四类问题
+
+现场报告（controller_server 日志 `controller_server_19301_1791381093930.log`）：
+40 次"净空 0.3737~0.3798 m 对 required 0.38 m"的碰撞拒绝、9 次
+`no_path: local path is empty after clipping`、运行中 mux 为 `v_max=0.5 / wz_max=2.0`
+（源码期望 1.5 / 1.0）、QP 最高 15.6 ms 与 22 次 50 Hz 控制超时。
+
+### 6.7.1 净空只差几毫米就被判碰撞（已修复）
+
+优化器对障碍是**软约束**，最优点会停在安全距离附近；而验证器按
+`robot_radius + clearance_margin = 0.38 m` **硬判**。两者取同一个值时，最优解经常落在阈值
+下方几毫米（实测 0.3737~0.3798），于是轨迹被整条丢弃。这与 §6.2 的软约束问题是同一类。
+
+修复：`MincoOptimizerConfig::optimization_clearance_margin`（默认 0.05 m），优化目标变为
+`robot_radius + clearance_margin + optimization_clearance_margin = 0.43 m`，
+比硬阈值高出一截，留出错动余量。配置项 `minco.optimization_clearance_margin`。
+
+**没有放宽硬阈值** —— 安全门槛保持 0.38 m 不变，改的是优化目标。
+
+### 6.7.2 终点附近 `no_path`（已修复）
+
+`extractLocalPath()` 从最近路径点的**下一个**点开始取局部路径；当最近点已经是路径终点时，
+一个点都取不到，局部路径退化成"只有当前位置"→ 判空 → 终点附近永远生不出减速/停止轨迹。
+
+修复：局部路径为空时兜底补上**路径终点**（条件：终点在有效地图内、且与当前位置有实际距离），
+让终点附近仍有一条"当前位置 → 终点"的短路径可用。
+另外，路径为空时分两种状态返回：落在 `terminal_reached_radius`（默认 0.20 m）内返回
+`already_at_goal`，否则才返回 `no_path`。控制器对 `already_at_goal` 的处理是**受控停车**：
+不算控制失败、不计入建轨宽限、不抛异常，交给 `StoppedGoalChecker` 判定成功——
+否则"到点"会被自己的超时逻辑判成控制器异常，把成功变成失败。
+
+### 6.7.3 "改了 v_max=1.5 却仍被限到 0.5"（已加防呆，但归因更正）
+
+现场归因是"底盘 launch 没传 `params_file`"。**实测否定了这个归因**：
+
+```text
+srm_cmd_mux 已启动: ... 平移上限 1.500 m/s (v_max 1.500), 自转上限 1.000 rad/s
+```
+
+* `srm_chassis_control.launch.py` 的 `params_file` 默认值就指向包内配置；
+* `RewrittenYaml(root_key=namespace)` 的输出经核对为 `v_max: 1.5 / wz_max: 1.0`；
+* 单独启动底盘链路实测，节点读到的就是 1.5 / 1.0。
+
+而现场观察到的 `0.5 / 2.0` **正好等于 `cmd_mux_node.cpp` 里的代码默认值**，
+说明那次运行加载到的配置不是本工作区的这份 —— 同机存在第二份工作区
+（`~/srm_nav_27test`，其同名包配置就是 0.5 / 2.0）。若 `AMENT_PREFIX_PATH` 里它排在前面，
+**除 MINCO 包以外的所有同名包（含底盘限速、Nav2 参数、行为树）都会从那边加载**，
+形成"一半新一半旧"的混合环境。
+
+处理：
+
+1. `script/start_sim_nav.sh` 增加**工作区一致性检查**：启动前逐个核对
+   `srm27_nav_bringup` / `srm27_chassis_control` / `srm27_minco_controller` 的解析路径，
+   不在本工作区下就直接报错退出，并提示"当前环境还 source 了别的工作区"。
+2. `nav_srm_simulation_launch.py` 显式传递底盘控制的 `params_file`（绝对路径），
+   让参数来源在启动文件里可见，不依赖默认值。
+
+### 6.7.4 QP 超时与控制循环超时（已改善）
+
+两个来源：
+
+1. `TrajectoryValidator::checkCollision()` 内部为了确定采样步长又做了一次
+   `computeExtrema()`（含多项式求根）。改为直接使用**配置的速度上限**——上限必不小于实际
+   速度，步长只会更保守，却省掉一次求根。
+2. `refreshMap()` 在地图版本变化时把 `last_full_revalidation_stamp_` 置 -1，
+   等于让 0.2 s 的复验节流**完全失效**：滚动局部地图 + 地形层的版本号每周期都在变，
+   于是每个控制周期都跑一次全轨迹复验。改为只置一个 `map_changed_since_validation_` 标记，
+   复验按 `max(0.2 s, 1/replan_frequency)` 节流执行。
+
+**注意**：这是"安全与耗时的折中"——已在执行的轨迹每 0.2 s（1.5 m/s 下约 0.3 m 行程）在最新
+地图上复验一次；新轨迹仍由工作线程在最新地图上验证后才提交。
+
+### 6.7.5 新增诊断：画出"规划器实际吃进去的局部路径"
+
+现象"车似乎只朝一个方向走、不沿红线"需要先分清是**规划器拿到的路径就不对**还是**轨迹对但跟踪不上**。
+新增话题 `FollowPath/planning_input_path`（odom 系）：把 `extractLocalPath()` 的输出原样发布出来。
+在 RViz 里同时显示三条曲线即可分辨：
+
+| 观察 | 结论 |
+|---|---|
+| 全局红线（map）与 `planning_input_path`（odom）**形状不一致** | 局部路径抓取/坐标系问题（`extractLocalPath` 取到了路径的另一支） |
+| 两者一致，但 MINCO 曲线偏离 | 优化器问题（参考吸引缺失、权重失衡） |
+| 三条都一致，但车不沿曲线走 | 跟踪/执行问题（限速不一致、延迟、lookahead 标定） |
+
+关于"只朝一个方向"还需要排除一个**设计后果**：阶段一 `yaw_policy.mode = xy_only`，
+MPC **不控制航向**，机器人是**平移（含横移）沿路径走、机头不转**；而且仿真的
+`srm_cmd_mux` 只采用 `rotation_velocity.angular.z`，会把导航命令的 `angular.z` 丢掉。
+所以即使把 yaw 模式改成 `follow_tangent`，仿真里机头也不会转 —— 那属于方案 §8.1 的
+`NAV_SE2`（P4）改造范围，本次未做。
+
 ## 7. 未完成项与后续阶段
 
 | 阶段 | 内容 | 状态 |

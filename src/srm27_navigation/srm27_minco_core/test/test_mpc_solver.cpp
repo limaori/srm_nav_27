@@ -563,6 +563,72 @@ TEST(MpcSolverTest, FirstStepDifference_UsesRealControlInterval)
   EXPECT_GE(vx_at_005, 0.9 * 0.3 * 0.05);
 }
 
+TEST(MpcSolverTest, FirstStepDifference_PreservesNonzeroPreviousInputDirection)
+{
+  // 零速基准无法发现移项符号错误；同时覆盖正负分量及冷热启动。
+  for (const bool hot_start : {false, true}) {
+    auto config = productSolverConfig();
+    config.max_linear_accel = 3.0;
+    config.max_angular_accel = 0.5;
+    config.use_hot_start = hot_start;
+    srm27_minco_core::MpcSolver solver;
+    ASSERT_TRUE(solver.configure(velocityModelConfig(30), config));
+    srm27_minco_core::Limits2D limits;
+    limits.max_linear_speed = 1.5;
+    limits.max_angular_speed = 1.0;
+    ASSERT_TRUE(solver.setLimits(limits));
+
+    for (const double sign : {1.0, -1.0}) {
+      SCOPED_TRACE(::testing::Message() << "hot_start=" << hot_start << " sign=" << sign);
+      const Eigen::Vector3d previous = sign * Eigen::Vector3d(0.5, -0.3, 0.2);
+      srm27_minco_core::MpcInitialState state;
+      state.z0 = Eigen::Vector3d::Zero();
+      state.has_previous_input = true;
+      state.previous_applied_input = previous;
+      state.control_interval = 0.02;
+      const auto reference = constantReference(solver.model(), Eigen::Vector3d::Zero(), previous);
+      srm27_minco_core::MpcSolution solution;
+      ASSERT_TRUE(solver.solve(state, reference, solution)) << solution.message;
+      std::cout << "[MEASURE] previous=" << previous.transpose()
+                << " first_input=" << solution.u.col(0).transpose() << std::endl;
+      // 匀速轨迹本身是零代价可行解，不能被差分约束强迫反向。
+      EXPECT_TRUE(solution.u.col(0).isApprox(previous, 1e-6));
+      for (int i = 0; i < solver.model().steps(); ++i) {
+        Eigen::Vector3d baseline = previous;
+        if (i > 0) {
+          baseline = solution.u.col(i - 1);
+        }
+        const Eigen::Vector3d delta = solution.u.col(i) - baseline;
+        EXPECT_LE(std::abs(delta.x()), config.max_linear_accel * 0.02 + 1e-6);
+        EXPECT_LE(std::abs(delta.y()), config.max_linear_accel * 0.02 + 1e-6);
+        EXPECT_LE(std::abs(delta.z()), config.max_angular_accel * 0.02 + 1e-6);
+      }
+    }
+  }
+}
+
+TEST(MpcSolverTest, FirstStepDifference_BrakesBeforeReversing)
+{
+  auto config = productSolverConfig();
+  config.max_linear_accel = 3.0;
+  srm27_minco_core::MpcSolver solver;
+  ASSERT_TRUE(solver.configure(velocityModelConfig(30), config));
+  srm27_minco_core::Limits2D limits;
+  limits.max_linear_speed = 1.5;
+  limits.max_angular_speed = 1.0;
+  ASSERT_TRUE(solver.setLimits(limits));
+  srm27_minco_core::MpcInitialState state;
+  state.z0 = Eigen::Vector3d::Zero();
+  state.has_previous_input = true;
+  state.previous_applied_input = Eigen::Vector3d(0.5, 0.0, 0.0);
+  state.control_interval = 0.02;
+  const auto reference =
+    constantReference(solver.model(), Eigen::Vector3d::Zero(), Eigen::Vector3d(-0.5, 0.0, 0.0));
+  srm27_minco_core::MpcSolution solution;
+  ASSERT_TRUE(solver.solve(state, reference, solution)) << solution.message;
+  EXPECT_NEAR(solution.u(0, 0), 0.44, 1e-6);
+}
+
 TEST(MpcSolverTest, PreviousInputFlag_TogglesFirstStepDifference)
 {
   const int steps = 5;

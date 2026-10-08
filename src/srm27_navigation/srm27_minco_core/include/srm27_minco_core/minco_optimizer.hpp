@@ -56,6 +56,13 @@ struct MincoOptimizerConfig
   double robot_radius{0.33};
   /// \brief 额外净空裕量（m），叠加在包络半径之上形成障碍软约束的安全距离。
   double clearance_margin{0.05};
+  /// \brief 优化目标相对硬校验阈值的额外余量（m）。
+  ///
+  /// 优化器对障碍是**软约束**，最优点会停在安全距离附近；而 `TrajectoryValidator` 按
+  /// `robot_radius + clearance_margin` 硬判。两者取同一个值时，最优解经常落在阈值下方几毫米
+  /// （现场实测 40 次拒绝：`minimum_clearance` 0.3737~0.3798 对 required 0.38），
+  /// 结果是轨迹被整条丢弃、车来回跑。这里让优化目标高出硬阈值一截，留出错动余量。
+  double optimization_clearance_margin{0.05};
 
   /// \brief 每段数值积分采样点数（midpoint 规则）。
   int samples_per_piece{8};
@@ -71,6 +78,8 @@ struct MincoOptimizerConfig
   double gradient_tolerance{1.0e-4};
   /// \brief L-BFGS 历史长度。
   int lbfgs_memory{10};
+  /// \brief L-BFGS 基于函数值下降率停止检测的迭代间隔；0 表示关闭该判据。
+  int lbfgs_past{0};
 
   /// \brief 是否执行 PRE / FINELY 两阶段优化（方案 §6.5）。
   bool two_stage{true};
@@ -156,6 +165,16 @@ public:
   bool optimize(
     const TrajectoryInitialGuess & _guess, const Limits2D & _limits, MincoOptimizeResult & _result);
 
+  /// \brief 按倍数拉伸所有段时长并重建轨迹（保持首末 p/v/a 与内部路标点不变）。
+  ///
+  /// 用途：MINCO 的速度/加速度是**软约束**，最优点可能轻微越过硬上限；而验证器按硬上限
+  /// 判定，越限的候选轨迹会被整条丢弃，表现为“机器人完全不动”。这里做一次确定性修复：
+  /// 用同一组内部路标点与首末边界条件、把段时长整体乘 `_scale` 重建轨迹。
+  /// 位置几何基本不变（速度 ≈ /k、加速度 ≈ /k²），且修复后仍会重新做极值与碰撞校验。
+  /// \param _scale 拉伸倍数，必须 >= 1。
+  /// \return 成功返回 true。
+  bool rescaleDurations(const Trajectory2D & _in, double _scale, Trajectory2D & _out);
+
   /// \brief 直接评估目标函数与解析梯度（供数值梯度检查使用）。
   ///
   /// 输入必须是完整的初值结构；输出 `_gradient` 的顺序与内部 L-BFGS 变量一致：
@@ -211,7 +230,10 @@ private:
     double _step, int _k, int _ls);
 
   /// \brief 安全距离（包络半径 + 裕量，m）。
-  double safetyDistance() const { return config_.robot_radius + config_.clearance_margin; }
+  double safetyDistance() const
+  {
+    return config_.robot_radius + config_.clearance_margin + config_.optimization_clearance_margin;
+  }
 
   MincoOptimizerConfig config_{};
   std::shared_ptr<const Esdf2D> esdf_{};

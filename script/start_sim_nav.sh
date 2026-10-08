@@ -163,6 +163,36 @@ if [ "$DRY_RUN" != "1" ] && [ "$USE_GUI" = "true" ] \
   echo "[警告] 可以改用 --no-gui --no-rviz。" >&2
 fi
 
+# ---------- 工作区一致性检查 ----------
+# 若当前 shell 还 source 了同机的另一份工作区（例如 ~/srm_nav_27test），同名包会优先解析到
+# 那边：底盘限速、参数文件、行为树可能全部来自另一个工作区，而 MINCO 插件只存在于本工作区
+# 于是出现"一半新一半旧"的混合环境——现场表现为"改了 v_max=1.5 却仍然被限到 0.5"。
+# 这里在启动前逐个核对关键包的解析路径，不一致就直接失败，而不是让混合环境跑起来。
+require_pkg_from_ws() {
+  local pkg="$1" prefix
+  prefix="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; ros2 pkg prefix '$pkg' 2>/dev/null" || true)"
+  if [ -z "$prefix" ]; then
+    echo "[错误] 找不到包 $pkg，请确认 $WS_DIR/install/setup.bash 可用。" >&2
+    return 1
+  fi
+  case "$prefix" in
+    "$WS_DIR"/*) return 0 ;;
+    *)
+      echo "[错误] 包 $pkg 解析到了其它工作区: $prefix" >&2
+      echo "       期望前缀: $WS_DIR" >&2
+      echo "       当前环境里还 source 了别的工作区（检查 ~/.bashrc 与当前 shell 的 AMENT_PREFIX_PATH），" >&2
+      echo "       否则同名包（含底盘限速、Nav2 参数、行为树）会从那边加载。请开新终端只 source 本工作区。" >&2
+      return 1
+      ;;
+  esac
+}
+
+if [ "$DRY_RUN" != "1" ]; then
+  for _pkg in srm27_nav_bringup srm27_chassis_control srm27_minco_controller; do
+    require_pkg_from_ws "$_pkg" || exit 1
+  done
+fi
+
 if [ "$DRY_RUN" != "1" ] && ! command -v flock >/dev/null 2>&1; then
   echo "[错误] 未找到 flock, 无法保证 Gazebo 单实例启动。" >&2
   exit 1

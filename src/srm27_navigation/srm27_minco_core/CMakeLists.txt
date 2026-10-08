@@ -55,6 +55,7 @@ if(BUILD_TESTING)
     test/test_kinematics.cpp
     test/test_minco_optimizer.cpp
     test/test_mpc_solver.cpp
+    test/test_mpc_startup.cpp
     test/test_replan_manager.cpp
     test/test_smooth_cost.cpp
     test/test_tracking_reference.cpp

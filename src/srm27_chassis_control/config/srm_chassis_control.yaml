@@ -16,10 +16,14 @@ srm_cmd_mux:
     nav_timeout: 0.3                      # 导航输入超时（s）
     rotation_timeout: 0.1                 # 自转输入超时（s）
     # 限幅
-    vx_max: 0.5                           # 前向速度上限（m/s）
-    vy_max: 0.5                           # 左向速度上限（m/s）
-    v_max: 0.5                            # 平移合速度上限（m/s，按向量模长）
-    wz_max: 2.0                           # 自转角速度上限（rad/s）
+    # 与实车对齐：实车导航链是 smoother(max_velocity 1.5) → fake_vel_transform →
+    # cmd_vel_chassis → 串口（srm27_nav_protocol max_vx/vy 2.5、max_wz 1.0），并不经过本 mux。
+    # 因此这里的合速度上限取实车 smoother 的 1.5 m/s，wz 取实车串口协议的 1.0 rad/s，
+    # 使仿真链路与实车有同一套有效限速（方案 §2.2 “速度链一致性”）。
+    vx_max: 1.5                           # 前向速度上限（m/s）
+    vy_max: 1.5                           # 左向速度上限（m/s）
+    v_max: 1.5                            # 平移合速度上限（m/s，按向量模长）
+    wz_max: 1.0                           # 自转角速度上限（rad/s，实车串口协议上限）
     diagnostics_period: 0.5               # 诊断发布周期（s）
 
 rotation_controller:

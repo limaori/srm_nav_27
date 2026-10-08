@@ -87,6 +87,12 @@ private:
   /// \brief 由配置建立 MPC 模型与求解器。
   bool configureSolver(std::string * _reason);
 
+  /// \brief 构造轨迹校验器配置。
+  ///
+  /// 控制周期内的复验（`validator_`）与后台工作线程使用**同一份**配置，
+  /// 只有速度/加速度上限按当前有效约束覆盖。
+  srm27_minco_core::TrajectoryValidatorConfig makeValidatorConfig() const;
+
   /// \brief 每个控制周期刷新地图快照与距离场。
   void refreshMap(double _stamp, const ControllerDiagnostics & _diagnostics);
 
@@ -107,6 +113,10 @@ private:
   geometry_msgs::msg::TwistStamped stopCommand(
     const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const std::string & _reason,
     double _now_stamp);
+
+  /// \brief 发布规划器实际使用的局部路径（可视化，不参与控制）。
+  void publishPlanningInputPath(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, double _now_stamp);
 
   /// \brief 发布 MINCO 轨迹与 MPC 预测轨迹（可视化，不参与控制）。
   void publishVisualization(
@@ -158,6 +168,14 @@ private:
   double state_velocity_filter_alpha_{0.35};
   double diagnostics_period_{0.5};
   double build_grace_period_{1.0};
+  /// \brief 有效制动减速度（m/s^2）；<=0 表示退化为使用 `limits.max_linear_accel`。
+  ///
+  /// 这个量直接决定"轨迹有效前缀必须覆盖多长才能停车"：取小了会把所有候选轨迹判死
+  /// （0.5 m/s 时要求 1.77 s 还能过，1.5 m/s 时要求 5.1 s 就必然失败），
+  /// 所以必须显式配置并来自实测，而不是沿用优化器里的加速度上限（方案 §6.1、§10 P5）。
+  double braking_deceleration_{0.0};
+  /// \brief 判定"已到达路径终点"的距离半径（m）。
+  double terminal_reached_radius_{0.20};
   double release_timeout_{0.20};
   bool publish_visualization_{true};
 
@@ -200,6 +218,8 @@ private:
   std::uint64_t map_version_{0};
   double map_stamp_{0.0};
   double last_full_revalidation_stamp_{0.0};
+  /// \brief 上次复验之后地图是否变化过（只用于诊断与节流判断）。
+  bool map_changed_since_validation_{false};
 
   std::vector<Eigen::Vector2d> warm_inner_points_{};
   std::vector<double> warm_durations_{};
@@ -214,6 +234,8 @@ private:
   std::uint64_t switched_trajectory_count_{0};
   double build_start_stamp_{-1.0};
   bool stopping_{false};
+  /// \brief 上一次规划判定"已在终点"，用于受控停车（而非当成控制失败）。
+  bool at_goal_stop_{false};
   std::string stop_reason_{"none"};
   double stop_request_stamp_{0.0};
   double output_zero_stamp_{0.0};
@@ -224,6 +246,10 @@ private:
   // 发布者
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr trajectory_pub_{};
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr prediction_pub_{};
+  /// \brief 规划器输入的局部路径（诊断用）。
+  rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Path>::SharedPtr planning_input_pub_{};
+  std::vector<Eigen::Vector2d> last_local_path_{};
+  double last_local_path_stamp_{0.0};
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_{};
   double last_diagnostics_stamp_{0.0};

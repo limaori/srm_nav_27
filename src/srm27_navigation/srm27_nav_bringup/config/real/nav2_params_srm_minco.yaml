@@ -473,6 +473,10 @@ controller_server:
       diagnostics_period: 0.5                           # 诊断发布周期（秒）
       publish_visualization: True                       # 是否发布轨迹/预测可视化
 
+      # 判定"已到达路径终点"的半径（米）：落在该半径内时局部路径为空属正常，
+      # 由目标检查器判定成功，不再报 no_path（避免把"到点"变成控制器异常）。
+      terminal_reached_radius: 0.20
+
       state:                                            # 状态适配层
         max_sample_gap: 0.20                            # 差分速度可用的最大采样间隔（秒）
         max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
@@ -491,31 +495,50 @@ controller_server:
         samples_per_piece: 8                            # 每段数值积分采样点数
         max_iterations: 150                             # L-BFGS 最大迭代次数
         gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
-        w_jerk: 1.0                                     # jerk 能量权重
+        # 仅靠梯度阈值时该问题永远打不到收敛（实测 302 次仍在上限、耗时 17 ms）；
+        # 打开基于函数值下降率的判据后 52 次收敛、耗时 3 ms，结果质量不变。
+        lbfgs_past: 3                                   # 函数值下降率判据的迭代间隔（0=关闭）
+        w_jerk: 0.2                                     # jerk 能量权重（按实车限速标定）
         w_time: 10.0                                    # 总时长权重
         w_obstacle: 100.0                               # 障碍软约束权重
-        w_velocity: 20.0                                # 速度软约束权重
-        w_acceleration: 2.0                             # 加速度软约束权重
+        # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
+        # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
+        # 实测（2 m 局部路径、v_max 0.5、a_max 0.3）：w_v=20/w_a=2 -> 0.614/0.637（双超）；
+        # w_v=60/w_a=300 -> 0.480/0.276（双双达标）。同时工作线程还有一次确定性时间拉伸修复兜底。
+        w_velocity: 60.0                                # 速度软约束权重
+        w_acceleration: 300.0                           # 加速度软约束权重
         w_time_ratio: 1.0                               # PRE 段时长比例惩罚权重
         soft_hinge_beta: 20.0                           # 软 hinge 平滑系数
+        # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
+        # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
+        # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
+        optimization_clearance_margin: 0.05
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         corner_speed_ratio: 0.35                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
 
-      limits:                                           # 有效约束（必须与 mux/smoother 一致）
-        max_linear_speed: 0.50                          # 平移合速度上限（米/秒）
-        max_linear_accel: 0.30                          # 平移合加速度上限（米/秒^2）
-        max_angular_speed: 0.30                         # 角速度上限（弧度/秒）
-        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2）
+      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 1.5 / max_accel 3.0、
+      # 串口 max_wz 1.0）对齐。原先的 0.5/0.3 是迁移方案里的“首跑测试档位”占位值，
+      # 与实际实车链路不一致；仿真配置已同步为同一组值。
+      limits:                                           # 有效约束（必须与 smoother/串口一致）
+        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
+        max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
+        max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
+        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
 
       mpc:                                              # MPC 求解器
         model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
         prediction_dt: 0.02                             # 预测步长（秒）
         prediction_steps: 30                            # 预测步数
         two_pass_reference: False                       # 报告式第二次采样/求解
-        command_lookahead: 0.0                          # 命令前瞻（秒），未标定前为 0
+        # 命令前瞻：取预测序列里 `t_now + 前瞻` 那一拍作为输出速度，而不是第 0 拍。
+        # 速度层 MPC 的决策量就是速度，而参考在轨迹起步段的 `u_ref(0)=0`（轨迹从静止起步），
+        # 于是 QP 的最优解把加速"后置"，第 0 拍命令≈0 —— 车永远不启动（现场实测 ±0.01 m/s、
+        # 原地漂移；离线闭环已复现）。加前瞻后同一场景 1.0 s 内前进 0.33 m、速度 0.28 m/s 起势。
+        # 该值应与有效执行延迟同量级：仿真无内环延迟，取 0.20 s；**实车必须按实测延迟重新标定**。
+        command_lookahead: 0.20                         # 命令前瞻（秒）
         qp_deadline_ms: 5.0                             # QP 性能门槛（毫秒），超过只计数不停车
         # 复用持久求解器 + 热启动：H 与约束矩阵在运行期固定，每周期只有梯度/上下界变化。
         # 实测 N=30、K=8、含输入差分约束：冷启动约 8~15 ms，热启动平均约 0.5 ms；
@@ -544,6 +567,11 @@ controller_server:
         robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
         clearance_margin: 0.05                          # 额外净空裕量（米）
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
+        # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
+        # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
+        # （实测：0.5 m/s 档要求 1.77 s 尚可通过，1.5 m/s 档要求 5.1 s 就必然失败，
+        # 现场表现为规划一直失败、车被 recovery 拖来拖去）。**必须按实车制动辨识填写。**
+        braking_deceleration: 0.0
 
 
 local_costmap:
@@ -731,10 +759,10 @@ velocity_smoother:
     # 与 FollowPath.limits 一致：初期测试档位为平移合速度 0.5 m/s。
     # 上下界对称；阶段一 yaw_policy.mode = xy_only 时导航命令的 wz 恒为 0，
     # 启用 SE(2) 阶段时必须同步提高这里的 yaw 界并改用 NAV_SE2 仲裁模式。
-    max_velocity: [0.5, 0.5, 0.3]      # 最大速度[x,y,yaw]
-    min_velocity: [-0.5, -0.5, -0.3]   # 最小速度[x,y,yaw]，与上界对称
-    max_accel: [1.0, 1.0, 1.0]         # 最大加速度[x,y,yaw]
-    max_decel: [-1.0, -1.0, -1.0]      # 最大减速度[x,y,yaw]
+    max_velocity: [1.5, 1.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
+    min_velocity: [-1.5, -1.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
+    max_accel: [3.0, 3.0, 0.0]         # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, 0.0]       # 最大减速度[x,y,yaw]
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

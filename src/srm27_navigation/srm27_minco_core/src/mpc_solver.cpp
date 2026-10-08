@@ -331,13 +331,14 @@ bool MpcSolver::buildConstraints(const MpcInitialState & _state, std::string * _
         if (i > 0) {
           a_row_major_(row, (i - 1) * nu + c) += -1.0;
         }
-        // i == 0 时基准是上一条实际执行命令，用 d_prev_ 平移到不等式右侧。
+        // 首步 -limit <= U_0 - base <= limit，即 base-limit <= U_0 <= base+limit。
+        // base 的符号不能取反，否则非零速度下首步会被强迫反向。
         double base = 0.0;
         if (i == 0) {
           base = _state.has_previous_input ? _state.previous_applied_input(c) : 0.0;
         }
-        lb_a_(row) = -limit - base;
-        ub_a_(row) = limit - base;
+        lb_a_(row) = -limit + base;
+        ub_a_(row) = limit + base;
         constraint_step_[static_cast<std::size_t>(row)] = i;
         constraint_kind_[static_cast<std::size_t>(row)] = kInputChange;
         ++row;
@@ -347,8 +348,8 @@ bool MpcSolver::buildConstraints(const MpcInitialState & _state, std::string * _
         if (i > 0) {
           a_row_major_(row, (i - 1) * nu + c) += 1.0;
         }
-        lb_a_(row) = -limit + base;
-        ub_a_(row) = limit + base;
+        lb_a_(row) = -limit - base;
+        ub_a_(row) = limit - base;
         constraint_step_[static_cast<std::size_t>(row)] = i;
         constraint_kind_[static_cast<std::size_t>(row)] = kInputChange;
         ++row;

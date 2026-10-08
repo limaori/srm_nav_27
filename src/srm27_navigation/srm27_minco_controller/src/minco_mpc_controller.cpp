@@ -147,18 +147,7 @@ void MincoMpcController::configure(
     throw MincoMpcControllerError("MincoMpcController: tracking reference: " + reason);
   }
 
-  srm27_minco_core::TrajectoryValidatorConfig validator_config;
-  validator_config.robot_radius = minco_config_.robot_radius;
-  validator_config.clearance_margin = minco_config_.clearance_margin;
-  validator_config.max_linear_speed = limits_.max_linear_speed;
-  validator_config.max_linear_accel = limits_.max_linear_accel;
-  validator_config.min_piece_duration = minco_config_.min_piece_duration;
-  validator_config.unknown_is_obstacle = esdf_config_.unknown_is_seed;
-  validator_config.map_timeout = map_timeout_;
-  validator_config.trajectory_max_age = trajectory_max_age_;
-  validator_config.required_prefix_duration = prediction_steps_ * prediction_dt_;
-  validator_config.braking_deceleration = initializer_config_.max_brake;
-  validator_config.reaction_latency = state_timeout_;
+  const srm27_minco_core::TrajectoryValidatorConfig validator_config = makeValidatorConfig();
   if (!validator_.configure(validator_config, &reason)) {
     throw MincoMpcControllerError("MincoMpcController: trajectory validator: " + reason);
   }
@@ -178,6 +167,8 @@ void MincoMpcController::configure(
     node->create_publisher<nav_msgs::msg::Path>(plugin_name_ + "/mpc_prediction", rclcpp::QoS(1));
   diagnostics_pub_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     plugin_name_ + "/diagnostics", rclcpp::QoS(1));
+  planning_input_pub_ = node->create_publisher<nav_msgs::msg::Path>(
+    plugin_name_ + "/planning_input_path", rclcpp::QoS(1));
 
   configured_ = true;
   RCLCPP_INFO(
@@ -219,6 +210,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("build_grace_period", 1.0);
   declare("diagnostics_period", 0.5);
   declare("publish_visualization", true);
+  declare("terminal_reached_radius", 0.20);
 
   declare("minco.polynomial_order", 5);
   declare("minco.two_stage_optimization", true);
@@ -231,6 +223,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("minco.samples_per_piece", 8);
   declare("minco.max_iterations", 150);
   declare("minco.gradient_tolerance", 1.0e-4);
+  declare("minco.lbfgs_past", 3);
   declare("minco.w_jerk", 1.0);
   declare("minco.w_time", 10.0);
   declare("minco.w_obstacle", 100.0);
@@ -238,6 +231,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("minco.w_acceleration", 2.0);
   declare("minco.w_time_ratio", 1.0);
   declare("minco.soft_hinge_beta", 20.0);
+  declare("minco.optimization_clearance_margin", 0.05);
   declare("minco.resample_step", 0.10);
   declare("minco.corner_speed_ratio", 0.35);
   declare("minco.min_pieces", 2);
@@ -253,7 +247,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("mpc.prediction_dt", 0.02);
   declare("mpc.prediction_steps", 30);
   declare("mpc.two_pass_reference", false);
-  declare("mpc.command_lookahead", 0.0);
+  declare("mpc.command_lookahead", 0.20);
   declare("mpc.qp_deadline_ms", 12.0);
   declare("mpc.use_hot_start", true);
   declare("mpc.q_position", 20.0);
@@ -277,6 +271,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("safety.robot_radius", 0.33);
   declare("safety.clearance_margin", 0.05);
   declare("safety.unknown_is_obstacle", true);
+  declare("safety.braking_deceleration", 0.0);
 
   declare("state.max_sample_gap", 0.20);
   declare("state.max_position_jump", 0.75);
@@ -295,6 +290,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".build_grace_period", build_grace_period_);
   node->get_parameter(name + ".diagnostics_period", diagnostics_period_);
   node->get_parameter(name + ".publish_visualization", publish_visualization_);
+  node->get_parameter(name + ".terminal_reached_radius", terminal_reached_radius_);
 
   node->get_parameter(name + ".minco.polynomial_order", polynomial_order_);
   node->get_parameter(name + ".minco.two_stage_optimization", two_stage_optimization_);
@@ -309,6 +305,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".minco.samples_per_piece", minco_config_.samples_per_piece);
   node->get_parameter(name + ".minco.max_iterations", minco_config_.max_iterations);
   node->get_parameter(name + ".minco.gradient_tolerance", minco_config_.gradient_tolerance);
+  node->get_parameter(name + ".minco.lbfgs_past", minco_config_.lbfgs_past);
   node->get_parameter(name + ".minco.w_jerk", minco_config_.w_jerk);
   node->get_parameter(name + ".minco.w_time", minco_config_.w_time);
   node->get_parameter(name + ".minco.w_obstacle", minco_config_.w_obstacle);
@@ -316,6 +313,8 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".minco.w_acceleration", minco_config_.w_acceleration);
   node->get_parameter(name + ".minco.w_time_ratio", minco_config_.w_time_ratio);
   node->get_parameter(name + ".minco.soft_hinge_beta", minco_config_.soft_hinge_beta);
+  node->get_parameter(
+    name + ".minco.optimization_clearance_margin", minco_config_.optimization_clearance_margin);
   node->get_parameter(name + ".minco.resample_step", initializer_config_.resample_step);
   node->get_parameter(name + ".minco.corner_speed_ratio", initializer_config_.corner_speed_ratio);
   node->get_parameter(name + ".minco.min_pieces", initializer_config_.min_pieces);
@@ -358,6 +357,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".safety.robot_radius", minco_config_.robot_radius);
   node->get_parameter(name + ".safety.clearance_margin", minco_config_.clearance_margin);
   node->get_parameter(name + ".safety.unknown_is_obstacle", esdf_config_.unknown_is_seed);
+  node->get_parameter(name + ".safety.braking_deceleration", braking_deceleration_);
 
   node->get_parameter(name + ".state.max_sample_gap", state_max_sample_gap_);
   node->get_parameter(name + ".state.max_position_jump", state_max_position_jump_);
@@ -405,6 +405,10 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   if (!base_limits_.valid()) {
     return fail("limits.* must be finite and positive");
   }
+  if (!std::isfinite(braking_deceleration_) || braking_deceleration_ < 0.0) {
+    return fail(
+      "safety.braking_deceleration must be non-negative (0 = use limits.max_linear_accel)");
+  }
 
   // MINCO 与前端共用段时长/权重配置。
   minco_config_.two_stage = two_stage_optimization_;
@@ -417,6 +421,25 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   initializer_config_.max_brake = base_limits_.max_linear_accel;
 
   return true;
+}
+
+srm27_minco_core::TrajectoryValidatorConfig MincoMpcController::makeValidatorConfig() const
+{
+  srm27_minco_core::TrajectoryValidatorConfig config;
+  config.robot_radius = minco_config_.robot_radius;
+  config.clearance_margin = minco_config_.clearance_margin;
+  config.max_linear_speed = limits_.max_linear_speed;
+  config.max_linear_accel = limits_.max_linear_accel;
+  config.min_piece_duration = minco_config_.min_piece_duration;
+  config.unknown_is_obstacle = esdf_config_.unknown_is_seed;
+  config.map_timeout = map_timeout_;
+  config.trajectory_max_age = trajectory_max_age_;
+  config.required_prefix_duration = prediction_steps_ * prediction_dt_;
+  // 制动能力必须取"实测可保证"的值（方案 §6.1）：未单独标定时才退化为使用加速度上限。
+  config.braking_deceleration =
+    (braking_deceleration_ > 0.0) ? braking_deceleration_ : base_limits_.max_linear_accel;
+  config.reaction_latency = state_timeout_;
+  return config;
 }
 
 bool MincoMpcController::configureSolver(std::string * _reason)
@@ -456,6 +479,9 @@ void MincoMpcController::activate()
   if (prediction_pub_) {
     prediction_pub_->on_activate();
   }
+  if (planning_input_pub_) {
+    planning_input_pub_->on_activate();
+  }
   if (diagnostics_pub_) {
     diagnostics_pub_->on_activate();
   }
@@ -490,6 +516,9 @@ void MincoMpcController::deactivate()
   if (prediction_pub_) {
     prediction_pub_->on_deactivate();
   }
+  if (planning_input_pub_) {
+    planning_input_pub_->on_deactivate();
+  }
   if (diagnostics_pub_) {
     diagnostics_pub_->on_deactivate();
   }
@@ -501,6 +530,7 @@ void MincoMpcController::cleanup()
   worker_.clear();
   trajectory_pub_.reset();
   prediction_pub_.reset();
+  planning_input_pub_.reset();
   diagnostics_pub_.reset();
   {
     std::lock_guard<std::mutex> lock(path_mutex_);
@@ -676,9 +706,12 @@ void MincoMpcController::refreshMap(double _stamp, const ControllerDiagnostics &
   esdf_received_steady_ = steadyNow();
   map_version_ = version;
   map_stamp_ = _stamp;
+  // 地图变化只**标记**需要在最近一次节流窗口到期时复验，不强制立刻复验。
+  // 原先这里直接把 last_full_revalidation_stamp_ 置 -1，等于让下面那个 0.2 s 的节流失效：
+  // 滚动局部地图 + 地形层的版本号每周期都在变，于是每个控制周期都跑一次全轨迹复验
+  // （含多项式求根与全段扫掠），叠加 QP 后出现 15.6 ms 的控制超时。
   if (version_changed) {
-    // 地图变化后已提交轨迹必须在最新地图上复验（方案 §6.6）。
-    last_full_revalidation_stamp_ = -1.0;
+    map_changed_since_validation_ = true;
   }
 }
 
@@ -691,17 +724,18 @@ void MincoMpcController::invalidateTrajectory(const std::string & _reason, doubl
   reference_builder_.reset();
   has_previous_input_ = false;
   stopping_ = true;
+  at_goal_stop_ = false;
   stop_reason_ = _reason;
   stop_request_stamp_ = _now_stamp;
   output_zero_stamp_ = _now_stamp;
   if (worker_.running()) {
     worker_.clear();
   }
-  if (map_version_ == 0) {
-    build_start_stamp_ = -1.0;
-  } else if (build_start_stamp_ < 0.0) {
-    build_start_stamp_ = _now_stamp;
-  }
+  // 本函数代表"一次新的建轨尝试"（新目标、定位重置、限速变化、复验失败、失活）。
+  // 必须把建轨宽限计时清零：否则一次失败留下的旧起点会让下一次尝试在几毫秒内就
+  // 超出 build_grace_period 而立刻抛异常——现场现象就是"脱困成功后 FollowPath 约 1 ms
+  // 就再次失败"，BT 因此陷入 recovery 循环。
+  build_start_stamp_ = -1.0;
 }
 
 void MincoMpcController::updateWarmStart(const Trajectory2D & _trajectory)
@@ -767,6 +801,8 @@ void MincoMpcController::requestReplan(
   planning_request.request_steady = _now_steady;
   planning_request.local_path_horizon = planning_horizon_;
   planning_request.validity_window = trajectory_max_age_;
+  planning_request.validator_config = makeValidatorConfig();
+  planning_request.terminal_reached_radius = terminal_reached_radius_;
   // 距离场以只读快照交给工作线程；工作线程不持有 costmap 锁。
   planning_request.esdf = std::const_pointer_cast<const srm27_minco_core::Esdf2D>(esdf_);
   planning_request.use_warm_start = decision.use_warm_start && has_warm_start_;
@@ -794,11 +830,23 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
   diagnostics_.maximum_acceleration = result.max_acceleration;
 
   if (!result.success) {
+    if (result.status == "already_at_goal") {
+      // 良性停车：机器人已经落在路径终点附近，局部路径为空是正常的。
+      // 这里既不算控制失败（不计入建轨宽限），也不需要重规划；由 StoppedGoalChecker
+      // 判定成功。之前的实现把它报成 no_path 并计入失败，会把"到点"变成控制器异常。
+      at_goal_stop_ = true;
+      RCLCPP_INFO_THROTTLE(
+        (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
+        "MincoMpcController: 已到达路径终点，受控停车等待目标检查器判定");
+      return;
+    }
     RCLCPP_WARN_THROTTLE(
       (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
       "MincoMpcController: 规划失败 (%s): %s", result.status.c_str(), result.reason.c_str());
     return;
   }
+  // 成功的规划结果到达：清除"到点停车"状态。
+  at_goal_stop_ = false;
 
   // 版本校验：迟到的旧会话结果不得重新激活运动。
   if (
@@ -822,6 +870,10 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
     return;
   }
 
+  if (!result.local_path.empty()) {
+    last_local_path_ = result.local_path;
+    last_local_path_stamp_ = _now_stamp;
+  }
   auto trajectory = std::make_shared<Trajectory2D>(result.trajectory);
   std::atomic_store(&trajectory_, std::static_pointer_cast<const Trajectory2D>(trajectory));
   updateWarmStart(*trajectory);
@@ -911,12 +963,20 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
 
   const auto fail = [this, &node, &now_stamp](const std::string & _reason) {
     diagnostics_.total_control_time_ms = 0.0;
+    diagnostics_.planning_result = _reason;
+    diagnostics_.stop_reason = _reason;
     const geometry_msgs::msg::TwistStamped command = stopCommand(node, _reason, now_stamp);
+    // 失败路径同样要发布诊断：否则现场只能去翻 controller_server 日志才能知道原因，
+    // 而 `ros2 topic echo .../diagnostics` 是最顺手的观测入口。
+    publishDiagnostics(node, diagnostics_, now_stamp);
     if (build_start_stamp_ < 0.0) {
       build_start_stamp_ = now_stamp;
     }
     if ((now_stamp - build_start_stamp_) > build_grace_period_) {
       // 超过建轨宽限：交给 BT 处理，而不是永远返回零并假装正常。
+      // 本次 FollowPath 也就此结束，下一次调用属于"新的尝试"，必须重新获得完整宽限，
+      // 否则恢复行为刚结束就会因为沿用旧计时而在毫秒级再次失败。
+      build_start_stamp_ = -1.0;
       throw MincoMpcControllerError("MincoMpcController: " + _reason);
     }
     return command;
@@ -965,9 +1025,13 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   auto trajectory = std::atomic_load(&trajectory_);
   if (trajectory) {
     diagnostics_.trajectory_age = std::max(0.0, now_stamp - trajectory->generated_stamp);
+    // 复验节流：最多每 0.2 s（且不慢于重规划周期）在最新地图上完整复验一次。
+    // 地图在这期间变化过也照样按该节流执行 —— 新轨迹由工作线程在最新地图上验证，
+    // 已在执行的轨迹每 0.2 s 复验一次（1.5 m/s 下约 0.3 m 行程）是安全与耗时的折中。
+    const double revalidation_period = std::max(0.2, 1.0 / replan_frequency_);
     const bool need_revalidation =
       (last_full_revalidation_stamp_ < 0.0) ||
-      ((now_stamp - last_full_revalidation_stamp_) > std::max(0.2, 1.0 / replan_frequency_));
+      ((now_stamp - last_full_revalidation_stamp_) > revalidation_period);
     if (need_revalidation) {
       last_full_revalidation_stamp_ = now_stamp;
       srm27_minco_core::TrajectoryValidationReport report;
@@ -981,8 +1045,12 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 7) 重规划请求。
   requestReplan(state, now_stamp, control_begin);
 
-  // 8) 没有可用轨迹：受控零输出 + 宽限计时。
+  // 8) 没有可用轨迹：先看是否属于"已经到达终点"的良性情况。
   if (!trajectory) {
+    if (at_goal_stop_) {
+      // 受控停车：不算控制失败，不计入建轨宽限，也不会抛异常把成功判成失败。
+      return stopCommand(node, "at_goal", now_stamp);
+    }
     return fail("no validated trajectory available yet");
   }
   if (diagnostics_.trajectory_age > trajectory_max_age_) {
@@ -1080,7 +1148,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     static_cast<int>(solution.z.cols()) - 1);
   // 两种模型的 yaw 都直接是预测状态的第 3 维；命令生效时刻的 yaw 与命令时间一致。
   const double yaw_at_actuation = solution.z(2, lookahead_index);
-  const Eigen::Vector2d velocity_odom(command(0), command(1));
+  Eigen::Vector2d velocity_odom(command(0), command(1));
   Eigen::Vector2d velocity_body =
     srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
   double omega_command = command(2);
@@ -1095,6 +1163,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   if (speed > limits_.max_linear_speed) {
     const double scale = limits_.max_linear_speed / speed;
     diagnostics_.applied_speed_scale = scale;
+    velocity_odom *= scale;
     velocity_body *= scale;
   }
   if (std::abs(omega_command) > limits_.max_angular_speed) {
@@ -1108,9 +1177,10 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     const Eigen::Vector2d delta = velocity_odom - previous_odom;
     const double max_delta = limits_.max_linear_accel * interval;
     if (delta.norm() > max_delta) {
-      const Eigen::Vector2d bounded = previous_odom + delta.normalized() * max_delta;
-      velocity_body = srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, bounded);
+      velocity_odom = previous_odom + delta.normalized() * max_delta;
+      velocity_body = srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
     }
+    // 下周期的差分基准必须是本周期限幅后的输出，而不是 MPC 未执行的原始请求。
     previous_applied_input_(0) = velocity_odom.x();
     previous_applied_input_(1) = velocity_odom.y();
     previous_applied_input_(2) = omega_command;
@@ -1223,6 +1293,21 @@ void MincoMpcController::publishVisualization(
       path.poses.push_back(pose);
     }
     trajectory_pub_->publish(path);
+  }
+
+  if (planning_input_pub_ && planning_input_pub_->is_activated() && !last_local_path_.empty()) {
+    nav_msgs::msg::Path path;
+    path.header.stamp = _node->now();
+    path.header.frame_id = planning_frame_;
+    for (const Eigen::Vector2d & point : last_local_path_) {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = path.header;
+      pose.pose.position.x = point.x();
+      pose.pose.position.y = point.y();
+      pose.pose.orientation.w = 1.0;
+      path.poses.push_back(pose);
+    }
+    planning_input_pub_->publish(path);
   }
 
   if (prediction_pub_ && prediction_pub_->is_activated() && _solution.usable()) {

@@ -90,6 +90,9 @@ bool MincoOptimizerConfig::valid(std::string * _reason) const
   if (!isFinite(clearance_margin) || clearance_margin < 0.0) {
     return fail("clearance_margin must be non-negative and finite");
   }
+  if (!isFinite(optimization_clearance_margin) || optimization_clearance_margin < 0.0) {
+    return fail("optimization_clearance_margin must be non-negative and finite");
+  }
   return true;
 }
 
@@ -135,6 +138,50 @@ void MincoOptimizer::clearWarmStart()
   warm_inner_points_.clear();
   warm_durations_.clear();
   has_warm_start_ = false;
+}
+
+bool MincoOptimizer::rescaleDurations(const Trajectory2D & _in, double _scale, Trajectory2D & _out)
+{
+  if (!configured_ || _in.empty() || !isFinite(_scale) || _scale < 1.0) {
+    return false;
+  }
+  const int pieces = _in.pieceCount();
+  if (pieces < 1 || _in.xCoefficients().size() != static_cast<std::size_t>(pieces)) {
+    return false;
+  }
+
+  Problem problem;
+  problem.pieces = pieces;
+  problem.head.setZero();
+  problem.head.col(0) << _in.startPosition().x(), _in.startPosition().y(), 0.0;
+  problem.head.col(1) << _in.startVelocity().x(), _in.startVelocity().y(), 0.0;
+  problem.head.col(2) << _in.startAcceleration().x(), _in.startAcceleration().y(), 0.0;
+  problem.tail.setZero();
+  problem.tail.col(0) << _in.endPosition().x(), _in.endPosition().y(), 0.0;
+  problem.tail.col(1) << _in.endVelocity().x(), _in.endVelocity().y(), 0.0;
+  problem.tail.col(2) << _in.endAcceleration().x(), _in.endAcceleration().y(), 0.0;
+
+  // 内部路标点 = 原轨迹在相邻段交界时刻的位置（MINCO 的经过点语义）。
+  problem.inner.resize(3, pieces - 1);
+  double accumulated = 0.0;
+  for (int i = 0; i + 1 < pieces; ++i) {
+    accumulated += _in.durations()[static_cast<std::size_t>(i)];
+    const Eigen::Vector2d point = _in.positionAt(accumulated);
+    problem.inner.col(i) << point.x(), point.y(), 0.0;
+  }
+  problem.durations.resize(pieces);
+  for (int i = 0; i < pieces; ++i) {
+    const double duration = _in.durations()[static_cast<std::size_t>(i)] * _scale;
+    if (!isFinite(duration) || duration <= config_.min_piece_duration) {
+      return false;
+    }
+    problem.durations(i) = duration;
+  }
+
+  problem_ = problem;
+  generator_.setConditions(problem_.head, problem_.tail, pieces);
+  generator_.setParameters(problem_.inner, problem_.durations);
+  return extractTrajectory(_out);
 }
 
 Eigen::VectorXd MincoOptimizer::encodeVariables(const TrajectoryInitialGuess & _guess) const
@@ -570,7 +617,7 @@ SolveStatus MincoOptimizer::runStage(
   lbfgs::lbfgs_parameter_t parameters;
   parameters.mem_size = config_.lbfgs_memory;
   parameters.g_epsilon = config_.gradient_tolerance;
-  parameters.past = 0;
+  parameters.past = config_.lbfgs_past;
   parameters.max_iterations = config_.max_iterations;
   last_iteration_ = 0;
   const auto stage_begin = std::chrono::steady_clock::now();

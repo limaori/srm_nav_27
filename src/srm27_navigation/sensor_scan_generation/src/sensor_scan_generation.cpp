@@ -154,8 +154,8 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
   }
   bool chassis_used_latest = false;
   if (!getTransform(
-        lidar_frame_, base_frame_, pcd_msg->header.stamp, tf_lidar_to_chassis,
-        chassis_used_latest, tf_error)) {
+        lidar_frame_, base_frame_, pcd_msg->header.stamp, tf_lidar_to_chassis, chassis_used_latest,
+        tf_error)) {
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *this->get_clock(), 5000,
       "跳过本次里程计/TF 输出：%s <- %s 查询失败 (%s)", lidar_frame_.c_str(), base_frame_.c_str(),
@@ -181,23 +181,36 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
   // Use the same filtered planar pose as the TF published above.  Transforming
   // the cloud with the raw Point-LIO pose while publishing a filtered base TF
   // makes a static scene appear to slide by a few millimetres in RViz.
+  // 输出统一为**里程计坐标系**表达。
+  //
+  // 消费者约定（terrain_analysis / terrain_analysis_ext）是：点云在 odom 下，并用
+  // `lidar_odometry` 给出的雷达位姿逐点相减得到相对坐标。因此这里必须保证 odom 表达：
+  //   * Point-LIO / loam_interface 的 registered_scan 本来就是 odom -> 直接透传；
+  //   * 仿真的 Gazebo 点云是雷达系（velodyne_points）-> 必须用同一采样时刻的雷达位姿
+  //     变换到 odom，否则地形算法会把雷达系坐标当 odom 用，生成错误地形图。
+  // 变换一律使用**未过滤**的 tf_odom_to_lidar：suppressJitter 只服务于 RViz 显示，
+  // 不能污染传给地形分析的几何。
+  const std::string & cloud_frame = pcd_msg->header.frame_id;
+  const std::string & odom_frame = odometry_msg->header.frame_id;
   sensor_msgs::msg::PointCloud2 out;
-  // Ground-truth simulation and loam_interface both publish registered_scan
-  // directly in odom.  Applying the lidar<-odom transform again would move
-  // every point twice and appears as a drifting/flying map in RViz.  Raw
-  // lidar-frame clouds still use the normal conversion path.
-  if (
-    pcd_msg->header.frame_id == lidar_frame_ ||
-    pcd_msg->header.frame_id == odometry_msg->header.frame_id ||
-    pcd_msg->header.frame_id == "odom") {
-    // Gazebo point clouds are already expressed in the lidar frame.  Point-LIO
-    // and loam_interface clouds are expressed in odom.  In both cases the
-    // message is ready for RViz; applying the inverse pose again would move the
-    // cloud twice and make it appear to fly or drift.
+  if (cloud_frame == odom_frame || cloud_frame == "odom") {
     out = *pcd_msg;
+  } else if (cloud_frame == lidar_frame_) {
+    pcl_ros::transformPointCloud(odom_frame, tf_odom_to_lidar, *pcd_msg, out);
   } else {
-    const auto filtered_odom_to_lidar = chassis_transform * tf_lidar_to_chassis.inverse();
-    pcl_ros::transformPointCloud(lidar_frame_, filtered_odom_to_lidar.inverse(), *pcd_msg, out);
+    tf2::Transform tf_odom_to_cloud;
+    bool used_latest = false;
+    std::string transform_error;
+    if (!getTransform(
+          odom_frame, cloud_frame, pcd_msg->header.stamp, tf_odom_to_cloud, used_latest,
+          transform_error)) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "跳过本次 sensor_scan 发布：%s <- %s 查询失败 (%s)", odom_frame.c_str(),
+        cloud_frame.c_str(), transform_error.c_str());
+      return;
+    }
+    pcl_ros::transformPointCloud(odom_frame, tf_odom_to_cloud, *pcd_msg, out);
   }
   pub_laser_cloud_->publish(out);
 }
@@ -263,8 +276,7 @@ void SensorScanGenerationNode::publishOdometry(
 
   // 差分分母使用消息采样时间差（不是回调到达时间差），因此仿真倍速/暂停/回放时
   // 速度不会因为“到达节奏”变化而产生错误量级（方案 §2.3 修正项 1）。
-  const double dt =
-    has_previous_odometry_ ? (stamp - previous_odometry_stamp_).seconds() : 0.0;
+  const double dt = has_previous_odometry_ ? (stamp - previous_odometry_stamp_).seconds() : 0.0;
 
   bool velocity_valid = false;
   if (has_previous_odometry_ && dt > 1.0e-6) {

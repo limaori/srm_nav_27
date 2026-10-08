@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <sstream>
 
 #include "srm27_minco_core/kinematics.hpp"
 
@@ -203,7 +204,24 @@ std::vector<Eigen::Vector2d> PlanningWorker::extractLocalPath(
     accumulated += segment;
   }
 
+  // 兜底：最近点已经是路径最后一个点（或剩余点都被地图边界截断）时，上面的循环一个点都
+  // 加不进来，局部路径会退化成"只有当前位置"→ 被判为空 → 终点附近永远生不出减速/停止轨迹
+  // （现场表现为 9 次 `no_path: local path is empty after clipping`）。
+  // 这里至少补上路径终点，让终点附近仍有一条"当前位置 -> 终点"的短路径可用。
   if (local.size() < 2) {
+    const Eigen::Vector2d & path_end = _path.back();
+    const double remaining_distance = (path_end - _position).norm();
+    if (remaining_distance > 1.0e-3) {
+      const srm27_minco_core::EsdfQueryResult end_query = _esdf.query(path_end.x(), path_end.y());
+      if (end_query.valid) {
+        local.push_back(path_end);
+      }
+    }
+  }
+
+  if (local.size() < 2) {
+    // 真的没有可走的局部路径：位置已经落在路径终点上（或终点在地图外），返回空。
+    // 调用方据此按"已在终点"处理，而不是报一个笼统的 no_path。
     local.clear();
     return local;
   }
@@ -244,9 +262,17 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     _request.path, _request.state.position(), _request.local_path_horizon, *_request.esdf,
     _request.terminal_is_global_goal, &terminal_reached);
   if (local_path.size() < 2) {
-    result.status = "no_path";
-    result.reason = "local path is empty after clipping";
+    // 走到这里说明"当前位置已经就是路径终点"或"终点在地图外"。
+    // 前者不该报错：由目标检查器和控制器一起完成停车，重复报 no_path 只会制造噪声，
+    // 并被上层误判成规划失败。
+    const double distance_to_end = (_request.path.back() - _request.state.position()).norm();
+    result.status =
+      (distance_to_end <= _request.terminal_reached_radius) ? "already_at_goal" : "no_path";
+    result.reason = (distance_to_end <= _request.terminal_reached_radius)
+                      ? "robot is already at the path end"
+                      : "local path is empty after clipping";
     result.frontend_time_ms = (steadyNow() - frontend_begin) * 1.0e3;
+    result.local_path = local_path;
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
     return result;
   }
@@ -299,12 +325,11 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 
   // 4) 独立轨迹验证（优化成功 != 轨迹安全）。
   TrajectoryValidator validator;
-  srm27_minco_core::TrajectoryValidatorConfig validator_config;
-  validator_config.robot_radius = minco_config.robot_radius;
-  validator_config.clearance_margin = minco_config.clearance_margin;
+  // 校验器配置来自请求（由控制器与自身的 validator_ 用同一份配置填入），
+  // 只有速度/加速度上限需要跟随本次请求的有效约束。
+  srm27_minco_core::TrajectoryValidatorConfig validator_config = _request.validator_config;
   validator_config.max_linear_speed = _request.limits.max_linear_speed;
   validator_config.max_linear_accel = _request.limits.max_linear_accel;
-  validator_config.min_piece_duration = minco_config.min_piece_duration;
   if (!validator.configure(validator_config, &reason)) {
     result.status = "invalid_validator_config";
     result.reason = reason;
@@ -313,6 +338,38 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   }
 
   Trajectory2D trajectory = optimize_result.trajectory;
+
+  // 硬保证：MINCO 的速度/加速度是**软约束**，最优点可能轻微越过硬上限；而验证器按硬上限
+  // 判定，越限即整条丢弃，现场表现为“反复 recovery、机器人完全不动”。这里做确定性的
+  // 时间拉伸修复（同一组路标点与首末边界条件、段时长整体放大 k），把越限压回硬上限以内；
+  // 修复后仍会重新计算极值并做完整碰撞与时效校验，不安全就照样丢弃。
+  double candidate_speed = 0.0;
+  double candidate_accel = 0.0;
+  if (validator.computeExtrema(trajectory, candidate_speed, candidate_accel)) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const double speed_ratio = _request.limits.max_linear_speed > 0.0
+                                   ? candidate_speed / _request.limits.max_linear_speed
+                                   : 1.0;
+      const double accel_ratio = _request.limits.max_linear_accel > 0.0
+                                   ? std::sqrt(candidate_accel / _request.limits.max_linear_accel)
+                                   : 1.0;
+      const double scale = std::max(1.0, std::max(speed_ratio, accel_ratio));
+      if (scale <= 1.0 + 1.0e-6) {
+        break;
+      }
+      Trajectory2D repaired;
+      if (!optimizer.rescaleDurations(trajectory, scale, repaired)) {
+        break;
+      }
+      trajectory = std::move(repaired);
+      ++result.speed_repair_count;
+      result.time_scale *= scale;
+      if (!validator.computeExtrema(trajectory, candidate_speed, candidate_accel)) {
+        break;
+      }
+    }
+  }
+
   trajectory.versions = _request.versions;
   trajectory.generated_stamp = _request.request_stamp;
   trajectory.valid_after = _request.request_stamp;
@@ -334,7 +391,23 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 
   if (!valid) {
     result.status = "validation_failed";
-    result.reason = report.reason;
+    // 把"失败点"写清楚：只报一句原因，现场只能猜是几何、动力学还是覆盖不足。
+    // 这里带上首次违例的时间与位置（odom 下）以及关键数值，便于直接定位。
+    std::ostringstream detail;
+    detail.precision(4);
+    detail << report.reason;
+    const double total = trajectory.totalDuration();
+    if (report.first_violation_time > 0.0 && report.first_violation_time < total) {
+      const Eigen::Vector2d violation_position = trajectory.positionAt(report.first_violation_time);
+      detail << " | t=" << report.first_violation_time << "s/ " << total << "s pos=("
+             << violation_position.x() << ", " << violation_position.y() << ")";
+    }
+    detail << " | 最小净空=" << report.min_clearance
+           << "m 需要=" << (minco_config.robot_radius + minco_config.clearance_margin) << "m"
+           << " 有效前缀=" << report.effective_prefix_duration
+           << "s 需要=" << report.required_prefix_duration << "s"
+           << " 最大速度=" << report.max_speed << " 最大加速度=" << report.max_acceleration;
+    result.reason = detail.str();
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
     return result;
   }

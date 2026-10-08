@@ -269,10 +269,11 @@ bool TrajectoryValidator::checkCollision(
   const double required_clearance = config_.robot_radius + config_.clearance_margin;
 
   // 采样步长同时受时间步长与最大空间间距约束，避免高速时跳过薄障碍。
+  //
+  // 这里直接用**配置的速度上限**而不是再算一次轨迹极值：上限必然不小于实际速度，
+  // 步长只会更保守（更安全），却省掉一次多项式求根（每周期被调用多次，是控制超时的主要来源之一）。
   double step = config_.sample_dt;
-  double max_speed = 0.0;
-  double max_accel = 0.0;
-  computeExtrema(_trajectory, max_speed, max_accel);
+  const double max_speed = config_.max_linear_speed;
   if (max_speed > 1.0e-6) {
     step = std::min(step, config_.max_sample_spacing / max_speed);
   }
@@ -360,11 +361,14 @@ bool TrajectoryValidator::validate(
   const double speed_limit = config_.max_linear_speed * (1.0 + config_.speed_tolerance_ratio);
   const double accel_limit = config_.max_linear_accel * (1.0 + config_.accel_tolerance_ratio);
   if (_report.max_speed > speed_limit) {
-    _report.reason = "max speed exceeds the effective limit";
+    // 带上实测值与门槛：只报“超速”在现场无法判断是权重没标定、时间项过强还是限速配错。
+    _report.reason = "max speed " + std::to_string(_report.max_speed) +
+                     " exceeds the effective limit " + std::to_string(speed_limit);
     return false;
   }
   if (_report.max_acceleration > accel_limit) {
-    _report.reason = "max acceleration exceeds the effective limit";
+    _report.reason = "max acceleration " + std::to_string(_report.max_acceleration) +
+                     " exceeds the effective limit " + std::to_string(accel_limit);
     return false;
   }
 

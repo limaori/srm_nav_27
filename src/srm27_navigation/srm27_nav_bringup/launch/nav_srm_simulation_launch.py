@@ -195,6 +195,15 @@ def generate_launch_description():
         launch_arguments={
             "namespace": namespace,
             "use_sim_time": use_sim_time,
+            # 显式传底盘控制自己的参数文件：底盘限速（vx_max/vy_max/v_max/wz_max）与超时
+            # 都是这条链的权威值，必须与控制器规划用的 limits 一致。虽然该 launch 的默认值
+            # 已经指向包内配置，但显式传递能让"参数从哪来"在启动命令里可见，也避免将来
+            # 默认值变化时静默改变行为。
+            "params_file": os.path.join(
+                get_package_share_directory("srm27_chassis_control"),
+                "config",
+                "srm_chassis_control.yaml",
+            ),
             "start_rotation_sender": start_rotation_sender,
             "rotation_mode": LaunchConfiguration("rotation_mode"),
             "rotation_speed": LaunchConfiguration("rotation_speed"),
