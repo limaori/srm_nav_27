@@ -121,7 +121,10 @@ def launch_setup(context):
         remappings=[(
             "registered_scan",
             PythonExpression([
-                "'velodyne_points' if not (", has_odometry_source,
+                # 地形节点按 odom 处理点云（用 lidar_odometry 位姿相减）；sensor_scan 由
+                # sensor_scan_generation 发布并已统一变换到 odom。直接喂雷达系的
+                # velodyne_points 会把雷达系坐标当 odom 用，生成错误地形图。
+                "'sensor_scan' if not (", has_odometry_source,
                 ") else 'registered_scan'",
             ]),
         )],
@@ -139,7 +142,10 @@ def launch_setup(context):
         remappings=[(
             "registered_scan",
             PythonExpression([
-                "'velodyne_points' if not (", has_odometry_source,
+                # 地形节点按 odom 处理点云（用 lidar_odometry 位姿相减）；sensor_scan 由
+                # sensor_scan_generation 发布并已统一变换到 odom。直接喂雷达系的
+                # velodyne_points 会把雷达系坐标当 odom 用，生成错误地形图。
+                "'sensor_scan' if not (", has_odometry_source,
                 ") else 'registered_scan'",
             ]),
         )],

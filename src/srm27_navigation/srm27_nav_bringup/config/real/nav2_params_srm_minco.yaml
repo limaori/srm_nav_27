@@ -1,0 +1,805 @@
+# SRM 实车导航参数（MINCO + MPC 变体）。
+#
+# 由 config/real/nav2_params_srm.yaml 派生：保留实车的定位、感知与代价地图配置，
+# 把 controller_server 的 FollowPath 换成 srm27_minco_controller::MincoMpcController。
+#
+# 与仿真变体的差异与注意点：
+#   * use_sim_time = False。
+#   * 实车入口必须显式选择本文件；默认的 nav_real_launch.py 仍指向
+#     config/real/nav2_params_upstream.yaml，不能用“改了一份没被加载的 YAML”当作
+#     完成实车迁移（方案 §2.1、§9.2）。
+#   * 本文件中的加速度、制动减速度、延迟与外形参数**必须来自实车辨识**；
+#     未辨识前只能用于受控区域低速联调，不得作为性能承诺（方案 §10 P5）。
+#   * 阶段一 yaw_policy.mode = xy_only：MPC 只控平移，自转仍由独立自转链路负责。
+
+# =============================================================
+# SRM 实车参数：srm27 导航栈 + SRM 自建栈的参数与模型
+#
+# 由来:
+#   结构、Nav2 全家桶、话题连线全部沿用 srm27 的 config/real/nav2_params_upstream.yaml；
+#   凡是"与这台车相关"的参数，改为 SRM 自建栈（config/real/mapping_params.yaml +
+#   point_lio/config/mid360.yaml + real_mapping_launch.py）里实车验证过的值。
+#   上游文件保持原样不动，本文件是给 SRM 车用的另一份。
+#
+# 坐标系对照（上游 frame -> 本车 frame）:
+#   base_footprint      -> base_link      (底盘，SRM 无 base_footprint)
+#   gimbal_yaw          -> base_link      (导航不经过云台，云台不在导航 TF 链上)
+#   gimbal_yaw_fake     -> base_link_fake (fake_vel_transform 造的不转虚拟底盘)
+#   front_mid360        -> livox_frame    (雷达驱动 frame_id) / livox_imu (LIO 的雷达-IMU 系)
+#   二维投影系          -> livox_scan     (real_mapping_launch.py 追加的水平系)
+#
+# 本车 TF 链（与 real_mapping_launch.py 一致）:
+#   map -> odom -> base_link -> livox_frame -> livox_imu
+#                            -> livox_scan
+#                            -> wheel_1..4        (均由 real_robot_state_publisher_launch.py 发布)
+#   odom -> base_link 由 sensor_scan_generation 发布；map -> odom 由 slam_toolbox 或
+#   small_gicp 发布，二者互斥（slam:=True / use_pcd_localization:=True）。
+#
+# 用法:
+#   ros2 launch srm27_nav_bringup nav2_stack_launch.py \
+#     params_file:=<本文件> map:=.../map/real/<name>.yaml prior_pcd_file:=.../pcd/real/<name>.pcd ...
+#   或直接用 script/start_real_nav.sh（默认就指向本文件与 SRM 模型）。
+# =============================================================
+
+# 取自 mapping_params.yaml（PublishFreq 10Hz 是实车建图用的值；上游实车配置是 20Hz）
+livox_ros_driver2:
+  ros__parameters:
+    xfer_format: 4                                      # 4-AllMsg（Point-LIO 需要 CustomMsg）
+    multi_topic: 0                                      # 0-All LiDARs share the same topic
+    data_src: 0                                         # 0-lidar
+    publish_freq: 10.0
+    output_data_type: 0
+    frame_id: livox_frame
+    user_config_path: $(find-pkg-share srm27_nav_bringup)/config/real/mid360_user_config.json
+    cmdline_input_bd_code: livox0000000001
+    lvx_file_path: ""
+
+# = point_lio/config/mid360.yaml（完整基线，因为 srm27 的 localization_launch.py 只喂这一份参数）
+#   + mapping_params.yaml 的覆盖
+#   + real_mapping_launch.py 按雷达安装角算出的 gravity（见下）
+point_lio:
+  ros__parameters:
+    use_imu_as_input: False
+    prop_at_freq_of_imu: True
+    check_satu: True
+    init_map_size: 10
+    point_filter_num: 4                                 # SRM: 4（上游实车是 8）
+    space_down_sample: True
+    filter_size_surf: 0.2                               # SRM
+    filter_size_map: 0.2                                # SRM
+    ivox_nearby_type: 18                                # SRM
+    runtime_pos_log_enable: False
+
+    common:
+      lid_topic: "livox/lidar"
+      imu_topic: "livox/imu"
+      con_frame: False
+      con_frame_num: 1
+      cut_frame: False
+      cut_frame_time_interval: 0.1
+      time_diff_lidar_to_imu: 0.0
+
+    prior_pcd:
+      enable: False                                     # 强制关闭：先验配准由 small_gicp 负责
+      # NOTE: prior_pcd_map_path 由 launch 传入
+      init_pose: [ 0.0, 0.0, 0.0 ]
+
+    preprocess:
+      lidar_type: 1                                     # 1 for Livox serials LiDAR
+      scan_line: 4
+      timestamp_unit: 3                                 # nanosecond
+      blind: 0.5
+
+    mapping:
+      imu_en: True
+      extrinsic_est_en: False                           # SRM
+      imu_time_inte: 0.005
+      lidar_time_inte: 0.1
+      satu_acc: 3.0                                     # 基线值（上游实车是 4.0）
+      satu_gyro: 35.0
+      acc_norm: 1.0                                     # SRM
+      lidar_meas_cov: 0.01
+      acc_cov_output: 500.0
+      gyr_cov_output: 1000.0
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      imu_meas_acc_cov: 0.01                            # 基线值（上游实车是 0.1）
+      imu_meas_omg_cov: 0.01                            # 基线值（上游实车是 0.1）
+      gyr_cov_input: 0.01                               # 基线值（上游实车是 0.1）
+      acc_cov_input: 0.1
+      plane_thr: 0.1
+      match_s: 81.0
+      ivox_grid_resolution: 0.5                         # SRM
+      # 由 real_mapping_launch.py 按 lidar_rpy = (-0.06981317007977318, 0.0, -1.5707963267948966) 算出:
+      #   gravity = 9.81 * [sin(pitch), -cos(pitch)sin(roll), -cos(pitch)cos(roll)]
+      # 量纲与 point_lio 基线一致（基线为 [0,0,-9.810]），不是单位向量。
+      # 改动雷达安装角时必须同步重算这两个值。
+      gravity: [ 0.0, 0.6843110074298693, -9.786103333048876 ]
+      gravity_init: [ 0.0, 0.6843110074298693, -9.786103333048876 ]
+      extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+      extrinsic_R: [ 1.0, 0.0, 0.0,
+                     0.0, 1.0, 0.0,
+                     0.0, 0.0, 1.0 ]
+
+    odometry:
+      publish_odometry_without_downsample: False        # SRM
+
+    publish:
+      path_en: False                                    # SRM
+      scan_publish_en: True                             # SRM
+      scan_bodyframe_pub_en: False
+      tf_send_en: False                                 # SRM: 由 loam_interface/sensor_scan_generation 发 TF
+
+    pcd_save:
+      pcd_save_en: False
+      interval: -1
+
+# 取自 mapping_params.yaml。base_frame 只用于查一次静态外参 TF(base<-lidar)；
+# 输出的 registered_scan 用 odom_frame，正是 small_gicp 要求的 odom 系输入。
+loam_interface:
+  ros__parameters:
+    state_estimation_topic: "aft_mapped_to_init"
+    registered_scan_topic: "cloud_registered"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    lidar_frame: "livox_imu"
+    planarize_pose: False
+
+# 取自 mapping_params.yaml。本节点发布 odom -> base_frame 的 TF（map->odom 由 SLAM/GICP 负责）。
+# 注意: navigation_launch.py 会按 slam/use_pcd_localization 强制覆盖 publish_tf。
+sensor_scan_generation:
+  ros__parameters:
+    use_sim_time: False
+    lidar_frame: "livox_imu"
+    base_frame: "base_link"
+    robot_base_frame: "base_link"
+    publish_tf: True
+    # odometry 语义修复（方案 §2.3）：
+    #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
+    #   * twist 表达在 child_frame_id 下，父系差分速度会旋转到车体系；
+    #   * 重复时间戳/时间倒退/过大间隔/位姿跳变都不产生速度尖峰。
+    max_sample_gap: 0.20            # 差分速度可用的最大采样间隔（秒）
+    max_position_jump: 0.75         # 单次采样允许的最大平移跳变（米）
+    max_yaw_jump: 1.20              # 单次采样允许的最大航向跳变（弧度）
+
+# 以下地形分析两段 SRM 自建栈没有对应值，沿用 srm27 实车配置。
+terrain_analysis:
+  ros__parameters:
+    scanVoxelSize: 0.05
+    decayTime: 0.5
+    noDecayDis: 0.0
+    clearingDis: 0.0
+    useSorting: True
+    quantileZ: 0.2
+    considerDrop: False
+    limitGroundLift: False
+    maxGroundLift: 0.3
+    clearDyObs: True
+    minDyObsDis: 0.3
+    minDyObsAngle: 0.0
+    minDyObsRelZ: -0.3
+    absDyObsRelZThre: 0.2
+    minDyObsVFOV: -28.0
+    maxDyObsVFOV: 33.0
+    minDyObsPointNum: 1
+    noDataObstacle: False
+    noDataBlockSkipNum: 0
+    minBlockPointNum: 10
+    vehicleHeight: 0.5
+    voxelPointUpdateThre: 100
+    voxelTimeUpdateThre: 1.0
+    minRelZ: -1.5
+    maxRelZ: 0.5
+    disRatioZ: 0.2
+
+terrain_analysis_ext:
+  ros__parameters:
+    scanVoxelSize: 0.1
+    decayTime: 0.2
+    noDecayDis: 0.0
+    clearingDis: 20.0
+    useSorting: true
+    quantileZ: 0.2
+    vehicleHeight: 1.0
+    voxelPointUpdateThre: 100
+    voxelTimeUpdateThre: 2.0
+    lowerBoundZ: -1.5
+    upperBoundZ: 0.5
+    disRatioZ: 0.2
+    checkTerrainConn: False
+    terrainUnderVehicle: -0.75
+    terrainConnThre: 0.5
+    ceilingFilteringThre: 2.0
+    localTerrainMapRadius: 4.0
+
+# 结构沿用 srm27，frame 换成 SRM。
+# init_spin_speed 上游实车是 3.14（云台自旋耦合），本车没有 cmd_spin 发布者，
+# 若沿用会在启动后给 /cmd_vel 叠一个恒定 +3.14 rad/s 偏航，故取 0.0。
+fake_vel_transform:
+  ros__parameters:
+    use_sim_time: False
+    odom_topic: "odometry"
+    robot_base_frame: "base_link"
+    fake_robot_base_frame: "base_link_fake"
+    input_cmd_vel_topic: "cmd_vel_nav2_result"
+    # 底盘串口节点订阅的是 cmd_vel_chassis(SRM 老工程的命名), 不是 cmd_vel;
+    # 老工程里 fake_vel_transform 就是发这个名, 两边必须一致, 否则链路断开、车不动。
+    output_cmd_vel_topic: "cmd_vel_chassis"
+    cmd_spin_topic: "cmd_spin"
+    init_spin_speed: 0.0
+
+# 结构沿用 srm27，frame 换成 SRM。
+#
+# 构造时会阻塞等待 TF(base_frame <- lidar_frame)，直到成功，没有超时：
+# 这两帧必须存在，否则节点起不来、整个 launch 卡住。
+# 它订阅的 registered_scan 必须严格是 odom 系（loam_interface 的输出正是）。
+#
+# ⚠ 这里的 base_frame / lidar_frame 不是"机器人坐标系"，而是**先验点云的坐标系约定**：
+#   代码加载 PCD 后会施加一次 T(base_frame <- lidar_frame)，把"建图起点雷达系"下的
+#   点云换算成"建图起点底盘系"（= odom / 地图系）。所以必须先确认手上的 PCD 属于
+#   哪一种约定，下面两种只能选一种对：
+#
+#   情况一（本配置默认）：PCD 已经在地图系
+#     例：pcd/real/srm_site_01.pcd（= maps/srm_site_01_mapframe.pcd，头部注明已
+#     转到 maps/srm_site_01.yaml 的 pgm 地图系）。
+#     => 把 lidar_frame 设成与 base_frame 相同，让那次换算成为恒等变换，点云原样使用。
+#        实测此时先验点云与 srm_site_01.pgm 的栅格重合最佳 yaw≈2°，即已对正。
+#
+#   情况二：PCD 是 Point-LIO 的 camera_init 系（建图起点雷达系）
+#     例：建图时 save_pcd:=True 落盘的 point_lio/PCD/scans.pcd，或任何与 pgm
+#     同一次会话导出的原始点云。
+#     => 保留 lidar_frame: "livox_imu"、base_frame: "base_link"，启用挂载变换。
+#
+#   ⚠ 绝不能把"地图系 PCD + 挂载变换"凑在一起：那会绕 Z 轴多转 -90°，车会被定位到
+#     差 90° 的姿态上，而且 GICP 自己不会报错。实测：给 srm_site_01_mapframe.pcd 再
+#     施加挂载变换后，与 pgm 的最佳重合 yaw 从 2° 变成 92°。
+small_gicp_relocalization:
+  ros__parameters:
+    use_sim_time: False
+    num_threads: 4
+    num_neighbors: 20
+    global_leaf_size: 0.1
+    registered_leaf_size: 0.05
+    max_dist_sq: 3.0
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_link"
+    robot_base_frame: "base_link"                       # 只用于把 RViz 的初始位姿从 base 系转到 odom 系
+    lidar_frame: "base_link"                            # 与 base_frame 相同 => 先验点云原样使用（见"情况一"）
+    init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]           # [x, y, z, roll, pitch, yaw]；含义是 map->odom 的初值
+    # 先验 PCD 由 launch 的 prior_pcd_file 传入。
+    # maps/srm_site_01.pcd（camera_init 原始点云）与地图差约 239°，不能直接用于重定位。
+
+# srm27 实车在 nav2_slam_launch.py 里把本节点接在 terrain_map_ext 上（odom 系），
+# 与 SRM 建图时接 registered_scan、以 livox_scan 为 target_frame 不同。
+# 所以这里取 SRM 的"物理高度带"换算到 base_link 系:
+#   real_mapping_launch.py 用的是 min=0.10-0.22=-0.12 / max=1.00-0.22=0.78（相对 livox_scan，
+#   而 livox_scan 在 base_link 上方 0.22 m），等价于 base_link 系 0.10 ~ 1.00 m，
+#   与实车文档"距底盘原点高度 0.10～1.00 m"一致。
+pointcloud_to_laserscan:
+  ros__parameters:
+    use_sim_time: False
+    target_frame: base_link
+    transform_tolerance: 0.1
+    queue_size: 20
+    min_height: 0.10
+    max_height: 1.00
+    min_intensity: 0.0
+    max_intensity: 255.0
+    angle_min: -3.141592653589793
+    angle_max: 3.141592653589793
+    angle_increment: 0.008726646259971648
+    scan_time: 0.1
+    range_min: 0.5
+    range_max: 20.0
+    use_inf: true
+
+# 结构沿用 srm27；扫描范围/分辨率等取 mapping_params.yaml 的实车建图值。
+# scan_topic 保持 srm27 的 obstacle_scan（nav2_slam_launch.py 的 remap 决定），
+# 不用 SRM 的 /scan。
+slam_toolbox:
+  ros__parameters:
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: obstacle_scan
+    use_map_saver: true
+    mode: mapping
+
+    debug_logging: false
+    throttle_scans: 1
+    scan_queue_size: 10
+    # slam_toolbox publishes map->odom; do not pair this with a static TF.
+    transform_publish_period: 0.02
+    map_update_interval: 1.0                            # SRM
+    resolution: 0.05                                    # SRM
+    min_laser_range: 0.5                                # SRM
+    max_laser_range: 20.0                               # SRM
+    minimum_time_interval: 0.1                          # SRM
+    transform_timeout: 0.5                              # SRM
+    tf_buffer_duration: 30.0                            # SRM
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+
+    # General Parameters
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: true                               # SRM
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # Correlation Parameters
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # Correlation Parameters - Loop Closure Parameters
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+
+    # Scan Matcher Parameters
+    distance_variance_penalty: 5.5
+    angle_variance_penalty: 5.0
+
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: False
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: odometry
+    bt_loop_duration: 10
+    default_server_timeout: 100
+    wait_for_service_timeout: 1000
+    default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
+    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+controller_server:
+  ros__parameters:
+    use_sim_time: False                                 # 实车使用系统时钟
+    odom_topic: odometry                                # 输入里程计话题
+    controller_frequency: 50.0                          # 控制器运行频率（Hz）
+    # 实车旧配置里 min_y_velocity_threshold: 0.5 会把低速横移反馈当成零，必须调小
+    # 到与传感器噪声相称的量级（方案 §2.2）。
+    min_x_velocity_threshold: 0.001                     # X速度死区阈值（米/秒）
+    min_y_velocity_threshold: 0.001                     # Y速度死区阈值（米/秒）
+    min_theta_velocity_threshold: 0.001                 # 角速度死区阈值（弧度/秒）
+    failure_tolerance: 0.3                              # 控制器允许的失败容差
+    progress_checker_plugins: ["progress_checker"]      # 进度检查器列表
+    goal_checker_plugins: ["general_goal_checker"]      # 目标检查器列表
+    controller_plugins: ["FollowPath"]                  # 路径控制器列表
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"  # 进度检查器插件
+      required_movement_radius: 0.5                     # 要求移动的最小半径（米）
+      movement_time_allowance: 10.0                      # 允许不移动的最长时间（秒）
+    # 终点必须按“已停稳”验收（方案 §7.4）。
+    general_goal_checker:
+      stateful: True                                    # 是否保存目标检查状态
+      plugin: "nav2_controller::StoppedGoalChecker"     # 位姿 + 停止速度双条件
+      # 与实车 Omni 配置保持一致（main 已由 0.15 放宽到 0.4）：航点跳过半径 0.35 必须小于
+      # 本容差，否则最后一个航点会在判定到达前被删掉、车掉头往回走（见 behavior_trees/
+      # navigate_through_poses_w_replanning_and_recovery.xml 的约束说明）。
+      xy_goal_tolerance: 0.40                           # 平面位置容差（米）
+      yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
+      trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
+      rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）
+
+    # MINCO + MPC 局部规划控制器。
+    # 阶段一（P2）：model=velocity_integrator、yaw_policy.mode=xy_only，MPC 只控平移，
+    # 自转仍由独立自转链路负责；two_pass_reference 关闭，报告式 fine 启发式关闭。
+    FollowPath:
+      plugin: "srm27_minco_controller::MincoMpcController"
+      planning_frame: odom                              # 局部规划坐标系（连续 odom）
+      base_frame: base_link                             # 车体系（速度输出坐标系）
+      odom_topic: odometry                              # 状态适配输入话题
+      replan_frequency: 10.0                            # 后台重规划频率（Hz）
+      planning_horizon: 2.0                             # 局部路径截取视野（米）
+      planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）
+      state_timeout: 0.10                               # 状态允许的最大年龄（秒）
+      map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
+      trajectory_max_age: 0.30                          # 轨迹允许的最大年龄（秒）
+      build_grace_period: 1.0                           # 无可用轨迹时的零输出宽限（秒）
+      diagnostics_period: 0.5                           # 诊断发布周期（秒）
+      publish_visualization: True                       # 是否发布轨迹/预测可视化
+
+      # 判定"已到达路径终点"的半径（米）：落在该半径内时局部路径为空属正常，
+      # 由目标检查器判定成功，不再报 no_path（避免把"到点"变成控制器异常）。
+      terminal_reached_radius: 0.20
+
+      state:                                            # 状态适配层
+        max_sample_gap: 0.20                            # 差分速度可用的最大采样间隔（秒）
+        max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
+        max_yaw_jump: 1.20                              # 航向跳变阈值（弧度）
+        velocity_filter_alpha: 0.35                     # 速度一阶低通系数（0 表示关闭）
+
+      minco:                                            # MINCO 优化器
+        polynomial_order: 5                             # 只支持五次多项式
+        two_stage_optimization: True                    # PRE + FINELY 两阶段
+        enable_report_fine_heuristic: False             # 报告式通道启发式（默认关闭）
+        nominal_piece_duration: 0.30                    # 名义段时长（秒）
+        min_piece_duration: 0.05                        # 段时长下限（秒）
+        max_piece_duration: 1.00                        # 段时长上限（秒）
+        pre_time_ratio_min: 0.90                        # PRE 段时长比例下限
+        pre_time_ratio_max: 1.10                        # PRE 段时长比例上限
+        samples_per_piece: 8                            # 每段数值积分采样点数
+        max_iterations: 150                             # L-BFGS 最大迭代次数
+        gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
+        # 仅靠梯度阈值时该问题永远打不到收敛（实测 302 次仍在上限、耗时 17 ms）；
+        # 打开基于函数值下降率的判据后 52 次收敛、耗时 3 ms，结果质量不变。
+        lbfgs_past: 3                                   # 函数值下降率判据的迭代间隔（0=关闭）
+        w_jerk: 0.2                                     # jerk 能量权重（按实车限速标定）
+        w_time: 10.0                                    # 总时长权重
+        w_obstacle: 100.0                               # 障碍软约束权重
+        # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
+        # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
+        # 实测（2 m 局部路径、v_max 0.5、a_max 0.3）：w_v=20/w_a=2 -> 0.614/0.637（双超）；
+        # w_v=60/w_a=300 -> 0.480/0.276（双双达标）。同时工作线程还有一次确定性时间拉伸修复兜底。
+        w_velocity: 60.0                                # 速度软约束权重
+        w_acceleration: 300.0                           # 加速度软约束权重
+        w_time_ratio: 1.0                               # PRE 段时长比例惩罚权重
+        soft_hinge_beta: 20.0                           # 软 hinge 平滑系数
+        # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
+        # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
+        # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
+        optimization_clearance_margin: 0.05
+        resample_step: 0.10                             # 前端弧长重采样步长（米）
+        corner_speed_ratio: 0.35                        # 转角处最低速度比例
+        min_pieces: 2                                   # 最少段数
+        max_pieces: 12                                  # 最多段数
+        terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
+
+      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 1.5 / max_accel 3.0、
+      # 串口 max_wz 1.0）对齐。原先的 0.5/0.3 是迁移方案里的“首跑测试档位”占位值，
+      # 与实际实车链路不一致；仿真配置已同步为同一组值。
+      limits:                                           # 有效约束（必须与 smoother/串口一致）
+        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
+        max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
+        max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
+        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
+
+      mpc:                                              # MPC 求解器
+        model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
+        prediction_dt: 0.02                             # 预测步长（秒）
+        prediction_steps: 30                            # 预测步数
+        two_pass_reference: False                       # 报告式第二次采样/求解
+        # 命令前瞻：取预测序列里 `t_now + 前瞻` 那一拍作为输出速度，而不是第 0 拍。
+        # 速度层 MPC 的决策量就是速度，而参考在轨迹起步段的 `u_ref(0)=0`（轨迹从静止起步），
+        # 于是 QP 的最优解把加速"后置"，第 0 拍命令≈0 —— 车永远不启动（现场实测 ±0.01 m/s、
+        # 原地漂移；离线闭环已复现）。加前瞻后同一场景 1.0 s 内前进 0.33 m、速度 0.28 m/s 起势。
+        # 该值应与有效执行延迟同量级：仿真无内环延迟，取 0.20 s；**实车必须按实测延迟重新标定**。
+        command_lookahead: 0.20                         # 命令前瞻（秒）
+        qp_deadline_ms: 5.0                             # QP 性能门槛（毫秒），超过只计数不停车
+        # 复用持久求解器 + 热启动：H 与约束矩阵在运行期固定，每周期只有梯度/上下界变化。
+        # 实测 N=30、K=8、含输入差分约束：冷启动约 8~15 ms，热启动平均约 0.5 ms；
+        # 冷启动已在 activate() 里预热，不在 50 Hz 控制回调内发生。
+        use_hot_start: True
+        q_position: 20.0                                # 位置误差权重
+        q_yaw: 5.0                                      # 航向误差权重
+        q_velocity: 1.0                                 # 六维模型平移速度权重
+        q_omega: 0.5                                    # 六维模型角速度权重
+        r_translation: 1.0                              # 平移输入权重
+        r_angular: 1.0                                  # 自转输入权重
+        r_input_change: 0.0                             # 输入变化惩罚权重
+        use_tangent_normal_weight: False                # 是否按切线/法向分别加权
+        q_along_track: 20.0                             # 沿轨迹权重（启用时生效）
+        q_cross_track: 40.0                             # 垂直轨迹权重（启用时生效）
+        speed_polygon_sides: 8                          # 合速度内接正多边形边数
+        enforce_input_change: True                      # 是否施加输入差分约束
+
+      yaw_policy:                                       # 航向策略
+        mode: xy_only                                   # 阶段一：MPC 不产生自转
+        stop_rotation_on_goal: True                     # 到点后停止自转参考
+        narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
+        allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
+
+      safety:                                           # 几何与安全
+        robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
+        clearance_margin: 0.05                          # 额外净空裕量（米）
+        unknown_is_obstacle: True                       # 未知区域按不可通行处理
+        # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
+        # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
+        # （实测：0.5 m/s 档要求 1.77 s 尚可通过，1.5 m/s 档要求 5.1 s 就必然失败，
+        # 现场表现为规划一直失败、车被 recovery 拖来拖去）。**必须按实车制动辨识填写。**
+        braking_deceleration: 0.0
+
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: False
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.05
+      robot_radius: 0.33           # 车体半径 0.27m、轮子外廓约 0.33m; 取外廓值保证不蹭墙
+      plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
+      intensity_voxel_layer:
+        plugin: srm27_nav_costmap::IntensityVoxelLayer
+        enabled: true
+        track_unknown_space: true
+        footprint_clearing_enabled: true
+        publish_voxel_map: false
+        combination_method: 1
+        mark_threshold: 0
+        origin_z: 0.0
+        unknown_threshold: 5
+        z_resolution: 0.05
+        z_voxels: 16
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        min_obstacle_intensity: 0.1
+        max_obstacle_intensity: 2.0
+        observation_sources: terrain_map
+        terrain_map:
+          data_type: PointCloud2
+          # '<robot_namespace>' 会被 namespace 替换
+          topic: <robot_namespace>/terrain_map
+          # terrain_analysis 实际发布在 odom 系（源码硬编码 frame_id=odom）；
+          # 这里仍按上游语义填雷达系，本车对应 livox_imu。
+          sensor_frame: livox_imu
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 5.0
+          obstacle_min_range: 0.2
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+      always_send_full_costmap: False
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: False
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: map
+      robot_base_frame: base_link
+      robot_radius: 0.33           # 车体半径 0.27m、轮子外廓约 0.33m; 取外廓值保证不蹭墙
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
+      intensity_voxel_layer:
+        plugin: srm27_nav_costmap::IntensityVoxelLayer
+        enabled: true
+        track_unknown_space: true
+        footprint_clearing_enabled: true
+        publish_voxel_map: false
+        combination_method: 1
+        mark_threshold: 0
+        origin_z: 0.0
+        unknown_threshold: 5
+        z_resolution: 0.05
+        z_voxels: 16
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        min_obstacle_intensity: 0.1
+        max_obstacle_intensity: 2.0
+        observation_sources: terrain_map_ext
+        terrain_map_ext:
+          data_type: PointCloud2
+          topic: <robot_namespace>/terrain_map_ext
+          sensor_frame: livox_imu
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 10.0
+          obstacle_min_range: 0.2
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+      always_send_full_costmap: False
+
+# yaml_filename 由 launch 传入
+map_server:
+  ros__parameters:
+    yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    use_sim_time: False
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    use_sim_time: False
+    expected_planner_frequency: 10.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_theta_star_planner/ThetaStarPlanner"
+      how_many_corners: 8
+      w_euc_cost: 1.0
+      w_traversal_cost: 10.0
+      w_heuristic_cost: 1.0
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: False
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: False
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "srm27_nav_behaviors/BackUpFreeSpace"
+    drive_on_heading:
+      plugin: "nav2_behaviors/DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors/AssistedTeleop"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+    service_name: "global_costmap/get_costmap"
+    max_radius: 2.0
+    visualize: false
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: False
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: False
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    # 禁止导航控制底盘自转 (ω 恒为 0)，底盘朝向由云台控制。
+    # behavior_server 的 Spin 恢复行为不走本话题，不受影响。
+    # 与 FollowPath.limits 一致：初期测试档位为平移合速度 0.5 m/s。
+    # 上下界对称；阶段一 yaw_policy.mode = xy_only 时导航命令的 wz 恒为 0，
+    # 启用 SE(2) 阶段时必须同步提高这里的 yaw 界并改用 NAV_SE2 仲裁模式。
+    max_velocity: [1.5, 1.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
+    min_velocity: [-1.5, -1.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
+    max_accel: [3.0, 3.0, 0.0]         # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, 0.0]       # 最大减速度[x,y,yaw]
+    odom_topic: "odometry"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+srm27_teleop_twist_joy_node:
+  ros__parameters:
+    use_sim_time: False
+    robot_base_frame: base_link
+    control_mode: auto_control    # Option: auto_control, manual_control
+
+    require_enable_button: true
+    enable_button: 4              # L1 shoulder button
+    enable_turbo_button: 5        # R1 shoulder button
+
+    axis_chassis:
+      x: 1                        # Left thumb stick vertical
+      y: 0                        # Left thumb stick horizontal
+      yaw: 6                      # button_left and button_right
+    scale_chassis:
+      x: 2.5
+      y: 2.5
+      yaw: 3.0
+    scale_chassis_turbo:
+      x: 4.0
+      y: 4.0
+      yaw: 6.0
+
+    axis_gimbal:
+      roll: -1                    # Disable
+      pitch: 4                    # Right thumb stick vertical
+      yaw: 3                      # Right thumb stick horizontal
+    scale_gimbal:
+      roll: 0.0
+      pitch: -1.0
+      yaw: 2.5
+    scale_gimbal_turbo:
+      roll: 0.0
+      pitch: -1.5
+      yaw: 3.5

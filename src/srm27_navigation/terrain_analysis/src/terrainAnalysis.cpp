@@ -255,7 +255,12 @@ int main(int argc, char ** argv)
     nh->create_subscription<nav_msgs::msg::Odometry>("lidar_odometry", 5, odometryHandler);
 
   auto subLaserCloud =
-    nh->create_subscription<sensor_msgs::msg::PointCloud2>("registered_scan", 5, laserCloudHandler);
+    // QoS 必须与发布端一致：仿真点云由 ign_sim_pointcloud_tool 以 SensorDataQoS
+    // （BEST_EFFORT）发布，默认的 RELIABLE 订阅会与之不兼容、完全收不到数据
+    // （发布端会打印 "requesting incompatible QoS ... RELIABILITY_QOS_POLICY"）。
+    // 用 SensorDataQoS 订阅同时也与 RELIABLE 发布端兼容（实车 LIO 走的是 RELIABLE）。
+    nh->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "registered_scan", rclcpp::SensorDataQoS(), laserCloudHandler);
 
   auto subJoystick = nh->create_subscription<sensor_msgs::msg::Joy>("joy", 5, joystickHandler);
 

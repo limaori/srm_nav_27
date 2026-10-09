@@ -140,6 +140,13 @@ sensor_scan_generation:
     base_frame: "base_link"
     robot_base_frame: "base_link"
     publish_tf: True
+    # odometry 语义修复（方案 §2.3）：
+    #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
+    #   * twist 表达在 child_frame_id 下，父系差分速度会旋转到车体系；
+    #   * 重复时间戳/时间倒退/过大间隔/位姿跳变都不产生速度尖峰。
+    max_sample_gap: 0.20            # 差分速度可用的最大采样间隔（秒）
+    max_position_jump: 0.75         # 单次采样允许的最大平移跳变（米）
+    max_yaw_jump: 1.20              # 单次采样允许的最大航向跳变（弧度）
 
 # 以下地形分析两段 SRM 自建栈没有对应值，沿用 srm27 实车配置。
 terrain_analysis:

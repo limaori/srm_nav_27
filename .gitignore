@@ -17,7 +17,7 @@
 *.bag2
 *.pcap
 *~
-调试日志.md
+
 
 # Local editor files
 .vscode/
@@ -31,3 +31,11 @@
 /*.pdf
 symlink
 sentry_*/
+
+# Cartographer raw map artifacts (大体积二进制，默认不跟踪)
+*.posegraph
+*.data
+# 例外：随地图一起版本化的原始产物仍要跟踪（main 已提交 maps/227_1006/ 下的
+# .data 与 .posegraph；没有这两条否定规则，它们会在这里被静默丢弃）
+!maps/**/*.data
+!maps/**/*.posegraph

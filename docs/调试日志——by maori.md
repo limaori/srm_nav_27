@@ -398,10 +398,42 @@ nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉�
 ```
 
 ### 存路径点
-1.先起导航栈./script/start_real_nav.sh
-2.另起终端：./script/start_waypoints.sh --save-file missions/文件名.yaml --record-only
+1.先起导航栈
+```bash
+./script/start_real_nav.sh
+```
+2.另起终端：
+```bash
+./script/start_waypoints.sh --save-file missions/文件名.yaml --record-only
+```
 3.点publish point,选点，终端会有“记下航点 #1: (1.00, -1.00, yaw 0.00) [map]  共 1 个”
-4.另起终端保存：ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
+4.另起终端保存：
+```bash
+ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
+```
 
 ### 跑存好的路径点
+```bash
 ./script/start_waypoints.sh --file missions/文件名.yaml
+```
+
+# 2026-10-7
+### 1006仿真脚本
+```bash
+script/start_sim_nav.sh -w srm_empty -m 227_1006
+```
+-w参数是gazebo世界名 
+-m参数是地图名
+
+# 2026-10-8
+### 两种局部规划器/控制器仿真测试
+##### 启动omnipid(空gzb世界+rmuc2025地图)
+```bash
+./script/start_sim_nav.sh -w srm_empty -m rmuc_2025
+```
+##### 启动minco+mpc(空gzb世界+rmuc2025地图)
+```bash
+./script/start_sim_nav.sh -w srm_empty -m rmuc_2025 \
+  -p /home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
+  --rotation-mode stop
+  ```

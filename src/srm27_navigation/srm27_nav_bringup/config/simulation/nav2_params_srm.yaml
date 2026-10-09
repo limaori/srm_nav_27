@@ -117,6 +117,16 @@ sensor_scan_generation:
     # simulation_ground_truth_odometry is the single owner of odom ->
     # base_link.  A second publisher here would make the chassis twitch.
     publish_tf: False
+    # odometry 语义修复（方案 §2.3）：
+    #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
+    #   * twist 表达在 child_frame_id 下，父系差分速度会旋转到车体系；
+    #   * 重复时间戳/时间倒退/过大间隔/位姿跳变都不产生速度尖峰。
+    # 仿真真值的 lidar_odometry 只有约 3.5 Hz（间隔 0.25~0.30 s）；真值模式下本节点的
+    # odometry 输出被 remap 到 sensor_odometry 且无订阅者，0.20 s 会每帧刷告警。
+    # 放宽到 0.40 s 仍保留“长间隔不产生差分速度”的保护。
+    max_sample_gap: 0.40            # 差分速度可用的最大采样间隔（秒）
+    max_position_jump: 0.75         # 单次采样允许的最大平移跳变（米）
+    max_yaw_jump: 1.20              # 单次采样允许的最大航向跳变（弧度）
 
 terrain_analysis:
   ros__parameters:
@@ -391,10 +401,11 @@ controller_server:
       use_rotate_to_heading_treshold: 0.1                # 旋转到路径方向阈值（弧度）
       min_approach_linear_velocity: 0.5                  # 接近目标时的最小线速度（米/秒）
       approach_velocity_scaling_dist: 1.0                # 开始减速的距离（米）
-      v_linear_min: -2.5                                 # 最小线速度（米/秒）
-      v_linear_max: 2.5                                  # 最大线速度（米/秒）
-      v_angular_min: -3.0                                # 最小角速度（弧度/秒）
-      v_angular_max: 3.0                                 # 最大角速度（弧度/秒）
+      # 与实车 Omni 配置（real/nav2_params_srm.yaml）对齐，保证 A/B 对照使用同一套限速。
+      v_linear_min: -1.5                                 # 最小线速度（米/秒）
+      v_linear_max: 1.5                                  # 最大线速度（米/秒）
+      v_angular_min: -1.0                                # 最小角速度（弧度/秒）
+      v_angular_max: 1.0                                 # 最大角速度（弧度/秒）
       curvature_min: 0.4                                # 低曲率阈值
       curvature_max: 0.7                                # 高曲率阈值
       reduction_ratio_at_high_curvature: 0.5            # 高曲率时的速度降低比例
@@ -587,10 +598,11 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    max_velocity: [2.5, 2.5, 3.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-2.5, -2.5, -3.0]                       # 最小速度[x,y,yaw]
-    max_accel: [4.5, 4.5, 5.0]                             # 最大加速度[x,y,yaw]
-    max_decel: [-4.5, -4.5, -5.0]                          # 最大减速度[x,y,yaw]
+    # 与实车 velocity_smoother 完全一致（实车 yaw 钳 0）。
+    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
+    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
+    max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]

@@ -14,6 +14,8 @@
 
 #include "srm27_nav_plugins/layers/intensity_voxel_layer.hpp"
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -108,6 +110,16 @@ void IntensityVoxelLayer::updateBounds(
   // reset maps each iteration
   resetMaps();
 
+  // This layer rebuilds its grid from observations every cycle. Its *previous* marked
+  // bounds must also be reset/recombined in the master map, including when the latest
+  // cloud is empty or has a smaller extent. Otherwise vanished obstacles remain lethal
+  // outside the current update rectangle until an unrelated full-map clear.
+  if (has_previous_bounds_) {
+    touch(previous_min_x_, previous_min_y_, min_x, min_y, max_x, max_y);
+    touch(previous_max_x_, previous_max_y_, min_x, min_y, max_x, max_y);
+    has_previous_bounds_ = false;
+  }
+
   // if not enabled, stop here
   if (!enabled_) {
     return;
@@ -115,6 +127,11 @@ void IntensityVoxelLayer::updateBounds(
 
   // get the maximum sized window required to operate
   useExtraBounds(min_x, min_y, max_x, max_y);
+
+  double current_min_x = std::numeric_limits<double>::infinity();
+  double current_min_y = std::numeric_limits<double>::infinity();
+  double current_max_x = -std::numeric_limits<double>::infinity();
+  double current_max_y = -std::numeric_limits<double>::infinity();
 
   // get the marking observations
   bool current = true;
@@ -171,7 +188,7 @@ void IntensityVoxelLayer::updateBounds(
         unsigned int index = getIndex(mx, my);
 
         costmap_[index] = LETHAL_OBSTACLE;
-        touch(static_cast<double>(px), static_cast<double>(py), min_x, min_y, max_x, max_y);
+        touch(px, py, &current_min_x, &current_min_y, &current_max_x, &current_max_y);
       }
     }
   }
@@ -197,7 +214,17 @@ void IntensityVoxelLayer::updateBounds(
     voxel_pub_->publish(grid_msg);
   }
 
-  updateFootprint(robot_x, robot_y, robot_yaw, min_x, min_y, max_x, max_y);
+  updateFootprint(
+    robot_x, robot_y, robot_yaw, &current_min_x, &current_min_y, &current_max_x, &current_max_y);
+  if (std::isfinite(current_min_x) && std::isfinite(current_min_y)) {
+    previous_min_x_ = current_min_x;
+    previous_min_y_ = current_min_y;
+    previous_max_x_ = current_max_x;
+    previous_max_y_ = current_max_y;
+    has_previous_bounds_ = true;
+    touch(current_min_x, current_min_y, min_x, min_y, max_x, max_y);
+    touch(current_max_x, current_max_y, min_x, min_y, max_x, max_y);
+  }
 }
 
 void IntensityVoxelLayer::updateOrigin(double new_origin_x, double new_origin_y)

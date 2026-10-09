@@ -14,40 +14,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""仿真真值里程计适配器：把 Gazebo 真值三维位姿变成导航链路用的里程计。
+
+约定：
+
+* ``odom -> base_link`` 的 TF 由本节点**单独拥有**（``sensor_scan_generation`` 的
+  ``publish_tf`` 在仿真里为 False），因此这里发布的位姿就是整条链路的真值。
+* odom 系是**重力对齐**的：原点取出生位置，姿态只取出生航向，z 轴始终竖直，
+  高度以出生点地面高度为基准，不会随每条消息把 z 归零。
+* ``odom -> base_link`` 保留完整三维姿态（含 roll/pitch），雷达位姿由完整底盘位姿
+  组合外参得到；二维导航需要的 x/y/yaw 由下游显式提取。
+"""
+
 import math
+import os
+import sys
 import time
 
 
 import rclpy
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import Transform, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from tf2_ros import TransformBroadcaster
 
+# 同目录的纯几何模块（无 ROS 依赖，便于单元测试）。显式加入脚本所在目录，兼容
+# ``--symlink-install`` 且 Python 3.11+ 会把 ``sys.path[0]`` 解析成源码目录的情况。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from srm_nav_pose_math import (  # noqa: E402 - 必须在 sys.path 调整之后导入
+    compose_pose,
+    inverse_pose,
+    normalize_angle,
+    pose_from_ros_pose,
+    pose_from_transform,
+    rpy_to_quaternion,
+    yaw_from_quaternion,
+)
+
 
 POSITION_JITTER_THRESHOLD = 0.002
 YAW_JITTER_THRESHOLD = 0.002
-
-
-def yaw_from_quaternion(q):
-    return math.atan2(
-        2.0 * (q.w * q.z + q.x * q.y),
-        1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-    )
-
-
-def rpy_to_quaternion(roll, pitch, yaw):
-    """固定轴 rpy 转四元数，用于把几何外参换算成 TF。"""
-    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
-    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
-    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
-    return (
-        sr * cp * cy - cr * sp * sy,
-        cr * sp * cy + sr * cp * sy,
-        cr * cp * sy - sr * sp * cy,
-        cr * cp * cy + sr * sp * sy,
-    )
 
 
 def load_lidar_extrinsic():
@@ -88,8 +96,11 @@ class SimulationGroundTruthOdometry(Node):
         self.lidar_frame = self.declare_parameter(
             "lidar_frame", lidar_extrinsic["link_name"]
         ).value
-        self.lidar_translation = lidar_extrinsic["xyz"]
-        self.lidar_rotation = rpy_to_quaternion(*lidar_extrinsic["rpy"])
+        # base_link -> 雷达外参位姿（几何 YAML 是唯一来源，避免这里再写一份硬编码）。
+        self.base_to_lidar = (
+            tuple(lidar_extrinsic["xyz"]),
+            rpy_to_quaternion(*lidar_extrinsic["rpy"]),
+        )
         self.initial_pose = None
         self.zero_pose_since = None
         self.zero_pose_grace_ns = 2_000_000_000
@@ -128,17 +139,22 @@ class SimulationGroundTruthOdometry(Node):
             return
         now_monotonic = time.monotonic_ns()
         self.last_callback_time = now_monotonic
-        pose = message.pose.pose
-        yaw = yaw_from_quaternion(pose.orientation)
+        # Gazebo 真值给出**完整三维位姿**：位置含高度，姿态含 roll/pitch/yaw。这里刻意
+        # 不做二维压平——odom -> base_link 的 TF、雷达位姿与点云变换都由完整位姿算出；
+        # 上坡时忽略俯仰会让车前方 1 m 的点产生约 0.2 m 的高度误差。二维导航需要的
+        # x/y/yaw 由下游（状态适配层）显式提取，不在感知链路上提前丢掉。
+        world_pose = pose_from_ros_pose(message.pose.pose)
+        world_position, world_orientation = world_pose
+        yaw = yaw_from_quaternion(world_orientation)
         if self.initial_pose is None:
             # Gazebo can publish one zero-valued odometry sample while the
             # robot entity is still being spawned. Do not use that placeholder
             # as the odometry origin, or the real spawn pose will appear
             # outside the Nav2 map.
             is_zero_pose = (
-                abs(pose.position.x) < 1e-6
-                and abs(pose.position.y) < 1e-6
-                and abs(pose.position.z) < 1e-6
+                abs(world_position[0]) < 1e-6
+                and abs(world_position[1]) < 1e-6
+                and abs(world_position[2]) < 1e-6
                 and abs(yaw) < 1e-6
             )
             if is_zero_pose:
@@ -158,8 +174,13 @@ class SimulationGroundTruthOdometry(Node):
                 # the intended relative-odometry origin.
                 if now_ns - self.zero_pose_since < self.zero_pose_grace_ns:
                     return
-            self.initial_pose = (pose.position.x, pose.position.y, yaw)
-            self.get_logger().info("Ground-truth odometry origin initialized")
+            # 里程计原点 = 出生位置 + 出生航向；roll/pitch 不进入原点定义，因此 odom 系
+            # 始终重力对齐（z 轴竖直），高度基准就是出生点地面高度，不会被强制归零。
+            self.initial_pose = (world_position, rpy_to_quaternion(0.0, 0.0, yaw))
+            self.get_logger().info(
+                "Ground-truth odometry origin initialized: "
+                f"z={world_position[2]:.3f} m, yaw={math.degrees(yaw):.1f} deg"
+            )
 
         # Use the node's ROS clock for every derived message.  Gazebo bridge
         # messages can carry a stale source timestamp after /clock starts;
@@ -175,42 +196,32 @@ class SimulationGroundTruthOdometry(Node):
             return
         self.last_publish_time = publish_time_ns
 
-        initial_x, initial_y, initial_yaw = self.initial_pose
-        world_dx = pose.position.x - initial_x
-        world_dy = pose.position.y - initial_y
-        cos_yaw = math.cos(initial_yaw)
-        sin_yaw = math.sin(initial_yaw)
-        x = cos_yaw * world_dx + sin_yaw * world_dy
-        y = -sin_yaw * world_dx + cos_yaw * world_dy
-        relative_yaw = math.atan2(
-            math.sin(yaw - initial_yaw), math.cos(yaw - initial_yaw)
+        # 相对位姿 T_odom_base = T_odom_initial⁻¹ ∘ T_world_base。odom 系原点在出生点、
+        # 姿态只保留出生航向，所以 z 轴始终竖直、高度有明确基准。
+        base_pose = self._suppress_jitter(
+            compose_pose(inverse_pose(self.initial_pose), world_pose)
         )
-        x, y, relative_yaw = self._suppress_jitter(x, y, relative_yaw)
 
-        transform = TransformStamped()
-        transform.header.stamp = stamp.to_msg()
-        transform.header.frame_id = "odom"
-        transform.child_frame_id = self.base_frame
-        transform.transform.translation.x = x
-        transform.transform.translation.y = y
-        transform.transform.rotation.z = math.sin(relative_yaw / 2.0)
-        transform.transform.rotation.w = math.cos(relative_yaw / 2.0)
+        transform = self._transform_from_pose(base_pose, stamp, "odom", self.base_frame)
         self.tf_broadcaster.sendTransform(transform)
 
         odometry = Odometry()
         odometry.header = transform.header
         odometry.child_frame_id = transform.child_frame_id
-        odometry.pose.pose.position.x = x
-        odometry.pose.pose.position.y = y
+        # 位姿与 TF 用**同一个完整三维位姿**：同名 frame 在 TF 与消息里必须表示同一件
+        # 事，否则下游（点云变换、地形分析）会按平面位姿解释三维真值。
+        odometry.pose.pose.position.x = base_pose[0][0]
+        odometry.pose.pose.position.y = base_pose[0][1]
+        odometry.pose.pose.position.z = base_pose[0][2]
         odometry.pose.pose.orientation = transform.transform.rotation
         odometry.twist = message.twist
-        # The Gazebo plugin reports full-3D twist in the chassis frame.  Nav2
-        # consumes a planar base odometry; discard vertical/roll/pitch motion
-        # and suppress tiny physics noise that otherwise keeps the controller
-        # and RViz model twitching while stopped.
+        # twist 保持平面：速度指令本身就是平面的，Nav2 消费的也是平面底盘里程计；
+        # 高度方向与 roll/pitch 角速度属于感知侧信息，保留在 Gazebo 真值话题里，
+        # 不进入导航接口，避免下游把三维分量误当平面速度。
         odometry.twist.twist.linear.z = 0.0
         odometry.twist.twist.angular.x = 0.0
         odometry.twist.twist.angular.y = 0.0
+        # 抑制静止时的物理噪声：否则控制器与 RViz 里的车会在停住后持续抽动。
         if abs(odometry.twist.twist.linear.x) < 0.002:
             odometry.twist.twist.linear.x = 0.0
         if abs(odometry.twist.twist.linear.y) < 0.002:
@@ -222,21 +233,14 @@ class SimulationGroundTruthOdometry(Node):
         # sensor_scan_generation consumes a lidar pose together with the cloud.
         # Publish the same stable pose with the lidar child frame so this path
         # works without Point-LIO/loam_interface in simulation odometry mode.
-        # 外参取自 srm27_robot_description 的几何 YAML（base_link -> front_mid360）。
-        lidar_tf = TransformStamped().transform
-        lidar_tf.translation.x = self.lidar_translation[0]
-        lidar_tf.translation.y = self.lidar_translation[1]
-        lidar_tf.translation.z = self.lidar_translation[2]
-        (
-            lidar_tf.rotation.x,
-            lidar_tf.rotation.y,
-            lidar_tf.rotation.z,
-            lidar_tf.rotation.w,
-        ) = self.lidar_rotation
+        # 外参取自 srm27_robot_description 的几何 YAML（base_link -> front_mid360），
+        # 由完整三维底盘位姿组合而成：底盘一旦有 roll/pitch，只有三维组合才正确。
         lidar_transform = TransformStamped()
         lidar_transform.header = transform.header
         lidar_transform.child_frame_id = self.lidar_frame
-        lidar_transform.transform = self._compose(transform.transform, lidar_tf)
+        lidar_transform.transform = self._compose(
+            transform.transform, self._pose_to_transform(self.base_to_lidar)
+        )
         lidar_odom = Odometry()
         lidar_odom.header = lidar_transform.header
         lidar_odom.child_frame_id = lidar_transform.child_frame_id
@@ -246,44 +250,75 @@ class SimulationGroundTruthOdometry(Node):
         lidar_odom.pose.pose.orientation = lidar_transform.transform.rotation
         self.lidar_odom_publisher.publish(lidar_odom)
 
-    def _suppress_jitter(self, x, y, yaw):
-        """Hold sub-threshold stationary noise while preserving accumulated motion."""
+    def _suppress_jitter(self, pose):
+        """静止时保持亚阈值抖动，同时不吞掉累积运动。
+
+        保持判据仍是**平面**位移与航向（与二维导航调参一致）；判据成立时整个三维位姿
+        （含高度与 roll/pitch）一起保持，避免静止时 RViz/代价地图的模型抽动；判据不
+        成立时位姿整体更新，因此上坡过程中的高度与俯仰不会被吞掉。
+        """
         if self.filtered_pose is None:
-            self.filtered_pose = (x, y, yaw)
+            self.filtered_pose = pose
             return self.filtered_pose
 
-        last_x, last_y, last_yaw = self.filtered_pose
-        yaw_delta = math.atan2(math.sin(yaw - last_yaw), math.cos(yaw - last_yaw))
+        position, orientation = pose
+        last_position, last_orientation = self.filtered_pose
+        yaw_delta = normalize_angle(
+            yaw_from_quaternion(orientation) - yaw_from_quaternion(last_orientation)
+        )
         if (
-            math.hypot(x - last_x, y - last_y) < POSITION_JITTER_THRESHOLD
+            math.hypot(
+                position[0] - last_position[0], position[1] - last_position[1]
+            )
+            < POSITION_JITTER_THRESHOLD
             and abs(yaw_delta) < YAW_JITTER_THRESHOLD
         ):
             return self.filtered_pose
 
-        self.filtered_pose = (x, y, yaw)
+        self.filtered_pose = pose
         return self.filtered_pose
 
     @staticmethod
+    def _pose_to_transform(pose):
+        """把 ``(position, orientation)`` 位姿写成不带时间戳/坐标系的 ``Transform``。"""
+        position, orientation = pose
+        transform = Transform()
+        transform.translation.x = position[0]
+        transform.translation.y = position[1]
+        transform.translation.z = position[2]
+        (
+            transform.rotation.x,
+            transform.rotation.y,
+            transform.rotation.z,
+            transform.rotation.w,
+        ) = orientation
+        return transform
+
+    @staticmethod
+    def _transform_from_pose(pose, stamp, parent_frame, child_frame):
+        """把 ``(position, orientation)`` 位姿写成 ``TransformStamped``。"""
+        transform = TransformStamped()
+        transform.header.stamp = stamp.to_msg()
+        transform.header.frame_id = parent_frame
+        transform.child_frame_id = child_frame
+        transform.transform = SimulationGroundTruthOdometry._pose_to_transform(pose)
+        return transform
+
+    @staticmethod
     def _compose(first, second):
-        """Compose two rigid transforms using only standard-library math."""
-        qx, qy, qz, qw = first.rotation.x, first.rotation.y, first.rotation.z, first.rotation.w
-        sx, sy, sz, sw = second.rotation.x, second.rotation.y, second.rotation.z, second.rotation.w
-        # Rotate the second translation by the first quaternion.
-        tx = 2.0 * (qy * sz - qz * sy)
-        ty = 2.0 * (qz * sx - qx * sz)
-        tz = 2.0 * (qx * sy - qy * sx)
-        output = TransformStamped().transform
-        output.translation.x = first.translation.x + (
-            second.translation.x + qw * tx + (qy * tz - qz * ty))
-        output.translation.y = first.translation.y + (
-            second.translation.y + qw * ty + (qz * tx - qx * tz))
-        output.translation.z = first.translation.z + (
-            second.translation.z + qw * tz + (qx * ty - qy * tx))
-        output.rotation.x = qw * sx + qx * sw + qy * sz - qz * sy
-        output.rotation.y = qw * sy - qx * sz + qy * sw + qz * sx
-        output.rotation.z = qw * sz + qx * sy - qy * sx + qz * sw
-        output.rotation.w = qw * sw - qx * sx - qy * sy - qz * sz
-        return output
+        """组合两个刚体变换：``T_out = T_first ∘ T_second``。
+
+        平移必须用 **second 的平移**参与 first 的旋转
+        （``t_out = t_first + R_first · t_second``），旋转用四元数乘法
+        （``q_out = q_first ⊗ q_second``），两者使用互相独立的变量。
+
+        历史缺陷：这里把 second 的**四元数分量**当成了平移代入叉乘，于是底盘转动时
+        外参平移完全不跟着转。最小复现（first 只 yaw 90°、second 只有平移
+        ``(0.15, -0.15, 0.22)`` 且旋转为单位四元数）：正确结果 ``(0.15, 0.15, 0.22)``，
+        缺陷结果 ``(0.15, -0.15, 0.22)``，相差 0.30 m。
+        """
+        composed = compose_pose(pose_from_transform(first), pose_from_transform(second))
+        return SimulationGroundTruthOdometry._pose_to_transform(composed)
 
 
 def main(args=None):

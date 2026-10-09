@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_minco_vendor</name>
+  <version>0.1.0</version>
+  <description>
+    Vendored GCOPTER MINCO/L-BFGS headers used by srm27_minco_core.
+    Upstream: https://github.com/ZJU-FAST-Lab/GCOPTER (MIT),
+    pinned commit e0444f6d47b84f972ced91746b05feb36ce1fd4f.
+  </description>
+  <maintainer email="srm27@example.com">SRM27 Navigation Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

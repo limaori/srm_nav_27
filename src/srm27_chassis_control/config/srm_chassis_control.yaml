@@ -15,11 +15,17 @@ srm_cmd_mux:
     # 超时清零
     nav_timeout: 0.3                      # 导航输入超时（s）
     rotation_timeout: 0.1                 # 自转输入超时（s）
-    # 限幅
-    vx_max: 0.5                           # 前向速度上限（m/s）
-    vy_max: 0.5                           # 左向速度上限（m/s）
-    v_max: 0.5                            # 平移合速度上限（m/s，按向量模长）
-    wz_max: 2.0                           # 自转角速度上限（rad/s）
+    # 限幅（仿真提速档 3.0 m/s，2026-10-09 由 1.5 提升）
+    # 本 mux 只存在于仿真链路：实车导航链是 smoother(max_velocity 1.5) → fake_vel_transform →
+    # cmd_vel_chassis → 串口（srm27_nav_protocol max_vx/vy 2.5、max_wz 1.0），并不经过本 mux。
+    # 因此这里放开到 3.0 只影响仿真，不改变实车限速。
+    # 必须与仿真 MINCO 的 FollowPath.limits.max_linear_speed 和 velocity_smoother 的
+    # 上下界保持一致；mux 是 cmd_vel_sim 的最后一道钳位，留低就会把提速整个吃掉。
+    # wz 仍取实车串口协议的 1.0 rad/s（自转链路独立，本次未改）。
+    vx_max: 3.0                           # 前向速度上限（m/s）
+    vy_max: 3.0                           # 左向速度上限（m/s）
+    v_max: 3.0                            # 平移合速度上限（m/s，按向量模长）
+    wz_max: 1.0                           # 自转角速度上限（rad/s，实车串口协议上限）
     diagnostics_period: 0.5               # 诊断发布周期（s）
 
 rotation_controller:
