@@ -72,9 +72,12 @@
 #   SAVE_MAP_NAME MAP_OUT_DIR FORCE_SAVE WAIT_FOR_SLAM PARAMS_FILE LIDAR_CONFIG_FILE
 #   LIDAR_XYZ LIDAR_RPY START_LIDAR USE_SIM_TIME SAVE_PCD
 #   USE_RVIZ USE_CHASSIS USE_JOY JOY_DEV
-#   OPEN_MODE(tab|window) TERMINAL DRY_RUN SRM27_WS_DIR
+#   OPEN_MODE(tab|window) TERMINAL DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
+#   - 启动前会自动先跑一遍 script/kill_gzb.sh 和 script/kill_rviz.sh, 清掉上次
+#     遗留的 Gazebo / RViz (不清会抢 /clock、抢 RViz 窗口)。清理失败只告警不阻断;
+#     想完全跳过这一步用 PREKILL=0。--save / --stop 分支不会触发这个清理。
 #   - 雷达驱动、车体 TF、Point-LIO、slam_toolbox 全在 real_mapping_launch.py 里,
 #     本脚本只负责"参数校验 + 补齐底盘/手柄 + 存图/停止", 不再重复起这些节点。
 #   - 雷达驱动外参必须为零 (安装位姿走 --lidar-xyz / --lidar-rpy),
@@ -701,6 +704,35 @@ open_term() {
   fi
 }
 
+# ---------- 启动前清理残留 ----------
+# 每次启动前先跑一遍 kill_gzb.sh / kill_rviz.sh: 上一次异常退出留下的 Gazebo
+# (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的节点抢 /clock、抢 RViz
+# 窗口。跳过本步骤: PREKILL=0 ./script/start_real_slam.sh
+prekill_leftovers() {
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "[dry-run] 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+  if [ "${PREKILL:-1}" = "0" ]; then
+    echo "[提示] PREKILL=0, 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+
+  echo "[清理] 启动前先结束残留的 Gazebo / RViz 进程..."
+  local name
+  for name in kill_gzb.sh kill_rviz.sh; do
+    if [ ! -x "$SCRIPT_DIR/$name" ]; then
+      echo "[警告] 未找到可执行脚本: $SCRIPT_DIR/$name (跳过)" >&2
+      continue
+    fi
+    if ! "$SCRIPT_DIR/$name"; then
+      # 退出码非 0 只代表"还有进程没死透", 两个 kill 脚本该 SIGINT/SIGKILL 的都发过了;
+      # 这里只告警不阻断, 免得清理失败反而连启动都做不了。
+      echo "[警告] $SCRIPT_DIR/$name 退出码非 0: 可能有进程未能结束, 继续启动。" >&2
+    fi
+  done
+}
+
 STEP_TITLES=()
 STEP_PATTERNS=()
 STEP_CMDS=()
@@ -730,6 +762,8 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "解析完成, 未启动任何进程。"
   exit 0
 fi
+
+prekill_leftovers
 
 for i in "${!STEP_TITLES[@]}"; do
   title="${STEP_TITLES[$i]}"

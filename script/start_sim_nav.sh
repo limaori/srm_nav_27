@@ -55,9 +55,13 @@
 #   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
 #   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
 #   START_ROTATION_SENDER ENABLE_TELEOP
-#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR
+#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
+#   - 启动前会自动先跑一遍 script/kill_gzb.sh 和 script/kill_rviz.sh, 清掉上次
+#     遗留的 Gazebo / RViz。注意: 上一次仿真还在跑时也会被清掉 (而不是像以前那样
+#     "[跳过] 已检测到正在运行的 Gazebo"), 目的是保证每次都是干净的一套仿真;
+#     不想清就用 PREKILL=0, 那时恢复"检测到在跑就跳过"的老行为。清理失败只告警不阻断。
 #   - Gazebo 世界、SRM 初始位姿和速度参数统一由
 #     srm27_gazebo_simulator/config/srm_sim.yaml 给出; -w 会覆盖其中的 world。
 #   - 地图与参数文件一律使用绝对路径; 地图可直接给名字 (在 map/simulation/ 下解析)。
@@ -372,6 +376,35 @@ cleanup_orphaned_gazebo() {
   WAIT_SECONDS="${GAZEBO_CLEANUP_WAIT_SECONDS:-5}" "$SCRIPT_DIR/kill_gzb.sh"
 }
 
+# ---------- 启动前清理残留 ----------
+# 每次启动前先跑一遍 kill_gzb.sh / kill_rviz.sh: 上一次异常退出留下的 Gazebo
+# (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的仿真抢 /clock、抢 RViz
+# 窗口。跳过本步骤: PREKILL=0 ./script/start_sim_nav.sh
+prekill_leftovers() {
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "[dry-run] 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+  if [ "${PREKILL:-1}" = "0" ]; then
+    echo "[提示] PREKILL=0, 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+
+  echo "[清理] 启动前先结束残留的 Gazebo / RViz 进程..."
+  local name
+  for name in kill_gzb.sh kill_rviz.sh; do
+    if [ ! -x "$SCRIPT_DIR/$name" ]; then
+      echo "[警告] 未找到可执行脚本: $SCRIPT_DIR/$name (跳过)" >&2
+      continue
+    fi
+    if ! "$SCRIPT_DIR/$name"; then
+      # 退出码非 0 只代表"还有进程没死透", 两个 kill 脚本该 SIGINT/SIGKILL 的都发过了;
+      # 这里只告警不阻断, 免得清理失败反而连启动都做不了。
+      echo "[警告] $SCRIPT_DIR/$name 退出码非 0: 可能有进程未能结束, 继续启动。" >&2
+    fi
+  done
+}
+
 # ---------- 终端 ----------
 open_term() {
   local title="$1"
@@ -422,6 +455,8 @@ case "$ROTATION_MODE" in
 esac
 printf '\n终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
 echo
+
+prekill_leftovers
 
 SIM_CMD="ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=${WORLD} gui:=${USE_GUI} run_immediately:=${RUN_IMMEDIATELY}"
 
