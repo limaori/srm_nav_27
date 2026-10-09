@@ -341,7 +341,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
 | `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
-| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车** |
+| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车**；实车/仿真通用（仿真命名空间自动探测，`--namespace` 可显式指定） |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
@@ -425,6 +425,31 @@ fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门�
 失败时按 `--retry` **重发还没开过的剩余点**（车已开过的点不会再被当成目标，靠 TF 跟踪，
 判定半径 `--passed-radius`，默认 0.8 m），retry 用完再按 `--on-failure abort/skip`；
 只剩终点一个点时自动退回 `NavigateToPose`，保证终点精确到达。
+
+仿真（Gazebo）里跑同一套航点：
+
+```bash
+./script/start_sim_nav.sh                        # 先起仿真 + 导航栈（默认命名空间 red_standard_robot1）
+./script/start_waypoints.sh --file m.yaml        # 命名空间自动探测，直接这样跑
+./script/start_waypoints.sh --file m.yaml --namespace red_standard_robot1   # 也可以显式指定
+./script/start_waypoints.sh --save-file m.yaml   # 仿真里教点，一样能存盘
+```
+
+- 仿真导航栈跑在命名空间下，导航 action 在 `/<ns>/navigate_to_pose`、`/<ns>/navigate_through_poses`，
+  TF 话题在 `/<ns>/tf`（nav2 与仿真两边的 launch 都有 `SetRemap("/tf", "tf")`）。
+  `start_waypoints.sh` 会从 `ros2 action list` 自动认出这个命名空间（根命名空间没有 `/navigate_to_pose`
+  而恰好有一个 `/<ns>/navigate_to_pose` 时），也可以 `--namespace` 显式给；显式给时不探测。
+  脚本只把**导航 action 与 TF** 挂到命名空间下，自己的服务仍在 `/waypoint_mission/*`，所以实车/仿真命令写法一致。
+- 点选不用改：`.rviz` 里 `2D Goal Pose`/`Publish Point` 填的是绝对话题 `/goal_pose`、`/clicked_point`
+  （仿真 RViz 也发这两个绝对话题），脚本同时订阅绝对名与 `/<ns>/` 名，谁发就收谁的。
+- 坐标系不用改：仿真 params 里 `global_frame=map`、`robot_base_frame=base_link`，没有加前缀。
+- 仿真里**不要**加 `--use-sim-time`：Gazebo 暂停时脚本会跟着 `/clock` 冻住（没有 `/clock` 时则静默不干活）；
+  本脚本只发导航目标、不依赖仿真时间，不加反而更稳。只有回放 rosbag 才需要它。
+- ⚠ `--pass-through` 依赖一组互相耦合的参数：共享 BT 的 `RemovePassedGoals radius=0.35` 必须**小于**
+  `general_goal_checker.xy_goal_tolerance`（否则终点会在判定到达前被删掉），又要**大于**车切内弯擦过途径点的
+  实际偏移量（否则擦过的点删不掉会折返），而后者由控制器前瞻决定。实车与仿真两份 Omni 参数现在都是
+  **容差 0.4 + 前瞻 0.6/0.3/0.6**，这组关系两边都成立（2026-10-09 之前仿真是 0.15 + 1.0/0.5/1.0，仿真里末端会判失败）。
+  改动其中任一项都要重新核对这三者的关系（详见 BT xml 里的注释）。
 
 > [!WARNING]
 > `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的

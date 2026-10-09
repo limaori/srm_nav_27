@@ -64,6 +64,34 @@
 #   - "已经开过哪些点"由本脚本自己用 TF 跟踪(默认 map <- base_link), 只用于失败后
 #     重发剩余点和 RViz 高亮, **不参与到达判定**; 判定半径是 --passed-radius(默认 0.8 m)。
 #
+# 仿真 (Gazebo) 里怎么用:
+#   ./script/start_waypoints.sh --file missions/xxx.yaml --namespace red_standard_robot1
+#   也可以不写 --namespace: start_waypoints.sh 会自动从 `ros2 action list` 认出仿真命名空间
+#   (实车是根命名空间, 探测不到就照旧)。仿真和实车只有两处差别, 本脚本都处理了:
+#   a) 导航栈跑在命名空间下 (start_sim_nav.sh 默认 ROBOT_NS=red_standard_robot1):
+#      * 导航 action 变成 /<ns>/navigate_to_pose、/<ns>/navigate_through_poses;
+#      * TF 话题变成 /<ns>/tf、/<ns>/tf_static —— nav2 的 launch 里有
+#        SetRemap("/tf", "tf") 把它搬进命名空间(同目录 rviz_launch.py 里同样的 remap 可佐证)。
+#      --namespace 会把这两处一起挂过去。本节点自己的服务/话题仍在 /waypoint_mission/*
+#      (不跟着进命名空间), 所以实车/仿真的命令写法一致。
+#      RViz 点选不受影响: 仓库的 rviz/nav2_default_view.rviz 里 "2D Goal Pose"/"Publish Point"
+#      填的是绝对话题 /goal_pose、/clicked_point(仿真 RViz 也发这两个绝对话题); 本脚本
+#      绝对名和 /<ns>/ 名两种都订阅, 谁发就收谁的。
+#   b) 坐标系名字不变: 仿真的 params 里 global_frame=map、robot_base_frame=base_link,
+#      都没加命名空间前缀, 所以 --frame map / --base-frame base_link 照旧, 不用改。
+#
+#   ⚠ 仿真里不要加 --use-sim-time: 本脚本的定时器/超时/反馈计时都走节点时钟, 而它只发
+#     导航目标、不需要仿真时间。换成仿真时钟后 Gazebo 一暂停 (/clock 不走) 脚本就跟着
+#     冻住, 且拿不到 /clock 时会静默不干活。不加时暂停期间脚本照常发目标/复位, 车不会跑。
+#     只有回放 rosbag(--use-sim-time 的初衷)才需要它。
+#   ⚠ --pass-through 依赖一组互相耦合的参数(改任一项都要重新核对三者的关系):
+#     共享 BT 里 RemovePassedGoals radius=0.35 必须 **小于** general_goal_checker.
+#     xy_goal_tolerance(否则终点会在判定到达前被删掉, 整段在终点前 0.35 m 处判失败),
+#     又要 **大于** 车切内弯擦过途径点的实际偏移量(否则擦过的点删不掉、3 Hz 重规划把路径
+#     绕回去 → 折返), 而后者由控制器前瞻(lookahead)决定。
+#     实车与仿真两份 Omni 参数现在都是 容差 0.4 + 前瞻 0.6/0.3/0.6, 这组关系两边都成立
+#     (2026-10-09 之前仿真是 0.15 + 1.0/0.5/1.0, 仿真里末端会失败)。详见 BT xml 里的注释。
+#
 # 服务 (std_srvs/srv/Trigger):
 #   ~/start  开始执行已收集的航点
 #   ~/stop   取消当前目标并暂停任务 (航点列表保留, 可再 start 继续)
@@ -72,7 +100,8 @@
 #
 # 话题:
 #   订阅 /goal_pose (geometry_msgs/PoseStamped, RViz "2D Goal Pose")
-#   订阅 /clicked_point (geometry_msgs/PointStamped, RViz "Publish Point")
+#        + 给了 --namespace 时同时订阅 /<ns>/goal_pose (RViz 跟自己命名空间时才需要)
+#   订阅 /clicked_point (geometry_msgs/PointStamped, RViz "Publish Point") 同上
 #   发布 ~/waypoints (visualization_msgs/MarkerArray, 航点可视化, latched)
 #   发布 ~/current_target (geometry_msgs/PoseStamped, 当前目标)
 #
@@ -86,6 +115,8 @@
 #   --loop           全部完成后从头再来
 #
 # 其它参数:
+#   --namespace/-n <ns>  导航栈的命名空间 (仿真默认 red_standard_robot1, 实车留空)。
+#                    只把**导航 action 与 TF 话题**挂到 /<ns>/ 下, 本节点自己的服务/话题不动。
 #   --pass-through   途径点模式: 除最后一个点(终点)外都当途径点, 途径点不刹车 (见上)
 #   --passed-radius  途径点模式下"这个点已经开过"的判定半径 (默认 0.8 m)
 #   --base-frame     判定"已开过"时用的机器人本体坐标系 (默认 base_link)
@@ -121,9 +152,10 @@ from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from std_srvs.srv import Trigger
+from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import Marker, MarkerArray
 
 try:
@@ -161,6 +193,11 @@ def quaternion_to_yaw(q):
     return math.atan2(siny, cosy)
 
 
+def normalize_namespace(value):
+    """--namespace 接受 "" / "foo" / "/foo", 统一成 ""(根命名空间) 或 "foo"。"""
+    return (value or "").strip().strip("/")
+
+
 class WaypointMission(Node):
     def __init__(self, args):
         super().__init__(NODE_NAME)
@@ -169,6 +206,22 @@ class WaypointMission(Node):
         self.use_sim_time = bool(args.use_sim_time)
         if self.use_sim_time:
             self.set_parameters([rclpy.parameter.Parameter("use_sim_time", value=True)])
+
+        # ---- 命名空间 (仿真: start_sim_nav.sh 默认跑在 red_standard_robot1 下) ----
+        # 只挂导航 action 与 TF: nav2 在命名空间下时, action 名字变成 /<ns>/navigate_to_pose,
+        # TF 也被 launch 里的 SetRemap("/tf","tf") 搬到 /<ns>/tf 下。
+        # 本节点自己的服务(~/start 等)不跟着进命名空间, 以免实车/仿真的命令写法不一致。
+        self.ns = normalize_namespace(args.namespace)
+        self.nav_action = self.qualify("navigate_to_pose")
+        self.through_action = self.qualify("navigate_through_poses")
+        # RViz 点选话题: 仓库的 .rviz 用的是绝对名(/goal_pose, /clicked_point), 仿真 RViz
+        # 也发这两个绝对话题; 有些配置会跟着 RViz 自己的命名空间走, 所以两种都订阅。
+        self.goal_pose_topics = ["/goal_pose"] + (
+            [f"/{self.ns}/goal_pose"] if self.ns else []
+        )
+        self.clicked_point_topics = ["/clicked_point"] + (
+            [f"/{self.ns}/clicked_point"] if self.ns else []
+        )
 
         self.waypoints = []          # list[PoseStamped]
         self.state = IDLE
@@ -188,20 +241,33 @@ class WaypointMission(Node):
         self.active_mode = "single"
 
         # ---- 导航 action 客户端 ----
-        self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.nav_client = ActionClient(self, NavigateToPose, self.nav_action)
         # 途径点模式用: 一次穿过一串点, 只有最后一个点(终点)会停车
-        self.through_client = ActionClient(self, NavigateThroughPoses, "navigate_through_poses")
+        self.through_client = ActionClient(self, NavigateThroughPoses, self.through_action)
 
         # ---- TF: 把点选结果统一到 --frame (RViz 的固定坐标系未必是 map) ----
         self.tf_buffer = None
         self.tf_listener = None
         if tf2_ros is not None:
             self.tf_buffer = tf2_ros.Buffer()
+            # TransformListener 订阅的是绝对的 /tf、/tf_static (实车就发这两个)
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            if self.ns:
+                # 仿真里 TF 在 /<ns>/tf 下, 额外喂给同一个 buffer(实车没有这两个话题, 不影响)
+                self.create_subscription(
+                    TFMessage, f"/{self.ns}/tf", self.on_tf, QoSProfile(depth=100)
+                )
+                self.create_subscription(
+                    TFMessage, f"/{self.ns}/tf_static", self.on_tf_static,
+                    QoSProfile(depth=100, reliability=ReliabilityPolicy.RELIABLE,
+                               durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                )
 
         # ---- 订阅: RViz 两种点选工具各发一个话题 ----
-        self.create_subscription(PoseStamped, "/goal_pose", self.on_goal_pose, 10)
-        self.create_subscription(PointStamped, "/clicked_point", self.on_clicked_point, 10)
+        for topic in self.goal_pose_topics:
+            self.create_subscription(PoseStamped, topic, self.on_goal_pose, 10)
+        for topic in self.clicked_point_topics:
+            self.create_subscription(PointStamped, topic, self.on_clicked_point, 10)
 
         # ---- 发布: 航点标记 + 当前目标 ----
         marker_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -227,6 +293,13 @@ class WaypointMission(Node):
             "航点任务节点就绪。RViz 用 '2D Goal Pose' / 'Publish Point' 点选航点; "
             f"开始: ros2 service call /{NODE_NAME}/start std_srvs/srv/Trigger"
         )
+        if self.ns:
+            self.get_logger().info(
+                f"命名空间 /{self.ns} (仿真): 导航 action = {self.nav_action} / "
+                f"{self.through_action}; TF 另听 /{self.ns}/tf(+/tf_static); "
+                f"点选听 {'、'.join(self.goal_pose_topics + self.clicked_point_topics)}; "
+                f"本节点自己的服务仍在 /{NODE_NAME}/*。"
+            )
         if args.pass_through:
             self.get_logger().info(
                 "途径点模式 (--pass-through): 除最后一个点(终点)外都是途径点, 途径点不刹车; "
@@ -243,19 +316,40 @@ class WaypointMission(Node):
                     f"从 {args.file} 载入 {len(self.waypoints)} 个航点 (--record-only, 不下发)。"
                 )
 
+    # ---------------- 命名空间 / TF ----------------
+    def qualify(self, name):
+        """把 action/话题名挂到 --namespace 下; 没给命名空间就保持根命名空间。"""
+        return f"/{self.ns}/{name}" if self.ns else name
+
+    def on_tf(self, msg: TFMessage):
+        for transform in msg.transforms:
+            try:
+                self.tf_buffer.set_transform(transform, NODE_NAME)
+            except Exception:  # 单条坏消息不该把回调打挂
+                pass
+
+    def on_tf_static(self, msg: TFMessage):
+        for transform in msg.transforms:
+            try:
+                self.tf_buffer.set_transform_static(transform, NODE_NAME)
+            except Exception:
+                pass
+
     # ---------------- "点了没反应"自诊断 ----------------
     def check_click_sources(self):
-        """一个航点都没收到、而且两个点选话题上都没有发布者时, 给出可操作的提示。"""
+        """一个航点都没收到、而且点选话题上都没有发布者时, 给出可操作的提示。"""
         if self.waypoints or self.state in (SEND, RUNNING, PAUSE):
             return
-        if self.count_publishers("/goal_pose") or self.count_publishers("/clicked_point"):
+        if any(self.count_publishers(topic)
+               for topic in self.goal_pose_topics + self.clicked_point_topics):
             return
         now = self.now_sec()
         if self.last_click_hint and now - self.last_click_hint < 60.0:
             return
         self.last_click_hint = now
         self.get_logger().warn(
-            "还没收到任何点选, 且 /goal_pose、/clicked_point 上都没有发布者。常见原因:\n"
+            "还没收到任何点选, 且 " + "、".join(self.goal_pose_topics + self.clicked_point_topics)
+            + " 上都没有发布者。常见原因:\n"
             "  1) 用的是 Nav2 面板里的 'Nav2 Goal' —— 它直接下发 navigate_to_pose action, "
             "不发 /goal_pose, 本脚本收不到; 请改用工具栏的 'Publish Point' 或 '2D Goal Pose'。\n"
             "  2) RViz 工具栏里没有这两个工具 —— 本仓库的 rviz/nav2_default_view.rviz 已补上, "
@@ -264,7 +358,9 @@ class WaypointMission(Node):
             "     ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped "
             "\"{header: {frame_id: map}, pose: {position: {x: 1.0, y: -1.0}, orientation: {w: 1.0}}}\"\n"
             "  4) 若同时跑着 srm27_behavior 的行为树, 它的 PubNav2Goal 也发 goal_pose, "
-            "那些目标会被本脚本当成航点记下来。"
+            "那些目标会被本脚本当成航点记下来。\n"
+            "  5) 仿真里导航栈带命名空间(如 red_standard_robot1): 用 --namespace <ns> 启动, "
+            "脚本会同时听 /<ns>/goal_pose。"
         )
 
     # ---------------- 点选 / 航点收集 ----------------
@@ -426,19 +522,27 @@ class WaypointMission(Node):
     def start_mission(self):
         if not self.nav_client.wait_for_server(timeout_sec=self.args.server_timeout):
             self.get_logger().error(
-                "等不到 navigate_to_pose action 服务: 导航栈没起来?"
-                "(bt_navigator 在跑吗: ros2 node list | grep bt_navigator)"
+                f"等不到 action 服务 {self.nav_action}: 导航栈没起来?"
+                "(bt_navigator 在跑吗: ros2 node list | grep bt_navigator)\n"
+                + (
+                    f"  当前用的命名空间是 /{self.ns}; 仿真里导航栈默认就在这个命名空间下, "
+                    "如果 action 名字不对, 用 ros2 action list 核对后重跑。"
+                    if self.ns else
+                    "  仿真里导航栈跑在命名空间下(如 red_standard_robot1), 这时要加 "
+                    "--namespace red_standard_robot1 (start_waypoints.sh 会自动探测)。"
+                )
             )
             return
         use_through = self.args.pass_through and len(self.waypoints) >= 2
         if use_through and not self.through_client.wait_for_server(
                 timeout_sec=self.args.server_timeout):
             self.get_logger().error(
-                "等不到 navigate_through_poses action 服务。--pass-through 需要 bt_navigator "
+                f"等不到 action 服务 {self.through_action}。--pass-through 需要 bt_navigator "
                 "带 navigate_through_poses 这个 navigator(默认就有)。检查:\n"
                 "  ros2 action list | grep through_poses\n"
                 "  以及 params 里的 navigator_plugins / "
-                "default_nav_through_poses_bt_xml (用仓库默认的 config/real/nav2_params_srm.yaml)"
+                "default_nav_through_poses_bt_xml (用仓库默认的 nav2_params_srm.yaml)\n"
+                "  带命名空间时还要加 --namespace <ns>。"
             )
             return
         self.index = 0
@@ -623,7 +727,18 @@ class WaypointMission(Node):
                 self.get_logger().warn(
                     "拿不到机器人位姿 TF, 没法确认哪些途径点已经开过 —— 这次重试会从 "
                     f"#{self.index + 1} 重发, 已经开过的点可能又被当成目标。检查 "
-                    "--frame/--base-frame 是否和实际一致。"
+                    "--frame/--base-frame 是否和实际一致"
+                    + (f"(仿真下 TF 在 /{self.ns}/tf, 命名空间要对)" if self.ns else "") + "。"
+                )
+            if self.active_mode == "through":
+                self.get_logger().warn(
+                    "  途径点航段失败的常见原因(按可能性):\n"
+                    "  1) 车切内弯擦过某途径点(rviz 里能看到它一直亮着), 3 Hz 重规划把路径绕回去 "
+                    "→ 车折返 / 'Failed to make progress'。调共享 BT 的 RemovePassedGoals radius "
+                    "与控制器前瞻 —— 这两个和 xy_goal_tolerance 是一组耦合参数, 见 BT 注释。\n"
+                    "  2) goal 容差小于 BT 的 radius(0.35): 车离终点 0.35 m 时终点就被从目标列表"
+                    "删掉, 判失败。实车/仿真两份 Omni 参数现在都是 0.4 > 0.35; 若换过参数文件或"
+                    "改过 xy_goal_tolerance, 先核对这一条。"
                 )
             self.get_logger().warn(
                 f"{target} {status_name}; 还剩 {remaining_retries} 次重试, 下发剩余航点。"
@@ -804,6 +919,10 @@ def parse_args(argv):
     parser.add_argument("--file", "-f", help="航点 YAML 文件; 给了就直接执行里面的航点")
     parser.add_argument("--save-file", help="~/save 服务的保存路径")
     parser.add_argument("--frame", default="map", help="航点统一坐标系 (默认 map)")
+    parser.add_argument("--namespace", "-n", default="", metavar="NS",
+                        help="导航栈命名空间 (仿真默认 red_standard_robot1=start_sim_nav.sh 的 "
+                             "ROBOT_NS, 实车留空)。只把导航 action 与 TF 挂到 /<ns>/ 下, "
+                             "本节点自己的服务仍在 /waypoint_mission/*")
     parser.add_argument("--pass-through", action="store_true",
                         help="途径点模式: 除最后一个点(终点)外都当途径点, 一次 "
                              "navigate_through_poses 下发, 途径点不刹车 (默认关闭: 每个点都停车)")
@@ -849,6 +968,13 @@ def main(argv=None):
         # Ctrl+C: rclpy 收到 SIGINT 后会让 spin 抛 ExternalShutdownException,
         # 这里一起接住, 免得打印一堆堆栈。
         pass
+    except RuntimeError as ex:
+        # 被 kill/SIGTERM(仿真里关脚本、kill_gzb.sh 之类的按进程名清理)时 rclpy 会先把
+        # 上下文关掉, spin 内部再建 wait set 就抛 "context is not valid" 的 RCLError
+        # (RCLError 继承 RuntimeError)。这属于正常退出路径, 顺手接住;
+        # 其它 RuntimeError 照旧抛出去, 免得把真 bug 吞掉。
+        if "context is not valid" not in str(ex):
+            raise
     finally:
         # Ctrl+C 时先撤销当前目标, 避免车继续跑最后一段
         try:

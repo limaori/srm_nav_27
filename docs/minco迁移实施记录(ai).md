@@ -442,6 +442,13 @@ smoother `max_velocity [1.5, 1.5, 0.0]`、`max_accel [3.0, 3.0, 0.0]`（yaw 钳 
 1. `min_y_velocity_threshold`：实车 Omni 配置是 `0.5`，仿真 Omni 是 `0.001`。**没有把仿真改成 0.5** ——
    方案 §2.2 明确指出 0.5 会把全向底盘的低速横移反馈抹成零；实车 MINCO 配置已是 0.001。
    建议把实车 Omni 也改到 0.001，而不是把仿真改坏。
+   > **后续（2026-10-09）**：按"仿真参数跟实车一致"的决策，**仿真 Omni 已改回 `0.5`**，
+   > 同批把仿真 Omni 的 `general_goal_checker.xy_goal_tolerance`(0.15→0.4)、`FollowPath` 前瞻
+   > (1.0/0.5/1.0→0.6/0.3/0.6)、`min_approach_linear_velocity`(0.5→0.4)、
+   > `inflation_radius`(0.7→0.5，local+global)、`global_costmap.track_unknown_space`(→true)、
+   > `terrain_analysis_ext.vehicleHeight`(0.5→1.0) 也对齐了实车（见
+   > `config/simulation/nav2_params_srm.yaml` 头部表格）。上面"建议改实车"那条依然成立：
+   > 真要动实车 Omni 的 `min_y_velocity_threshold` 时，仿真这边要一起改。
 2. `rotation_controller.wz_max` / `rotation_test_sender.wz_max` 仍是 `2.0`（仿真自转测试链路）。
    mux 已钳到 1.0，所以最终输出与实车一致；这两个是仿真测试工具，未动。
 3. 实车侧自身存在一处**不一致**（本次未改，属于实车配置问题）：

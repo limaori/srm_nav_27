@@ -197,10 +197,11 @@ inflation_layer
 
 ```text
 robot_radius: 0.33 m       # SRM 整车碰撞包络半径（几何 YAML 的 collision.envelope_radius）
-inflation_radius: 0.7 m
+inflation_radius: 0.5 m    # 2026-10-09 由 0.7 改成与实车一致（实车是为钻窄道调小的）
 ```
 
 `robot_radius` 取整车外接包络而不是圆柱半径 0.27 m：轮组外廓、雷达偏置安装和传感器外形都要覆盖。
+全局代价地图顶层还开了 `track_unknown_space: true`（2026-10-09 与实车对齐；缺省是 false）。
 局部代价地图使用 `odom` 作为全局坐标系并跟随机器人滚动，`robot_base_frame` 为 `base_link`；
 全局代价地图使用 `map` 作为全局坐标系。
 
@@ -241,8 +242,9 @@ srm27_omni_pid_controller::OmniPidPursuitController
 
 控制器以 20 Hz 运行，把路径变换到代价地图的机器人系（`base_link`）后输出速度指令。
 SRM 仿真参数关闭了独立旋转控制：`enable_rotation: false`、`use_rotate_to_heading: false`，
-因此**导航链路只产生 `vx`、`vy`**；`min_y_velocity_threshold` 由 0.5 降到 0.001，
-避免抹掉低速横移反馈。
+因此**导航链路只产生 `vx`、`vy`**。`min_y_velocity_threshold` 两边一致，都是 `0.5`
+（2026-10-09 由 `0.001` 改回，为的是"仿真参数跟实车一致"）。注意 `0.5` 会把 <0.5 m/s 的横移分量
+在喂给目标检查器之前当成 0 —— 仓库的建议是把实车 Omni 改到 `0.001`，真要那么做时这里要同步改回。
 
 ### 9. 速度出口、合成与底盘控制
 
