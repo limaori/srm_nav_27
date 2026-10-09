@@ -256,6 +256,9 @@ class WaypointMission(Node):
         self.guard_same_point = 0              # 同一个点连续几次折返/无进展
         self.guard_triggers = 0                # 本次任务累计触发次数
         self.guard_quiet_dispatch = False      # 下一次发送是"回头检测后重发", 不算一次重试
+        # 二次确认用: 车到"当前该去的那个点"的历史最近距离(真的折返时车在远离它)
+        self.guard_target_index = None
+        self.guard_target_best = float("inf")
 
         # ---- 导航 action 客户端 ----
         self.nav_client = ActionClient(self, NavigateToPose, self.nav_action)
@@ -695,8 +698,16 @@ class WaypointMission(Node):
         车在前后来回绕(剩余距离 5.8↔9.3 m 反复跳, 实车 Omni 是同一个 radius 同样会中招)。
 
         判据用反馈里的 distance_remaining(到终点的剩余路径长度): 它比"本段最好成绩"回退了
-        --backtrack-gain 米就判定折返 —— 车往回开时这个值必然变大; 而重规划造成的路线抖动只有
-        零点几米, 所以留 1 m 的门限就不会误报。
+        --backtrack-gain 米, **并且车确实在远离它当前该去的那个点**(二次确认, 见下), 才判定折返。
+
+        **为什么必须有二次确认(2026-10-09 仿真实测)**: distance_remaining 自己会跳。车开到
+        #1/#2 一带时它先从 ~10 m 掉到 2.93 m, 再跳回 7.85 m(退了 4.9 m) —— 这是 nav2 对
+        navigate_through_poses 的反馈按"当前那条规划路径"算出来的, 计划一变它就跳; 用不用
+        自研 BT 节点都一样(同一起点位置、同样的 2.98→7.94 数值), 也就是说**每个任务都会在
+        同一个地方误报一次折返**。误报的代价很大: 它取消当前航段、只重发"脚本自己以为还没
+        开过的点", 计划被越切越短 —— 现场看到的就是"跑到第 2/3 个点就直冲最后那个终点"。
+        真正的折返有一个 distance_remaining 抖动没有的特征: **车在远离当前目标点**(抖动时车
+        仍在接近它)。所以再加一条: 车到"当前该去的点"的距离要比历史最近值远 >= gain 米。
 
         触发后: 取消当前航段 → 按 TF 跟踪的进度(默认 0.8 m 判据, 比 nav2 的 0.35 m 宽松)只重发
         "还没开过的点", 被卡住的点自然出局。同一个点连续 --backtrack-limit 次都折返/没进展, 就
@@ -708,6 +719,20 @@ class WaypointMission(Node):
             return
         if distance - self.leg_min_distance < self.args.backtrack_gain:
             return
+
+        # ---- 二次确认: 车是不是真的在往回走(远离当前目标点) ----
+        xy = self.robot_xy()
+        if xy is None:
+            return                     # 拿不到位姿就不动: 宁可漏报, 也不能把计划切短
+        if self.guard_target_index != self.index:
+            self.guard_target_index = self.index
+            self.guard_target_best = float("inf")
+        target = self.waypoints[min(self.index, len(self.waypoints) - 1)].pose.position
+        target_dist = math.hypot(xy[0] - target.x, xy[1] - target.y)
+        if target_dist < self.guard_target_best:
+            self.guard_target_best = target_dist
+        if target_dist - self.guard_target_best < self.args.backtrack_gain:
+            return                     # 车还在接近当前目标 → 是反馈抖动, 不是折返
 
         if self.index > self.guard_last_index:
             self.guard_same_point = 0        # 上次触发之后又往前过了点, 说明整体在推进
@@ -1026,10 +1051,13 @@ def parse_args(argv):
                         help="途径点模式的回头检测 (默认开, --no-backtrack-guard 关)。"
                              "nav2 的 RemovePassedGoals 在本仓库这套部署上实测不删已过的途径点, "
                              "于是 3 Hz 重规划一直生成'回头去它'的腿、车来回绕; 这个检测发现"
-                             "'剩余距离比本段最好成绩退回了 --backtrack-gain 米'就取消当前航段, "
-                             "按自己的进度只重发还没开过的点")
+                             "'剩余距离比本段最好成绩退回了 --backtrack-gain 米'**且车确实在远离"
+                             "当前目标点**就取消当前航段, 按自己的进度只重发还没开过的点。"
+                             "后半条(二次确认)必须留着: distance_remaining 本身会跳(实测车到 #1/#2 "
+                             "一带 2.93→7.85 m), 只看它每个任务都会误报, 把计划越切越短")
     parser.add_argument("--backtrack-gain", type=float, default=1.0,
-                        help="回头检测判据: 剩余距离比本段最好成绩回退多少米算折返 (默认 1.0)")
+                        help="回头检测判据: 剩余距离比本段最好成绩回退多少米、且车到当前目标的"
+                             "距离比最近值远多少米, 才算折返 (默认 1.0)")
     parser.add_argument("--backtrack-limit", type=int, default=3,
                         help="同一个点连续几次折返/无进展就交给常规失败策略 (默认 3)")
     parser.add_argument("--passed-radius", type=float, default=0.8,

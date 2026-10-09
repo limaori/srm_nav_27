@@ -449,6 +449,24 @@ smoother `max_velocity [1.5, 1.5, 0.0]`、`max_accel [3.0, 3.0, 0.0]`（yaw 钳 
    > `terrain_analysis_ext.vehicleHeight`(0.5→1.0) 也对齐了实车（见
    > `config/simulation/nav2_params_srm.yaml` 头部表格）。上面"建议改实车"那条依然成立：
    > 真要动实车 Omni 的 `min_y_velocity_threshold` 时，仿真这边要一起改。
+   >
+   > **再后续（2026-10-09 深夜，仿真 MINCO）**：把三个症状分开定位并修掉：
+   > ① "车走不动+来回跑" = MINCO 轨迹校验要求 0.38 m 净空而规划器只保证 0.33 m → 代价地图
+   > `robot_radius` 提到 0.40（先试过 0.45，但 0.45 会让 planner 把"车自己那一格"也判成障碍）；
+   > ② "途径点删不掉、剩余距离来回跳" = nav2 的 `RemovePassedGoals` 实测不生效 → 换自研 BT 节点
+   > `srm27_nav_plugins::RemovePassedGoalsByRoute`（判据 = "半径 0.6 m" 或 "到过 1.0 m 又走开且比
+   > 下一个点更近"；只删列表头部连续前缀；终点永不删），新 BT
+   > `behavior_trees/navigate_through_poses_route_aware.xml`；③ 脚本 `--backtrack-guard` 加
+   > 二次确认（`distance_remaining` 自己会跳：实测车到 #1/#2 一带 2.93→7.85 m，只看它每个任务
+   > 都会误报折返，把计划越切越短 → 现场表现为"跑到第 2/3 个点就直冲最后那个终点"）。
+   > 效果：一个 7 点任务从 93 s / 9 次 recovery 变成 10.8 s / 0 次。
+   >
+   > **同晚的插曲（值得记一笔）**：`RemovePassedGoalsByRoute` 第一版按"路线弧长投影"判"已通过"，
+   > 8 字任务直接跑不了 —— 227_1006_waypoint1 里车起点离 #1 有 1.09 m、离**终点**只有 0.86 m
+   > （八字头尾几乎贴在一起），"整条路线取最近点"的全局投影落到路线末端 ⇒ 判定"已经走过整条路线"
+   > ⇒ 6 个途径点 3.6 s 内删光、7.4 s 冲终点。第二版"限窗 + 单调弧长进度"仍翻车：车抄近道时到
+   > #3→#4 那一段的垂距只有 0.98 m，能容纳障碍绕行的走廊阈值都会放行 ⇒ 没到过的 #3 又被判成走过。
+   > 最终只认"物理上靠近过"这一种证据，并把这两个失败场景写成单元测试钉死（16 个用例）。
 2. `rotation_controller.wz_max` / `rotation_test_sender.wz_max` 仍是 `2.0`（仿真自转测试链路）。
    mux 已钳到 1.0，所以最终输出与实车一致；这两个是仿真测试工具，未动。
 3. 实车侧自身存在一处**不一致**（本次未改，属于实车配置问题）：
