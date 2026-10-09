@@ -10,6 +10,10 @@
 #     waypoint[i] --NavigateToPose--> 成功才发 waypoint[i+1]
 #   每个点只受 goal checker 的 xy_goal_tolerance 约束, 不存在"路径绕回旧航点"。
 #
+#   ⚠ 代价: 逐点导航 = 每个航点都要停车 —— goal checker 必须等车在 0.4 m 内停稳
+#     才算"到达", 到了再发下一个, 车在每个点都会刹一下。想要"除了最后一个点, 其它
+#     都是途径点、途径点不刹车"就用 --pass-through (见下面"途径点模式")。
+#
 # 用法:
 #   1) 点选航点再执行 (推荐, 边看 RViz 边排点):
 #        ./script/waypoint_mission.py
@@ -38,6 +42,28 @@
 #        ./script/waypoint_mission.py --save-file mission.yaml
 #        # 点选完执行 ~/save 存盘
 #
+#   4) 途径点模式 (除最后一个点外都当途径点, 途径点不刹车):
+#        ./script/waypoint_mission.py --file mission.yaml --pass-through
+#
+# 途径点模式 (--pass-through) 怎么实现的、要注意什么:
+#   - 整个列表一次交给 nav2 的 navigate_through_poses: 前 N-1 个点是途径点, 第 N 个
+#     是终点。全局路径一次规划穿过所有点, 控制器只在**路径末端(终点)**做到达判定和
+#     减速(OmniPidPursuitController 的 approach_velocity_scaling_dist 也是按路径末点
+#     算的), 所以途径点不会停车, 到终点才停。终点精度与逐点模式相同(都用
+#     general_goal_checker: xy_goal_tolerance 0.4 m)。
+#   - 用的是 bt_navigator 的 default_nav_through_poses_bt_xml:
+#       behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+#     里面 RemovePassedGoals(radius="0.35") 负责"开过哪个途径点就把它从目标列表里删掉",
+#     不删的话 3 Hz 重规划会把路径绕回已开过的点 → 车折返 / "Failed to make progress"。
+#     这个 radius 和 general_goal_checker.xy_goal_tolerance(0.4)、控制器前瞻
+#     (min/max_lookahead_dist 0.3/0.6)是一组参数, 要调一起调 —— 详见 xml 里的注释。
+#     本脚本不发速度, 所以"不刹车"完全是这条链路(控制器→velocity_smoother)决定的。
+#   - 失败处理: 整段失败后按 --retry 重发"还没开过的剩下的点"(已经开过的点不会再被
+#     当成目标), retry 用完再按 --on-failure abort(停下保留现场)/skip(丢掉当前途径点
+#     继续)。只剩终点一个点时自动退回 NavigateToPose, 保证终点精确到达。
+#   - "已经开过哪些点"由本脚本自己用 TF 跟踪(默认 map <- base_link), 只用于失败后
+#     重发剩余点和 RViz 高亮, **不参与到达判定**; 判定半径是 --passed-radius(默认 0.8 m)。
+#
 # 服务 (std_srvs/srv/Trigger):
 #   ~/start  开始执行已收集的航点
 #   ~/stop   取消当前目标并暂停任务 (航点列表保留, 可再 start 继续)
@@ -50,14 +76,19 @@
 #   发布 ~/waypoints (visualization_msgs/MarkerArray, 航点可视化, latched)
 #   发布 ~/current_target (geometry_msgs/PoseStamped, 当前目标)
 #
-# 失败策略 (每个航点独立判定):
-#   --retry N        单个航点失败后的重试次数 (默认 1; 0 = 失败即按策略处理)
-#   --on-failure     重试用尽后: abort(默认, 停下并保留现场) / skip(跳过该点继续)
-#   --timeout SEC    单个航点超时秒数 (默认 0 = 不限时)
+# 失败策略 (每个航点 / 每段途径点航段独立判定):
+#   --retry N        失败后的重试次数 (默认 1; 0 = 失败即按策略处理)。
+#                    --pass-through 时重发的是"还没开过的剩余点", 不是从头再来。
+#   --on-failure     重试用尽后: abort(默认, 停下并保留现场) / skip(跳过该点继续;
+#                    --pass-through 时丢掉车当前正要去的那一个途径点)
+#   --timeout SEC    单个航点/整段途径点超时秒数 (默认 0 = 不限时)
 #   --pause SEC      航点之间停顿
 #   --loop           全部完成后从头再来
 #
 # 其它参数:
+#   --pass-through   途径点模式: 除最后一个点(终点)外都当途径点, 途径点不刹车 (见上)
+#   --passed-radius  途径点模式下"这个点已经开过"的判定半径 (默认 0.8 m)
+#   --base-frame     判定"已开过"时用的机器人本体坐标系 (默认 base_link)
 #   --frame <frame>  航点统一转到该坐标系 (默认 map); 点击时的固定坐标系不同也能用
 #   --accept-timeout SEC  发出目标后等"已接受"应答的秒数 (默认 8)。超时按失败处理并重试。
 #       ⚠ 这个参数是防"静默卡死"的: 导航栈/脚本刚起来时, 服务端可能还没发现本节点的
@@ -85,7 +116,7 @@ import rclpy
 import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped, PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
@@ -141,7 +172,7 @@ class WaypointMission(Node):
 
         self.waypoints = []          # list[PoseStamped]
         self.state = IDLE
-        self.index = 0
+        self.index = 0               # 逐点模式: 当前目标下标; 途径点模式: 还没开过的第一个点
         self.attempts = 0
         self.pause_until = 0.0
         self.mission_running = False
@@ -153,9 +184,13 @@ class WaypointMission(Node):
         self.last_distance = float("nan")
         self.recoveries = 0
         self.tf_ok = False
+        # 当前在跑的这一段是逐点(NavigateToPose)还是途径点(NavigateThroughPoses)
+        self.active_mode = "single"
 
         # ---- 导航 action 客户端 ----
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        # 途径点模式用: 一次穿过一串点, 只有最后一个点(终点)会停车
+        self.through_client = ActionClient(self, NavigateThroughPoses, "navigate_through_poses")
 
         # ---- TF: 把点选结果统一到 --frame (RViz 的固定坐标系未必是 map) ----
         self.tf_buffer = None
@@ -192,6 +227,11 @@ class WaypointMission(Node):
             "航点任务节点就绪。RViz 用 '2D Goal Pose' / 'Publish Point' 点选航点; "
             f"开始: ros2 service call /{NODE_NAME}/start std_srvs/srv/Trigger"
         )
+        if args.pass_through:
+            self.get_logger().info(
+                "途径点模式 (--pass-through): 除最后一个点(终点)外都是途径点, 途径点不刹车; "
+                "终点精度与逐点模式相同 (xy_goal_tolerance)。"
+            )
 
         if args.file:
             self.load_file(args.file)
@@ -390,11 +430,23 @@ class WaypointMission(Node):
                 "(bt_navigator 在跑吗: ros2 node list | grep bt_navigator)"
             )
             return
+        use_through = self.args.pass_through and len(self.waypoints) >= 2
+        if use_through and not self.through_client.wait_for_server(
+                timeout_sec=self.args.server_timeout):
+            self.get_logger().error(
+                "等不到 navigate_through_poses action 服务。--pass-through 需要 bt_navigator "
+                "带 navigate_through_poses 这个 navigator(默认就有)。检查:\n"
+                "  ros2 action list | grep through_poses\n"
+                "  以及 params 里的 navigator_plugins / "
+                "default_nav_through_poses_bt_xml (用仓库默认的 config/real/nav2_params_srm.yaml)"
+            )
+            return
         self.index = 0
         self.attempts = 0
         self.mission_running = True
+        mode_note = "途径点(只有终点停车)" if use_through else "逐点停车"
         self.get_logger().info(
-            f"任务开始: {len(self.waypoints)} 个航点, retry={self.args.retry}, "
+            f"任务开始: {len(self.waypoints)} 个航点, 模式={mode_note}, retry={self.args.retry}, "
             f"on-failure={self.args.on_failure}, "
             f"timeout={self.args.timeout or '不限'}, loop={self.args.loop}"
         )
@@ -409,10 +461,45 @@ class WaypointMission(Node):
         self.send_current()
 
     def send_current(self):
+        """下发"当前该走的目标"。
+        --pass-through: 只要还剩 >=2 个点, 就把剩下的整条当途径点一次下发(途径点不刹车);
+        只剩终点(或没开 --pass-through)时就退回逐点 NavigateToPose。"""
         if self.index >= len(self.waypoints):
             self.finish_mission()
             return
-        pose = self.waypoints[self.index]
+        remaining = self.waypoints[self.index:]
+        if self.args.pass_through and len(remaining) >= 2:
+            self.send_through_poses(remaining)
+            return
+        self.send_to_pose(remaining[0])
+
+    def send_through_poses(self, poses):
+        """一次穿过 poses[0..n-2](途径点)到 poses[-1](终点): 只有终点会停车。"""
+        goal = NavigateThroughPoses.Goal()
+        goal.poses = poses
+        last = poses[-1]
+        last_yaw = quaternion_to_yaw(last.pose.orientation)
+        self.attempts += 1
+        attempt_note = f" (第 {self.attempts} 次尝试)" if self.attempts > 1 else ""
+        self.get_logger().info(
+            f"[{self.index + 1}..{len(self.waypoints)}/{len(self.waypoints)}] 途径点模式: "
+            f"{len(poses) - 1} 个途径点(不刹车) → 终点 "
+            f"({last.pose.position.x:.2f}, {last.pose.position.y:.2f}, yaw {last_yaw:.2f})"
+            f"{attempt_note}"
+        )
+        self.active_mode = "through"
+        self.goal_started_at = self.now_sec()
+        self.last_feedback_log = 0.0
+        self.goal_future = self.through_client.send_goal_async(
+            goal, feedback_callback=self.on_feedback
+        )
+        self.goal_handle = None
+        self.result_future = None
+        self.state = SEND
+        self.publish_markers()
+        self.target_pub.publish(last)
+
+    def send_to_pose(self, pose):
         goal = NavigateToPose.Goal()
         goal.pose = pose
         yaw = quaternion_to_yaw(pose.pose.orientation)
@@ -422,6 +509,7 @@ class WaypointMission(Node):
             f"[{self.index + 1}/{len(self.waypoints)}] 目标 "
             f"({pose.pose.position.x:.2f}, {pose.pose.position.y:.2f}, yaw {yaw:.2f}){attempt_note}"
         )
+        self.active_mode = "single"
         self.goal_started_at = self.now_sec()
         self.last_feedback_log = 0.0
         self.goal_future = self.nav_client.send_goal_async(
@@ -442,10 +530,51 @@ class WaypointMission(Node):
         # 所以目标开始 1 秒后才记录, 之后每 2 秒一条。
         if now - self.goal_started_at >= 1.0 and now - self.last_feedback_log >= 2.0:
             self.last_feedback_log = now
-            self.get_logger().info(
-                f"  剩余 {self.last_distance:.2f} m, 已用 {now - self.goal_started_at:.1f} s, "
-                f"恢复次数 {self.recoveries}"
+            # 途径点模式的 distance_remaining 是"到终点还剩多少"; 反馈里的
+            # number_of_poses_remaining 各家版本算法不一致, 这里只信自己 TF 跟踪的进度。
+            progress = (
+                f"已过 {self.index}/{len(self.waypoints)} 个点, "
+                if self.active_mode == "through" else ""
             )
+            self.get_logger().info(
+                f"  剩余 {self.last_distance:.2f} m, {progress}"
+                f"已用 {now - self.goal_started_at:.1f} s, 恢复次数 {self.recoveries}"
+            )
+
+    def robot_xy(self):
+        """TF 里机器人当前位置; 拿不到返回 None。只给途径点模式的进度跟踪用。"""
+        if self.tf_buffer is None:
+            return None
+        try:
+            tf = self.tf_buffer.lookup_transform(self.frame_id, self.args.base_frame, Time())
+        except Exception:  # tf2 各种异常基类不统一, 统一兜住: 拿不到就当没进度
+            return None
+        self.tf_ok = True
+        return tf.transform.translation.x, tf.transform.translation.y
+
+    def update_passed_index(self):
+        """--pass-through 专用: 车离当前途径点 < --passed-radius 就认为这个点已开过, index 前移。
+
+        只影响两件事: 失败后重发哪些剩余点、RViz 高亮哪个点。**到达判定/是否停车完全由
+        nav2 决定**(控制器只在路径末点做判定), 这里不参与, 所以判早了也不会让车少走。"""
+        if not self.args.pass_through or self.index >= len(self.waypoints) - 1:
+            return
+        xy = self.robot_xy()
+        if xy is None:
+            return
+        moved = False
+        while self.index < len(self.waypoints) - 1:
+            wp = self.waypoints[self.index].pose.position
+            if math.hypot(xy[0] - wp.x, xy[1] - wp.y) > self.args.passed_radius:
+                break
+            self.get_logger().info(
+                f"  途径点 #{self.index + 1} 已开过(距 {self.args.passed_radius:.2f} m 以内), "
+                f"下一个是 #{self.index + 2}"
+            )
+            self.index += 1
+            moved = True
+        if moved:
+            self.publish_markers()
 
     def cancel_current(self, reason):
         handle = self.goal_handle
@@ -485,19 +614,39 @@ class WaypointMission(Node):
 
     def on_waypoint_failed(self, status_name):
         remaining_retries = self.args.retry - (self.attempts - 1)
+        target = (
+            f"途径点航段 (从 #{self.index + 1} 到终点)" if self.active_mode == "through"
+            else f"航点 #{self.index + 1}"
+        )
         if remaining_retries > 0:
+            if self.active_mode == "through" and not self.tf_ok:
+                self.get_logger().warn(
+                    "拿不到机器人位姿 TF, 没法确认哪些途径点已经开过 —— 这次重试会从 "
+                    f"#{self.index + 1} 重发, 已经开过的点可能又被当成目标。检查 "
+                    "--frame/--base-frame 是否和实际一致。"
+                )
             self.get_logger().warn(
-                f"航点 #{self.index + 1} {status_name}; 还剩 {remaining_retries} 次重试, 重新下发。"
+                f"{target} {status_name}; 还剩 {remaining_retries} 次重试, 下发剩余航点。"
             )
             self.pause_until = self.now_sec() + 1.0
             self.state = PAUSE
             return
         if self.args.on_failure == "skip":
-            self.get_logger().warn(f"航点 #{self.index + 1} {status_name}; 按 --on-failure skip 跳过。")
+            if self.active_mode == "through":
+                self.get_logger().warn(
+                    f"{target} {status_name}; 按 --on-failure skip 丢掉途经点 "
+                    f"#{self.index + 1}, 从下一个点继续。"
+                )
+            else:
+                self.get_logger().warn(f"航点 #{self.index + 1} {status_name}; 按 --on-failure skip 跳过。")
+            if self.index >= len(self.waypoints) - 1:
+                self.get_logger().warn(
+                    "  注意: 丢掉的已经是最后一个点(终点), 跳过它 = 终点不会精确到达。"
+                )
             self.advance_waypoint()
             return
         self.get_logger().error(
-            f"航点 #{self.index + 1} {status_name}; 按 --on-failure abort 停止任务。"
+            f"{target} {status_name}; 按 --on-failure abort 停止任务。"
             f"现场保留: 可用 ~/start 重跑, 或用 ~/clear 清空。"
         )
         self.state = IDLE
@@ -517,6 +666,10 @@ class WaypointMission(Node):
         return self.get_clock().now().nanoseconds / 1e9
 
     def tick(self):
+        # 途径点模式: 边跑边用 TF 记下"哪些途径点已经开过了"(失败重发/高亮用, 见函数注释)
+        if self.state in (SEND, RUNNING):
+            self.update_passed_index()
+
         if self.state == PAUSE:
             if self.now_sec() >= self.pause_until:
                 # index 由上一处逻辑决定: 重试时 index 未变(重发同一点),
@@ -554,7 +707,8 @@ class WaypointMission(Node):
 
         if self.state == RUNNING:
             if self.args.timeout > 0 and self.now_sec() - self.goal_started_at > self.args.timeout:
-                self.get_logger().warn(f"航点 #{self.index + 1} 超时 {self.args.timeout} s。")
+                what = "途径点航段" if self.active_mode == "through" else f"航点 #{self.index + 1}"
+                self.get_logger().warn(f"{what} 超时 {self.args.timeout} s。")
                 self.cancel_current("超时")
                 self.on_waypoint_failed("TIMEOUT")
                 return
@@ -567,11 +721,21 @@ class WaypointMission(Node):
             status_name = STATUS_NAMES.get(status, str(status))
             elapsed = self.now_sec() - self.goal_started_at
             if status == GoalStatus.STATUS_SUCCEEDED:
-                self.get_logger().info(
-                    f"[{self.index + 1}/{len(self.waypoints)}] 到达 "
-                    f"(用时 {elapsed:.1f} s, 恢复 {self.recoveries} 次)"
-                )
-                self.advance_waypoint()
+                if self.active_mode == "through":
+                    # through_poses 只在最后一个点(路径末点)做到达判定, 所以它成功 =
+                    # 车已经在终点停稳, 整条航点跑完, 不需要再逐点走。
+                    self.get_logger().info(
+                        f"[终点 {len(self.waypoints)}/{len(self.waypoints)}] 到达, "
+                        f"途径点全程未停车 (用时 {elapsed:.1f} s, 恢复 {self.recoveries} 次)"
+                    )
+                    self.index = len(self.waypoints)
+                    self.finish_mission()
+                else:
+                    self.get_logger().info(
+                        f"[{self.index + 1}/{len(self.waypoints)}] 到达 "
+                        f"(用时 {elapsed:.1f} s, 恢复 {self.recoveries} 次)"
+                    )
+                    self.advance_waypoint()
             else:
                 self.on_waypoint_failed(status_name)
             return
@@ -618,7 +782,10 @@ class WaypointMission(Node):
             label.scale.z = 0.25
             label.color.r = label.color.g = label.color.b = 1.0
             label.color.a = 1.0
+            # 用 ASCII "GOAL": RViz 的字体没有中文字形, 中文会变成方块/乱码
             label.text = f"#{i + 1}"
+            if self.args.pass_through and i == len(self.waypoints) - 1:
+                label.text = f"#{i + 1} GOAL"
             array.markers.append(label)
 
         # 用 DELETEALL 清掉已删除的航点残留
@@ -630,16 +797,27 @@ class WaypointMission(Node):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="SRM 航点任务: RViz 点选航点, 逐个下发 NavigateToPose (替代面板途经点模式)",
+        description="SRM 航点任务: RViz 点选航点, 逐个下发 NavigateToPose "
+                    "(--pass-through: 除终点外都当途径点, 途径点不刹车)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--file", "-f", help="航点 YAML 文件; 给了就直接执行里面的航点")
     parser.add_argument("--save-file", help="~/save 服务的保存路径")
     parser.add_argument("--frame", default="map", help="航点统一坐标系 (默认 map)")
-    parser.add_argument("--retry", type=int, default=1, help="单个航点失败后的重试次数 (默认 1)")
+    parser.add_argument("--pass-through", action="store_true",
+                        help="途径点模式: 除最后一个点(终点)外都当途径点, 一次 "
+                             "navigate_through_poses 下发, 途径点不刹车 (默认关闭: 每个点都停车)")
+    parser.add_argument("--passed-radius", type=float, default=0.8,
+                        help="途径点模式下判定'这个点已经开过'的距离 (默认 0.8 m); "
+                             "只用于失败后重发剩余点与 RViz 高亮, 不参与到达判定")
+    parser.add_argument("--base-frame", default="base_link",
+                        help="判定'已开过'时用的机器人本体坐标系 (默认 base_link)")
+    parser.add_argument("--retry", type=int, default=1,
+                        help="失败后的重试次数 (默认 1); --pass-through 时重发的是剩余点")
     parser.add_argument("--on-failure", choices=("abort", "skip"), default="abort",
-                        help="重试用尽后: abort 停止(默认) / skip 跳过")
-    parser.add_argument("--timeout", type=float, default=0.0, help="单个航点超时秒数 (默认 0 = 不限)")
+                        help="重试用尽后: abort 停止(默认) / skip 跳过(途径点模式丢掉当前途径点)")
+    parser.add_argument("--timeout", type=float, default=0.0,
+                        help="单个航点/整段途径点超时秒数 (默认 0 = 不限)")
     parser.add_argument("--pause", type=float, default=0.0, help="航点之间停顿秒数")
     parser.add_argument("--loop", action="store_true", help="全部完成后从头再来")
     parser.add_argument("--record-only", action="store_true", help="只记录航点, 不下发")
@@ -658,6 +836,10 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.retry < 0:
         print("[错误] --retry 不能是负数", file=sys.stderr)
+        return 2
+    if args.pass_through and args.passed_radius <= 0:
+        # radius <= 0 会让"已开过"的进度永远不前进, 失败重试就变成从头再来(会把车引回去)
+        print("[错误] --pass-through 需要 --passed-radius > 0", file=sys.stderr)
         return 2
     rclpy.init()
     node = WaypointMission(args)

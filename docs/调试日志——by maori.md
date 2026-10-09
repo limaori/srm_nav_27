@@ -437,3 +437,8 @@ script/start_sim_nav.sh -w srm_empty -m 227_1006
   -p /home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
   --rotation-mode stop
   ```
+# 2026-10-9
+### 路径点变途径点模式
+```bash
+./script/start_waypoints.sh --file missions/227_1006_waypoint1.yaml --pass-through
+```

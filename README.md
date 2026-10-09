@@ -341,7 +341,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
 | `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
-| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`。替代 RViz Nav2 面板的途经点模式，避免 `navigate_through_poses` 的航点折返问题 |
+| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车** |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
@@ -391,7 +391,8 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 ```bash
 ./script/start_waypoints.sh                       # 点选模式：RViz 点航点，再调 ~/start 开始
-./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点
+./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点（每个点都停车）
+./script/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式：除最后一个点外都不停车
 ./script/start_waypoints.sh --save-file m.yaml    # 只收集，~/save 存盘（教点模式）
 ./script/start_waypoints.sh --retry 2 --timeout 30 --on-failure skip --loop
 ```
@@ -413,6 +414,17 @@ RViz 点选用工具栏的 **Publish Point**（发 `/clicked_point`）或 **2D G
 fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门狗照旧生效。
 因为它不经过 `RemovePassedGoals`，`xy_goal_tolerance` 与航点删除半径的耦合约束也随之消失，
 收紧到达容差不再有副作用。
+
+**途径点模式（`--pass-through`，默认关闭）**：把整个列表一次交给 `navigate_through_poses`——
+前 N-1 个点只是途径点，第 N 个是终点。全局路径一次规划穿过所有点，控制器只在**路径末端（终点）**
+做减速与到达判定（`OmniPidPursuitController` 的 `approach_velocity_scaling_dist` 也是按路径末点算的），
+所以**途径点不刹车，到终点才停**；终点精度与逐点模式相同（都用 `general_goal_checker`，`xy_goal_tolerance` 0.4 m）。
+用的是 `behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml`，其中
+`RemovePassedGoals(radius="0.35")` 与 `general_goal_checker.xy_goal_tolerance`、控制器前瞻
+（`min/max_lookahead_dist` 0.3/0.6）是一组耦合参数，要调一起调（xml 里有注释）。
+失败时按 `--retry` **重发还没开过的剩余点**（车已开过的点不会再被当成目标，靠 TF 跟踪，
+判定半径 `--passed-radius`，默认 0.8 m），retry 用完再按 `--on-failure abort/skip`；
+只剩终点一个点时自动退回 `NavigateToPose`，保证终点精确到达。
 
 > [!WARNING]
 > `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的

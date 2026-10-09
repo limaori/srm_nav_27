@@ -3,7 +3,9 @@
 # SRM 航点任务一键启动 (包装 script/waypoint_mission.py)
 #
 #   ./script/start_waypoints.sh                       # 点选模式: RViz 里点航点, 再调 ~/start
-#   ./script/start_waypoints.sh --file m.yaml         # 直接执行航点文件里的航点
+#   ./script/start_waypoints.sh --file m.yaml         # 直接执行航点文件里的航点(每个点都停车)
+#   ./script/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式: 除最后一个点(终点)
+#                                                     # 外都是途径点, 途径点不刹车
 #   ./script/start_waypoints.sh --save-file m.yaml    # 只收集航点, 用 ~/save 存盘
 #   ./script/start_waypoints.sh --loop --retry 2      # 循环跑, 每个点失败重试 2 次
 #
@@ -15,6 +17,10 @@
 #   - 需要导航栈在跑(nav2 + bt_navigator), 即先执行 ./script/start_real_nav.sh。
 #     本脚本只下发导航目标, 不直接发速度: 速度仍走 Nav2 控制器 → velocity_smoother
 #     → fake_vel_transform → /cmd_vel_chassis 这条链路, 底盘限幅/看门狗照旧生效。
+#   - --pass-through 用的是 bt_navigator 的 navigate_through_poses 与
+#     behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml, 默认导航栈
+#     就带; 它只在最后一个点(终点)停车, 途径点不停车。失败时按 --retry 重发还没开过的
+#     剩余点, 再用完则按 --on-failure abort/skip。细节见 waypoint_mission.py 头部注释。
 #   - RViz 点选请用工具栏的 "2D Goal Pose" (发 /goal_pose) 或 "Publish Point"
 #     (发 /clicked_point); 别用 Nav2 面板里直接下发 action 的 "Nav2 Goal" 工具,
 #     否则它和本脚本会互相抢目标。
