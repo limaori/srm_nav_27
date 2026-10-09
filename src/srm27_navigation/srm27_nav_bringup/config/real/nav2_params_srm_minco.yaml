@@ -526,7 +526,15 @@ controller_server:
       base_frame: base_link                             # 车体系（速度输出坐标系）
       odom_topic: odometry                              # 状态适配输入话题
       replan_frequency: 10.0                            # 后台重规划频率（Hz）
-      planning_horizon: 2.0                             # 局部路径截取视野（米）
+      # 局部路径截取视野（米）。2026-10-09: 2.0 → 4.0，配合 limits.max_linear_speed 3.5。
+      # 为什么必须一起改：MINCO 的轨迹是"从当前速度出发、在本视野末端停住"的起停剖面，
+      # 视野太短时连 v_max 都到不了 —— 2.0 m + a_max 3.0 的三角形剖面峰值只有
+      # sqrt(2·a·(horizon/2)) = 2.45 m/s，上限提到 3.5 也白提（预检会报"制动走廊余量不足"）。
+      # 4.0 m 时剖面峰值 = sqrt(2·3.0·2.0) = 3.46 m/s，刚好摸到 3.5；
+      # 想让剖面变成能真正跑到 v_max 的梯形，需要 horizon >= v_max²/a_max = 4.08 m（取 4.5 更稳）。
+      # 同时要求: local_costmap 的窗口与 intensity_voxel_layer 的 obstacle_max_range 一起放大，
+      # 否则视野外半段没有任何障碍数据（控制器把未知当障碍，路径会被截短）。
+      planning_horizon: 4.0                             # 局部路径截取视野（米）
       planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）；注意：该参数目前在插件里是死参数（只做范围校验），真正的时间门槛是 mpc.qp_deadline_ms
       # 状态新鲜度门限（秒）。**实车必须比仿真大**：
       #   仿真的 /odometry 由 simulation_ground_truth_odometry 以固定 50 Hz 发布（周期 0.02 s），
@@ -619,7 +627,11 @@ controller_server:
         max_piece_duration: 1.00                        # 段时长上限（秒）
         pre_time_ratio_min: 0.90                        # PRE 段时长比例下限
         pre_time_ratio_max: 1.10                        # PRE 段时长比例上限
-        samples_per_piece: 8                            # 每段数值积分采样点数
+        # 2026-10-09: 8 → 16。障碍软约束只在每段 samples_per_piece 个点上积分，
+        # 网格太粗时优化器"以为"净空够、密采样一扫却不够（实测交付值比软目标低 5 cm 量级）。
+        # 加倍后软约束网格间距减半，代价是 PRE 阶段 ESDF 查询翻倍
+        # （实测 pre_time_ms ≈ 1.8 ms，预算内还有余量）。
+        samples_per_piece: 16                           # 每段数值积分采样点数
         max_iterations: 150                             # L-BFGS 最大迭代次数
         gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
         # 仅靠梯度阈值时该问题永远打不到收敛（实测 302 次仍在上限、耗时 17 ms）；
@@ -639,19 +651,46 @@ controller_server:
         # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
         # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
-        optimization_clearance_margin: 0.05
+        # 2026-10-09: 0.05 → 0.10。实测（22:13 录包 + 22:53 日志）交付净空长期落在
+        # 0.3707~0.3799，而硬门槛是 0.38 —— 差 0.4~9 mm 就被整条丢弃。原因是优化器的
+        # 软目标（0.33+0.05+margin）与它实际交付之间还差 ~5 cm，margin 取 0.05 时几乎没有
+        # 缓冲。取 0.10（软目标 0.48）把这段落差吃掉，硬门槛 0.38 不变。
+        # 代价: 窄通道里优化器会更用力往中心线挤（软约束，不可行时只是吃罚值）；
+        # 若发现窄道通过性变差，先回到 0.05~0.075。
+        optimization_clearance_margin: 0.10
         resample_step: 0.10                             # 前端弧长重采样步长（米）
-        corner_speed_ratio: 0.35                        # 转角处最低速度比例
+        # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
+        # 依据: 实车 227_1006 那组 7 点航点（9.8 m 路径里 7 个转折）实测沿路径平均
+        # 只有 0.584 m/s，而规划侧报出的峰值是 1.902 m/s（平均/峰值 ≈ 0.31）——
+        # 时间基本都花在弯角的减速-再加速上。0.35 意味着每个弯角把参考速度压到 35%。
+        # 提到 0.60 直接减少这段开销。**注意它与净空强耦合**：弯角越快，MINCO 切内弯越深，
+        # 越容易压到 0.38 硬门槛 —— 所以这次同时把 optimization_clearance_margin 提到 0.10
+        # 并加密软约束采样点；如果现场又出现"净空 0.37x 判死"，先把本项退回 0.45。
+        corner_speed_ratio: 0.60                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
 
-      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 1.5 / max_accel 3.0、
-      # 串口 max_wz 1.0）对齐。原先的 0.5/0.3 是迁移方案里的“首跑测试档位”占位值，
-      # 与实际实车链路不一致；仿真配置已同步为同一组值。
+      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 3.5 / max_accel 3.0、
+      # 串口 max_wz 1.0）对齐。
+      # 2026-10-09: 平移上限由 1.50 提到 3.50（与 smoother 的 3.5 对齐）。预检(0 阻塞/7 警告)
+      # 对这条改动的判读如下，改这一行必须一起看：
+      #   1) 校验硬门槛变成 3.50×1.02 = 3.57 → "max speed exceeds the effective limit" 这类
+      #      判死基本消失（原门槛 1.53，实测状态速度到 1.66 就整条被丢）。
+      #   2) 制动覆盖: 要求有效前缀 >= 0.10 + 3.50/3.00 = 1.267 s；horizon 2.0 m 下最短局部
+      #      轨迹只有 1.633 s（三角形剖面，跑不到 v_max）→ 能过但余量 < 30%，
+      #      预检要求先做制动辨识把 safety.braking_deceleration 填实测值。
+      #   3) **视野才是真上限**: horizon 2.0 m + a_max 3.0 的三角形剖面峰值只有
+      #      a·t_half = 3.0×sqrt(2·(horizon/2)/a) ≈ 2.45 m/s，所以直线段上也跑不到 3.5；
+      #      要真跑到 3.5 需要 horizon ≈ v²/a = 4.1 m，而实车局部代价地图只有 5×5 m
+      #      （横向半径 2.5 m）—— horizon、局部地图尺寸、a_max 要一起重新标。
+      #   4) 终点急停: 预检给出的进入速度 = min(v_max, sqrt(2·a_plan·tol)) = 1.732 m/s，
+      #      要求底盘可保证减速度 >= v_entry²/(4·tol) = 1.50 m/s²（当前按 3.0 占位估计）。
+      #   5) 串口层 max_vx/max_vy = 2.50 会静默削掉出口（对齐系数 0.8 下 0.8×3.5 = 2.8 > 2.5），
+      #      要真的放开速度必须同步放宽这两个值——那是安全限幅，需单独决定。
       limits:                                           # 有效约束（必须与 smoother/串口一致）
-        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
-        max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
+        max_linear_speed: 3.50                          # 平移合速度上限（米/秒）
+        max_linear_accel: 4.00                          # 平移合加速度上限（米/秒^2）
         max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
         max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
 
@@ -720,8 +759,13 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
-      width: 5
-      height: 5
+      # 2026-10-09: 5×5 → 10×10。planning_horizon 提到 4.0 之后，局部地图必须能覆盖
+      # 视野（滚动窗口下机器人居中，5×5 只有 ±2.5 m，4 m 的前瞻会直接顶出地图边界，
+      # 局部路径被 LocalPathEnd::kMapBoundary 截短）。10×10 给到 ±5 m。
+      # 代价: 栅格数 100×100 → 200×200，ESDF/代价地图每周期开销约 4 倍（实测 esdf_time_ms
+      # 仍为 0 ms 量级，可接受；若将来发现规划耗时上升，优先查这里）。
+      width: 10
+      height: 10
       resolution: 0.05
       robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -751,7 +795,10 @@ local_costmap:
           sensor_frame: livox_imu
           min_obstacle_height: 0.0
           max_obstacle_height: 2.0
-          obstacle_max_range: 5.0
+          # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
+          # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
+          # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.2
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -896,10 +943,13 @@ velocity_smoother:
     # 与 FollowPath.limits 一致：初期测试档位为平移合速度 0.5 m/s。
     # 上下界对称；阶段一 yaw_policy.mode = xy_only 时导航命令的 wz 恒为 0，
     # 启用 SE(2) 阶段时必须同步提高这里的 yaw 界并改用 NAV_SE2 仲裁模式。
-    max_velocity: [1.5, 1.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
-    min_velocity: [-1.5, -1.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
-    max_accel: [3.0, 3.0, 0.0]         # 最大加速度[x,y,yaw]
-    max_decel: [-3.0, -3.0, 0.0]       # 最大减速度[x,y,yaw]
+    max_velocity: [3.5, 3.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
+    min_velocity: [-3.5, -3.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
+    # 2026-10-09: ±3.0 → ±4.0，与 FollowPath.limits.max_linear_accel 一起动。
+    # 不平移同步就会"规划按 4.0 算、实际按 3.0 执行"，MPC 会持续看到跟踪滞后
+    # （表现为指令与 odom 长期对不上，终点附近更明显）。
+    max_accel: [4.0, 4.0, 0.0]         # 最大加速度[x,y,yaw]
+    max_decel: [-4.0, -4.0, 0.0]       # 最大减速度[x,y,yaw]
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
