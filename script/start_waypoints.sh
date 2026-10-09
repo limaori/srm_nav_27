@@ -29,6 +29,9 @@
 #       general_goal_checker.xy_goal_tolerance、又要大于切内弯的偏移量): 实车/仿真两份 Omni
 #       参数 2026-10-09 起已都是 容差 0.4 + 前瞻 0.6/0.3/0.6, 两边表现一致。详见
 #       waypoint_mission.py 头部注释。
+#     - --pass-through 默认开"回头检测"(--backtrack-guard): 实测 nav2 的 RemovePassedGoals
+#       没在删已过的途径点, 靠它自己发现"车在往回走"就取消当前航段、只重发还没开过的点。
+#       详见 waypoint_mission.py 头部注释。--no-backtrack-guard 可关。
 #
 # 注意:
 #   - 需要导航栈在跑(nav2 + bt_navigator), 即先执行 ./script/start_real_nav.sh (仿真则

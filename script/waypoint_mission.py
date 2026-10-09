@@ -58,9 +58,20 @@
 #     这个 radius 和 general_goal_checker.xy_goal_tolerance(0.4)、控制器前瞻
 #     (min/max_lookahead_dist 0.3/0.6)是一组参数, 要调一起调 —— 详见 xml 里的注释。
 #     本脚本不发速度, 所以"不刹车"完全是这条链路(控制器→velocity_smoother)决定的。
+#   ⚠ 实测 (2026-10-09, 空场仿真 + MINCO): **RemovePassedGoals 在这套部署上不生效** ——
+#     车贴着途径点 0.05~0.34 m 开过去, 那个点照样留在目标列表里(车离 #3 只有 0.01 m 时,
+#     全局路径里 #3 还在; 最小实验: 车离第一个点 0.09 m, 路径里仍带着"回头去它"的腿)。
+#     后果就是车在两个点之间来回绕(剩余距离 5.8↔9.3 m 反复跳), 一个 7 点任务跑 93 s、
+#     9 次 recovery 才完成。排除过的嫌疑: map↔odom 重合(launch 默认 0, 实测恒等)、
+#     跟踪偏差极小(平均 0.05 m / 最大 0.18 m)、控制器轨迹校验没报错。
+#     → 所以默认打开 --backtrack-guard: 不指望 nav2 删点, 由脚本自己发现"车在往回走"
+#       就取消当前航段、按 --passed-radius(0.8 m)的进度只重发还没开过的点。机制见
+#       check_backtrack()。实车 Omni 用的是同一个 radius=0.35, 同样会中招, 所以这个
+#       兜底两边都有效。
 #   - 失败处理: 整段失败后按 --retry 重发"还没开过的剩下的点"(已经开过的点不会再被
 #     当成目标), retry 用完再按 --on-failure abort(停下保留现场)/skip(丢掉当前途径点
 #     继续)。只剩终点一个点时自动退回 NavigateToPose, 保证终点精确到达。
+#     回头检测触发的重发**不消耗** --retry(否则几次折返就把重试额度用光)。
 #   - "已经开过哪些点"由本脚本自己用 TF 跟踪(默认 map <- base_link), 只用于失败后
 #     重发剩余点和 RViz 高亮, **不参与到达判定**; 判定半径是 --passed-radius(默认 0.8 m)。
 #
@@ -239,6 +250,12 @@ class WaypointMission(Node):
         self.tf_ok = False
         # 当前在跑的这一段是逐点(NavigateToPose)还是途径点(NavigateThroughPoses)
         self.active_mode = "single"
+        # ---- 回头检测 (--backtrack-guard, 仅途径点模式生效; 机制见 check_backtrack) ----
+        self.leg_min_distance = float("inf")   # 本航段"离终点最近"时的剩余距离
+        self.guard_last_index = -1             # 上次触发时"还没开过的第一个点"
+        self.guard_same_point = 0              # 同一个点连续几次折返/无进展
+        self.guard_triggers = 0                # 本次任务累计触发次数
+        self.guard_quiet_dispatch = False      # 下一次发送是"回头检测后重发", 不算一次重试
 
         # ---- 导航 action 客户端 ----
         self.nav_client = ActionClient(self, NavigateToPose, self.nav_action)
@@ -548,11 +565,21 @@ class WaypointMission(Node):
         self.index = 0
         self.attempts = 0
         self.mission_running = True
+        # 回头检测的计数清零 (它跨航段累计, 用来判断"同一个点反复折返")
+        self.leg_min_distance = float("inf")
+        self.guard_last_index = -1
+        self.guard_same_point = 0
+        self.guard_triggers = 0
+        self.guard_quiet_dispatch = False
         mode_note = "途径点(只有终点停车)" if use_through else "逐点停车"
+        guard_note = (
+            f"是(gain={self.args.backtrack_gain:.1f} m, limit={self.args.backtrack_limit})"
+            if use_through and self.args.backtrack_guard else "否"
+        )
         self.get_logger().info(
             f"任务开始: {len(self.waypoints)} 个航点, 模式={mode_note}, retry={self.args.retry}, "
             f"on-failure={self.args.on_failure}, "
-            f"timeout={self.args.timeout or '不限'}, loop={self.args.loop}"
+            f"timeout={self.args.timeout or '不限'}, loop={self.args.loop}, 回头检测={guard_note}"
         )
         # 不要立刻发: wait_for_server 只保证"本节点发现了服务端", 反方向
         # (服务端发现本节点的应答端点) 可能还没完成。这段窗口里发目标会出现
@@ -564,27 +591,31 @@ class WaypointMission(Node):
             return
         self.send_current()
 
-    def send_current(self):
+    def send_current(self, count_attempt=True, note=""):
         """下发"当前该走的目标"。
         --pass-through: 只要还剩 >=2 个点, 就把剩下的整条当途径点一次下发(途径点不刹车);
-        只剩终点(或没开 --pass-through)时就退回逐点 NavigateToPose。"""
+        只剩终点(或没开 --pass-through)时就退回逐点 NavigateToPose。
+        count_attempt=False 用于回头检测后的重发 —— 那不算一次"失败重试"。"""
         if self.index >= len(self.waypoints):
             self.finish_mission()
             return
         remaining = self.waypoints[self.index:]
         if self.args.pass_through and len(remaining) >= 2:
-            self.send_through_poses(remaining)
+            self.send_through_poses(remaining, count_attempt, note)
             return
-        self.send_to_pose(remaining[0])
+        self.send_to_pose(remaining[0], count_attempt, note)
 
-    def send_through_poses(self, poses):
+    def send_through_poses(self, poses, count_attempt=True, note=""):
         """一次穿过 poses[0..n-2](途径点)到 poses[-1](终点): 只有终点会停车。"""
         goal = NavigateThroughPoses.Goal()
         goal.poses = poses
         last = poses[-1]
         last_yaw = quaternion_to_yaw(last.pose.orientation)
-        self.attempts += 1
-        attempt_note = f" (第 {self.attempts} 次尝试)" if self.attempts > 1 else ""
+        if count_attempt:
+            self.attempts += 1
+            attempt_note = f" (第 {self.attempts} 次尝试)" if self.attempts > 1 else ""
+        else:
+            attempt_note = f" ({note})" if note else ""
         self.get_logger().info(
             f"[{self.index + 1}..{len(self.waypoints)}/{len(self.waypoints)}] 途径点模式: "
             f"{len(poses) - 1} 个途径点(不刹车) → 终点 "
@@ -592,6 +623,7 @@ class WaypointMission(Node):
             f"{attempt_note}"
         )
         self.active_mode = "through"
+        self.leg_min_distance = float("inf")   # 新航段: 重置回头检测的"最好成绩"
         self.goal_started_at = self.now_sec()
         self.last_feedback_log = 0.0
         self.goal_future = self.through_client.send_goal_async(
@@ -603,17 +635,21 @@ class WaypointMission(Node):
         self.publish_markers()
         self.target_pub.publish(last)
 
-    def send_to_pose(self, pose):
+    def send_to_pose(self, pose, count_attempt=True, note=""):
         goal = NavigateToPose.Goal()
         goal.pose = pose
         yaw = quaternion_to_yaw(pose.pose.orientation)
-        self.attempts += 1
-        attempt_note = f" (第 {self.attempts} 次尝试)" if self.attempts > 1 else ""
+        if count_attempt:
+            self.attempts += 1
+            attempt_note = f" (第 {self.attempts} 次尝试)" if self.attempts > 1 else ""
+        else:
+            attempt_note = f" ({note})" if note else ""
         self.get_logger().info(
             f"[{self.index + 1}/{len(self.waypoints)}] 目标 "
             f"({pose.pose.position.x:.2f}, {pose.pose.position.y:.2f}, yaw {yaw:.2f}){attempt_note}"
         )
         self.active_mode = "single"
+        self.leg_min_distance = float("inf")
         self.goal_started_at = self.now_sec()
         self.last_feedback_log = 0.0
         self.goal_future = self.nav_client.send_goal_async(
@@ -630,6 +666,10 @@ class WaypointMission(Node):
         self.last_distance = getattr(feedback, "distance_remaining", float("nan"))
         self.recoveries = getattr(feedback, "number_of_recoveries", 0)
         now = self.now_sec()
+        # 回头检测要在每条反馈上跑(3 Hz 重规划 + 车在动, 等 2 秒才看一次太迟)
+        if self.args.pass_through and self.args.backtrack_guard \
+                and self.active_mode == "through" and self.state == RUNNING:
+            self.check_backtrack(self.last_distance)
         # 刚下发时 nav2 会先发一帧 distance_remaining=0 的反馈, 直接打出来会误导,
         # 所以目标开始 1 秒后才记录, 之后每 2 秒一条。
         if now - self.goal_started_at >= 1.0 and now - self.last_feedback_log >= 2.0:
@@ -644,6 +684,57 @@ class WaypointMission(Node):
                 f"  剩余 {self.last_distance:.2f} m, {progress}"
                 f"已用 {now - self.goal_started_at:.1f} s, 恢复次数 {self.recoveries}"
             )
+
+    def check_backtrack(self, distance):
+        """回头检测 (--backtrack-guard): 发现车在沿原路往回走, 就取消当前航段、只重发还没过的点。
+
+        为什么需要它: nav2 的 RemovePassedGoals(radius=0.35) 负责"车开过哪个途径点就把它从
+        目标列表里删掉"。实测在这套部署上它**不生效** —— 车贴着途径点 0.05~0.34 m 经过, 点照样
+        留在列表里(2026-10-09 空场仿真: 车离 #3 只有 0.01 m, 全局路径里 #3 仍在; 最小实验里车
+        离第一个点 0.09 m, 路径里仍带着"回头去它"的腿), 于是 3 Hz 重规划每次都生成一条回头腿,
+        车在前后来回绕(剩余距离 5.8↔9.3 m 反复跳, 实车 Omni 是同一个 radius 同样会中招)。
+
+        判据用反馈里的 distance_remaining(到终点的剩余路径长度): 它比"本段最好成绩"回退了
+        --backtrack-gain 米就判定折返 —— 车往回开时这个值必然变大; 而重规划造成的路线抖动只有
+        零点几米, 所以留 1 m 的门限就不会误报。
+
+        触发后: 取消当前航段 → 按 TF 跟踪的进度(默认 0.8 m 判据, 比 nav2 的 0.35 m 宽松)只重发
+        "还没开过的点", 被卡住的点自然出局。同一个点连续 --backtrack-limit 次都折返/没进展, 就
+        交给常规失败策略(--retry / --on-failure), 避免无限循环。"""
+        if not math.isfinite(distance) or distance <= 0.0:
+            return
+        if distance < self.leg_min_distance:
+            self.leg_min_distance = distance
+            return
+        if distance - self.leg_min_distance < self.args.backtrack_gain:
+            return
+
+        if self.index > self.guard_last_index:
+            self.guard_same_point = 0        # 上次触发之后又往前过了点, 说明整体在推进
+        else:
+            self.guard_same_point += 1
+        self.guard_last_index = self.index
+        self.guard_triggers += 1
+        back = distance - self.leg_min_distance
+        self.get_logger().warn(
+            f"检测到折返: 剩余距离从 {self.leg_min_distance:.2f} m 涨回 {distance:.2f} m "
+            f"(退了 {back:.2f} m), 已过 {self.index}/{len(self.waypoints)} 个点; "
+            f"取消当前航段, 只重发还没开过的点 (第 {self.guard_triggers} 次)"
+            + ("" if self.guard_same_point == 0
+               else f"; 同一个点已连续 {self.guard_same_point} 次无进展")
+        )
+        self.cancel_current("回头检测")
+        if self.guard_same_point >= self.args.backtrack_limit:
+            self.get_logger().error(
+                f"同一个点连续 {self.guard_same_point} 次折返/无进展, 交给常规失败策略 "
+                f"(retry={self.args.retry}, on-failure={self.args.on_failure}) —— 通常是那个点"
+                f"本身就过不去(被障碍/容差卡住), 不是折返。"
+            )
+            self.on_waypoint_failed("BACKTRACK")
+            return
+        self.guard_quiet_dispatch = True
+        self.state = PAUSE
+        self.pause_until = self.now_sec() + 0.5
 
     def robot_xy(self):
         """TF 里机器人当前位置; 拿不到返回 None。只给途径点模式的进度跟踪用。"""
@@ -789,7 +880,12 @@ class WaypointMission(Node):
             if self.now_sec() >= self.pause_until:
                 # index 由上一处逻辑决定: 重试时 index 未变(重发同一点),
                 # 成功后 index 已 +1(发下一个点)。两种情况都走 send_current。
-                self.send_current()
+                # 回头检测触发的重发不算一次"失败重试"(attempts 不涨), 否则几次折返就把
+                # --retry 用光, 直接 abort 了。
+                quiet = self.guard_quiet_dispatch
+                self.guard_quiet_dispatch = False
+                self.send_current(count_attempt=not quiet,
+                                  note="回头检测后重发剩余点" if quiet else "")
             return
 
         if self.state == SEND and self.goal_future is not None:
@@ -926,6 +1022,16 @@ def parse_args(argv):
     parser.add_argument("--pass-through", action="store_true",
                         help="途径点模式: 除最后一个点(终点)外都当途径点, 一次 "
                              "navigate_through_poses 下发, 途径点不刹车 (默认关闭: 每个点都停车)")
+    parser.add_argument("--backtrack-guard", action=argparse.BooleanOptionalAction, default=True,
+                        help="途径点模式的回头检测 (默认开, --no-backtrack-guard 关)。"
+                             "nav2 的 RemovePassedGoals 在本仓库这套部署上实测不删已过的途径点, "
+                             "于是 3 Hz 重规划一直生成'回头去它'的腿、车来回绕; 这个检测发现"
+                             "'剩余距离比本段最好成绩退回了 --backtrack-gain 米'就取消当前航段, "
+                             "按自己的进度只重发还没开过的点")
+    parser.add_argument("--backtrack-gain", type=float, default=1.0,
+                        help="回头检测判据: 剩余距离比本段最好成绩回退多少米算折返 (默认 1.0)")
+    parser.add_argument("--backtrack-limit", type=int, default=3,
+                        help="同一个点连续几次折返/无进展就交给常规失败策略 (默认 3)")
     parser.add_argument("--passed-radius", type=float, default=0.8,
                         help="途径点模式下判定'这个点已经开过'的距离 (默认 0.8 m); "
                              "只用于失败后重发剩余点与 RViz 高亮, 不参与到达判定")
@@ -960,6 +1066,11 @@ def main(argv=None):
         # radius <= 0 会让"已开过"的进度永远不前进, 失败重试就变成从头再来(会把车引回去)
         print("[错误] --pass-through 需要 --passed-radius > 0", file=sys.stderr)
         return 2
+    if args.pass_through and args.backtrack_guard:
+        if args.backtrack_gain <= 0 or args.backtrack_limit < 1:
+            print("[错误] --backtrack-gain 必须 > 0, --backtrack-limit 必须 >= 1",
+                  file=sys.stderr)
+            return 2
     rclpy.init()
     node = WaypointMission(args)
     try:

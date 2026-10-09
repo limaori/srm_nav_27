@@ -42,7 +42,7 @@
 | `fake_vel_transform` | **关闭**（`nav_srm_simulation_launch.py` 传 `use_fake_vel_transform: False`） | 旧 Omni 链路默认**开启**；MINCO 模式现已默认关闭 | 见 §4.2；不关闭会给平移速度叠一次多余的 `R(-yaw)` |
 | 速度出口 | `cmd_vel_nav` → `srm_cmd_mux` → `cmd_vel_sim` → Gazebo 速度插件 | `velocity_smoother` → `cmd_vel_chassis` → `srm27_nav_protocol` → 串口 | 实车没有 mux，导航角速度由 smoother 钳 0 |
 | 限幅点 | mux（`v_max`） | smooth（`max_velocity [1.5,1.5,0.0]`）+ 串口（`max_vx/vy 2.5`、`max_wz 1.0`） | 任何一层留低都会静默钳住上游 |
-| 平移上限 | 3.0 m/s（当前提速档） | **1.5 m/s**（与实车 Omni/smooth/串口对齐） | 实车比仿真慢一半，`limits` 与实验结论的适用档位不同 |
+| 平移上限 | **1.5 m/s**（2026-10-09 的"提速档 3.0"已撤销，两端现已一致） | **1.5 m/s**（与实车 Omni/smooth/串口对齐） | 撤销原因：3.0 m/s 下切内弯的横向偏移量超过行为树 `RemovePassedGoals radius=0.35`，途经点删不掉 → 3 Hz 重规划把路径绕回去 → 车在途径点之间来回跑（见 `config/simulation/nav2_params_srm_minco.yaml` 文件头 / `srm_chassis_control.yaml` 的限幅注释） |
 | `/odometry` 来源 | `simulation_ground_truth_odometry`（真值适配器） | `sensor_scan_generation` | — |
 | `/odometry` 频率 | **50 Hz**（`publish_period_ns = 20 ms`） | **≈10 Hz**（跟随雷达帧率） | **这是本次发现的关键阻塞项**，见 §4.1 |
 | MPC 自转权限 | `yaw_policy.mode = xy_only`，角速度上下界为 0 | 同上 | 导航不产生自转；实车目前也没有 `cmd_spin` / `rotation_*` 发布者 |

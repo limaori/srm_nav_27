@@ -8,14 +8,34 @@
 #   * 阶段一 yaw_policy.mode = xy_only：MPC 只控平移（angular.z 参考恒为 0，且角速度
 #     上下限为 0），自转仍由独立自转链路 srm_cmd_mux + rotation_controller 负责；
 #     此阶段不宣称已完成 SE(2) 控制。
-#   * 平移合速度上限 3.0 m/s（当前仿真提速档，2026-10-09 由 1.5 提升）。三处必须同步：
-#     本文件 FollowPath.limits.max_linear_speed、velocity_smoother 的上下界、
+#   * 平移合速度上限 1.5 m/s，与实车完全一致（2026-10-09 先提到 3.0 的"仿真提速档"已撤销）。
+#     撤销原因：3.0 m/s 下切内弯的横向偏移量大于行为树里 RemovePassedGoals 的 radius=0.35，
+#     车擦过的途径点删不掉 → 3 Hz 重规划每次都生成"回头去该点"的弯 → 车在途径点之间来回跑，
+#     永远走不到下一个点（2026-10-09 空场仿真复现：7 点 through_poses 目标卡在 #2/#3 之间 23 s，
+#     剩余路径长度在 5.8↔9.3 m 之间反复跳）。那个 radius 是照实车 1.5 m/s + 前瞻 0.6/0.3 标定的，
+#     速度不回到实车档，navigate_through_poses 的"经过即删除"假设就不成立。
+#     三处必须同步：本文件 FollowPath.limits.max_linear_speed、velocity_smoother 的上下界、
 #     srm27_chassis_control/config/srm_chassis_control.yaml 的 vx_max/vy_max/v_max。
 #     任何一处留低，最终执行速度都会被它钳住。
-#   * 加速度上限仍为 3.0 m/s²：3.0 m/s 下 0→满速约需 1.0 s、制动距离约 1.5 m，
-#     落在 planning_horizon 3.0 m 与 8 m 局部地图内。
+#   * 加速度上限仍为 3.0 m/s²：1.5 m/s 下 0→满速约需 0.5 s、制动距离约 0.375 m，
+#     落在 planning_horizon 3.0 m 与 8 m 局部地图内（比提速档时更宽裕）。
 #   * 加速度/角速度仍是联调建议值，不能当作已辨识的制动能力；TrajectoryValidator 的
 #     制动减速度参数必须来自实车辨识。
+#   * 代价地图 robot_radius 0.33 → 0.45（2026-10-09，仅仿真）：
+#     MINCO 的轨迹校验要求净空 = safety.robot_radius(0.33) + clearance_margin(0.05) = 0.38 m
+#     （ESDF 的障碍种子就是代价地图里的致命栅格），而规划器只保证 robot_radius 那么远 ——
+#     于是规划会给出"贴着障碍 0.33~0.38 m"的路径，控制器一条候选轨迹都不敢走 → 输出零 →
+#     10 s 后被进度检查器判 "Failed to make progress" → recovery 把车往回拖 → 现场表现就是
+#     车在原地来回跑。实测 missions/227_1006_waypoint1.yaml 的 #2→#3 段最紧处净空只有 0.36 m
+#     （那处是真障碍物，地图上只有 3 个像素，膨胀后是个 ~0.76 m 的禁行气泡），车正好卡在那儿：
+#     20 次轨迹校验失败 + 4 次 recovery，任务能完成但要多花 100+ 秒。
+#     抬到 0.45 = 0.38 + 0.07（留给 MPC 切弯的余量），让规划器把障碍物周围 0.45 m 都当禁行。
+#     已验证该图（map/simulation/227_1006）在要求净空 0.33/0.38/0.42/0.45/0.50 m 下，
+#     起点→#1→…→#7 各段仍全部可通行（8 邻域连通性搜索）；换更窄的图若报"找不到路径"，
+#     先回退到 0.40。
+#     ⚠ 实车那份 config/real/nav2_params_srm_minco.yaml 本次未改，仍是"规划 0.33 / 控制器
+#       要求 0.38"的不一致状态；实车地图 maps/227_1006 与仿真这份 md5 相同、同样的障碍物，
+#       所以实车切到 MINCO 会在同一个点卡住（现在跑 Omni 没有该轨迹校验，不卡）。
 #   * nav2_params_srm.yaml（Omni）保留为迁移期 A/B 对照与回退配置。
 #
 # 用法：
@@ -492,12 +512,12 @@ controller_server:
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.8                             # 仅视野截断且制动延伸已验证时保留；目标/地图/障碍边界停稳
 
-      # 有效约束：仿真提速档 3.0 m/s，已同步 velocity_smoother 上下界与 srm_cmd_mux 的
-      # vx_max/vy_max/v_max；实车链路仍按 smoother max_velocity 1.5 / max_accel 3.0、
-      # 串口 max_wz 1.0 执行，本文件不代表实车限速。
+      # 有效约束：1.5 m/s，与实车一致（仿真提速档 3.0 已撤销，原因见文件头）。
+      # 已同步 velocity_smoother 上下界与 srm_cmd_mux 的 vx_max/vy_max/v_max；
+      # 实车链路同样是 smoother max_velocity 1.5 / max_accel 3.0、串口 max_wz 1.0。
       # 阶段一 yaw_policy.mode = xy_only，MPC 的角速度权限实际为 0，max_angular_* 只对未来模式生效。
       limits:                                           # 有效约束（必须与 mux/smoother 一致）
-        max_linear_speed: 3.00                          # 平移合速度上限（米/秒）
+        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
         max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
         max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
         max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
@@ -563,7 +583,7 @@ local_costmap:
       width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
       height: 8                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
-      robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）
+      robot_radius: 0.45                                   # 机器人圆形碰撞半径（米）；抬到 0.45 = 控制器要求的 0.38 + 0.07 切弯余量（原 0.33，原因见文件头）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
@@ -609,7 +629,7 @@ global_costmap:
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
       robot_base_frame: base_link                   # 机器人坐标系
-      robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）
+      robot_radius: 0.45                                   # 机器人圆形碰撞半径（米）；抬到 0.45 = 控制器要求的 0.38 + 0.07 切弯余量（原 0.33，原因见文件头）
       resolution: 0.05                                    # 地图分辨率（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
@@ -735,11 +755,11 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 仿真提速档：平移上限 3.0 m/s，与 FollowPath.limits.max_linear_speed 及 srm_cmd_mux
-    # 的 vx_max/vy_max/v_max 保持一致。yaw 仍钳 0（阶段一导航命令 wz 本来也为 0，
-    # 自转走 rotation_velocity 独立链路、不经 smoother）；实车 smoother 仍为 1.5。
-    max_velocity: [3.0, 3.0, 0.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-3.0, -3.0, 0.0]                        # 最小速度[x,y,yaw]
+    # 平移上限 1.5 m/s，与实车一致（仿真提速档 3.0 已撤销，原因见文件头）；
+    # 必须与 FollowPath.limits.max_linear_speed 及 srm_cmd_mux 的 vx_max/vy_max/v_max 一致。
+    # yaw 仍钳 0（阶段一导航命令 wz 本来也为 0，自转走 rotation_velocity 独立链路、不经 smoother）。
+    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
+    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
     max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
     max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
     odom_topic: "odometry"                                # 里程计反馈话题
