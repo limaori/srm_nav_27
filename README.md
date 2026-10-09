@@ -359,6 +359,17 @@ map ──► odom ──► base_link ──┬─► front_mid360
 ./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
 ```
 
+> **实车链已同步仿真链的两项优化（2026-10-09，见 `docs/minco实车迁移实施记录(ai).md` §4.11）**
+> ① 两份实车 params（`config/real/nav2_params_srm.yaml`、`..._minco.yaml`）的
+> `default_nav_through_poses_bt_xml` 都换成 `navigate_through_poses_route_aware.xml`、
+> `plugin_lib_names` 都加了 `srm27_remove_passed_goals_bt_node`（多目标航点不再"回头折返"）；
+> ② `config/real/nav2_params_srm_minco.yaml` 的代价地图 `robot_radius` 0.33 → **0.40**
+> （= MINCO 硬要求的 0.38 + 0.02；Omni 那份不动，保持车体外廓 0.33 以便走窄道）。
+> 上机前**必须先** `colcon build --packages-select srm27_nav_plugins srm27_nav_bringup`：
+> 行为树由 bringup 提供、自研 BT 节点的 `.so` 由 plugins 提供，都是 `bt_navigator` 启动时
+> 按 `plugin_lib_names` 里的库名 `dlopen` 的。`start_real_nav.sh` 现在会在启动前检查这两样东西
+> 是否已在本工作区，缺了直接拒绝启动并提示重编哪个包。
+
 实车建图（SLAM）：
 
 ```bash

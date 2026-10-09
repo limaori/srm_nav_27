@@ -97,6 +97,11 @@ private:
   double max_vx_{0.5};             // §6.5 上位机自己限幅
   double max_vy_{0.5};
   double max_wz_{1.0};
+  // 速度对齐系数: 发往下位机之前把指令乘这个系数。
+  // 用来修正"指令值 → 底盘实际速度"的尺度不一致 (实测依据见 config yaml 的注释)。
+  // 1.0 = 不缩放(原行为)。只作用在**出口**上: cmd_vx_ 仍保存收到的原始值。
+  double linear_velocity_scale_{1.0};
+  double angular_velocity_scale_{1.0};
   bool debug_print_hex_{false};
 
   // 限流日志用的状态翻转标志

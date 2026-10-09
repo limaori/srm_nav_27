@@ -25,6 +25,19 @@
 #   ros2 launch srm27_nav_bringup nav2_stack_launch.py \
 #     params_file:=<本文件> map:=.../map/real/<name>.yaml prior_pcd_file:=.../pcd/real/<name>.pcd ...
 #   或直接用 script/start_real_nav.sh（默认就指向本文件与 SRM 模型）。
+#   * 【2026-10-09 从仿真链迁移】多目标航点(BT):
+#       default_nav_through_poses_bt_xml 换成 behavior_trees/navigate_through_poses_route_aware.xml,
+#       plugin_lib_names 里加 srm27_remove_passed_goals_bt_node(自研 RemovePassedGoalsByRoute)。
+#       原因: nav2 原版 RemovePassedGoals 在本仓库这套部署上实测**不生效** —— 车贴着途径点
+#       0.05~0.34 m 开过去, 点照样留在目标列表里, 于是 3 Hz 重规划一直生成"回头去它"的腿, 车在
+#       途径点之间来回绕("剩余距离"来回跳、一个 7 点任务 9 次 recovery)。换掉之后途径点按
+#       "半径 0.6 m + 到过 1.0 m 又走开"的顺序删, **只删列表头部的连续前缀**, 终点永不删
+#       (到达仍由 goal checker 判定, 所以不再有"radius 必须小于 xy_goal_tolerance"这条约束)。
+#       **本文件的代价地图 robot_radius 保持 0.33 不动**: Omni(纯跟踪)控制器没有 MINCO 那种
+#       "净空 = robot_radius + clearance_margin"的硬要求, 保持车体外廓值可以走更窄的通道。
+#       对应的 MINCO 文件(本文件同目录 nav2_params_srm_minco.yaml)把 robot_radius 抬到了 0.40, 原因见那边文件头。
+#   * 迁移后必须在实车上重新编译并部署 srm27_nav_plugins(自研 BT 节点的 .so)与 srm27_nav_bringup(新 BT xml),
+#     bt_navigator 启动时会按 plugin_lib_names 里的库名 dlopen 这个 .so, 缺了会直接报找不到节点。
 # =============================================================
 
 # 取自 mapping_params.yaml（PublishFreq 10Hz 是实车建图用的值；上游实车配置是 20Hz）
@@ -361,7 +374,7 @@ bt_navigator:
     default_server_timeout: 100
     wait_for_service_timeout: 1000
     default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
-    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_route_aware.xml                # 用自研 RemovePassedGoalsByRoute 代替 nav2 的 RemovePassedGoals
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -373,6 +386,7 @@ bt_navigator:
       - nav2_back_up_action_bt_node
       - nav2_drive_on_heading_bt_node
       - nav2_clear_costmap_service_bt_node
+      - srm27_remove_passed_goals_bt_node                      # 自研: 按"半径 + 到过又走开"删已过的途径点(route_aware BT 用)
       - nav2_is_stuck_condition_bt_node
       - nav2_goal_reached_condition_bt_node
       - nav2_goal_updated_condition_bt_node

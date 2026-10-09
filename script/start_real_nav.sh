@@ -713,6 +713,43 @@ if [ "$CONTROLLER" = "minco" ]; then
   fi
 fi
 
+# ---------- 多目标航点(途径点)行为树的部署检查 ----------
+# 本仓库的 params 里 default_nav_through_poses_bt_xml 指向 behavior_trees/
+# navigate_through_poses_route_aware.xml, 它用自研 BT 节点 RemovePassedGoalsByRoute
+# 代替 nav2 的 RemovePassedGoals(nav2 那个在这套部署上实测不删已过的途径点)。
+# 树由 srm27_nav_bringup 提供、节点由 srm27_nav_plugins 的 .so 提供, 两者都是 **启动时**
+# 由 bt_navigator 按 plugin_lib_names 里的库名 dlopen 的 —— 只改参数文件而没重新编译部署
+# 这两个包时, 报错要到 bt_navigator 启动时才出现(现场表现: 多目标导航直接不可用/加载报错)。
+# 所以这里提前拦住, 并写清楚要重编哪两个包。
+if [ "$DRY_RUN" != "1" ]; then
+  BT_REL="$(sed -n 's|.*default_nav_through_poses_bt_xml:.*behavior_trees/\([^ ]*\).*|\1|p' \
+    "$PARAMS_FILE" | head -1)"
+  if [ -n "$BT_REL" ]; then
+    BT_PATH=""
+    for _cand in "$PKG_DIR/share/srm27_nav_bringup/behavior_trees/$BT_REL" \
+                 "$PKG_SRC/behavior_trees/$BT_REL"; do
+      if [ -f "$_cand" ]; then BT_PATH="$_cand"; break; fi
+    done
+    if [ -z "$BT_PATH" ]; then
+      echo "[错误] 参数指向的行为树不存在: behavior_trees/$BT_REL" >&2
+      echo "       参数文件: $PARAMS_FILE" >&2
+      echo "       先重新编译部署: colcon build --packages-select srm27_nav_bringup" >&2
+      exit 1
+    fi
+    if grep -q "srm27_remove_passed_goals_bt_node" "$PARAMS_FILE"; then
+      BT_LIB_DIR="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; \
+        ros2 pkg prefix srm27_nav_plugins 2>/dev/null" || true)"
+      if [ -z "$BT_LIB_DIR" ] || [ ! -f "$BT_LIB_DIR/lib/libsrm27_remove_passed_goals_bt_node.so" ]; then
+        echo "[错误] 参数里要求自研 BT 节点库 libsrm27_remove_passed_goals_bt_node.so," >&2
+        echo "       但在本工作区没找到 (srm27_nav_plugins 解析到: ${BT_LIB_DIR:-未找到})。" >&2
+        echo "       先重新编译部署: colcon build --packages-select srm27_nav_plugins" >&2
+        echo "       (缺这个库时 bt_navigator 会在启动时报找不到节点, 多目标导航不可用。)" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
 # 地图: --slam 仍要求该参数存在, 但不加载栅格图
 if [ -z "$MAP_NAME" ]; then
   # 自动选择: 只有一个候选就用它, 多个则取最近修改的一份, 并明确打印出来。

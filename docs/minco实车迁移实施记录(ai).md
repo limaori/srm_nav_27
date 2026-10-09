@@ -42,7 +42,7 @@
 | `fake_vel_transform` | **关闭**（`nav_srm_simulation_launch.py` 传 `use_fake_vel_transform: False`） | 旧 Omni 链路默认**开启**；MINCO 模式现已默认关闭 | 见 §4.2；不关闭会给平移速度叠一次多余的 `R(-yaw)` |
 | 速度出口 | `cmd_vel_nav` → `srm_cmd_mux` → `cmd_vel_sim` → Gazebo 速度插件 | `velocity_smoother` → `cmd_vel_chassis` → `srm27_nav_protocol` → 串口 | 实车没有 mux，导航角速度由 smoother 钳 0 |
 | 限幅点 | mux（`v_max`） | smooth（`max_velocity [1.5,1.5,0.0]`）+ 串口（`max_vx/vy 2.5`、`max_wz 1.0`） | 任何一层留低都会静默钳住上游 |
-| 平移上限 | **1.5 m/s**（2026-10-09 的"提速档 3.0"已撤销，两端现已一致） | **1.5 m/s**（与实车 Omni/smooth/串口对齐） | 撤销原因：3.0 m/s 下切内弯的横向偏移量超过行为树 `RemovePassedGoals radius=0.35`，途经点删不掉 → 3 Hz 重规划把路径绕回去 → 车在途径点之间来回跑（见 `config/simulation/nav2_params_srm_minco.yaml` 文件头 / `srm_chassis_control.yaml` 的限幅注释） |
+| 平移上限 | **1.5 m/s**（2026-10-09 的"提速档 3.0"已撤销，两端现已一致） | **1.5 m/s**（与实车 Omni/smooth/串口对齐） | 撤销原因：3.0 m/s 下切内弯的横向偏移量超过行为树 `RemovePassedGoals radius=0.35`，途经点删不掉 → 3 Hz 重规划把路径绕回去 → 车在途径点之间来回跑（见 `config/simulation/nav2_params_srm_minco.yaml` 文件头 / `srm_chassis_control.yaml` 的限幅注释）。**当晚补注**：后来查清"途经点删不掉"的真正原因不是横向偏移量，而是 nav2 的 `RemovePassedGoals` 在这套部署上根本不生效 —— 已换成自研 `RemovePassedGoalsByRoute`（见 §4.11）；1.5 m/s 这个上限保持不动 |
 | `/odometry` 来源 | `simulation_ground_truth_odometry`（真值适配器） | `sensor_scan_generation` | — |
 | `/odometry` 频率 | **50 Hz**（`publish_period_ns = 20 ms`） | **≈10 Hz**（跟随雷达帧率） | **这是本次发现的关键阻塞项**，见 §4.1 |
 | MPC 自转权限 | `yaw_policy.mode = xy_only`，角速度上下界为 0 | 同上 | 导航不产生自转；实车目前也没有 `cmd_spin` / `rotation_*` 发布者 |
@@ -352,6 +352,53 @@ terminal=global_goal | 有效前缀=0.2611s 需要=0.6s | 最小净空=1.207m �
 
 **未改动**：`config/real/nav2_params_srm.yaml`（Omni，A/B 对照与回退基线）仍用 `StoppedGoalChecker`。
 它同样是自转不归导航管的底盘，是否一并切换由你决定 —— 改动方向是放宽条件，但会动到已验证的回退路径。
+
+### 4.11 【本次迁移】把仿真链验证过的"多目标航点 + 代价地图外形"搬到实车两份参数上
+
+仿真空场里跑 227_1006 那套 8 字航点时定位并修掉了两个问题（细节见 README 与
+`config/simulation/nav2_params_srm_minco.yaml` 文件头）。这两项与"仿不仿真"无关，实车同样中招，
+因此本次一并迁移到 `config/real/nav2_params_srm.yaml`（Omni）与
+`config/real/nav2_params_srm_minco.yaml`（MINCO）两份文件上。
+
+| 迁移项 | 改动 | 为什么实车同样需要 |
+|---|---|---|
+| 多目标航点行为树 | `default_nav_through_poses_bt_xml` → `behavior_trees/navigate_through_poses_route_aware.xml`；`plugin_lib_names` 加 `srm27_remove_passed_goals_bt_node` | nav2 原版 `RemovePassedGoals`(radius=0.35) 在本仓库这套部署上**不生效**：车贴着途径点 0.05~0.34 m 开过去，点照样留在目标列表里 → 3 Hz 重规划一直生成"回头去它"的腿 → 车在途径点之间来回绕 / `Failed to make progress`。它是**软件行为**，与定位、底盘、场地都无关，实车 Omni/MINCO 用的是同一个节点库 |
+| 代价地图外形（**仅 MINCO**） | 两份 costmap 的 `robot_radius` 0.33 → **0.40** | MINCO 的轨迹校验硬阈值是 `safety.robot_radius(0.33) + clearance_margin(0.05) = 0.38 m`（预检脚本已把这行打出来），而**规划器只保证 `robot_radius` 那么远**：0.33 时 Theta* 会规划出控制器不敢走的路径，现场表现就是"车走不动/原地绕/进 recovery"。取 0.40 = 0.38 + 0.02；不再往上抬到 0.45 —— 那会让 planner 把"车自己那一格"也判成障碍并反复报 `Either of the start or goal pose are an obstacle!` |
+| 代价地图外形（Omni） | **不动**（保持 0.33 = 车体外廓） | Omni（纯跟踪）控制器没有 MINCO 那种净空硬阈值，保持外廓值可以走更窄的通道 |
+
+自研 BT 节点 `RemovePassedGoalsByRoute` 的判据（两条都有正/反例单测，共 16 个用例）：
+① 车离该点 ≤ 0.6 m；② 车曾进到该点 1.0 m 以内、现在离它 ≥ 0.3 m **且比下一个点更近**（"到过又走开"）。
+另外两条硬规矩：**只删列表头部的连续前缀**（跳过中间某个点一定是误判 —— 8 字任务里 #2 与 #5 只差 0.44 m）、
+**终点永不删除**（到达仍由 goal checker 判定，所以不再有"radius 必须小于 `xy_goal_tolerance`"这条约束）。
+不要改回"按路线弧长投影"那一版：8 字路线里车起点离终点比离第一个点还近（1.09 m / 0.86 m），
+全局投影会落到路线末端，3.6 s 就把 6 个途径点删光、车直冲终点。
+
+**实车部署要求（顺序不能反）**：
+
+```bash
+# 1. 上机前先编译这两个包 —— 树由 bringup 提供, 节点 .so 由 plugins 提供,
+#    都是 bt_navigator 启动时按 plugin_lib_names 里的库名 dlopen 的
+colcon build --packages-select srm27_nav_plugins srm27_nav_bringup
+
+# 2. Omni / MINCO 各按老用法启动(参数文件已改好, 不需要额外开关)
+./script/start_real_nav.sh                      # Omni
+./script/start_real_nav.sh --controller minco   # MINCO(自动跑预检)
+
+# 3. 只读验证: 预检
+python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.py \
+    --params src/srm27_navigation/srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml --expect-minco
+```
+
+`script/start_real_nav.sh` 本次加了一条启动前检查：解析参数文件里的
+`default_nav_through_poses_bt_xml` 与 `srm27_remove_passed_goals_bt_node`，确认行为树文件与
+`libsrm27_remove_passed_goals_bt_node.so` 都在本工作区；缺了就直接拒绝启动并提示重编哪个包，
+而不是等 bt_navigator 启动时抛"找不到节点"。
+
+**实车上的验证顺序**：仿真里是"起点离终点 0.88 m 的 8 字任务 10.8 s 跑完、0 次 recovery、0 次规划失败"。
+实车第一次不要直接跑整条 8 字，先按 §6 的阶梯低速度验证：① 单点 `navigate_to_pose` 正常；
+② 两点 `navigate_through_poses`（第一个点当途径点）确认"经过不停车"且日志里出现
+`RemovePassedGoalsByRoute: 删掉 1 个已通过的途径点`；③ 再上完整航点文件。
+**日志里必须能看到那条删除日志** —— 看不到就说明自研节点没被加载（检查 plugin_lib_names 与 .so 是否部署）。
 
 ## 5. 待辨识清单（P5 的未完部分）
 
