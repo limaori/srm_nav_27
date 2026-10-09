@@ -37,6 +37,7 @@
 #include "srm27_minco_controller/diagnostics.hpp"
 #include "srm27_minco_controller/planning_worker.hpp"
 #include "srm27_minco_controller/state_adapter.hpp"
+#include "srm27_minco_controller/terminal_stop.hpp"
 #include "srm27_minco_controller/yaw_policy.hpp"
 #include "srm27_minco_core/esdf_2d.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
@@ -174,8 +175,21 @@ private:
   /// （0.5 m/s 时要求 1.77 s 还能过，1.5 m/s 时要求 5.1 s 就必然失败），
   /// 所以必须显式配置并来自实测，而不是沿用优化器里的加速度上限（方案 §6.1、§10 P5）。
   double braking_deceleration_{0.0};
+  /// \brief 有效反应延迟（s）；<=0 表示退化为使用 `state_timeout`。
+  ///
+  /// 与 `state_timeout` 拆开是实车暴露出来的硬需求：`state_timeout` 必须不小于里程计
+  /// 到达周期（实车 10 Hz -> 0.25 s），而"从下发命令到车真正动起来"只有 0.1 s 量级。
+  /// 两者混用时终点短轨迹会被一律拒绝（2026-10-09 实车日志 "有效前缀=0.2611s 需要=0.6s"）。
+  double reaction_latency_{0.0};
   /// \brief 判定"已到达路径终点"的距离半径（m）。
   double terminal_reached_radius_{0.20};
+  /// \brief 判定"同一目标的新路径"与"新目标"的末点位移阈值（m）。
+  ///
+  /// 必须明显大于全局规划器每次刷新的末点抖动，否则同一个任务会被反复判成新目标、
+  /// 清空轨迹/热启动/重规划状态（2026-10-09 实车日志的会话重置）。
+  double goal_change_tolerance_{0.10};
+  /// \brief 终点急停的原始配置（保留下来供启动时校验）。
+  TerminalStop::Config terminal_stop_config_{};
   double release_timeout_{0.20};
   bool publish_visualization_{true};
 
@@ -189,6 +203,8 @@ private:
   StateAdapter state_adapter_{};
   CostmapAdapter costmap_adapter_{};
   YawPolicy yaw_policy_{};
+  /// \brief 终点急停：一进入目标检查器的成功区域就立即输出零速，不再追踪末点。
+  TerminalStop terminal_stop_{};
   PlanningWorker worker_{};
   srm27_minco_core::MpcModel mpc_model_{};
   srm27_minco_core::MpcSolver mpc_solver_{};

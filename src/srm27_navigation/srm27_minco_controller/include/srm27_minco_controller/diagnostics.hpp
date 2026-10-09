@@ -85,6 +85,14 @@ struct ControllerDiagnostics
   double output_zero_time{0.0};
   double actual_stop_time{0.0};
 
+  // 终点收敛（2026-10-09 实车终点振荡诊断）
+  /// \brief 当前位姿到路径末点的距离（m）。
+  double terminal_distance{0.0};
+  /// \brief 是否处于终点急停（已进入成功区域，正在输出零速等待目标检查器判定停稳）。
+  bool terminal_active{false};
+  /// \brief 本次生效的终点急停进入阈值（m）。
+  double terminal_tolerance{0.0};
+
   /// \brief 请求命令（车体系，m/s 与 rad/s）。
   double requested_vx{0.0};
   double requested_vy{0.0};

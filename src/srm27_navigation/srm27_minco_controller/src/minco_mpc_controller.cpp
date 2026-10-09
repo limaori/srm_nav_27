@@ -69,12 +69,16 @@ double steadyNow()
 constexpr int kDiagnosticOk = 0;
 constexpr int kDiagnosticWarn = 1;
 
-/// \brief 判定“新目标”的终点位置阈值（m）。
+/// \brief 判定“新目标”的终点位置阈值（m）的默认值。
 ///
 /// 小于该值视为同一目标的路径刷新；大于该值说明导航目标变了，必须开启新会话。
+/// 实际取值来自参数 `goal_change_tolerance`（默认 0.10 m）。
+/// 原来的硬编码值是 **1 mm**，比全局规划器每次刷新的末点抖动还小，导致同一个任务在
+/// 接近终点时被反复判成“新目标”，把轨迹、热启动与重规划状态一起清空
+/// （2026-10-09 实车日志：两次 “Reached the goal” 之前各多出一次会话重置）。
 /// **已知限制**：取消后重新下发**完全相同坐标**的目标会得到同一个会话编号，
 /// 无法与普通路径刷新区分；真正的 Action 级会话守护属于方案 §8.3 的 P4 工作。
-constexpr double kGoalChangeThresholdMeters = 1.0e-3;
+constexpr double kGoalChangeThresholdMeters = 0.10;
 
 }  // namespace
 
@@ -211,6 +215,13 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("diagnostics_period", 0.5);
   declare("publish_visualization", true);
   declare("terminal_reached_radius", 0.20);
+  // 同一导航任务内的路径刷新与"真正的换目标"必须区分：末点抖动超过这个距离才算新目标。
+  declare("goal_change_tolerance", kGoalChangeThresholdMeters);
+
+  // 终点急停（见 terminal_stop.hpp）：一进成功区域就立即给零速，不再追踪末点。
+  declare("terminal.enabled", true);
+  declare("terminal.tolerance", 0.0);
+  declare("terminal.exit_margin", 0.15);
 
   declare("minco.polynomial_order", 5);
   declare("minco.two_stage_optimization", true);
@@ -272,6 +283,8 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("safety.clearance_margin", 0.05);
   declare("safety.unknown_is_obstacle", true);
   declare("safety.braking_deceleration", 0.0);
+  // 有效反应延迟（s）。<=0 表示退化为使用 state_timeout。
+  declare("safety.reaction_latency", 0.0);
 
   declare("state.max_sample_gap", 0.20);
   declare("state.max_position_jump", 0.75);
@@ -291,6 +304,13 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".diagnostics_period", diagnostics_period_);
   node->get_parameter(name + ".publish_visualization", publish_visualization_);
   node->get_parameter(name + ".terminal_reached_radius", terminal_reached_radius_);
+  node->get_parameter(name + ".goal_change_tolerance", goal_change_tolerance_);
+  node->get_parameter(name + ".terminal.enabled", terminal_stop_config_.enabled);
+  node->get_parameter(name + ".terminal.tolerance", terminal_stop_config_.tolerance);
+  node->get_parameter(name + ".terminal.exit_margin", terminal_stop_config_.exit_margin);
+  // 目标检查器容差不可用时的兜底：沿用既有的到点半径语义。
+  terminal_stop_config_.fallback_tolerance = terminal_reached_radius_;
+  terminal_stop_.configure(terminal_stop_config_);
 
   node->get_parameter(name + ".minco.polynomial_order", polynomial_order_);
   node->get_parameter(name + ".minco.two_stage_optimization", two_stage_optimization_);
@@ -358,6 +378,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".safety.clearance_margin", minco_config_.clearance_margin);
   node->get_parameter(name + ".safety.unknown_is_obstacle", esdf_config_.unknown_is_seed);
   node->get_parameter(name + ".safety.braking_deceleration", braking_deceleration_);
+  node->get_parameter(name + ".safety.reaction_latency", reaction_latency_);
 
   node->get_parameter(name + ".state.max_sample_gap", state_max_sample_gap_);
   node->get_parameter(name + ".state.max_position_jump", state_max_position_jump_);
@@ -409,6 +430,20 @@ bool MincoMpcController::loadParameters(std::string * _reason)
     return fail(
       "safety.braking_deceleration must be non-negative (0 = use limits.max_linear_accel)");
   }
+  if (!std::isfinite(reaction_latency_) || reaction_latency_ < 0.0) {
+    return fail("safety.reaction_latency must be non-negative (0 = use state_timeout)");
+  }
+  if (!(goal_change_tolerance_ > 0.0) || !std::isfinite(goal_change_tolerance_)) {
+    return fail("goal_change_tolerance must be positive");
+  }
+  // 终点急停：tolerance 允许为 0（表示"用目标检查器容差"），只拒绝非有限与负数 ——
+  // 负值会被静默改写，宁可让配置错误在启动时就暴露。
+  const TerminalStop::Config & terminal = terminal_stop_config_;
+  if (
+    !std::isfinite(terminal.tolerance) || terminal.tolerance < 0.0 ||
+    !std::isfinite(terminal.exit_margin) || terminal.exit_margin < 0.0) {
+    return fail("terminal.tolerance / terminal.exit_margin must be non-negative");
+  }
 
   // MINCO 与前端共用段时长/权重配置。
   minco_config_.two_stage = two_stage_optimization_;
@@ -438,7 +473,13 @@ srm27_minco_core::TrajectoryValidatorConfig MincoMpcController::makeValidatorCon
   // 制动能力必须取"实测可保证"的值（方案 §6.1）：未单独标定时才退化为使用加速度上限。
   config.braking_deceleration =
     (braking_deceleration_ > 0.0) ? braking_deceleration_ : base_limits_.max_linear_accel;
-  config.reaction_latency = state_timeout_;
+  // reaction_latency 与 state_timeout 在早期实现里是同一个参数。实车把两者拆开了：
+  // state_timeout 必须不小于里程计到达周期（实车约 10 Hz），而 reaction_latency 是
+  // "从下发命令到车真正动起来"的延迟，量级只有 0.1 s 左右。混用会让终点短轨迹被
+  // 一律拒绝：2026-10-09 实车日志里 "有效前缀=0.2611s 需要=0.6s" 就是这个后果 ——
+  // 短停车轨迹能否通过取决于 `totalDuration >= reaction_latency + v/a_brake`，
+  // reaction_latency 取 0.25 时 0.26 s 的终点轨迹只允许 v <= 0.033 m/s。
+  config.reaction_latency = (reaction_latency_ > 0.0) ? reaction_latency_ : state_timeout_;
   return config;
 }
 
@@ -473,6 +514,7 @@ void MincoMpcController::activate()
   build_start_stamp_ = -1.0;
   stopping_ = false;
   stop_reason_ = "none";
+  terminal_stop_.reset();
   if (trajectory_pub_) {
     trajectory_pub_->on_activate();
   }
@@ -508,6 +550,7 @@ void MincoMpcController::deactivate()
   reference_builder_.reset();
   replan_manager_.reset();
   state_adapter_.reset();
+  terminal_stop_.reset();
   has_previous_input_ = false;
   has_last_control_stamp_ = false;
   if (trajectory_pub_) {
@@ -558,18 +601,32 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
   const geometry_msgs::msg::Point & new_goal_point = _path.poses.back().pose.position;
 
   bool new_goal = false;
+  std::string change_reason;
+  double previous_distance = 0.0;
   {
     std::lock_guard<std::mutex> lock(path_mutex_);
     const bool same_source_frame = path_source_frame_ == _path.header.frame_id && has_raw_path_;
     // “同一目标 3 Hz 刷新”与“新目标”必须区分：前者保留可用轨迹，后者必须有新的会话编号，
     // 否则迟到的旧会话结果会重新激活运动（方案 §4.4）。
-    if (!has_raw_path_ || !same_source_frame) {
+    if (!has_raw_path_) {
       new_goal = true;
+      change_reason = "first path";
+    } else if (!same_source_frame) {
+      new_goal = true;
+      change_reason =
+        "path frame changed (" + path_source_frame_ + " -> " + _path.header.frame_id + ")";
     } else if (!raw_path_.poses.empty()) {
       const geometry_msgs::msg::Point & previous_goal_point = raw_path_.poses.back().pose.position;
-      new_goal = std::hypot(
-                   new_goal_point.x - previous_goal_point.x,
-                   new_goal_point.y - previous_goal_point.y) > kGoalChangeThresholdMeters;
+      previous_distance = std::hypot(
+        new_goal_point.x - previous_goal_point.x, new_goal_point.y - previous_goal_point.y);
+      new_goal = previous_distance > goal_change_tolerance_;
+      // 阈值必须明显大于全局规划器每次刷新的末点抖动（Theta* 的栅格量化本身就有厘米级），
+      // 否则同一个任务会被反复判成"新目标"、清空轨迹/热启动/重规划状态。
+      // 2026-10-09 实车日志里两次"Reached the goal"之前各多出一次会话重置，
+      // 用的就是原来的 1 mm 阈值。
+      if (new_goal) {
+        change_reason = "path endpoint moved " + std::to_string(previous_distance) + " m";
+      }
     }
 
     raw_path_ = _path;
@@ -583,21 +640,27 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
   }
 
   if (new_goal) {
-    // 新会话：作废轨迹、热启动、重规划状态与参考进度。
+    // 新会话：作废轨迹、热启动、重规划状态、终点急停与参考进度。
     ++goal_epoch_;
     replan_manager_.reset();
+    terminal_stop_.reset();
     invalidateTrajectory("new navigation goal", now_stamp);
     if (node) {
+      // 记录"为什么"是新会话：只报一句"新会话 #N"在现场无法区分
+      // "用户换了目标"、"规划器末点抖动"还是"坐标系变了"。
       RCLCPP_INFO(
-        node->get_logger(), "MincoMpcController: 新导航会话 #%lu (路径版本 %lu)",
-        static_cast<unsigned long>(goal_epoch_), static_cast<unsigned long>(path_version_));
+        node->get_logger(),
+        "MincoMpcController: 新导航会话 #%lu (路径版本 %lu, 原因: %s; 末点 %.3f, %.3f, frame=%s)",
+        static_cast<unsigned long>(goal_epoch_), static_cast<unsigned long>(path_version_),
+        change_reason.c_str(), new_goal_point.x, new_goal_point.y, _path.header.frame_id.c_str());
     }
   } else {
     // 同一目标的路径刷新：保留当前有效轨迹与控制进度，只递增路径版本。
     if (node) {
       RCLCPP_DEBUG(
-        node->get_logger(), "MincoMpcController: 路径刷新 (版本 %lu)，保留当前轨迹",
-        static_cast<unsigned long>(path_version_));
+        node->get_logger(),
+        "MincoMpcController: 路径刷新 (版本 %lu)，保留当前轨迹 (末点移动 %.4f m, 阈值 %.3f m)",
+        static_cast<unsigned long>(path_version_), previous_distance, goal_change_tolerance_);
     }
   }
 }
@@ -847,10 +910,11 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
       "MincoMpcController: 规划失败 (%s): %s", result.status.c_str(), result.reason.c_str());
     return;
   }
-  // 成功的规划结果到达：清除"到点停车"状态。
-  at_goal_stop_ = false;
-
   // 版本校验：迟到的旧会话结果不得重新激活运动。
+  //
+  // 注意顺序：先校验版本，再改任何控制状态。原实现把 `at_goal_stop_ = false` 放在校验之前，
+  // 于是**任何**成功结果（包括已经过期的旧会话结果）都会解除"到点停车"，
+  // 使停车状态无法可靠保持（2026-10-09 实车终点往返诊断 §1）。
   if (
     result.versions.goal_epoch != goal_epoch_ || result.versions.path_version != path_version_ ||
     result.versions.limits_version != limits_version_) {
@@ -863,6 +927,9 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
     diagnostics_.rejected_stale_result_count += 1;
     return;
   }
+  // 通过版本校验的成功结果到达：清除"到点停车"状态。
+  // 终点急停（terminal_stop_）不在这里清：它是位置状态，只由离开成功区域或换目标解除。
+  at_goal_stop_ = false;
   std::string reason;
   if (!replan_manager_.canCommit(result.trajectory, result.versions, _now_stamp, &reason)) {
     diagnostics_.rejected_stale_result_count += 1;
@@ -939,8 +1006,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   nav2_core::GoalChecker * _goal_checker)
 {
   (void)_pose;
-  (void)_velocity;
-  (void)_goal_checker;
 
   const double control_begin = steadyNow();
   auto node = parent_.lock();
@@ -1002,6 +1067,8 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     invalidateTrajectory("odometry reset", now_stamp);
     yaw_policy_.reset(state.yaw);
     replan_manager_.reset();
+    // 定位跳变后"距离终点多远"这件事本身不再可信，终点急停必须重新判定。
+    terminal_stop_.reset();
     RCLCPP_WARN(node->get_logger(), "MincoMpcController: 检测到里程计重置，已作废轨迹");
   }
 
@@ -1049,7 +1116,59 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 7) 重规划请求。
   requestReplan(state, now_stamp, control_begin);
 
-  // 8) 没有可用轨迹：先看是否属于"已经到达终点"的良性情况。
+  // 8) 终点急停：一进入目标检查器的成功区域就立即给零速，不再追踪精确末点。
+  //
+  // 这一步必须优先于跟踪已提交轨迹。MPC 的代价里一直带着"到精确末点的位置误差"
+  // （mpc.q_position），即使车已经进入目标检查器的 xy 容差，控制器也会继续把它往末点上修；
+  // 一旦冲过末点就反向修正，再冲、再修正 —— 现场就是终点附近来回走
+  // （2026-10-09 实车日志）。
+  //
+  // 逻辑刻意做得最简单：**进容差 → 立即零速**，没有任何后段控制。
+  //  * 进入只看位置、不看速度：轨迹本来就是停在末点的停车剖面，车进容差圈时的速度是
+  //    sqrt(2*a*tol)（实车约 1.5 m/s，几乎满速）；任何"先慢下来再接管"的门槛等于永不接管。
+  //  * 接管后**不再输出任何朝末点或背向末点的速度**，所以控制器再也不可能主动把车
+  //    带出容差 —— 振荡在逻辑上不可能出现。
+  //  * 停车距离完全由底盘自己决定（急刹），"停在哪里"取决于底盘减速能力，见 §5 制动辨识。
+  //    容差对末点是对称的：在距末点 tol 处给零，滑行 v²/(2*a_chassis) 后停下，
+  //    只要 v²/(2*a_chassis) <= 2·tol 就仍落在末点 ±tol 内（实车条件 a >= 1.41 m/s²）。
+  //
+  // 安全校验全部保留：已提交轨迹的复验（步骤 6）照常执行；规划请求（步骤 7）继续提交，
+  // 解除急停时立刻有新鲜轨迹可用。
+  {
+    double distance_to_goal = std::numeric_limits<double>::infinity();
+    if (!planning_path_.empty()) {
+      const Eigen::Vector2d position(state.x, state.y);
+      distance_to_goal = (planning_path_.back() - position).norm();
+    }
+    // 进入阈值与目标检查器同源：优先读它的 xy 容差，读不到才退回 terminal_reached_radius。
+    double goal_tolerance = 0.0;
+    if (_goal_checker != nullptr) {
+      geometry_msgs::msg::Pose pose_tolerance;
+      geometry_msgs::msg::Twist vel_tolerance;
+      if (_goal_checker->getTolerances(pose_tolerance, vel_tolerance)) {
+        goal_tolerance = pose_tolerance.position.x;
+      }
+    }
+    const bool terminal_active = terminal_stop_.update(distance_to_goal, goal_tolerance);
+    diagnostics_.terminal_distance = distance_to_goal;
+    diagnostics_.terminal_active = terminal_active;
+    diagnostics_.terminal_tolerance = terminal_stop_.entryTolerance();
+    if (terminal_active) {
+      RCLCPP_INFO_THROTTLE(
+        (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
+        "MincoMpcController: 终点急停中 (距末点 %.3f m <= %.3f m)，等待目标检查器判定停稳",
+        distance_to_goal, terminal_stop_.entryTolerance());
+      geometry_msgs::msg::TwistStamped command = stopCommand(node, "terminal_stop", now_stamp);
+      // stopCommand 的 command_owner 统一是 "stop"；这里改成更具体的原因，
+      // 现场才能从 diagnostics 直接区分"终点急停"与其它停车。
+      diagnostics_.command_owner = "terminal_stop";
+      diagnostics_.total_control_time_ms = (steadyNow() - control_begin) * 1.0e3;
+      publishDiagnostics(node, diagnostics_, now_stamp);
+      return command;
+    }
+  }
+
+  // 9) 没有可用轨迹：先看是否属于"已经到达终点"的良性情况。
   if (!trajectory) {
     if (at_goal_stop_) {
       // 受控停车：不算控制失败，不计入建轨宽限，也不会抛异常把成功判成失败。

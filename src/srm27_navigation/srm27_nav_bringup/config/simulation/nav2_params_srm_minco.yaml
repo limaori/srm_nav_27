@@ -400,13 +400,17 @@ controller_server:
       required_movement_radius: 0.5                     # 要求移动的最小半径（米）
       movement_time_allowance: 10.0                      # 允许不移动的最长时间（秒）
     # 终点必须按“已停稳”验收：SimpleGoalChecker 只检查位姿，不能保证到达时速度为零。
+    # 与实车同源，见 config/real 下同名文件的说明。
     general_goal_checker:
-      stateful: True                                    # 是否保存目标检查状态
-      plugin: "nav2_controller::StoppedGoalChecker"     # 位姿 + 停止速度双条件
-      xy_goal_tolerance: 0.15                           # 平面位置容差（米）
+      plugin: "srm27_nav_plugins::OmniStoppedGoalChecker"
+      # 平面位置容差（米）：与实车统一为 0.50，同时也是终点急停的进入半径。
+      # 顺带修掉了原来的一处不自洽 —— 本文件原先 xy_goal_tolerance(0.15) 小于
+      # terminal_reached_radius(0.20)，车在 0.15~0.20 m 处会被插件判 already_at_goal
+      # 但目标检查器不接受（详见 minco实车迁移实施记录 §4.4）。
+      xy_goal_tolerance: 0.50                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
       trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
-      rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）
+      # 没有 rot_stopped_velocity：角速度不参与到达判定（见上）。
 
     # MINCO + MPC 局部规划控制器。
     # 阶段一（P2）：model=velocity_integrator、yaw_policy.mode=xy_only，MPC 只控平移，
@@ -430,6 +434,19 @@ controller_server:
       # 由目标检查器判定成功，不再报 no_path（避免把"到点"变成控制器异常）。
       terminal_reached_radius: 0.20
 
+      # 同一导航任务内"路径刷新"与"换目标"的判定阈值（米）。
+      # ⚠ 仿真的 general_goal_checker.xy_goal_tolerance 是 0.15，比这里的
+      # terminal_reached_radius(0.20) 还小 —— 也就是说车在 0.15~0.20 m 处会被插件判成
+      # already_at_goal（输出零速、不算失败），但目标检查器不接受，随后进度检查器会把
+      # 目标判失败。实车那份是 0.40 > 0.20，没有这个问题；本文件保持原值未改，
+      # 是否收敛这对参数由仿真侧单独决定。
+      goal_change_tolerance: 0.10
+
+      # 终点急停（与实车同语义，见 terminal_stop.hpp）：进容差立即给零速。
+      terminal:
+        enabled: True
+        tolerance: 0.0                  # 0 = 用目标检查器的 xy 容差（本文件 0.15 m）
+        exit_margin: 0.15
       state:                                            # 状态适配层
         max_sample_gap: 0.20                            # 差分速度可用的最大采样间隔（秒）
         max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
@@ -529,6 +546,9 @@ controller_server:
         # （实测：0.5 m/s 档要求 1.77 s 尚可通过，1.5 m/s 档要求 5.1 s 就必然失败，
         # 现场表现为规划一直失败、车被 recovery 拖来拖去）。**必须按实车制动辨识填写。**
         braking_deceleration: 0.0
+        # 有效反应延迟（秒）。0 = 退化为使用 state_timeout（本文件 0.10 s），
+        # 也就是与改动前完全一致的行为。实车把两者拆开了，原因见实车配置文件。
+        reaction_latency: 0.0
 
 
 local_costmap:

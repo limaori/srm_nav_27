@@ -16,23 +16,36 @@
 #   --static  只加载先验栅格图 + 静态 map->odom, 没有任何里程计来源
 #             (仅当车体模块自己发 odom->base_link 时可用; 直接用本脚本起车不会动)
 #
-# 实车速度链路:
-#   controller_server ─cmd_vel_controller─► velocity_smoother ─cmd_vel_nav2_result─┐
-#                                                                                  v
-#                                       fake_vel_transform ─► cmd_vel_chassis ─► srm27_nav_protocol ─► 串口 ─► C 板
-#   默认经过 fake_vel_transform (SRM 实车参数文件就是按这条链路配的);
-#   --no-fake-vel-transform 时改由 velocity_smoother 直接发 cmd_vel_chassis,
-#   两级出口话题都对准底盘节点实际订阅的 cmd_vel_chassis, 不会出现"链路断开、车不动"。
+# 实车速度链路 (两种控制器共用同一条出口, 区别只在是否串 fake_vel_transform):
+#   Omni (nav2_params_srm.yaml, 默认):
+#     controller_server ─cmd_vel_controller─► velocity_smoother ─cmd_vel_nav2_result─┐
+#                                                                                     v
+#                                          fake_vel_transform ─► cmd_vel_chassis ─► srm27_nav_protocol ─► 串口 ─► C 板
+#   MINCO (nav2_params_srm_minco.yaml, --controller minco):
+#     controller_server ─cmd_vel_controller─► velocity_smoother ─► cmd_vel_chassis ─► srm27_nav_protocol ─► 串口
+#
+#   MINCO 模式**默认关闭 fake_vel_transform**, 与仿真入口 nav_srm_simulation_launch.py 一致:
+#     * SRM 的机器人参考系是真实随底盘运动的 base_link, 不需要 gimbal_yaw_fake 那套虚拟底盘;
+#     * fake_vel_transform 会把 (vx, vy) 再乘一次 R(-yaw) —— 它假设输入是"与 odom 对齐的
+#       虚拟底盘系", 而 Nav2 控制器 (含 MINCO) 输出的本来就是 base_link 系;
+#       只有 yaw ≡ 0 时这个多余旋转才是恒等变换, 一旦车头方向非零就会静默转错方向;
+#     * 它的同步分支依赖 local_plan 话题, 而该话题只有 Omni 控制器发布,
+#       MINCO 插件不发布 -> 永远走"控制器不活跃"分支, 行为不可预测。
+#   --controller omni 或显式 --fake-vel-transform 可以恢复旧链路。
 #
 # ⚠ 安全须知 (务必先读):
-#   1) srm27_nav_protocol 在后台线程里按固定频率重发"最近一次"收到的速度,
-#      源码中没有超时清零逻辑 (sendData() 的 while 循环)。所以**发命令的节点退出后
-#      车不会自己停**, 会一直按最后速度跑。任何"停节点"操作前先发零速。
-#   2) 本脚本的 --stop 会先发零速再结束进程; 物理急停按钮始终是第一手段。
+#   1) srm27_nav_protocol 的发送线程按 send_rate_hz (默认 100 Hz) 重发"最近一次"收到的速度,
+#      并带 0.5 s 看门狗 (cmd_timeout_sec): cmd_vel_chassis 超过 0.5 s 没更新就把控制量归零。
+#      **但看门狗只在节点活着的时候有效**: 进程被 kill -9 / 主机崩溃 / 串口掉线时它没机会跑,
+#      而 C 板固件自己**没有超时保护**, 会一直用最后一帧的速度。所以任何"停节点"操作前
+#      先发零速 (本脚本的 --stop 会先发), 物理急停按钮始终是第一手段。
+#   2) srm27_nav_protocol 没有任何急停/使能 service, 软件层面唯一的停车手段是在
+#      /cmd_vel_chassis 上发零速度 Twist。实车急停只能靠物理按钮或断电。
 #   3) 底盘能动之后, 先在 RViz 用很小的目标点试一次, 确认车头方向/正负号都对。
 #
 # 用法:
-#   ./script/start_real_nav.sh                       # 默认 --lio, 地图自动选, 启动全部
+#   ./script/start_real_nav.sh                       # 默认 --lio + Omni 控制器, 启动全部
+#   ./script/start_real_nav.sh --controller minco    # MINCO + MPC 控制器 (默认关闭 fake_vel_transform)
 #   ./script/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
 #   ./script/start_real_nav.sh --reloc --prior-pcd /abs/map.pcd
 #   ./script/start_real_nav.sh --slam                # 边建图边导航
@@ -48,6 +61,17 @@
 #       --map-to-odom X Y YAW   静态 map->odom 初值 (m, m, rad), 即"车现在停的位置
 #                               在地图坐标系里的位姿"; 默认 0 0 0 (车在 map 原点)
 #   -p, --params <绝对路径>     Nav2 参数, 默认 config/real/nav2_params_srm.yaml
+#   -c, --controller <auto|omni|minco>
+#                              局部控制器选择 (默认 auto):
+#                                auto  = 读 -p 指定的参数文件里的 FollowPath.plugin 自动判断;
+#                                        若 -p 没给, 用 Omni 默认文件。
+#                                omni  = config/real/nav2_params_srm.yaml
+#                                minco = config/real/nav2_params_srm_minco.yaml
+#                              选 minco 时自动: 关闭 fake_vel_transform (可用
+#                              --fake-vel-transform 显式恢复)、把导航出口对准 cmd_vel_chassis、
+#                              并做一轮 MINCO 专属预检 (插件是否可解析 / use_sim_time 一致 /
+#                              各层限速是否自洽 / 里程计频率与 state_timeout 是否匹配)。
+#       --minco / --omni        等价于 --controller minco / --controller omni
 #       --slam / --reloc / --lio / --static   定位方式, 四者互斥 (默认 --lio)
 #       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.15 -0.15 0.22)
 #       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 -0.06981317007977318 0 -1.5707963267948966)
@@ -58,7 +82,9 @@
 #       --chassis / --no-chassis       是否启动底盘串口 (默认启动)
 #       --joy / --no-joy               是否启动手柄遥控 (默认关闭)
 #       --smoother / --no-smoother     是否串联 velocity_smoother (默认串联)
-#       --fake-vel-transform / --no-fake-vel-transform  (默认启用, 见上文速度链路)
+#       --fake-vel-transform / --no-fake-vel-transform
+#                              默认: Omni 启用、MINCO 关闭 (见上文速度链路)。
+#                              显式给出时以显式值为准。
 #       --composition / --no-composition   导航栈是否用组合节点 (默认组合)
 #       --log-level <级别>      导航栈日志级别 (默认 info)
 #   -n, --check                 只解析并打印将执行的命令 (等同 DRY_RUN=1)
@@ -67,7 +93,7 @@
 #   -h, --help                  显示本帮助
 #
 # 环境变量 (同名参数均可由环境变量给默认值):
-#   MAP MAP_NAME PRIOR_PCD_FILE PARAMS_FILE LIDAR_CONFIG_FILE NAMESPACE
+#   MAP MAP_NAME PRIOR_PCD_FILE PARAMS_FILE CONTROLLER LIDAR_CONFIG_FILE NAMESPACE
 #   START_SLAM START_RELOC START_LIO START_STATIC
 #   USE_RVIZ USE_ROBOT_STATE_PUB USE_CHASSIS USE_JOY USE_COMPOSITION
 #   USE_VELOCITY_SMOOTHER USE_FAKE_VEL_TRANSFORM
@@ -77,6 +103,9 @@
 # 说明:
 #   - 本脚本走 nav2_stack_launch.py 而不是 nav_real_launch.py, 因为后者没有透传
 #     use_pcd_localization / use_lio_odometry (传了也无效), --reloc / --lio 会失效。
+#     nav2_stack_launch.py 本身与控制器无关 (只把 params_file 透传给各节点), 所以
+#     MINCO 不需要新增一个实车 launch: 换控制器就是换参数文件, 入口保持唯一的这一条。
+#     MINCO 实车首次上电的分阶段验收清单见 docs/minco实车迁移实施记录(ai).md。
 #   - 雷达驱动单独启动: 驱动代码里的节点名是 livox_driver_node, 而参数文件顶层键是
 #     livox_ros_driver2, ROS 2 按节点名匹配 --params-file, 对不上整段参数被忽略,
 #     因此这里显式 -r __node:=livox_ros_driver2; 参数文件里的 user_config_path 用的是
@@ -126,7 +155,21 @@ USE_CHASSIS="${USE_CHASSIS:-1}"
 USE_JOY="${USE_JOY:-0}"
 USE_COMPOSITION="${USE_COMPOSITION:-1}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-1}"
-USE_FAKE_VEL_TRANSFORM="${USE_FAKE_VEL_TRANSFORM:-1}"
+# fake_vel_transform 的默认值取决于控制器: Omni 沿用旧链路 (启用), MINCO 关闭。
+# 这里先记住"环境变量有没有显式给过", 解析参数文件之后再定默认值 —— 与定位方式的
+# MODE_GIVEN 是同一个思路: 默认值不能覆盖用户的显式选择。
+if [ -n "${USE_FAKE_VEL_TRANSFORM:-}" ]; then
+  USE_FAKE_VEL_TRANSFORM_GIVEN=1
+else
+  USE_FAKE_VEL_TRANSFORM=1
+  USE_FAKE_VEL_TRANSFORM_GIVEN=0
+fi
+# 同上: 命令行是否显式给过 --fake-vel-transform / --no-fake-vel-transform。
+FAKE_VEL_CLI_GIVEN=0
+
+# 局部控制器: auto (按参数文件内容判断) / omni / minco。
+CONTROLLER="${CONTROLLER:-auto}"
+CONTROLLER_CLI_GIVEN=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
@@ -139,6 +182,8 @@ MODE_GIVEN=0
 MAP_NAME="${MAP_NAME:-${MAP:-}}"
 PRIOR_PCD_FILE="${PRIOR_PCD_FILE:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
+# 参数文件是用户给的还是本脚本的默认值: -c 只在自己选默认文件时才去覆盖它。
+if [ -n "$PARAMS_FILE" ]; then PARAMS_FILE_GIVEN=1; else PARAMS_FILE_GIVEN=0; fi
 LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
 MAP_YAML=""
 PRIOR_PCD=""
@@ -324,7 +369,11 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -m|--map)         MAP_NAME="${2:?--map 需要地图名或绝对路径}"; shift 2 ;;
     --prior-pcd)      PRIOR_PCD_FILE="${2:?--prior-pcd 需要名字或路径}"; shift 2 ;;
-    -p|--params)      PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
+    -p|--params)      PARAMS_FILE="${2:?--params 需要绝对路径}"; PARAMS_FILE_GIVEN=1; shift 2 ;;
+    -c|--controller)  CONTROLLER="${2:?--controller 需要 auto|omni|minco}"
+                      CONTROLLER_CLI_GIVEN=1; shift 2 ;;
+    --minco)          CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
+    --omni)           CONTROLLER="omni"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --map-to-odom)
       MAP_TO_ODOM_X="${2:?--map-to-odom 需要 X Y YAW}"
       MAP_TO_ODOM_Y="${3:?--map-to-odom 需要 X Y YAW}"
@@ -350,8 +399,8 @@ while [ $# -gt 0 ]; do
     --no-joy)         USE_JOY=0; shift ;;
     --smoother)       USE_VELOCITY_SMOOTHER=1; shift ;;
     --no-smoother)    USE_VELOCITY_SMOOTHER=0; shift ;;
-    --fake-vel-transform)    USE_FAKE_VEL_TRANSFORM=1; shift ;;
-    --no-fake-vel-transform) USE_FAKE_VEL_TRANSFORM=0; shift ;;
+    --fake-vel-transform)    USE_FAKE_VEL_TRANSFORM=1; FAKE_VEL_CLI_GIVEN=1; shift ;;
+    --no-fake-vel-transform) USE_FAKE_VEL_TRANSFORM=0; FAKE_VEL_CLI_GIVEN=1; shift ;;
     --composition)    USE_COMPOSITION=1; shift ;;
     --no-composition) USE_COMPOSITION=0; shift ;;
     --log-level)      LOG_LEVEL="${2:?--log-level 需要级别}"; shift 2 ;;
@@ -403,14 +452,6 @@ LIO_ARG="$(bool_arg "$LIO_ON")"
 COMPOSITION_ARG="$(bool_arg "$USE_COMPOSITION")"
 RVIZ_ARG="$(bool_arg "$USE_RVIZ")"
 SMOOTHER_ARG="$(bool_arg "$USE_VELOCITY_SMOOTHER")"
-FAKE_ARG="$(bool_arg "$USE_FAKE_VEL_TRANSFORM")"
-
-# 导航链路的最终出口必须落在底盘节点订阅的 cmd_vel_chassis 上。
-if [ "$USE_FAKE_VEL_TRANSFORM" = "1" ]; then
-  CMD_VEL_NAV_TOPIC="cmd_vel_nav2_result"    # 由 fake_vel_transform 转成 cmd_vel_chassis
-else
-  CMD_VEL_NAV_TOPIC="cmd_vel_chassis"        # 直接对准底盘
-fi
 
 case "$LOG_LEVEL" in
   debug|info|warn|error|fatal) ;;
@@ -429,6 +470,77 @@ if [ -z "$LIDAR_CONFIG_FILE" ]; then
   if [ ! -f "$LIDAR_CONFIG_FILE" ]; then
     LIDAR_CONFIG_FILE="$PKG_SRC/config/real/mid360_user_config.json"
   fi
+fi
+
+# ---------- 局部控制器: 选参数文件 + 定默认速度链路 ----------
+# 迁移 MINCO 时最容易出错的不是算法, 而是"以为加载了 MINCO 其实还是 Omni":
+# 默认参数文件是 Omni 那份, 换控制器必须换文件。这里把"选哪个控制器"变成一等参数,
+# 并在启动前把插件名、use_sim_time、限速自洽性都核对一遍 (见后面的预检)。
+MINCO_PARAMS_DEFAULT="$PKG_DIR/config/real/nav2_params_srm_minco.yaml"
+if [ ! -f "$MINCO_PARAMS_DEFAULT" ]; then
+  MINCO_PARAMS_DEFAULT="$PKG_SRC/config/real/nav2_params_srm_minco.yaml"
+fi
+OMNI_PARAMS_DEFAULT="$PKG_DIR/config/real/nav2_params_srm.yaml"
+if [ ! -f "$OMNI_PARAMS_DEFAULT" ]; then
+  OMNI_PARAMS_DEFAULT="$PKG_SRC/config/real/nav2_params_srm.yaml"
+fi
+MINCO_PLUGIN_NAME="srm27_minco_controller::MincoMpcController"
+
+case "$CONTROLLER" in
+  auto|omni|minco) ;;
+  *) echo "[错误] --controller 只支持 auto / omni / minco, 收到: $CONTROLLER" >&2; exit 2 ;;
+esac
+
+if [ "$CONTROLLER_CLI_GIVEN" = "1" ] && [ "$PARAMS_FILE_GIVEN" = "0" ]; then
+  case "$CONTROLLER" in
+    minco) PARAMS_FILE="$MINCO_PARAMS_DEFAULT" ;;
+    omni)  PARAMS_FILE="$OMNI_PARAMS_DEFAULT" ;;
+  esac
+fi
+
+if [ "$CONTROLLER" = "auto" ]; then
+  if [ -f "$PARAMS_FILE" ] && grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+    CONTROLLER="minco"
+  else
+    CONTROLLER="omni"
+  fi
+fi
+
+# 显式选 minco 但文件里不是 MINCO 插件 -> 直接失败, 不让"名字是 MINCO、跑的是 Omni"溜过去。
+if [ "$CONTROLLER" = "minco" ] && [ -f "$PARAMS_FILE" ] \
+   && ! grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+  echo "[错误] --controller minco, 但参数文件里没有 $MINCO_PLUGIN_NAME:" >&2
+  echo "[错误]   $PARAMS_FILE" >&2
+  echo "[提示] MINCO 实车参数文件: $MINCO_PARAMS_DEFAULT" >&2
+  exit 1
+fi
+
+# fake_vel_transform 默认值跟着控制器走 (MINCO 关闭, Omni 启用), 显式指定优先。
+if [ "$CONTROLLER" = "minco" ]; then
+  if [ "$FAKE_VEL_CLI_GIVEN" = "0" ] && [ "$USE_FAKE_VEL_TRANSFORM_GIVEN" = "0" ]; then
+    USE_FAKE_VEL_TRANSFORM=0
+    echo "[提示] MINCO 模式: 默认关闭 fake_vel_transform (与仿真入口 nav_srm_simulation_launch.py 一致)。"
+    echo "[提示] 如需恢复旧链路, 显式加 --fake-vel-transform。"
+  elif [ "$USE_FAKE_VEL_TRANSFORM" = "1" ]; then
+    cat >&2 <<'EOF'
+[警告] MINCO 与 fake_vel_transform 同时启用, 这一组合有两个已知问题:
+[警告]   1) fake_vel_transform 会对 (vx, vy) 再做一次 R(-yaw) 旋转 —— 它假设输入是
+[警告]      "与 odom 对齐的虚拟底盘系", 而 MINCO 输出的本来就是 base_link 系。
+[警告]      只有底盘 yaw ≡ 0 时该旋转才是恒等变换; 一旦车头方向非零, 平移方向会被静默转错。
+[警告]   2) 它的同步分支依赖 local_plan 话题, 而该话题只有 Omni 控制器发布;
+[警告]      MINCO 插件不发布 -> 永远走"控制器不活跃"的直发分支, 行为与设计意图不一致。
+[警告] 实车 MINCO 建议 --no-fake-vel-transform; 确需保留请自行确认上面两点可接受。
+EOF
+  fi
+fi
+
+FAKE_ARG="$(bool_arg "$USE_FAKE_VEL_TRANSFORM")"
+
+# 导航链路的最终出口必须落在底盘节点订阅的 cmd_vel_chassis 上。
+if [ "$USE_FAKE_VEL_TRANSFORM" = "1" ]; then
+  CMD_VEL_NAV_TOPIC="cmd_vel_nav2_result"    # 由 fake_vel_transform 转成 cmd_vel_chassis
+else
+  CMD_VEL_NAV_TOPIC="cmd_vel_chassis"        # 直接对准底盘
 fi
 
 # ---------- 环境检查 ----------
@@ -524,6 +636,78 @@ if [ "$USE_ROBOT_STATE_PUB" = "1" ] && ! grep -qE "livox_imu|base_link" "$PARAMS
 [错误] 请用默认的 config/real/nav2_params_srm.yaml。
 EOF
   exit 1
+fi
+
+# ---------- 工作区一致性检查 ----------
+# 与 start_sim_nav.sh 同一个理由: 若当前环境还 source 了同机的另一份工作区
+# (例如 ~/srm_nav_27test), 同名包会优先解析到那边 —— 底盘限速、参数文件、行为树可能
+# 全部来自另一个工作区, 而 MINCO 插件只存在于本工作区, 于是形成"一半新一半旧"的混合环境。
+# 现场表现正是"改了参数却仍按旧值跑"。这里在启动前逐个核对关键包的解析路径。
+require_pkg_from_ws() {
+  local pkg="$1" prefix
+  prefix="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; ros2 pkg prefix '$pkg' 2>/dev/null" || true)"
+  if [ -z "$prefix" ]; then
+    echo "[错误] 找不到包 $pkg, 请确认 $WS_DIR/install/setup.bash 可用。" >&2
+    return 1
+  fi
+  case "$prefix" in
+    "$WS_DIR"/*) return 0 ;;
+    *)
+      echo "[错误] 包 $pkg 解析到了其它工作区: $prefix" >&2
+      echo "       期望前缀: $WS_DIR" >&2
+      echo "       当前环境里还 source 了别的工作区 (检查 ~/.bashrc 与 AMENT_PREFIX_PATH)。" >&2
+      echo "       否则同名包 (含底盘限速、Nav2 参数、行为树) 会从那边加载。请开新终端只 source 本工作区。" >&2
+      return 1
+      ;;
+  esac
+}
+
+if [ "$DRY_RUN" != "1" ]; then
+  WS_CHECK_PKGS=(srm27_nav_bringup srm27_nav_protocol)
+  if [ "$CONTROLLER" = "minco" ]; then
+    WS_CHECK_PKGS+=(srm27_minco_controller srm27_minco_core)
+  fi
+  for _pkg in "${WS_CHECK_PKGS[@]}"; do
+    require_pkg_from_ws "$_pkg" || exit 1
+  done
+fi
+
+# ---------- MINCO 专属预检 ----------
+# 换控制器最容易出的错不是算法, 而是"名字是 MINCO、跑的其实还是 Omni"或"参数按仿真标定、
+# 到实车就周期性失效"。预检脚本把这些只能靠读配置发现的问题集中起来, 只读、不需要 ROS,
+# 因此放在上电之前跑。致命项直接拒绝启动; 待辨识项只告警。
+if [ "$CONTROLLER" = "minco" ]; then
+  PREFLIGHT_PY="$PKG_SRC/scripts/srm_minco_real_preflight.py"
+  [ -f "$PREFLIGHT_PY" ] || PREFLIGHT_PY="$PKG_DIR/scripts/srm_minco_real_preflight.py"
+  if [ -f "$PREFLIGHT_PY" ] && command -v python3 >/dev/null 2>&1; then
+    PROTOCOL_CFG_FOR_PREFLIGHT="$WS_DIR/src/srm27_nav_protocol/config/srm27_nav_protocol.yaml"
+    PREFLIGHT_ARGS=(--params "$PARAMS_FILE" --expect-minco)
+    [ -f "$PROTOCOL_CFG_FOR_PREFLIGHT" ] && PREFLIGHT_ARGS+=(--protocol "$PROTOCOL_CFG_FOR_PREFLIGHT")
+    if ! python3 "$PREFLIGHT_PY" "${PREFLIGHT_ARGS[@]}"; then
+      echo >&2
+      echo "[错误] MINCO 实车参数预检未通过 (见上)。" >&2
+      echo "[提示] 预检把\"阻塞问题\"和\"待辨识警告\"分开列出; 带 [阻塞] 的必须先处理, 没有跳过开关 ——" >&2
+      echo "[提示] 那些都是能让车不动或走错的硬性问题 (use_sim_time 为真、state_timeout 不大于" >&2
+      echo "[提示] 里程计周期、制动走廊不可能满足、坐标系/到点几何矛盾), 绕过它们等于带着已知故障上电。" >&2
+      echo "[提示] 请先修参数, 或在验收清单里记录这次为什么可以带着该问题启动。" >&2
+      exit 1
+    fi
+    echo "[提示] MINCO 预检通过 (警告项仍需在验收清单里逐条确认)。"
+  else
+    echo "[警告] 未找到 MINCO 预检脚本或 python3, 跳过预检:" >&2
+    echo "[警告]   $PREFLIGHT_PY" >&2
+  fi
+
+  # 插件必须真的能被 pluginlib 解析, 否则 controller_server 只会在运行时才报错。
+  if [ "$DRY_RUN" != "1" ]; then
+    PLUGIN_XML="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; \
+      ros2 pkg prefix srm27_minco_controller 2>/dev/null" || true)"
+    if [ -n "$PLUGIN_XML" ] && [ ! -f "$PLUGIN_XML/share/srm27_minco_controller/srm27_minco_controller.xml" ]; then
+      echo "[错误] 缺少 pluginlib 描述文件: $PLUGIN_XML/share/srm27_minco_controller/srm27_minco_controller.xml" >&2
+      echo "[错误] controller_server 会在加载 FollowPath 时失败。" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # 地图: --slam 仍要求该参数存在, 但不加载栅格图
@@ -710,6 +894,11 @@ else
   echo "  先验 PCD    : $PRIOR_PCD   (未使用)"
 fi
 echo "  参数文件    : $PARAMS_FILE"
+if [ "$CONTROLLER" = "minco" ]; then
+  echo "  局部控制器  : MINCO + MPC (srm27_minco_controller::MincoMpcController)"
+else
+  echo "  局部控制器  : Omni (srm27_omni_pid_controller::OmniPidPursuitController)"
+fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then
   echo "  车体 TF     : real_robot_state_publisher_launch.py (SRM 模型)"
@@ -807,9 +996,11 @@ cat <<EOF
 启动流程处理完成 (终端模式: $OPEN_MODE)。
 
 安全提醒:
-  - 底盘没有超时清零: 杀掉发速度的节点后车会保持最后速度继续跑。
-    停任何节点前先发零速, 或直接按急停:
+  - C 板固件自己**没有**超时保护: srm27_nav_protocol 的 0.5 s 看门狗只在它活着时有效,
+    进程被 kill -9 / 主机崩溃 / 串口掉线时它没机会归零, 底盘会保持最后一帧的速度继续跑。
+    停任何节点前先发零速, 或直接按物理急停:
       ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"
+  - srm27_nav_protocol 没有任何急停 service, 软件层面唯一的停车手段就是上面那条零速。
   - 一键停整条链路 (先发零速再结束进程):
       ./script/start_real_nav.sh --stop
 
@@ -822,8 +1013,45 @@ cat <<EOF
   ros2 topic echo /cmd_vel_controller --once                 # 控制器原始输出
   ros2 topic echo /cmd_vel_chassis --once                    # 底盘实际收到的速度 (最终出口)
   ros2 topic hz /cmd_vel_chassis                             # 应有持续输出
-  ros2 topic echo /odometry --once                           # 里程计
+  ros2 topic hz /odometry                                    # 实车约 10 Hz (跟随雷达帧率, 不是 50 Hz)
   ros2 node list                                             # 各节点是否都起来了
+EOF
+
+if [ "$CONTROLLER" = "minco" ]; then
+  cat <<EOF
+
+MINCO 专属自检 (按顺序确认, 任一步不符就不要放开跑):
+  1) 插件真的被加载 (不是"launch 没报错"就算):
+       ros2 param get /controller_server FollowPath.plugin
+       期望: srm27_minco_controller::MincoMpcController
+       若显示 Omni, 说明参数文件选错了 —— 本脚本会用 --controller minco 选对文件,
+       但如果 --stop 没清干净、旧进程还在, 也会看到旧值。
+  2) 只有一份速度出口, 且没有 fake_vel_transform 抢:
+       ros2 node list | grep -i fake_vel_transform      # 应当没有任何输出
+       ros2 topic info /cmd_vel_chassis -v              # 发布者应只有 velocity_smoother
+  3) 轨迹真的算出来了:
+       ros2 topic hz /FollowPath/minco_trajectory
+       ros2 topic hz /FollowPath/mpc_prediction
+  4) 诊断健康 (这是判"卡在哪"的第一手证据, 失败路径也会发布):
+       ros2 topic echo /FollowPath/diagnostics --once
+       关注: planning_result=success、planning_time_ms、minimum_clearance>0、
+             state_age 与 map_age 都很小、missed_deadline_count 不持续增长。
+       出现 planning_result 非 success 时, 先看它的 reason 文本再动权重。
+  5) 阶段一 MPC 没有自转权限: /cmd_vel_controller 与 /cmd_vel_chassis 的 wz 应恒为 0。
+  6) 速度没有被任何一层静默钳住: 实际 /cmd_vel_chassis 的合速度应能达到
+     limits.max_linear_speed (默认 1.5) 的 90% 以上, 且不长期顶在某个更小的值上。
+
+  曲线对照 (判断"路径不对"还是"跟踪不对"):
+     RViz 里同时显示全局路径 (map)、/FollowPath/planning_input_path (odom)、
+     /FollowPath/minco_trajectory (odom)。三者形状应一致;
+     若车不沿曲线走, 才是跟踪/执行层的问题 (限速不一致、command_lookahead 未标定)。
+
+  分阶段上电的完整验收清单与回退步骤见:
+     docs/minco实车迁移实施记录(ai).md
+EOF
+fi
+
+cat <<'EOF'
 
 上层状态:
   ros2 topic echo /local_costmap/scan --once                # 局部代价地图是否有数据

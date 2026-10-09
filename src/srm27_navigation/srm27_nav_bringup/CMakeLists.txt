@@ -5,6 +5,7 @@ find_package(ament_cmake_auto REQUIRED)
 
 install(PROGRAMS
   scripts/simulation_ground_truth_odometry.py
+  scripts/srm_minco_real_preflight.py
   scripts/srm_regression_metadata.py
   scripts/srm_velocity_monitor.py
   DESTINATION lib/${PROJECT_NAME}
@@ -30,7 +31,7 @@ find_package(ament_lint_auto REQUIRED)
   # srm27_robot_description 的 test_model_builder 保持一致的做法）。
   find_program(SRM27_PYTHON3_EXECUTABLE NAMES python3 REQUIRED)
   find_package(ament_cmake_test REQUIRED)
-  foreach(test_name test_pose_math test_ground_truth_odometry_pose)
+  foreach(test_name test_pose_math test_ground_truth_odometry_pose test_minco_real_preflight)
     ament_add_test(${test_name}
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO
       COMMAND ${SRM27_PYTHON3_EXECUTABLE}
