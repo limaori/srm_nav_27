@@ -534,7 +534,13 @@ controller_server:
       # 想让剖面变成能真正跑到 v_max 的梯形，需要 horizon >= v_max²/a_max = 4.08 m（取 4.5 更稳）。
       # 同时要求: local_costmap 的窗口与 intensity_voxel_layer 的 obstacle_max_range 一起放大，
       # 否则视野外半段没有任何障碍数据（控制器把未知当障碍，路径会被截短）。
-      planning_horizon: 4.0                             # 局部路径截取视野（米）
+      # 2026-10-10: 与仿真同步 4.0 → 3.0（仿真当前档）。
+      # ⚠ 视野变小后的可达峰值 = √(a·d) = √(10.0×3.0) ≈ 5.5 m/s，而 6.0 m/s 档的制动
+      #   距离已达 v·t + v²/(2a) + 包络 ≈ 0.6+1.8+0.33 = 2.7 m，余量很小；
+      #   实车出口实际被串口 max_vx 3.5 × linear_velocity_scale 0.80 = 2.8 m/s 封顶，
+      #   按 2.8 m/s 估制动距离约 1.6 m（占视野 53%）。
+      #   若预检报"制动走廊余量不足/制动覆盖不够"，先把本项退回 4.0。
+      planning_horizon: 3.0                             # 局部路径截取视野（米）
       planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）；注意：该参数目前在插件里是死参数（只做范围校验），真正的时间门槛是 mpc.qp_deadline_ms
       # 状态新鲜度门限（秒）。**实车必须比仿真大**：
       #   仿真的 /odometry 由 simulation_ground_truth_odometry 以固定 50 Hz 发布（周期 0.02 s），
@@ -552,6 +558,9 @@ controller_server:
       #   代价：local_path 在截断端点处要求的制动走廊 v·t_react + v²/(2a) + res 由 0.575 m
       #   增到 0.80 m，5×5 m 局部地图下有效局部视野由约 1.55 m 缩到约 1.32 m。
       #   若实测发现视野不够，应当加大 planning_horizon 或局部代价地图，而不是把这个值调回 0.10。
+      # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.10 s：实车 /odometry 由
+      #   sensor_scan_generation 按雷达帧率输出（10 Hz，周期 0.10 s），门限等于周期
+      #   会被判"状态过期"→ 零速输出。仿真 10.0（真值里程计 50 Hz）不适用。
       state_timeout: 0.25                               # 状态允许的最大年龄（秒）
       map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
       trajectory_max_age: 0.30                          # 轨迹允许的最大年龄（秒）
@@ -613,6 +622,9 @@ controller_server:
         # 这正是终点来回走的放大因素之一（该日志 §4）。
         # 放宽到 0.60 s 让这些间隔给出**真实的差分速度**：位移差商噪声正比于 1/dt，
         # 间隔越长噪声反而越小；真正需要拦的是位姿跳变，由 max_position_jump / max_yaw_jump 负责。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.20：10 Hz 里程计下 0.20 s 会被
+        #   频繁超过 → 沿用上一条有效值 → 控制器/目标检查器读到过期速度（本文上文 §4
+        #   记录的"终点来回走"放大因素）。仿真用 0.20 是因为它的 odom 是 50 Hz。
         max_sample_gap: 0.60
         max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
         max_yaw_jump: 1.20                              # 航向跳变阈值（弧度）
@@ -631,14 +643,22 @@ controller_server:
         # 网格太粗时优化器"以为"净空够、密采样一扫却不够（实测交付值比软目标低 5 cm 量级）。
         # 加倍后软约束网格间距减半，代价是 PRE 阶段 ESDF 查询翻倍
         # （实测 pre_time_ms ≈ 1.8 ms，预算内还有余量）。
-        samples_per_piece: 16                           # 每段数值积分采样点数
+        # 2026-10-10: 与仿真同步 16 → 8（网格变粗一倍）。
+        # ⚠ 上面的 2026-10-09 记录正相反（8 → 16 就是为了解决"优化器以为净空够、密采样
+        #   一扫却不够"）。同步成 8 后若现场再出现"净空 0.37x 判死 / 反复 recovery"，
+        #   第一件事就是把本项退回 16。
+        samples_per_piece: 8                            # 每段数值积分采样点数
         max_iterations: 150                             # L-BFGS 最大迭代次数
         gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
         # 仅靠梯度阈值时该问题永远打不到收敛（实测 302 次仍在上限、耗时 17 ms）；
         # 打开基于函数值下降率的判据后 52 次收敛、耗时 3 ms，结果质量不变。
         lbfgs_past: 3                                   # 函数值下降率判据的迭代间隔（0=关闭）
-        w_jerk: 0.2                                     # jerk 能量权重（按实车限速标定）
-        w_time: 10.0                                    # 总时长权重
+        # 2026-10-10: 与仿真同步（w_jerk 0.2 → 0.0、w_time 10.0 → 25.0）。
+        # w_jerk = 0 表示完全不惩罚 jerk：轨迹会更"冲"（加加速度无约束），实车底盘与
+        # 机械结构的冲击都由它承担；仿真里这样跑没问题，实车若出现起步/停车顿挫或
+        # 定位（LIO）在急加速时漂移，先把 w_jerk 调回 0.1~0.2。
+        w_jerk: 0.0                                     # jerk 能量权重
+        w_time: 25.0                                    # 总时长权重（越大越偏好短时间=越快）
         w_obstacle: 100.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
@@ -657,6 +677,10 @@ controller_server:
         # 缓冲。取 0.10（软目标 0.48）把这段落差吃掉，硬门槛 0.38 不变。
         # 代价: 窄通道里优化器会更用力往中心线挤（软约束，不可行时只是吃罚值）；
         # 若发现窄道通过性变差，先回到 0.05~0.075。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 50.0：本参数的单位是**米**
+        #   （软目标 = robot_radius + clearance_margin + 本值，见 minco_optimizer.hpp），
+        #   50.0 会给出 50.38 m 的软目标，与本文件注释里的 0.05/0.10 语义矛盾，疑为仿真侧笔误。
+        #   仿真若确实有意用 50.0，请显式改这一行（风险自担：窄道里优化器会疯狂往中心挤）。
         optimization_clearance_margin: 0.10
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
@@ -666,10 +690,14 @@ controller_server:
         # 提到 0.60 直接减少这段开销。**注意它与净空强耦合**：弯角越快，MINCO 切内弯越深，
         # 越容易压到 0.38 硬门槛 —— 所以这次同时把 optimization_clearance_margin 提到 0.10
         # 并加密软约束采样点；如果现场又出现"净空 0.37x 判死"，先把本项退回 0.45。
-        corner_speed_ratio: 0.60                        # 转角处最低速度比例
+        # 2026-10-10: 与仿真同步 0.60 → 0.80（弯角保速更激进，切内弯更深）。
+        corner_speed_ratio: 0.80                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
-        terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
+        # 2026-10-10: 与仿真同步 0.0 → 0.8。
+        # ⚠ 实车含义变了：到点前不再要求停稳，末端允许保留 0.8 m/s，靠目标检查器 +
+        #   终点制动兜住。若现场出现"冲过目标点再回来"或终点来回走，退回 0.0。
+        terminal_speed: 0.8                             # 非全局目标时的末端速度（米/秒）
 
       # 限速已移到 config/real/speed_limits.yaml 的 controller_server@minco 段
       # （唯一来源：与 Omni 变体、velocity_smoother 一起定义，改档位只改那一份；
@@ -743,6 +771,8 @@ controller_server:
         # reaction_latency 取 0.25 s 时 0.26 s 的终点轨迹只允许 v <= 0.033 m/s。
         # 取 0.10 s 是"按原配置反推"的占位值（state_timeout 还是 0.10 时它就是这个值），
         # **仍需按实车辨识**：命令阶跃到 /odometry 速度起变化的时延中位数。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.0：取 0 会退化为使用
+        #   state_timeout(0.25)，比 0.10 更保守（短终点轨迹更容易被拒）。
         reaction_latency: 0.10
 
 
@@ -760,8 +790,11 @@ local_costmap:
       # 局部路径被 LocalPathEnd::kMapBoundary 截短）。10×10 给到 ±5 m。
       # 代价: 栅格数 100×100 → 200×200，ESDF/代价地图每周期开销约 4 倍（实测 esdf_time_ms
       # 仍为 0 ms 量级，可接受；若将来发现规划耗时上升，优先查这里）。
-      width: 10
-      height: 10
+      # 2026-10-10: 与仿真同步 10×10 → 8×8（±4 m）。
+      # planning_horizon 同步降到 3.0 后 ±4 m 仍然够用；但若将来把 horizon 调回 4.0，
+      # 必须同时把这里改回 10（否则局部路径会被 kMapBoundary 截短）。
+      width: 8
+      height: 8
       resolution: 0.05
       robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -802,7 +835,10 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
-        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+        # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
+        # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
+        #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
+        inflation_radius: 0.7           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 global_costmap:
@@ -848,7 +884,10 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
-        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+        # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
+        # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
+        #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
+        inflation_radius: 0.7           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -959,7 +998,11 @@ velocity_smoother:
     # 另外这也削弱了 smoother 与 behavior_server 的竞争：恢复行为是把 cmd_vel 直接
     # remap 到 cmd_vel_chassis（绕过 smoother），而 smoother 也发同一话题；超时越长，
     # 两者在同一话题上对打的时间越长。
-    velocity_timeout: 0.3
+    # 2026-10-10: 与仿真同步 0.3 → 1.0。
+    # ⚠ 危险方向的安全项：控制器停发命令后，平滑器会继续重发最后速度更久
+    #   （底盘继续执行的总时长 = 本值 + 串口看门狗 0.5 s，由 0.8 s 变成 1.5 s）。
+    #   实车若在意"命令中断后还在走"的窗口，把这里改回 0.3。
+    velocity_timeout: 1.0
 
 srm27_teleop_twist_joy_node:
   ros__parameters:

@@ -317,7 +317,8 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 `srm27_gazebo_simulator/srm_sim.launch.py` 的关键参数：`config_file`（默认 `config/srm_sim.yaml`）、
 `robot_name`（默认取配置里的 `red_standard_robot1`）、`world`、`world_sdf`、`gui`、
-`run_immediately`（默认 `false`，Gazebo 以暂停状态启动）。
+`run_immediately`（launch 自身默认 `false`，Gazebo 以暂停状态启动；
+`script/start_sim_nav.sh` 默认传 `true`，即起来就自动运行，`--no-run` 可改回暂停）。
 
 `srm27_chassis_control/srm_chassis_control.launch.py` 的关键参数：`namespace`、`use_sim_time`、
 `params_file`、`start_rotation_sender`、`rotation_mode`、`rotation_speed`、`rotation_offset`、
@@ -343,6 +344,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
 | `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车**；实车/仿真通用（仿真命名空间自动探测，`--namespace` 可显式指定） |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
+| `script/kill_nav.sh` | 清理残留的 Nav2 导航栈（入口 launch 进程 + 整棵子进程树 + 命名空间匹配的孤儿节点）。改完膨胀半径/限速等 configure 期参数后必须重启导航栈，否则跑的还是旧值 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
 实车：
@@ -535,7 +537,8 @@ nav2 的 `RemovePassedGoals`（负责"车开过哪个途径点就把它从目标
 ./script/start_sim_nav.sh -h                    # 打印脚本头部的完整用法
 ./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
 ./script/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty --run    # 空场 + Gazebo 直接开始运行
+./script/start_sim_nav.sh -w srm_empty          # 空场（Gazebo 默认起来就自动运行）
+./script/start_sim_nav.sh --no-run              # Gazebo 保持暂停，手动点播放
 ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
 ./script/start_sim_nav.sh --rotation-mode periodic \
     --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
@@ -545,7 +548,8 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 
 常用参数：`-w/--world`（`rmuc_2025` / `rmuc_2024` / `rmul_2024` / `rmul_2025` / `srm_empty`）、
 `-m/--map`（地图名或 YAML 绝对路径）、`-p/--params`（默认 `config/simulation/nav2_params_srm.yaml`）、
-`--gui/--no-gui`、`--run/--no-run`、`--smoother/--no-smoother`、`--rviz/--no-rviz`、
+`--gui/--no-gui`、`--run/--no-run`（默认 `--run`：Gazebo 直接开始运行）、
+`--smoother/--no-smoother`、`--rviz/--no-rviz`、
 `--rotation-mode/-speed/-offset/-amplitude/-period/-phase/-wave`、`--rotation/--no-rotation`、
 `--teleop/--no-teleop`。
 
@@ -707,7 +711,7 @@ ros2 launch srm27_bringup bringup.launch.py \
 ```bash
 ./script/start_sim_nav.sh                    # 默认 rmuc_2025 + 隧道地图，不自转
 ./script/start_sim_nav.sh -m rmuc_2025       # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty --run # 空场调试，Gazebo 直接开始运行
+./script/start_sim_nav.sh -w srm_empty      # 空场调试（Gazebo 起来就自动运行）
 ```
 
 等价的拆开手动启动方式：

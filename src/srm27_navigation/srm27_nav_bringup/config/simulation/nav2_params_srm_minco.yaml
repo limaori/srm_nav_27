@@ -492,8 +492,8 @@ controller_server:
         # jerk 权重按实车限速标定：w_jerk=1.0 时最小 jerk 会严重压制速度
         # （实车档实测只跑到 1.116/1.5 m/s、2 m 起停用 3.36 s，理论时间最优 1.83 s）；
         # 降到 0.2 后 1.438/1.50 m/s、2.59 s，同时保留 jerk 惩罚、加速度只用掉 57% 上限。
-        w_jerk: 0.5                                     # jerk 能量权重
-        w_time: 20.0                                    # 总时长权重
+        w_jerk: 0.0                                    # jerk 能量权重
+        w_time: 25.0                                    # 总时长权重
         w_obstacle: 100.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
@@ -506,7 +506,7 @@ controller_server:
         # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
         # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
-        optimization_clearance_margin: 0.05
+        optimization_clearance_margin: 50.0
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         corner_speed_ratio: 0.8                       # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数

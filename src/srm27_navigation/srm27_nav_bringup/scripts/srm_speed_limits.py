@@ -186,21 +186,41 @@ def _node_section(cfg, node):
     return None
 
 
+_MISSING = object()
+
+
+def _lookup_path(node, parts):
+    """按路径逐段下钻，途中穿透容器键与重复的节点名。
+
+    Nav2 的代价地图段写作 `local_costmap: local_costmap: ros__parameters:`（节点名重复
+    一次），控制器写作 `controller_server: ros__parameters:`；两种都要能走通。顺序是
+    "先按字面匹配下一段，再穿透 ros__parameters，最后吃掉重复的节点名"。
+    """
+    if not parts:
+        return node
+    if not isinstance(node, dict):
+        return _MISSING
+
+    if parts[0] in node:
+        found = _lookup_path(node[parts[0]], parts[1:])
+        if found is not _MISSING:
+            return found
+
+    for container in _TRANSPARENT_KEYS + (parts[0],):
+        if isinstance(node.get(container), dict):
+            found = _lookup_path(node[container], parts)
+            if found is not _MISSING:
+                return found
+    return _MISSING
+
+
 def _lookup(cfg, path):
-    """按 `.` 分隔的路径取值（自动穿透容器键）；不存在返回 None。"""
-    parts = path.split(".")
-    section = _node_section(cfg, parts[0])
-    if section is None:
-        return None
-    current = section
-    for part in parts[1:]:
-        if not isinstance(current, dict) or part not in current:
-            return None
-        current = current[part]
-    return current
+    """按 `.` 分隔的路径取值（穿透容器键 / 重复节点名）；不存在返回 None。"""
+    found = _lookup_path(cfg, path.split("."))
+    return None if found is _MISSING else found
 
 
-#: 公开别名：检查脚本 / 预检脚本也用同一条取值路径（穿透 ros__parameters）。
+#: 公开别名：检查脚本 / 预检脚本也用同一条取值路径（穿透 ros__parameters / 重复节点名）。
 lookup = _lookup
 
 

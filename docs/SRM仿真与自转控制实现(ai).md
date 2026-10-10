@@ -240,7 +240,7 @@ wz = clamp(rotation_wz, -wz_max, wz_max)     # 自转独立限幅，与平移无
 ./script/start_sim_nav.sh -h                    # 打印文件头注释里的权威用法
 ./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
 ./script/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty --run    # 空场 + Gazebo 直接开始运行
+./script/start_sim_nav.sh -w srm_empty          # 空场 (Gazebo 默认起来就自动运行)
 ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
 ./script/start_sim_nav.sh --rotation-mode periodic \
     --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
@@ -272,7 +272,7 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 | `script/srm_regression.sh` | 回归运行器：一次跑完 §5/§8 的测试矩阵，自动落盘 CSV / rosbag / metadata / 汇总 |
 | `script/clean_sim_processes.sh` | 清理本工作空间的全部仿真残留进程（Gazebo / bridge / 适配器 / Nav2 / RViz） |
 | `script/diag_nav_abort.sh` | 单次安全的导航诊断：启动前检查残留、独立进程组启动、内存看门狗、日志落到 `log_diag/nav_abort/` |
-| `script/kill_gzb.sh` / `script/kill_rviz.sh` | 分别清理 Gazebo 与 RViz |
+| `script/kill_nav.sh` / `script/kill_gzb.sh` / `script/kill_rviz.sh` | 分别清理 Nav2 导航栈、Gazebo、RViz（`start_sim_nav.sh` 启动前依次调用） |
 
 `diag_nav_abort.sh` 可用环境变量调整场景：`WORLD`、`GOAL_X`、`GOAL_Y`。
 
@@ -342,7 +342,8 @@ ros2 topic echo /red_standard_robot1/cmd_vel_sim
 
 世界解析顺序：`srm27_gazebo_simulator/worlds/<world>.sdf` →
 `srm27_gazebo_simulator/resource/worlds/<world>_world.sdf`；`world_sdf:=<绝对路径>` 优先级最高。
-Gazebo 默认**以暂停启动**，`run_immediately:=true` 才直接运行。
+`srm_sim.launch.py` 自身默认 `run_immediately:=false`（暂停启动），
+`script/start_sim_nav.sh` 默认传 `true`（起来就自动运行，`--no-run` 可改回暂停）。
 
 ### 4.4 旧入口的当前状态
 

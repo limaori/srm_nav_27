@@ -400,15 +400,26 @@ def test_sim_config_is_treated_as_simulation():
 
 
 def test_reports_the_documented_real_vs_sim_divergence():
-    """实车与仿真的差异项必须被列出来, 否则"仿真跑通"会被误当成"实车也跑通"。"""
-    config = preflight.load_yaml(str(REAL_MINCO))
+    """实车与仿真的差异项必须被列出来, 否则"仿真跑通"会被误当成"实车也跑通"。
+
+    2026-10-10 把仿真档同步到实车后, 剩下的差异只应该是**故意保留**的那几项
+    （与实车 10 Hz 里程计绑定的 state_timeout / reaction_latency 等）。
+    这里两侧都走与 main() 相同的"合并速度限幅后"配置, 避免拿未合并的实车文件
+    去和合并过的仿真文件比, 从而把"限速在覆盖层里"误报成差异。
+    """
+    config = preflight.load_params(str(REAL_MINCO)).merged
     report = preflight.Report()
     preflight.check_real_sim_divergence(config, SIM_MINCO, report)
     warnings = [title for title in _titles(report, preflight.WARN) if "差异" in title]
     _assert(warnings, "实车/仿真参数差异没有被报告")
     detail = next(detail for level, title, detail in report.items if "差异" in title)
-    for key in ("state_timeout", "limits.max_linear_speed", "minco.terminal_speed"):
+    for key in ("state_timeout", "safety.reaction_latency"):
         _assert(key in detail, f"差异报告里缺少 {key}")
+    # 已经同步过的项不该再报差异（报了说明实车文件又被改回去了 / 同步没生效）。
+    for key in ("minco.terminal_speed", "minco.w_time", "minco.w_jerk",
+                "minco.corner_speed_ratio", "limits.max_linear_speed",
+                "planning_horizon", "state.max_sample_gap"):
+        _assert(key not in detail, f"{key} 已与仿真同步, 不该再出现在差异清单里")
 
 
 def _run_all():
