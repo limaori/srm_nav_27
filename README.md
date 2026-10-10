@@ -83,7 +83,7 @@ srm_nav_27/
 └── dependencies.repos        vcs 依赖清单
 ```
 
-关于 `maps/` 与包内 `map/`、`pcd/` 的分工：**包内目录是随包发布的默认数据**（如 `srm27_nav_bringup/map/real/srm_site_01.*`），**工作区根 `maps/` 是现场采集的场地地图**。两者都可用 `--map` 指定。
+关于 `maps/` 与包内 `map/`、`pcd/` 的分工：**包内目录是随包发布的默认数据**（如 `srm27_nav_bringup/map/real/srm_site_01.*`），**工作区根 `maps/` 是现场采集的场地地图**。两者都可用 `--map`（仿真脚本为 `-m/--map`）指定；仿真与实车一键脚本都会先查包内目录、再查工作区根 `maps/`。
 
 ### 2.3 包清单
 
@@ -548,6 +548,19 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 `--gui/--no-gui`、`--run/--no-run`、`--smoother/--no-smoother`、`--rviz/--no-rviz`、
 `--rotation-mode/-speed/-offset/-amplitude/-period/-phase/-wave`、`--rotation/--no-rotation`、
 `--teleop/--no-teleop`。
+
+`-m` 只给名字时（不带 `/`）按以下顺序解析，全部落空会打印可用地图清单后退出：
+
+```text
+src/srm27_navigation/srm27_nav_bringup/map/simulation/<名字>.yaml   # 包内仿真地图
+maps/<名字>/<名字>.yaml                                              # 工作空间根目录 maps/ 下按目录存放
+maps/<名字>.yaml                                                     # 或直接平铺在 maps/ 下
+```
+
+`maps/` 是工作空间根目录下放现场采集 / SLAM 新出地图的地方，`start_sim_nav.sh` 与 `start_real_nav.sh`
+用的是同一套搜索规则，所以新图不必再拷进包内 `map/simulation/`。两个目录出现同名地图时以包内
+`map/simulation/` 优先，仿真默认地图不会被 `maps/` 里的同名文件顶掉；`maps/<目录>/<其它名字>.yaml`
+（例如 rosbag 的 `metadata.yaml`）不会被误当成地图。
 
 仿真脚本除了按顺序拉起各节点，还多了几层保护：`flock` 保证 Gazebo 单实例启动、清理上次 `ros2 launch`
 遗留的孤儿节点（避免新旧 `/clock` 同时发布）、地图与参数文件的存在性校验（`--params` 必须是绝对路径）、

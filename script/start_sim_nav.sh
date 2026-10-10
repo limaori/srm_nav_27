@@ -64,7 +64,9 @@
 #     不想清就用 PREKILL=0, 那时恢复"检测到在跑就跳过"的老行为。清理失败只告警不阻断。
 #   - Gazebo 世界、SRM 初始位姿和速度参数统一由
 #     srm27_gazebo_simulator/config/srm_sim.yaml 给出; -w 会覆盖其中的 world。
-#   - 地图与参数文件一律使用绝对路径; 地图可直接给名字 (在 map/simulation/ 下解析)。
+#   - 地图与参数文件一律使用绝对路径; 地图可直接给名字, 依次在
+#     src/srm27_navigation/srm27_nav_bringup/map/simulation/ 与工作空间根目录 maps/
+#     (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml) 下解析, 找不到会列出全部可用地图。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
 #   - 控制清单：导航速度 cmd_vel_nav、自转请求 rotation_cmd、自转输出
 #     rotation_velocity、合成命令 cmd_vel_sim; 诊断在 /<ns>/diagnostics。
@@ -213,6 +215,11 @@ if [ ! -d "$MAP_DIR" ]; then
   exit 1
 fi
 
+# 工作空间根目录 maps/ 也纳入搜索范围: 那里放现场采集 / SLAM 新出的地图
+# (与 start_real_nav.sh 的搜索规则保持一致), 这样新图不必先拷进包内 map/simulation/。
+# 两个目录同名时以包内 map/simulation/ 优先, 保证仿真默认地图不被意外顶掉。
+MAPS_DIR="$WS_DIR/maps"
+
 if [ -z "$PARAMS_FILE" ]; then
   PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
   if [ ! -f "$PARAMS_FILE" ]; then
@@ -234,14 +241,46 @@ fi
 
 WORLD="${WORLD_FROM_USER:-${GZ_WORLD:-rmuc_2025}}"
 
+# 地图候选文件: map/simulation/*.yaml、maps/*.yaml、maps/<名字>/<名字>.yaml。
+# 最后一种布局只认"目录名与 yaml 同名"的那份, 否则 rosbag 之类的
+# maps/<bag>/metadata.yaml 会被误当成地图。
+list_map_candidates() {
+  local f
+  for f in "$MAP_DIR"/*.yaml "$MAPS_DIR"/*.yaml "$MAPS_DIR"/*/*.yaml; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      "$MAPS_DIR"/*/*)
+        [ "$(basename "$(dirname "$f")")" = "$(basename "$f" .yaml)" ] || continue
+        ;;
+    esac
+    printf '%s\n' "$f"
+  done
+}
+
 list_maps() {
-  echo "[提示] $MAP_DIR 下可用的地图:" >&2
-  (cd "$MAP_DIR" && ls *.yaml 2>/dev/null | sed 's/^/  - /') >&2
+  echo "[提示] 可用的地图 (左侧名称即为 -m 的取值, 右侧为实际会加载的文件):" >&2
+  local f name seen="" found=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    name="$(basename "$f" .yaml)"
+    case " $seen " in *" $name "*) continue ;; esac
+    seen="$seen $name"
+    printf '  - %-22s %s\n' "$name" "$f" >&2
+    found=1
+  done < <(list_map_candidates)
+  if [ "$found" = "0" ]; then
+    echo "  (未找到任何 .yaml 地图)" >&2
+  fi
+  echo "[提示] 搜索目录: $MAP_DIR" >&2
+  if [ -d "$MAPS_DIR" ]; then
+    echo "[提示]           $MAPS_DIR  (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml)" >&2
+  fi
 }
 
 # 地图名 -> 绝对路径; 也接受绝对路径。
+# 搜索顺序: 包内 map/simulation/<名字>.yaml, 再 maps/<名字>/<名字>.yaml、maps/<名字>.yaml。
 resolve_map() {
-  local value="$1"
+  local value="$1" name cand
   if [ -z "$value" ]; then
     return 1
   fi
@@ -257,16 +296,21 @@ resolve_map() {
     echo "[错误] 相对路径地图不受支持, 请用绝对路径: $value" >&2
     return 1
   fi
-  local name="$value"
+  name="$value"
   case "$name" in
     *.yaml) ;;
     *) name="${name}.yaml" ;;
   esac
-  if [ -f "$MAP_DIR/$name" ]; then
-    printf '%s\n' "$MAP_DIR/$name"
-    return 0
-  fi
-  echo "[错误] 未找到地图: $MAP_DIR/$name" >&2
+  for cand in \
+    "$MAP_DIR/$name" \
+    "$MAPS_DIR/${name%.yaml}/${name}" \
+    "$MAPS_DIR/$name"; do
+    if [ -f "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  echo "[错误] 未找到地图: $name" >&2
   list_maps
   return 1
 }
@@ -274,7 +318,7 @@ resolve_map() {
 if [ -z "$MAP_FILE" ]; then
   if [ -z "$MAP_NAME" ]; then
     for candidate in "${WORLD}_tunnel" "$WORLD"; do
-      if [ -f "$MAP_DIR/${candidate}.yaml" ]; then
+      if resolve_map "$candidate" >/dev/null 2>&1; then
         MAP_NAME="$candidate"
         break
       fi
