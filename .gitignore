@@ -29,6 +29,13 @@
 /*.pgm
 /*.gv
 /*.pdf
+
+# 以下三条原先由 src/srm27_navigation/.gitignore 提供。该文件已作为冗余文件删除，
+# 规则上提到此统一维护，避免本地实车地图产物变成未跟踪文件而被误提交。
+/src/srm27_navigation/srm27_nav_bringup/pcd/**/*.pcd
+/src/srm27_navigation/srm27_nav_bringup/map/real/*.yaml
+/src/srm27_navigation/srm27_nav_bringup/map/real/*.pgm
+
 symlink
 sentry_*/
 
