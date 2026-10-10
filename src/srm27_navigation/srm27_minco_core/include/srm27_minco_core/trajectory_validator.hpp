@@ -96,6 +96,13 @@ struct TrajectoryValidationReport
   double required_prefix_duration{0.0};
   /// \brief 所需停车时间（s），含反应延迟。
   double required_stop_time{0.0};
+  /// \brief 终点是否为"必须停住"（全局目标或视野截断要求停车）。
+  bool terminal_stop_required{false};
+  /// \brief 末端速度与加速度是否都接近零（终点停车轨迹的静止条件）。
+  ///
+  /// 短停车轨迹允许用"保持已校验的末点"补齐 MPC 窗口，但前提就是这一条；
+  /// 失败日志里必须能区分"覆盖不足"与"末端没静止"（2026-10-09 实车终点诊断 §2）。
+  bool ends_at_rest{false};
 
   bool coefficients_ok{false};
   bool boundary_ok{false};

@@ -5,7 +5,23 @@
 #     fake_vel_transform 相关配置；
 #   * 控制器只做全向平移（enable_rotation: false、use_rotate_to_heading: false），
 #     导航链路不产生自转角速度；
-#   * min_y_velocity_threshold 由 0.5 降到 0.001，避免抹掉低速横移反馈；
+#   * 行为参数逐项对齐实车 config/real/nav2_params_srm.yaml（本次改动，见下表）：
+#       general_goal_checker.xy_goal_tolerance    0.15  -> 0.4
+#       FollowPath.lookahead_time                 1.0   -> 0.6
+#       FollowPath.min_lookahead_dist             0.5   -> 0.3
+#       FollowPath.max_lookahead_dist             1.0   -> 0.6
+#       FollowPath.min_approach_linear_velocity   0.5   -> 0.4
+#       min_y_velocity_threshold                  0.001 -> 0.5
+#       inflation_layer.inflation_radius          0.7   -> 0.5（local + global）
+#       global_costmap.track_unknown_space        缺省  -> true
+#       terrain_analysis_ext.vehicleHeight        0.5   -> 1.0
+#     目的：让仿真里验证过的行为在实车上能复现。此前仿真的到达容差、前瞻、膨胀都比实车
+#     "宽松/不同"，同一套航点两边表现会不一样。两条要留意：
+#       * xy_goal_tolerance=0.4 > 共享 BT 里 RemovePassedGoals 的 radius=0.35，所以途径点
+#         模式（navigate_through_poses）"终点在判定到达前被删掉"的问题两侧表现一致；
+#       * min_y_velocity_threshold=0.5 会把 <0.5 m/s 的横移分量在喂给目标检查器之前当成 0
+#         （见 docs/minco迁移实施记录(ai).md §6.3）。实车 Omni 一直是 0.5，这里跟随实车；
+#         若哪天实车 Omni 改到 0.001（仓库的建议），这里要同步改回。
 #   * 速度出口为 cmd_vel_nav，由 srm_cmd_mux 合成后写入 cmd_vel_sim。
 
 ign_sim_pointcloud_tool:
@@ -165,7 +181,7 @@ terrain_analysis_ext:
     clearingDis: 20.0                    # 执行点云清理时使用的距离阈值（米）
     useSorting: true                     # 是否用分位数估计地面
     quantileZ: 0.2                       # 地面高度分位数
-    vehicleHeight: 0.5                   # 车辆高度阈值（米）
+    vehicleHeight: 1.0                   # 车辆高度阈值（米）；与实车一致（terrain_analysis 那份两边都还是 0.5）
     voxelPointUpdateThre: 100            # 体素更新点数阈值
     voxelTimeUpdateThre: 2.0             # 体素更新时间阈值（秒）
     lowerBoundZ: -1.5                    # 有效相对高度下限（米）
@@ -365,7 +381,7 @@ controller_server:
     odom_topic: odometry                                # 输入里程计话题
     controller_frequency: 20.0                          # 控制器运行频率（Hz）
     min_x_velocity_threshold: 0.001                     # X速度死区阈值（米/秒）
-    min_y_velocity_threshold: 0.001                     # Y速度死区阈值（米/秒），0.5 会抹掉低速横移反馈
+    min_y_velocity_threshold: 0.5                       # Y速度死区阈值（米/秒）；与实车 Omni 一致。⚠ 0.5 会把 <0.5 m/s 的横移分量在喂给目标检查器前当 0（原为 0.001，本次按"跟实车一致"改回）
     min_theta_velocity_threshold: 0.001                 # 角速度死区阈值（弧度/秒）
     failure_tolerance: 0.3                              # 控制器允许的失败容差
     progress_checker_plugins: ["progress_checker"]     # 进度检查器列表
@@ -378,7 +394,7 @@ controller_server:
     general_goal_checker:
       stateful: True                                    # 是否保存目标检查状态
       plugin: "nav2_controller::SimpleGoalChecker"      # 目标检查器插件
-      xy_goal_tolerance: 0.15                           # 平面位置容差（米）
+      xy_goal_tolerance: 0.4                            # 平面位置容差（米）；与实车一致（0.4 > BT 里 RemovePassedGoals radius 0.35）
       yaw_goal_tolerance: 6.28                           # 航向角容差（弧度）
     FollowPath:
       plugin: "srm27_omni_pid_controller::OmniPidPursuitController" # 全向PID跟踪控制器
@@ -393,19 +409,26 @@ controller_server:
       min_max_sum_error: 1.0                            # 误差积分限幅
       lookahead_dist: 2.0                               # 基准前视距离（米）
       use_velocity_scaled_lookahead_dist: true           # 是否按速度缩放前视距离
-      lookahead_time: 1.0                               # 速度缩放前视时间（秒）
-      min_lookahead_dist: 0.5                           # 最小前视距离（米）
-      max_lookahead_dist: 1.0                           # 最大前视距离（米）
+      # 前瞻 = 速度 × lookahead_time, 再夹到 [min, max]（见 omni_pid_pursuit_controller.cpp
+      # getLookAheadDistance: 开启速度缩放时 lookahead_dist 不参与计算）。
+      # 与实车一致（原 1.0/0.5/1.0 是仿真值）。实车那组是为配合共享 BT 里
+      # RemovePassedGoals radius=0.35 收紧的：前瞻大 → 车切内弯的偏移量大 → 擦过的途径点
+      # 删不掉 → 3 Hz 重规划又把路径绕回去 → 折返 / "Failed to make progress"。
+      # 代价：前瞻过小会让方向对横向误差过敏（前瞻 0.3 m 时 10 cm 误差≈18°，且
+      # enable_rotation=false 时方向变化直接变成横向平移速度），表现为路径两侧"画龙"。
+      # 若仿真里观察到画龙，可回退到 0.8/0.4/0.8（支持运行时 ros2 param set，不必重启）。
+      lookahead_time: 0.6                               # 速度缩放前视时间（秒）
+      min_lookahead_dist: 0.3                           # 最小前视距离（米）
+      max_lookahead_dist: 0.6                           # 最大前视距离（米）
       use_interpolation: false                           # 是否插值路径点
       use_rotate_to_heading: false                       # 是否先旋转到路径方向
       use_rotate_to_heading_treshold: 0.1                # 旋转到路径方向阈值（弧度）
-      min_approach_linear_velocity: 0.5                  # 接近目标时的最小线速度（米/秒）
+      min_approach_linear_velocity: 0.4                  # 接近目标时的最小线速度（米/秒）；与实车一致
       approach_velocity_scaling_dist: 1.0                # 开始减速的距离（米）
-      # 与实车 Omni 配置（real/nav2_params_srm.yaml）对齐，保证 A/B 对照使用同一套限速。
-      v_linear_min: -1.5                                 # 最小线速度（米/秒）
-      v_linear_max: 1.5                                  # 最大线速度（米/秒）
-      v_angular_min: -1.0                                # 最小角速度（弧度/秒）
-      v_angular_max: 1.0                                 # 最大角速度（弧度/秒）
+      # 平移/自转**限速**已移到 config/simulation/speed_limits.yaml（唯一来源）：
+      # 那里同时定义 Omni 与 MINCO 两个变体的控制器、平滑器、mux 限幅，改档位只改那一份。
+      # v_linear_max/min、v_angular_max/min 在本文件里不再写（写了会与覆盖层冲突并报错）。
+      # 下面这些"曲线"参数不是硬上限，仍留在这里（见 docs/导航速度调试指南.md §4.3）。
       curvature_min: 0.4                                # 低曲率阈值
       curvature_max: 0.7                                # 高曲率阈值
       reduction_ratio_at_high_curvature: 0.5            # 高曲率时的速度降低比例
@@ -461,7 +484,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.5                               # 障碍膨胀半径（米）；与实车一致（原 0.7，实车调小以便钻窄道）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 global_costmap:
@@ -474,6 +497,7 @@ global_costmap:
       robot_base_frame: base_link                   # 机器人坐标系
       robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）
       resolution: 0.05                                    # 地图分辨率（米）
+      track_unknown_space: true                           # 主代价地图是否跟踪未知空间；与实车一致（缺省 false）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
@@ -508,7 +532,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.5                               # 障碍膨胀半径（米）；与实车一致（原 0.7，实车调小以便钻窄道）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
@@ -573,9 +597,8 @@ behavior_server:
     robot_base_frame: base_link                      # 机器人坐标系
     transform_tolerance: 0.1                               # TF变换容差（秒）
     simulate_ahead_time: 2.0                               # 行为碰撞前向模拟时间（秒）
-    max_rotational_vel: 1.0                                # 最大旋转速度（弧度/秒）
-    min_rotational_vel: 0.4                                # 最小旋转速度（弧度/秒）
-    rotational_acc_lim: 3.2                                # 旋转加速度上限（弧度/秒²）
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/simulation/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     # params for srm27_nav_behaviors/BackUpFreeSpace
     service_name: "global_costmap/get_costmap"            # 后退行为查询全局地图的服务名
     max_radius: 2.0                                        # 搜索自由空间的最大半径（米）
@@ -598,11 +621,8 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 与实车 velocity_smoother 完全一致（实车 yaw 钳 0）。
-    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
-    max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
-    max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
+    # 速度上下界与加速度上限已移到 config/simulation/speed_limits.yaml（唯一来源）：
+    # max_velocity / min_velocity / max_accel / max_decel 都在那里按控制器变体分别定义。
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]

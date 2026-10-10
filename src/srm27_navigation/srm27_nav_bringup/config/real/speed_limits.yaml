@@ -1,0 +1,122 @@
+# =============================================================================
+# 实车速度限幅 —— 唯一来源（single source of truth）
+# =============================================================================
+#
+# 本文件是实车链上**所有非串口限幅**的唯一定义处。启动时由
+#   launch/nav2_stack_launch.py
+# 合并进下面两份参数文件，合并后各节点收到的就是这里的值：
+#   * config/real/nav2_params_srm.yaml         （Omni 变体）
+#   * config/real/nav2_params_srm_minco.yaml   （MINCO 变体）
+# 那两份文件里**不再写**这些键：两处都写且值不一致时启动会直接报错
+# （见 scripts/srm_speed_limits.py 的冲突检查）。
+#
+# 实车速度链（与仿真不同，没有 srm_cmd_mux）：
+#   控制器 FollowPath ─cmd_vel_controller─► velocity_smoother ─┐
+#                                     fake_vel_transform（仅 Omni 链路）┴─► cmd_vel_chassis
+#                                                                        ─► srm27_nav_protocol ─► 串口
+# 串口那一层（max_vx/max_vy/max_wz、linear_velocity_scale）**故意不在这里**：
+# 它是最后一道安全限幅，见 srm27_nav_protocol/config/srm27_nav_protocol.yaml。
+# ⚠ 串口限幅作用在缩放**之后**，所以实车出口上限 = max_vx 与
+#   linear_velocity_scale × 控制器上限 中的较小者——提速时必须一起核对，
+#   scripts/srm_speed_limits_check.py 会把这一层一起算出来打印。
+#
+# 语法
+# ----
+#   * 顶层键 = 参数文件里的节点名；`@minco` / `@omni` 表示只对该控制器变体生效，
+#     不带 @ 的段对所有变体生效。
+#   * 段内层级与参数文件完全一致（必须带 ros__parameters，否则启动报错）。
+#
+# 当前档位（2026-10-10）
+# ----------------------
+#   | 层                       | Omni 变体 | MINCO 变体 | 说明                          |
+#   |--------------------------|-----------|------------|-------------------------------|
+#   | 控制器平移上限           | 1.50      | 6.00       | Omni 是首跑限速档，MINCO 与仿真同档 |
+#   | 控制器平移加速度上限     | 无        | 10.00      | Omni 由平滑器承担；同时是验证器制动假设 |
+#   | 平滑器 max_velocity      | 1.50      | 5.00       | 低于控制器上限（6.0）= 当前 MINCO 链的瓶颈 |
+#   | 平滑器 max_accel         | 3.00      | 6.00       | 低于控制器 10.0，同样会限制短航段    |
+#   | 串口（不在本文件）       | 3.50×0.8 = 2.80 | 同左    | **实车真正的瓶颈**（本文件任何档位都不会超过它） |
+#   ⚠ 2026-10-10: MINCO 档从 3.5/4.0 同步到仿真的 6.0/10.0。这是**仿真档**，实车要跑出
+#     这个档位速度，必须先做制动辨识（把 safety.braking_deceleration 填实测值）、
+#     重新标定 planning_horizon，并决定是否放开串口 max_vx / linear_velocity_scale。
+#     当前实车出口被串口封在 2.8 m/s。
+#
+# 改档位的步骤
+# ------------
+#   1) 只改本文件里的数字；
+#   2) 跑 `python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py`
+#      —— 打印各层实际生效值、指出卡住速度的层，并校验 "控制器 ≤ 平滑器 ≤ 串口"；
+#   3) 上电前再跑实车预检：`ros2 run srm27_nav_bringup srm_minco_real_preflight --params <参数文件>`
+#      （它会自动把本文件合并进去，检查制动走廊、分层一致性等）；
+#   4) 实车提速前必须做制动与延迟辨识，并按 docs/导航速度调试指南.md §6 逐级提档。
+#
+# 故意不放在这里的东西
+# --------------------
+#   * 串口 srm27_nav_protocol 的 max_vx/max_vy/max_wz 与 linear_velocity_scale；
+#   * 手柄 scale_chassis / scale_chassis_turbo —— 手动链路，绕过平滑器；
+#   * 行为树 BackUp 的 backup_speed —— 脱困动作，也绕过平滑器；
+#   * 弯道降速与前瞻（curvature_*、lookahead_time、corner_speed_ratio、w_jerk）。
+
+# -----------------------------------------------------------------------------
+# 控制器（Omni 变体：nav2_params_srm.yaml）
+# -----------------------------------------------------------------------------
+controller_server@omni:
+  ros__parameters:
+    FollowPath:
+      v_linear_max: 1.5                 # 平移线速度上限（米/秒），PID 输出的饱和值
+      v_linear_min: -1.5                # 平移线速度下限
+      v_angular_max: 1.0                # 自转角速度上限（弧度/秒）；导航 wz 恒为 0
+      v_angular_min: -1.0               # 自转角速度下限
+
+# -----------------------------------------------------------------------------
+# 控制器（MINCO-MPC 变体：nav2_params_srm_minco.yaml）
+# 同时是"规划器"的速度硬约束：前端起停剖面与轨迹校验都按这两个值判定。
+# 2026-10-10: 3.50/4.00 → 6.00/10.00，与仿真同步（仿真当前档）。
+# ⚠ 三个必须先读的提醒：
+#   1) 实车出口 = min(本档, 串口) —— 串口 max_vx 3.5 × linear_velocity_scale 0.80
+#      = **2.8 m/s**，所以 6.0 这一档在实车上**跑不到**，只是把planning/校验门槛抬高；
+#   2) max_linear_accel 10.0 会同时被验证器当作**制动能力**（safety.braking_deceleration
+#      = 0 → 退化用它），即假设车能以 10 m/s² 刹停 —— 实车没做制动辨识前这是乐观假设，
+#      表现为"允许了实际停不下来的轨迹"；
+#   3) 需与 planning_horizon 3.0 m 一起看：6.0 m/s 的制动距离约 2.7 m，余量很小。
+# -----------------------------------------------------------------------------
+controller_server@minco:
+  ros__parameters:
+    FollowPath:
+      limits:
+        max_linear_speed: 6.00          # 平移合速度上限（米/秒）；实际被串口 2.8 封顶
+        max_linear_accel: 10.00         # 平移合加速度上限（米/秒²）；同时是验证器的制动能力假设
+        max_angular_speed: 5.00         # 角速度上限（弧度/秒）；xy_only 阶段实际权限为 0
+        max_angular_accel: 4.50         # 角加速度上限（弧度/秒²）；同上
+
+# -----------------------------------------------------------------------------
+# 速度平滑器（两个变体各一套：控制器上限不同，平滑器必须分别跟住）
+# -----------------------------------------------------------------------------
+velocity_smoother@omni:
+  ros__parameters:
+    max_velocity: [1.5, 1.5, 0.0]       # 最大速度[x,y,yaw]，yaw 钳 0（导航 wz 恒 0）
+    min_velocity: [-1.5, -1.5, 0.0]     # 最小速度[x,y,yaw]
+    max_accel: [3.0, 3.0, 0.0]          # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, 0.0]        # 最大减速度[x,y,yaw]
+
+velocity_smoother@minco:
+  ros__parameters:
+    # 2026-10-10: 3.5/4.0 → 5.0/6.0，与仿真同步。
+    # yaw 分量**故意保持 0.0**：实车的平滑器出口直连 cmd_vel_chassis → 串口，
+    # 一旦有节点往导航出口发 wz，yaw 界放开就会让底盘真的转起来；这是实车执行端
+    # 的安全闸（仿真没有这个风险，所以它在仿真里是 5.0）。开启 SE(2) 阶段时再放开。
+    # 另注意：平滑器按分量钳位，所以 x 给 5.0 时斜向合速度可达 √2×5.0；
+    # 实车出口仍被串口 2.8 m/s 封顶。
+    max_velocity: [5.0, 5.0, 0.0]       # 最大速度[x,y,yaw]
+    min_velocity: [-5.0, -5.0, 0.0]     # 最小速度[x,y,yaw]
+    max_accel: [6.0, 6.0, 0.0]          # 最大加速度[x,y,yaw]
+    max_decel: [-6.0, -6.0, 0.0]        # 最大减速度[x,y,yaw]
+
+# -----------------------------------------------------------------------------
+# 恢复行为（behavior_server）：Spin 等的自转限幅，两份参数文件里原本都是这三个值。
+# 不是导航速度上限，放在这里只是为了"非串口限幅都能一处找到"。
+# -----------------------------------------------------------------------------
+behavior_server:
+  ros__parameters:
+    max_rotational_vel: 1.0             # 最大旋转速度（弧度/秒）
+    min_rotational_vel: 0.4             # 最小旋转速度（弧度/秒）
+    rotational_acc_lim: 3.2             # 旋转加速度上限（弧度/秒²）

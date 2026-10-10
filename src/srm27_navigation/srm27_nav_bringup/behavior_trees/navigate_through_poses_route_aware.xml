@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 多目标导航行为树: 与 navigate_through_poses_w_replanning_and_recovery.xml 只有一处不同 ——
+     用自研的 RemovePassedGoalsByRoute 代替 nav2 的 RemovePassedGoals。
+
+     为什么换掉 nav2 的(2026-10-09 实测, 空场仿真 + MINCO):
+       - 它只看"车离这个点多近(radius=0.35)", 而且**判定不落地**: 车贴着途径点
+         0.05~0.34 m 开过去, 点照样留在目标列表里(车离 #3 只有 0.01 m 时全局路径里
+         #3 还在)。后果: 3 Hz 重规划每次都生成一条"回头去它"的腿 → 车的
+         distance_remaining 反复"回落又涨回去"(实测 2.98 m → 7.94 m), 航点脚本的
+         --backtrack-guard 因此误判折返、取消航段并只重发"它以为还没开过"的点,
+         最后一路缩短成"直接去终点" —— 现场看到的就是"跑到第 2/3 个点就直冲终点"。
+       - 它还会把**终点**一起删掉, 于是逼出"radius 必须小于
+         general_goal_checker.xy_goal_tolerance"这条耦合约束(否则车在判定到达前就掉头)。
+
+     RemovePassedGoalsByRoute 的判据:
+       1) 半径 0.60 m: 车就在它旁边;
+       2) "到过又走开": 车曾进到该点 1.0 m 以内(记忆只挂在当前队首上),
+          现在离它 >= 0.30 m 且比**下一个点**更近 —— 覆盖"路径被障碍推开、贴不到点上"
+          的情况。
+     **只删列表头部的连续前缀**; 最后一个点(终点)永不删除, 到达仍由 goal checker 判定 ——
+     所以 "radius < xy_goal_tolerance" 这个约束在这里不存在了。
+
+     **别再改成"按路线弧长投影"那一版**: 试过两种都翻车 ——
+     全局最近投影: 8 字任务里车起点离 #1 1.09 m、离终点 0.86 m, 投影落到路线末端
+     ⇒ 3.6 s 删光 6 个途径点、7 s 冲终点; 限窗弧长进度: 车在 8 字中间抄近道时到 #3→#4
+     那段的垂距只有 0.98 m, 照样把没到过的 #3 判成已走过, 第一瓣直接没了。
+     现在只认"物理上靠近过"这一种证据。 -->
+<root BTCPP_format="3"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode name="NavigateRecovery"
+                  number_of_retries="10">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="3.0">
+          <RecoveryNode name="ComputePathThroughPoses"
+                        number_of_retries="1">
+            <ReactiveSequence>
+              <RemovePassedGoalsByRoute input_goals="{goals}"
+                                        output_goals="{goals}"
+                                        radius="0.60"
+                                        approach_radius="1.0"
+                                        route_margin="0.30"
+                                        keep_last="true"/>
+              <ComputePathThroughPoses goals="{goals}"
+                                       path="{path}"
+                                       planner_id="GridBased"/>
+            </ReactiveSequence>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode name="FollowPath"
+                      number_of_retries="10">
+          <FollowPath path="{path}"
+                      controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <!-- 同 navigate_to_pose 那份: 脱困速度 1.0 -> 0.2 m/s。
+               该动作由 srm27_nav_behaviors/BackUpFreeSpace 实现, 不是真倒车,
+               而是朝最空方向开, 并且绕过 velocity_smoother 的限速。 -->
+          <BackUp backup_dist="1.0"
+                  backup_speed="0.2"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

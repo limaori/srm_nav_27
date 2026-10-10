@@ -166,6 +166,9 @@ void Srm27NavProtocolNode::getParams()
   max_vx_ = declare_parameter<double>("max_vx", 0.5);
   max_vy_ = declare_parameter<double>("max_vy", 0.5);
   max_wz_ = declare_parameter<double>("max_wz", 1.0);
+  // 速度对齐系数 (只在出口生效, 见头文件注释)
+  linear_velocity_scale_ = declare_parameter<double>("linear_velocity_scale", 1.0);
+  angular_velocity_scale_ = declare_parameter<double>("angular_velocity_scale", 1.0);
 
   if (!(send_rate_hz_ > 0.0)) {
     throw std::invalid_argument{"send_rate_hz 必须 > 0"};
@@ -181,6 +184,15 @@ void Srm27NavProtocolNode::getParams()
   if (!(max_vx_ > 0.0) || !(max_vy_ > 0.0) || !(max_wz_ > 0.0)) {
     throw std::invalid_argument{"max_vx / max_vy / max_wz 必须 > 0"};
   }
+  // 速度对齐系数: 允许 <1 (车实际跑得比指令快时往下压) 与 >1 (反向修正),
+  // 但必须是有限正数, 且设了上限 —— 打错的系数会直接改车的行为, 不能无界。
+  const auto bad_scale = [](double _value) {
+    return !std::isfinite(_value) || _value <= 0.0 || _value > 2.0;
+  };
+  if (bad_scale(linear_velocity_scale_) || bad_scale(angular_velocity_scale_)) {
+    throw std::invalid_argument{
+      "linear_velocity_scale / angular_velocity_scale 必须在 (0, 2.0] 内且有限"};
+  }
 
   RCLCPP_INFO(
     get_logger(),
@@ -188,6 +200,22 @@ void Srm27NavProtocolNode::getParams()
     "限幅 vx<=%.3f vy<=%.3f wz<=%.3f",
     FRAME_LENGTH_CMD, static_cast<unsigned>(DATA_LENGTH_CMD), send_rate_hz_,
     cmd_timeout_sec_ * 1000.0, max_vx_, max_vy_, max_wz_);
+
+  // 速度对齐是"改车行为"的开关, 必须显眼: 生效时每次启动都提醒一次,
+  // 免得调完忘了改回来 (或以为自己在跑原始标定)。
+  if (linear_velocity_scale_ != 1.0 || angular_velocity_scale_ != 1.0) {
+    RCLCPP_WARN(
+      get_logger(),
+      "速度对齐生效: 发往下位机的指令 = 收到值 × (linear %.3f, angular %.3f) —— "
+      "平移 %+.1f%% / 角速度 %+.1f%% (改回 1.0 即恢复原行为)",
+      linear_velocity_scale_, angular_velocity_scale_,
+      (linear_velocity_scale_ - 1.0) * 100.0, (angular_velocity_scale_ - 1.0) * 100.0);
+  }
+  if (linear_velocity_scale_ > 1.0 || angular_velocity_scale_ > 1.0) {
+    RCLCPP_WARN(
+      get_logger(),
+      "速度对齐系数 > 1.0: 这是**放大**速度, 请确认是有意为之 (例如实测车比指令慢)");
+  }
 }
 
 void Srm27NavProtocolNode::serialPortProtect()
@@ -744,6 +772,13 @@ void Srm27NavProtocolNode::fillSpeedVector(SendRobotCmdData & frame)
     vy = 0.0;
     wz = 0.0;
   }
+
+  // 速度对齐: 把"上位机指令值"换成"下位机应当执行的值", 只改出口, 不改存下来的原始值。
+  // 放在 NaN 检查之后(坏值先被挡掉)、限幅之前(缩放后的值仍受 max_vx/max_vy 约束);
+  // 看门狗归零走的也是这里, 0 × 系数 = 0, 不会破坏"超时必须为零"的语义。
+  vx *= linear_velocity_scale_;
+  vy *= linear_velocity_scale_;
+  wz *= angular_velocity_scale_;
 
   // [协议 §6.5] 自己做限幅 —— 协议层不限幅, 限幅是上位机的责任
   bool clamped = false;

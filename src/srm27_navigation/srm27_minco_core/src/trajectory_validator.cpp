@@ -416,6 +416,9 @@ bool TrajectoryValidator::validate(
     _trajectory.terminal_is_global_goal || _trajectory.terminal_requires_stop;
   const bool ends_at_rest =
     _trajectory.endVelocity().norm() <= 1.0e-4 && _trajectory.endAcceleration().norm() <= 1.0e-4;
+  // 把两个中间量记进报告：终点附近的失败几乎都落在这两条上，而它们原先不可见。
+  _report.terminal_stop_required = terminal_stop;
+  _report.ends_at_rest = ends_at_rest;
   if (
     terminal_stop && ends_at_rest &&
     _trajectory.totalDuration() + 1.0e-6 >= _report.required_stop_time) {

@@ -126,6 +126,10 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
   addNumber(values, "requested_vy", _diagnostics.requested_vy);
   addNumber(values, "requested_wz", _diagnostics.requested_wz);
 
+  addNumber(values, "terminal_distance", _diagnostics.terminal_distance);
+  addString(values, "terminal_active", _diagnostics.terminal_active ? "true" : "false");
+  addNumber(values, "terminal_tolerance", _diagnostics.terminal_tolerance);
+
   array.status.push_back(status);
   return array;
 }

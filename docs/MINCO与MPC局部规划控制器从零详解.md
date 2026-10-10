@@ -142,7 +142,7 @@ MPC 不能代替地图，MINCO 也不能替代真实状态反馈。当前 MPC �
 | 动态障碍 | 地图占用变化后重规划 | 不含障碍物未来运动预测 |
 | 实车迁移 | 有 MINCO YAML | 不能据此认定真实底盘执行链已接通 |
 
-两个数值尤其容易读错：早期方案写的是 **0.5 m/s 起测、测试上限 1.0 m/s**；当前仿真 MINCO YAML 的 `max_linear_speed` 已是 **3.0 m/s**（2026-10-09 由 1.5 提升，同时改了 `velocity_smoother` 上下界与 `srm_cmd_mux` 的 `vx_max/vy_max/v_max`），`max_linear_accel` 仍是 **3.0 m/s²**。本文解释当前数值，不把它们当作实车已辨识能力；实车链路仍按 smoother 1.5 m/s 执行。
+两个数值尤其容易读错：早期方案写的是 **0.5 m/s 起测、测试上限 1.0 m/s**；当前仿真 MINCO YAML 的 `max_linear_speed` 是 **1.5 m/s**（2026-10-09 曾提到 3.0 m/s，当天又撤销：3.0 m/s 下切内弯的横向偏移量超过行为树 `RemovePassedGoals radius=0.35`，途经点删不掉会让车在途径点之间来回跑；改这一项时必须同步 `velocity_smoother` 上下界与 `srm_cmd_mux` 的 `vx_max/vy_max/v_max`），`max_linear_accel` 仍是 **3.0 m/s²**。本文解释当前数值，不把它们当作实车已辨识能力；实车链路同样是 smoother 1.5 m/s。
 
 ### 3.3 四个包各管什么
 

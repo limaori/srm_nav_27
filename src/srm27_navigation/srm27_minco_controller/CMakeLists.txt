@@ -16,6 +16,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/minco_mpc_controller.cpp
   src/planning_worker.cpp
   src/state_adapter.cpp
+  src/terminal_stop.cpp
   src/yaw_policy.cpp
 )
 
@@ -37,6 +38,9 @@ if(BUILD_TESTING)
   target_link_libraries(test_yaw_policy ${PROJECT_NAME})
   ament_add_gtest(test_diagnostics test/test_diagnostics.cpp)
   target_link_libraries(test_diagnostics ${PROJECT_NAME})
+  # 终点急停：实车终点振荡回归（2026-10-09）引入的状态机。
+  ament_add_gtest(test_terminal_stop test/test_terminal_stop.cpp)
+  target_link_libraries(test_terminal_stop ${PROJECT_NAME})
   ament_add_gtest(test_local_path test/test_local_path.cpp)
   target_link_libraries(test_local_path ${PROJECT_NAME})
   ament_add_gtest(test_planning_worker test/test_planning_worker.cpp)

@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<class_libraries>
+  <library path="srm27_goal_checkers">
+    <class type="srm27_nav_plugins::OmniStoppedGoalChecker" base_class_type="nav2_core::GoalChecker">
+      <description>
+        全向底盘用的停稳到点判定：位置 + 航向 + 平动停稳；角速度不参与判定
+        （导航不拥有自转，哨兵的自转由下位机/独立链路负责）。
+      </description>
+    </class>
+  </library>
+</class_libraries>

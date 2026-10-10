@@ -21,6 +21,7 @@
 
 # Local editor files
 .vscode/
+tmp/
 .idea/
 
 # Generated map and visualization artifacts
@@ -29,6 +30,13 @@
 /*.pgm
 /*.gv
 /*.pdf
+
+# 以下三条原先由 src/srm27_navigation/.gitignore 提供。该文件已作为冗余文件删除，
+# 规则上提到此统一维护，避免本地实车地图产物变成未跟踪文件而被误提交。
+/src/srm27_navigation/srm27_nav_bringup/pcd/**/*.pcd
+/src/srm27_navigation/srm27_nav_bringup/map/real/*.yaml
+/src/srm27_navigation/srm27_nav_bringup/map/real/*.pgm
+
 symlink
 sentry_*/
 
@@ -39,3 +47,4 @@ sentry_*/
 # .data 与 .posegraph；没有这两条否定规则，它们会在这里被静默丢弃）
 !maps/**/*.data
 !maps/**/*.posegraph
+

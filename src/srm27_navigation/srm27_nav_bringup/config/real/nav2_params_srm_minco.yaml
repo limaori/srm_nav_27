@@ -5,12 +5,42 @@
 #
 # 与仿真变体的差异与注意点：
 #   * use_sim_time = False。
-#   * 实车入口必须显式选择本文件；默认的 nav_real_launch.py 仍指向
-#     config/real/nav2_params_upstream.yaml，不能用“改了一份没被加载的 YAML”当作
-#     完成实车迁移（方案 §2.1、§9.2）。
+#   * 本文件不会被默认加载：script/start_real_nav.sh 的默认参数文件是
+#     config/real/nav2_params_srm.yaml（Omni）。要点亮 MINCO 必须显式二选一：
+#         ./script/start_real_nav.sh --controller minco
+#         ./script/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml
+#     （--controller minco 会自动选本文件、并把 fake_vel_transform 关掉。）
+#     不能用“改了一份没被加载的 YAML”当作完成实车迁移（方案 §2.1、§9.2）。
+#   * MINCO 模式下速度链路**不串 fake_vel_transform**（与仿真入口
+#     nav_srm_simulation_launch.py 一致）：velocity_smoother 直接发 cmd_vel_chassis。
+#     原因见 script/start_real_nav.sh 文件头 —— 该节点会对已经是 base_link 系的
+#     (vx, vy) 再做一次 R(-yaw)，且其同步分支依赖只有 Omni 控制器才发布的 local_plan。
+#     因此本文件里的 fake_vel_transform 段落在本链路下不生效，保留仅为 A/B 对照与回退。
 #   * 本文件中的加速度、制动减速度、延迟与外形参数**必须来自实车辨识**；
 #     未辨识前只能用于受控区域低速联调，不得作为性能承诺（方案 §10 P5）。
+#     逐项状态见 docs/minco实车迁移实施记录(ai).md 的“待辨识清单”。
 #   * 阶段一 yaw_policy.mode = xy_only：MPC 只控平移，自转仍由独立自转链路负责。
+#   * 【2026-10-09 从仿真链迁移】多目标航点(BT)与代价地图外形:
+#       - default_nav_through_poses_bt_xml 换成 behavior_trees/navigate_through_poses_route_aware.xml,
+#         plugin_lib_names 里加 srm27_remove_passed_goals_bt_node(自研 RemovePassedGoalsByRoute)。
+#         原因: nav2 原版 RemovePassedGoals 在本仓库这套部署上实测**不生效**(车贴着途径点
+#         0.05~0.34 m 开过去点照样留着) → 3 Hz 重规划一直生成"回头去它"的腿 → 车在途径点之间
+#         来回绕 / "Failed to make progress"。换掉之后途径点按"半径 + 到过又走开"顺序删, 终点永不删。
+#       - 代价地图 robot_radius 0.33 → **0.40**。这不是外形变了, 而是把控制器的净空要求算进去:
+#         MINCO 轨迹校验要求净空 = safety.robot_radius(0.33) + clearance_margin(0.05) = 0.38 m,
+#         而规划器只保证 robot_radius 那么远 —— 0.33 时它会规划出控制器不敢走的路径(现场=车走不动/
+#         原地绕)。取 0.40 = 0.38 + 0.02;不要再往上抬到 0.45: 那会让 planner 把"车自己那一格"也
+#         判成障碍, 反复报 Either of the start or goal pose are an obstacle! 并进 recovery。
+#         代价: MINCO 链下可通行的最窄通道由 0.66 m 变成 0.80 m(2×robot_radius), 更窄的通道两种取法
+#         都过不去(0.33 时规划器给路径、控制器照样拒), 只是现在会明确报"规划失败"而不是悄悄卡住。
+#         真要过更窄的通道, 要动的是 safety.robot_radius / clearance_margin(安全决定), 不是这一行。
+#   * 迁移后必须在实车上重新编译并部署 srm27_nav_plugins(自研 BT 节点的 .so)与 srm27_nav_bringup(新 BT xml),
+#     bt_navigator 启动时会按 plugin_lib_names 里的库名 dlopen 这个 .so, 缺了会直接报找不到节点。
+
+#   * 上电前先跑预检（只读、不需要 ROS）：
+#         python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.py \
+#             --params src/srm27_navigation/srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml \
+#             --expect-minco
 
 # =============================================================
 # SRM 实车参数：srm27 导航栈 + SRM 自建栈的参数与模型
@@ -38,7 +68,8 @@
 # 用法:
 #   ros2 launch srm27_nav_bringup nav2_stack_launch.py \
 #     params_file:=<本文件> map:=.../map/real/<name>.yaml prior_pcd_file:=.../pcd/real/<name>.pcd ...
-#   或直接用 script/start_real_nav.sh（默认就指向本文件与 SRM 模型）。
+#   或直接用 script/start_real_nav.sh --controller minco
+#   （该脚本默认指向 Omni 那份；--controller minco 才会选本文件并把 fake_vel_transform 关掉。）
 # =============================================================
 
 # 取自 mapping_params.yaml（PublishFreq 10Hz 是实车建图用的值；上游实车配置是 20Hz）
@@ -158,7 +189,17 @@ sensor_scan_generation:
     #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
     #   * twist 表达在 child_frame_id 下，父系差分速度会旋转到车体系；
     #   * 重复时间戳/时间倒退/过大间隔/位姿跳变都不产生速度尖峰。
-    max_sample_gap: 0.20            # 差分速度可用的最大采样间隔（秒）
+    #
+    # max_sample_gap 决定"多长的采样间隔就不再计算差分速度、改为沿用上一条有效值"。
+    # 实车 /odometry 只有约 10 Hz，2026-10-09 日志里还出现过 0.3/0.4/0.5 s 的间隔。
+    # 原来取 0.20 s，那些间隔全部落到"沿用上一条有效值"分支，于是 /odometry 的 twist
+    # 会是**过期速度**：车其实已经停了，目标检查器与控制器却仍读到 0.3 m/s 左右，
+    # StoppedGoalChecker 迟迟判不了停稳，MPC 还会为消掉这个不存在的速度反向修正
+    # （实车终点往返诊断 §4）。放宽到 0.60 s 让这些间隔给出真实差分速度：
+    # 位移差商的噪声正比于 1/dt，间隔越长噪声越小；真正要拦的是位姿跳变，
+    # 由下面的 max_position_jump / max_yaw_jump 负责。超过 0.60 s 的间隔
+    # （暂停、定位重启、丢包）仍沿用上一条有效值。
+    max_sample_gap: 0.60            # 差分速度可用的最大采样间隔（秒）
     max_position_jump: 0.75         # 单次采样允许的最大平移跳变（米）
     max_yaw_jump: 1.20              # 单次采样允许的最大航向跳变（弧度）
 
@@ -375,7 +416,7 @@ bt_navigator:
     default_server_timeout: 100
     wait_for_service_timeout: 1000
     default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml
-    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml
+    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_route_aware.xml                # 用自研 RemovePassedGoalsByRoute 代替 nav2 的 RemovePassedGoals
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -387,6 +428,7 @@ bt_navigator:
       - nav2_back_up_action_bt_node
       - nav2_drive_on_heading_bt_node
       - nav2_clear_costmap_service_bt_node
+      - srm27_remove_passed_goals_bt_node                      # 自研: 按"半径 + 到过又走开"删已过的途径点(route_aware BT 用)
       - nav2_is_stuck_condition_bt_node
       - nav2_goal_reached_condition_bt_node
       - nav2_goal_updated_condition_bt_node
@@ -443,17 +485,37 @@ controller_server:
       plugin: "nav2_controller::SimpleProgressChecker"  # 进度检查器插件
       required_movement_radius: 0.5                     # 要求移动的最小半径（米）
       movement_time_allowance: 10.0                      # 允许不移动的最长时间（秒）
-    # 终点必须按“已停稳”验收（方案 §7.4）。
+    # 终点必须按“已停稳”验收（方案 §7.4），但**角速度不参与判定**。
+    #
+    # 用自建插件而不是 nav2_controller::StoppedGoalChecker，差别只有一条：
+    #   后者在位置/航向满足后还要求 |wz| <= rot_stopped_velocity —— 也就是**自转会让它
+    #   永远判不了到点**。SRM 的自转不归导航管：阶段一 yaw_policy.mode = xy_only（插件
+    #   输出 wz≡0），velocity_smoother 也把 yaw 上界钳成 0，哨兵的自转由下位机/独立链路
+    #   负责。导航既不产生也不控制 wz，就不该拿它否掉自己的到达结论。
+    #   而且 yaw_goal_tolerance 本来就是自由的（见下），"朝向不算到达条件"已经写在配置里，
+    #   wz 再算条件在语义上自相矛盾。
+    # 判据 = 平面距离 <= xy_goal_tolerance 且 |Δyaw| <= yaw_goal_tolerance
+    #        且 hypot(vx, vy) <= trans_stopped_velocity。
+    # 平动那一条保留：它保证"到点"时车真的停住了，而不是高速掠过目标点。
     general_goal_checker:
-      stateful: True                                    # 是否保存目标检查状态
-      plugin: "nav2_controller::StoppedGoalChecker"     # 位姿 + 停止速度双条件
+      plugin: "srm27_nav_plugins::OmniStoppedGoalChecker"
+      # 注意：本插件**没有** rot_stopped_velocity 参数（角速度不参与判定）；
+      # 参数文件里若残留它，它不会被声明也不会被读取 ——
+      # scripts/srm_minco_real_preflight.py 会在文本层拦下这种残留。
       # 与实车 Omni 配置保持一致（main 已由 0.15 放宽到 0.4）：航点跳过半径 0.35 必须小于
       # 本容差，否则最后一个航点会在判定到达前被删掉、车掉头往回走（见 behavior_trees/
       # navigate_through_poses_w_replanning_and_recovery.xml 的约束说明）。
-      xy_goal_tolerance: 0.40                           # 平面位置容差（米）
+      # 平面位置容差（米）。它同时是**终点急停的进入半径**（terminal.tolerance = 0 会跟随它），
+      # 所以这一个数同时决定"在哪开始急刹"和"多近算到点"。
+      # 0.50 的含义：车距末点 0.50 m 时立刻给零速，滑行 v²/(2·a_chassis) 后停下；
+      # 只要底盘减速能力 >= v_entry²/(4·tol)（见 terminal 段注释）停车点就仍在末点 ±0.5 m 内。
+      # 约束：必须大于行为树的航点跳过半径 0.35（见 behavior_trees/
+      # navigate_through_poses_w_replanning_and_recovery.xml 的说明），且不小于
+      # terminal_reached_radius（0.20）。0.50 > 0.35 与 0.50 > 0.20 都满足。
+      xy_goal_tolerance: 0.50                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
       trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
-      rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）
+      # 没有 rot_stopped_velocity：角速度不参与到达判定（见上）。
 
     # MINCO + MPC 局部规划控制器。
     # 阶段一（P2）：model=velocity_integrator、yaw_policy.mode=xy_only，MPC 只控平移，
@@ -464,9 +526,42 @@ controller_server:
       base_frame: base_link                             # 车体系（速度输出坐标系）
       odom_topic: odometry                              # 状态适配输入话题
       replan_frequency: 10.0                            # 后台重规划频率（Hz）
-      planning_horizon: 2.0                             # 局部路径截取视野（米）
-      planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）
-      state_timeout: 0.10                               # 状态允许的最大年龄（秒）
+      # 局部路径截取视野（米）。2026-10-09: 2.0 → 4.0，配合 limits.max_linear_speed 3.5。
+      # 为什么必须一起改：MINCO 的轨迹是"从当前速度出发、在本视野末端停住"的起停剖面，
+      # 视野太短时连 v_max 都到不了 —— 2.0 m + a_max 3.0 的三角形剖面峰值只有
+      # sqrt(2·a·(horizon/2)) = 2.45 m/s，上限提到 3.5 也白提（预检会报"制动走廊余量不足"）。
+      # 4.0 m 时剖面峰值 = sqrt(2·3.0·2.0) = 3.46 m/s，刚好摸到 3.5；
+      # 想让剖面变成能真正跑到 v_max 的梯形，需要 horizon >= v_max²/a_max = 4.08 m（取 4.5 更稳）。
+      # 同时要求: local_costmap 的窗口与 intensity_voxel_layer 的 obstacle_max_range 一起放大，
+      # 否则视野外半段没有任何障碍数据（控制器把未知当障碍，路径会被截短）。
+      # 2026-10-10: 与仿真同步 4.0 → 3.0（仿真当前档）。
+      # ⚠ 视野变小后的可达峰值 = √(a·d) = √(10.0×3.0) ≈ 5.5 m/s，而 6.0 m/s 档的制动
+      #   距离已达 v·t + v²/(2a) + 包络 ≈ 0.6+1.8+0.33 = 2.7 m，余量很小；
+      #   实车出口实际被串口 max_vx 3.5 × linear_velocity_scale 0.80 = 2.8 m/s 封顶，
+      #   按 2.8 m/s 估制动距离约 1.6 m（占视野 53%）。
+      #   若预检报"制动走廊余量不足/制动覆盖不够"，先把本项退回 4.0。
+      planning_horizon: 3.0                             # 局部路径截取视野（米）
+      planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）；注意：该参数目前在插件里是死参数（只做范围校验），真正的时间门槛是 mpc.qp_deadline_ms
+      # 状态新鲜度门限（秒）。**实车必须比仿真大**：
+      #   仿真的 /odometry 由 simulation_ground_truth_odometry 以固定 50 Hz 发布（周期 0.02 s），
+      #   0.10 s 有 5 倍余量；实车的 /odometry 由 sensor_scan_generation 发布，而它是拿
+      #   lidar_odometry + registered_scan 做 ApproximateTime 同步之后才输出的，频率 =
+      #   **雷达帧率**（本文件 livox_ros_driver2.publish_freq = 10.0 与
+      #   point_lio.mapping.lidar_time_inte = 0.1 两处都指向 10 Hz，周期 0.10 s）。
+      #   沿用 0.10 s 时门限不大于到达周期：每个 50 Hz 控制周期都有相当概率被判
+      #   "odometry sample is older than the configured timeout" -> 输出零速；持续超过
+      #   build_grace_period(1.0 s) 就抛异常，现场表现是"走走停停 + BT 反复 recovery"。
+      #   取 0.25 s = 2.5 倍到达周期，用于吸收 LIO 解算延迟与传输抖动。
+      # ⚠ 这个参数在代码里**同时**被当作制动模型的 reaction_latency
+      #   （makeValidatorConfig(): config.reaction_latency = state_timeout_），所以调大它不是
+      #   "更宽松"，而是"假设反应更慢"——要求的安全前缀同步变长，方向是保守的。
+      #   代价：local_path 在截断端点处要求的制动走廊 v·t_react + v²/(2a) + res 由 0.575 m
+      #   增到 0.80 m，5×5 m 局部地图下有效局部视野由约 1.55 m 缩到约 1.32 m。
+      #   若实测发现视野不够，应当加大 planning_horizon 或局部代价地图，而不是把这个值调回 0.10。
+      # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.10 s：实车 /odometry 由
+      #   sensor_scan_generation 按雷达帧率输出（10 Hz，周期 0.10 s），门限等于周期
+      #   会被判"状态过期"→ 零速输出。仿真 10.0（真值里程计 50 Hz）不适用。
+      state_timeout: 0.25                               # 状态允许的最大年龄（秒）
       map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
       trajectory_max_age: 0.30                          # 轨迹允许的最大年龄（秒）
       build_grace_period: 1.0                           # 无可用轨迹时的零输出宽限（秒）
@@ -475,10 +570,62 @@ controller_server:
 
       # 判定"已到达路径终点"的半径（米）：落在该半径内时局部路径为空属正常，
       # 由目标检查器判定成功，不再报 no_path（避免把"到点"变成控制器异常）。
+      # ⚠ 它**只在"局部路径不足两点"时才生效**（planning_worker 的 already_at_goal 分支），
+      # 正常接近终点时局部路径始终 >= 2 点，所以它不是一个独立的到点停车阈值。
+      # 真正的"进入终点后停止修正"由下面的 terminal.hold_* 负责。
       terminal_reached_radius: 0.20
 
+      # 同一导航任务内"路径刷新"与"换目标"的判定阈值（米）。
+      # 2026-10-09 实车日志：两次 "Reached the goal" 之前各多出一次会话重置
+      # （14:01:01.600 新会话 #2 -> 14:01:01.720 到点；14:01:51.231 新会话 #4 -> 14:01:51.511 到点），
+      # 原因是原实现用 1 mm 判定"末点变了"，比全局规划器每次刷新的末点抖动还小；
+      # 新会话会清空轨迹、热启动与重规划状态，让车在终点附近重新加速/反向修正。
+      # 取 0.10 m：远大于规划器的栅格量化抖动，又远小于航点间距（航点跟随不会误判成同一目标）。
+      goal_change_tolerance: 0.10
+
+      # 终点急停：一进入目标检查器的成功区域就**立即输出零速**，不再追踪精确末点。
+      #
+      # 为什么需要（2026-10-09 实车终点振荡，log_diag/real_goal_20261009_140024/）：
+      #   MPC 的代价里一直带着"到精确末点的位置误差"（mpc.q_position）。即使车已经进入
+      #   目标检查器的 xy 容差，控制器也会继续把车往末点上修；一旦冲过末点就反向修正，
+      #   再冲、再修正 —— 现场就是终点附近来回走。
+      #   "目标检查器允许在容差内判成功"与"控制器仍要求精确末点"本来是矛盾的，
+      #   急停就是把这个矛盾消掉：进容差就停，不再有任何后段控制逻辑。
+      #
+      # 逻辑刻意最简单：进容差 -> 立即零速。控制器之后不再输出任何朝末点或背向末点的
+      # 速度，所以它**不可能再主动把车带出容差**，振荡在逻辑上不会出现。
+      terminal:
+        enabled: True
+        # 进入阈值（米）。0 = 使用目标检查器的 xy 容差（本文件 0.40 m）；
+        # 容差读不到时退回 terminal_reached_radius。
+        #
+        # ⚠ 这是"急刹有多猛"的旋钮。轨迹是停在末点的停车剖面，车进入阈值圈时的速度是
+        #   sqrt(2*a*tol)：tol=0.40 时约 1.5 m/s（几乎满速，急刹最猛）；
+        #   tol=0.15 时约 0.95 m/s；tol=0.05 时约 0.55 m/s。
+        #   如果实测觉得急刹太冲，把这里调小（例如 0.15），而不是重新引入减速曲线。
+        tolerance: 0.0
+        # 退出滞回（米）：距末点超过 tolerance + 该值才解除急停，避免阈值附近抖动。
+        exit_margin: 0.15
+      #
+      # 急刹之后停在哪里，完全由**底盘自己**把速度收掉的能力决定（电机反接/摩擦/打滑），
+      # 控制器不再限速。容差对末点是**对称的**：在距末点 tol 处给零，滑行
+      # v²/(2*a_chassis) 后停下，只要 v²/(2*a_chassis) <= 2·tol 就仍落在末点 ±tol 内。
+      # 以本文件 v_max=1.5、tol=0.40 代入，条件只是 a_chassis >= 1.41 m/s²。
+      # 这条判据由 scripts/srm_minco_real_preflight.py 作为阻塞级检查把关
+      # （它用的 a_chassis 就是下面的 safety.braking_deceleration，未填则退化为加速度上限）。
       state:                                            # 状态适配层
-        max_sample_gap: 0.20                            # 差分速度可用的最大采样间隔（秒）
+        # 差分速度可用的最大采样间隔（秒）。实车 /odometry 只有约 10 Hz，
+        # 而且 2026-10-09 日志里出现过 0.3/0.4/0.5 s 的间隔（同步丢帧）。
+        # 原来取 0.20 s：间隔一旦超过就"不给速度"，由 sensor_scan_generation 沿用
+        # 上一条有效值（见其源码 §3），于是控制器与目标检查器都会拿到**过期速度** ——
+        # 车其实已经停了却仍读到 0.3 m/s，MPC 会为了消掉这个不存在的速度反向修正，
+        # 这正是终点来回走的放大因素之一（该日志 §4）。
+        # 放宽到 0.60 s 让这些间隔给出**真实的差分速度**：位移差商噪声正比于 1/dt，
+        # 间隔越长噪声反而越小；真正需要拦的是位姿跳变，由 max_position_jump / max_yaw_jump 负责。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.20：10 Hz 里程计下 0.20 s 会被
+        #   频繁超过 → 沿用上一条有效值 → 控制器/目标检查器读到过期速度（本文上文 §4
+        #   记录的"终点来回走"放大因素）。仿真用 0.20 是因为它的 odom 是 50 Hz。
+        max_sample_gap: 0.60
         max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
         max_yaw_jump: 1.20                              # 航向跳变阈值（弧度）
         velocity_filter_alpha: 0.35                     # 速度一阶低通系数（0 表示关闭）
@@ -492,14 +639,26 @@ controller_server:
         max_piece_duration: 1.00                        # 段时长上限（秒）
         pre_time_ratio_min: 0.90                        # PRE 段时长比例下限
         pre_time_ratio_max: 1.10                        # PRE 段时长比例上限
+        # 2026-10-09: 8 → 16。障碍软约束只在每段 samples_per_piece 个点上积分，
+        # 网格太粗时优化器"以为"净空够、密采样一扫却不够（实测交付值比软目标低 5 cm 量级）。
+        # 加倍后软约束网格间距减半，代价是 PRE 阶段 ESDF 查询翻倍
+        # （实测 pre_time_ms ≈ 1.8 ms，预算内还有余量）。
+        # 2026-10-10: 与仿真同步 16 → 8（网格变粗一倍）。
+        # ⚠ 上面的 2026-10-09 记录正相反（8 → 16 就是为了解决"优化器以为净空够、密采样
+        #   一扫却不够"）。同步成 8 后若现场再出现"净空 0.37x 判死 / 反复 recovery"，
+        #   第一件事就是把本项退回 16。
         samples_per_piece: 8                            # 每段数值积分采样点数
         max_iterations: 150                             # L-BFGS 最大迭代次数
         gradient_tolerance: 1.0e-4                      # L-BFGS 梯度收敛阈值
         # 仅靠梯度阈值时该问题永远打不到收敛（实测 302 次仍在上限、耗时 17 ms）；
         # 打开基于函数值下降率的判据后 52 次收敛、耗时 3 ms，结果质量不变。
         lbfgs_past: 3                                   # 函数值下降率判据的迭代间隔（0=关闭）
-        w_jerk: 0.2                                     # jerk 能量权重（按实车限速标定）
-        w_time: 10.0                                    # 总时长权重
+        # 2026-10-10: 与仿真同步（w_jerk 0.2 → 0.0、w_time 10.0 → 25.0）。
+        # w_jerk = 0 表示完全不惩罚 jerk：轨迹会更"冲"（加加速度无约束），实车底盘与
+        # 机械结构的冲击都由它承担；仿真里这样跑没问题，实车若出现起步/停车顿挫或
+        # 定位（LIO）在急加速时漂移，先把 w_jerk 调回 0.1~0.2。
+        w_jerk: 0.0                                     # jerk 能量权重
+        w_time: 25.0                                    # 总时长权重（越大越偏好短时间=越快）
         w_obstacle: 100.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
@@ -512,21 +671,52 @@ controller_server:
         # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
         # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
-        optimization_clearance_margin: 0.05
+        # 2026-10-09: 0.05 → 0.10。实测（22:13 录包 + 22:53 日志）交付净空长期落在
+        # 0.3707~0.3799，而硬门槛是 0.38 —— 差 0.4~9 mm 就被整条丢弃。原因是优化器的
+        # 软目标（0.33+0.05+margin）与它实际交付之间还差 ~5 cm，margin 取 0.05 时几乎没有
+        # 缓冲。取 0.10（软目标 0.48）把这段落差吃掉，硬门槛 0.38 不变。
+        # 代价: 窄通道里优化器会更用力往中心线挤（软约束，不可行时只是吃罚值）；
+        # 若发现窄道通过性变差，先回到 0.05~0.075。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 50.0：本参数的单位是**米**
+        #   （软目标 = robot_radius + clearance_margin + 本值，见 minco_optimizer.hpp），
+        #   50.0 会给出 50.38 m 的软目标，与本文件注释里的 0.05/0.10 语义矛盾，疑为仿真侧笔误。
+        #   仿真若确实有意用 50.0，请显式改这一行（风险自担：窄道里优化器会疯狂往中心挤）。
+        optimization_clearance_margin: 0.10
         resample_step: 0.10                             # 前端弧长重采样步长（米）
-        corner_speed_ratio: 0.35                        # 转角处最低速度比例
+        # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
+        # 依据: 实车 227_1006 那组 7 点航点（9.8 m 路径里 7 个转折）实测沿路径平均
+        # 只有 0.584 m/s，而规划侧报出的峰值是 1.902 m/s（平均/峰值 ≈ 0.31）——
+        # 时间基本都花在弯角的减速-再加速上。0.35 意味着每个弯角把参考速度压到 35%。
+        # 提到 0.60 直接减少这段开销。**注意它与净空强耦合**：弯角越快，MINCO 切内弯越深，
+        # 越容易压到 0.38 硬门槛 —— 所以这次同时把 optimization_clearance_margin 提到 0.10
+        # 并加密软约束采样点；如果现场又出现"净空 0.37x 判死"，先把本项退回 0.45。
+        # 2026-10-10: 与仿真同步 0.60 → 0.80（弯角保速更激进，切内弯更深）。
+        corner_speed_ratio: 0.80                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
-        terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
+        # 2026-10-10: 与仿真同步 0.0 → 0.8。
+        # ⚠ 实车含义变了：到点前不再要求停稳，末端允许保留 0.8 m/s，靠目标检查器 +
+        #   终点制动兜住。若现场出现"冲过目标点再回来"或终点来回走，退回 0.0。
+        terminal_speed: 0.8                             # 非全局目标时的末端速度（米/秒）
 
-      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 1.5 / max_accel 3.0、
-      # 串口 max_wz 1.0）对齐。原先的 0.5/0.3 是迁移方案里的“首跑测试档位”占位值，
-      # 与实际实车链路不一致；仿真配置已同步为同一组值。
-      limits:                                           # 有效约束（必须与 smoother/串口一致）
-        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
-        max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
-        max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
-        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
+      # 限速已移到 config/real/speed_limits.yaml 的 controller_server@minco 段
+      # （唯一来源：与 Omni 变体、velocity_smoother 一起定义，改档位只改那一份；
+      #  这里再写 limits.* 会与覆盖层冲突并直接报错）。
+      # 当前 3.50 m/s 是 2026-10-09 的试验档，配套判读（改这一行必须一起看）：
+      #   1) 校验硬门槛变成 3.50×1.02 = 3.57 → "max speed exceeds the effective limit" 这类
+      #      判死基本消失（原门槛 1.53，实测状态速度到 1.66 就整条被丢）。
+      #   2) 制动覆盖: 要求有效前缀 >= 0.10 + 3.50/3.00 = 1.267 s；horizon 2.0 m 下最短局部
+      #      轨迹只有 1.633 s（三角形剖面，跑不到 v_max）→ 能过但余量 < 30%，
+      #      预检要求先做制动辨识把 safety.braking_deceleration 填实测值。
+      #   3) **视野才是真上限**: horizon 2.0 m + a_max 3.0 的三角形剖面峰值只有
+      #      a·t_half = 3.0×sqrt(2·(horizon/2)/a) ≈ 2.45 m/s，所以直线段上也跑不到 3.5；
+      #      要真跑到 3.5 需要 horizon ≈ v²/a = 4.1 m，而实车局部代价地图只有 5×5 m
+      #      （横向半径 2.5 m）—— horizon、局部地图尺寸、a_max 要一起重新标。
+      #   4) 终点急停: 预检给出的进入速度 = min(v_max, sqrt(2·a_plan·tol)) = 1.732 m/s，
+      #      要求底盘可保证减速度 >= v_entry²/(4·tol) = 1.50 m/s²（当前按 3.0 占位估计）。
+      #   5) 串口层 max_vx/max_vy = 3.5、对齐系数 0.80 → 实车出口最大 2.8 m/s，
+      #      所以实车链的这一档实际卡在**串口缩放**上，不在这里；要放开速度必须
+      #      同步决定 srm27_nav_protocol 的 linear_velocity_scale 与 max_vx/vy（安全限幅）。
 
       mpc:                                              # MPC 求解器
         model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
@@ -572,6 +762,18 @@ controller_server:
         # （实测：0.5 m/s 档要求 1.77 s 尚可通过，1.5 m/s 档要求 5.1 s 就必然失败，
         # 现场表现为规划一直失败、车被 recovery 拖来拖去）。**必须按实车制动辨识填写。**
         braking_deceleration: 0.0
+        # 有效反应延迟（米/秒^2 无关，单位秒）：从下发命令到车真正动起来的时间。
+        # ⚠ 这个参数以前与 state_timeout 共用（代码里 config.reaction_latency = state_timeout）。
+        # 实车把两者拆开了：state_timeout 必须不小于里程计到达周期（10 Hz -> 0.25 s），
+        # 而反应延迟只有 0.1 s 量级。混用会让终点短停车轨迹被一律拒绝 ——
+        # 2026-10-09 实车日志里 "terminal=global_goal | 有效前缀=0.2611s 需要=0.6s"
+        # 就是这么来的：短轨迹能否通过取决于 轨迹总时长 >= reaction_latency + v/a_brake，
+        # reaction_latency 取 0.25 s 时 0.26 s 的终点轨迹只允许 v <= 0.033 m/s。
+        # 取 0.10 s 是"按原配置反推"的占位值（state_timeout 还是 0.10 时它就是这个值），
+        # **仍需按实车辨识**：命令阶跃到 /odometry 速度起变化的时延中位数。
+        # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.0：取 0 会退化为使用
+        #   state_timeout(0.25)，比 0.10 更保守（短终点轨迹更容易被拒）。
+        reaction_latency: 0.10
 
 
 local_costmap:
@@ -583,10 +785,18 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
-      width: 5
-      height: 5
+      # 2026-10-09: 5×5 → 10×10。planning_horizon 提到 4.0 之后，局部地图必须能覆盖
+      # 视野（滚动窗口下机器人居中，5×5 只有 ±2.5 m，4 m 的前瞻会直接顶出地图边界，
+      # 局部路径被 LocalPathEnd::kMapBoundary 截短）。10×10 给到 ±5 m。
+      # 代价: 栅格数 100×100 → 200×200，ESDF/代价地图每周期开销约 4 倍（实测 esdf_time_ms
+      # 仍为 0 ms 量级，可接受；若将来发现规划耗时上升，优先查这里）。
+      # 2026-10-10: 与仿真同步 10×10 → 8×8（±4 m）。
+      # planning_horizon 同步降到 3.0 后 ±4 m 仍然够用；但若将来把 horizon 调回 4.0，
+      # 必须同时把这里改回 10（否则局部路径会被 kMapBoundary 截短）。
+      width: 8
+      height: 8
       resolution: 0.05
-      robot_radius: 0.33           # 车体半径 0.27m、轮子外廓约 0.33m; 取外廓值保证不蹭墙
+      robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
@@ -614,7 +824,10 @@ local_costmap:
           sensor_frame: livox_imu
           min_obstacle_height: 0.0
           max_obstacle_height: 2.0
-          obstacle_max_range: 5.0
+          # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
+          # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
+          # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.2
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -622,7 +835,10 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
-        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+        # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
+        # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
+        #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
+        inflation_radius: 0.7           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 global_costmap:
@@ -633,7 +849,7 @@ global_costmap:
       publish_frequency: 2.0
       global_frame: map
       robot_base_frame: base_link
-      robot_radius: 0.33           # 车体半径 0.27m、轮子外廓约 0.33m; 取外廓值保证不蹭墙
+      robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -668,7 +884,10 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
-        inflation_radius: 0.5           # 障碍膨胀半径(m); 原 0.7, 调小以便钻窄道
+        # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
+        # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
+        #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
+        inflation_radius: 0.7           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -730,9 +949,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/real/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     service_name: "global_costmap/get_costmap"
     max_radius: 2.0
     visualize: false
@@ -756,16 +974,34 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # 禁止导航控制底盘自转 (ω 恒为 0)，底盘朝向由云台控制。
     # behavior_server 的 Spin 恢复行为不走本话题，不受影响。
-    # 与 FollowPath.limits 一致：初期测试档位为平移合速度 0.5 m/s。
+    # 速度上下界与加速度上限已移到 config/real/speed_limits.yaml 的
+    # velocity_smoother@minco 段（唯一来源）：max_velocity / min_velocity / max_accel /
+    # max_decel 都在那里，改档位只改那一份（本文件里再写会与覆盖层冲突并报错）。
     # 上下界对称；阶段一 yaw_policy.mode = xy_only 时导航命令的 wz 恒为 0，
-    # 启用 SE(2) 阶段时必须同步提高这里的 yaw 界并改用 NAV_SE2 仲裁模式。
-    max_velocity: [1.5, 1.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
-    min_velocity: [-1.5, -1.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
-    max_accel: [3.0, 3.0, 0.0]         # 最大加速度[x,y,yaw]
-    max_decel: [-3.0, -3.0, 0.0]       # 最大减速度[x,y,yaw]
+    # 启用 SE(2) 阶段时必须同步放开那里的 yaw 界并改用 NAV_SE2 仲裁模式。
+    # 平移加速度必须与控制器 limits.max_linear_accel 一起动，否则"规划按 4.0 算、
+    # 实际按 3.0 执行"，MPC 会持续看到跟踪滞后（终点附近尤其明显）。
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
+    # 停止接收控制器命令多久之后不再转发（秒）。
+    #
+    # 这条直接决定"FollowPath 成功之后底盘还会被喂多久旧速度"。控制器一停发，
+    # smoother 仍会按 20 Hz 重发它手上最后那条速度，直到本超时；随后串口看门狗
+    # (srm27_nav_protocol.cmd_timeout_sec = 0.5 s) 才把底盘归零。所以
+    #   底盘继续执行最后速度的总时长 = velocity_timeout + 0.5 s
+    # 用 2026-10-09 实车日志实测校准过：两次 "Reached the goal!" 与随后串口看门狗触发
+    # 的间隔分别是 1.458 s 与 1.469 s，正好是 1.0 + 0.5（差 40 ms 是 smoother 20 Hz 的
+    # 结算相位）。原来的 1.0 s 意味着成功之后还有约 1.5 s 在推车。
+    # 取 0.3 s：窗口缩到约 0.8 s；控制器是 50 Hz 发布（20 ms），0.3 s 相当于 15 个周期
+    # 完全没消息，只会在真正异常时触发，不会造成误停。
+    # 另外这也削弱了 smoother 与 behavior_server 的竞争：恢复行为是把 cmd_vel 直接
+    # remap 到 cmd_vel_chassis（绕过 smoother），而 smoother 也发同一话题；超时越长，
+    # 两者在同一话题上对打的时间越长。
+    # 2026-10-10: 与仿真同步 0.3 → 1.0。
+    # ⚠ 危险方向的安全项：控制器停发命令后，平滑器会继续重发最后速度更久
+    #   （底盘继续执行的总时长 = 本值 + 串口看门狗 0.5 s，由 0.8 s 变成 1.5 s）。
+    #   实车若在意"命令中断后还在走"的窗口，把这里改回 0.3。
     velocity_timeout: 1.0
 
 srm27_teleop_twist_joy_node:

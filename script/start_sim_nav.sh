@@ -13,6 +13,14 @@
 #
 #   导航只产生 vx/vy; mux 丢弃导航输入的 angular.z。自转由独立自转链路给出。
 #
+# 速度限幅 (控制器 / 平滑器 / mux / 恢复行为 / 自转) 的**唯一来源**:
+#   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
+#   launch 启动时把它合并进 nav2_params_srm*.yaml 与 srm_chassis_control.yaml,
+#   参数文件里不再写这些键 (两处都写且值不同 -> 启动直接报错)。
+#   改档位只改那一份; 改完用下面的自检看"卡住速度的是哪一层":
+#     python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py
+# 详见 docs/导航速度调试指南.md §1/§2。
+#
 # 模式说明 (本脚本只做导航):
 #   slam:=False  use_pcd_localization:=False
 #     -> 由 map_server 加载现成的 PGM/YAML 地图, map->odom 为静态 TF,
@@ -24,7 +32,8 @@
 # 用法:
 #   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认), 不自转
 #   ./script/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
-#   ./script/start_sim_nav.sh -w srm_empty --run               # 空场, Gazebo 直接开始运行
+#   ./script/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
+#   ./script/start_sim_nav.sh --no-run                         # Gazebo 保持暂停, 手动点播放
 #   ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
 #   ./script/start_sim_nav.sh --rotation-mode periodic \
 #       --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
@@ -37,7 +46,8 @@
 #   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params_srm.yaml
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
-#       --run / --no-run           Gazebo 是否直接开始运行 (默认暂停, 手动点播放)
+#       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
+#                                 --no-run 则保持暂停等你点播放)
 #       --smoother / --no-smoother velocity_smoother 是否串联 (默认串联)
 #       --rotation-mode <stop|constant|periodic>   自转模式 (默认 stop)
 #       --rotation-speed <rad/s>  恒速模式角速度
@@ -55,12 +65,21 @@
 #   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
 #   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
 #   START_ROTATION_SENDER ENABLE_TELEOP
-#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR
+#   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
+#   - 启动前会自动依次跑 script/kill_nav.sh、script/kill_gzb.sh、script/kill_rviz.sh,
+#     清掉上次遗留的 Nav2 导航栈 / Gazebo / RViz。注意: 上一次仿真还在跑时也会被清掉
+#     (而不是像以前那样 "[跳过] 已检测到正在运行的 ..."), 目的是保证每次都是干净的一套
+#     仿真 + 导航。**导航栈必须一起重启**: costmap 的膨胀半径等参数只在节点 configure
+#     时读一次 (Humble 的 InflationLayer 没有动态回调), 只重启 Gazebo 会留下"仿真新、
+#     导航旧"的错配, 表现就是改了参数却看到旧值。
+#     不想清就用 PREKILL=0, 那时恢复"检测到在跑就跳过"的老行为。清理失败只告警不阻断。
 #   - Gazebo 世界、SRM 初始位姿和速度参数统一由
 #     srm27_gazebo_simulator/config/srm_sim.yaml 给出; -w 会覆盖其中的 world。
-#   - 地图与参数文件一律使用绝对路径; 地图可直接给名字 (在 map/simulation/ 下解析)。
+#   - 地图与参数文件一律使用绝对路径; 地图可直接给名字, 依次在
+#     src/srm27_navigation/srm27_nav_bringup/map/simulation/ 与工作空间根目录 maps/
+#     (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml) 下解析, 找不到会列出全部可用地图。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
 #   - 控制清单：导航速度 cmd_vel_nav、自转请求 rotation_cmd、自转输出
 #     rotation_velocity、合成命令 cmd_vel_sim; 诊断在 /<ns>/diagnostics。
@@ -81,7 +100,9 @@ ROBOT_NS="${ROBOT_NS:-red_standard_robot1}"  # 与 nav_srm_simulation_launch.py 
 USE_COMPOSITION="${USE_COMPOSITION:-False}"
 USE_RVIZ="${USE_RVIZ:-True}"
 USE_GUI="${USE_GUI:-true}"
-RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-false}"
+# Gazebo 默认"起来就跑"(gz sim -r): 仿真时间立即推进, 导航栈不用等手动点播放。
+# 想保持旧的"暂停等点播放"行为: --no-run 或 RUN_IMMEDIATELY=false。
+RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-true}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
 ENABLE_TELEOP="${ENABLE_TELEOP:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -209,6 +230,11 @@ if [ ! -d "$MAP_DIR" ]; then
   exit 1
 fi
 
+# 工作空间根目录 maps/ 也纳入搜索范围: 那里放现场采集 / SLAM 新出的地图
+# (与 start_real_nav.sh 的搜索规则保持一致), 这样新图不必先拷进包内 map/simulation/。
+# 两个目录同名时以包内 map/simulation/ 优先, 保证仿真默认地图不被意外顶掉。
+MAPS_DIR="$WS_DIR/maps"
+
 if [ -z "$PARAMS_FILE" ]; then
   PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
   if [ ! -f "$PARAMS_FILE" ]; then
@@ -230,14 +256,46 @@ fi
 
 WORLD="${WORLD_FROM_USER:-${GZ_WORLD:-rmuc_2025}}"
 
+# 地图候选文件: map/simulation/*.yaml、maps/*.yaml、maps/<名字>/<名字>.yaml。
+# 最后一种布局只认"目录名与 yaml 同名"的那份, 否则 rosbag 之类的
+# maps/<bag>/metadata.yaml 会被误当成地图。
+list_map_candidates() {
+  local f
+  for f in "$MAP_DIR"/*.yaml "$MAPS_DIR"/*.yaml "$MAPS_DIR"/*/*.yaml; do
+    [ -f "$f" ] || continue
+    case "$f" in
+      "$MAPS_DIR"/*/*)
+        [ "$(basename "$(dirname "$f")")" = "$(basename "$f" .yaml)" ] || continue
+        ;;
+    esac
+    printf '%s\n' "$f"
+  done
+}
+
 list_maps() {
-  echo "[提示] $MAP_DIR 下可用的地图:" >&2
-  (cd "$MAP_DIR" && ls *.yaml 2>/dev/null | sed 's/^/  - /') >&2
+  echo "[提示] 可用的地图 (左侧名称即为 -m 的取值, 右侧为实际会加载的文件):" >&2
+  local f name seen="" found=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    name="$(basename "$f" .yaml)"
+    case " $seen " in *" $name "*) continue ;; esac
+    seen="$seen $name"
+    printf '  - %-22s %s\n' "$name" "$f" >&2
+    found=1
+  done < <(list_map_candidates)
+  if [ "$found" = "0" ]; then
+    echo "  (未找到任何 .yaml 地图)" >&2
+  fi
+  echo "[提示] 搜索目录: $MAP_DIR" >&2
+  if [ -d "$MAPS_DIR" ]; then
+    echo "[提示]           $MAPS_DIR  (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml)" >&2
+  fi
 }
 
 # 地图名 -> 绝对路径; 也接受绝对路径。
+# 搜索顺序: 包内 map/simulation/<名字>.yaml, 再 maps/<名字>/<名字>.yaml、maps/<名字>.yaml。
 resolve_map() {
-  local value="$1"
+  local value="$1" name cand
   if [ -z "$value" ]; then
     return 1
   fi
@@ -253,16 +311,21 @@ resolve_map() {
     echo "[错误] 相对路径地图不受支持, 请用绝对路径: $value" >&2
     return 1
   fi
-  local name="$value"
+  name="$value"
   case "$name" in
     *.yaml) ;;
     *) name="${name}.yaml" ;;
   esac
-  if [ -f "$MAP_DIR/$name" ]; then
-    printf '%s\n' "$MAP_DIR/$name"
-    return 0
-  fi
-  echo "[错误] 未找到地图: $MAP_DIR/$name" >&2
+  for cand in \
+    "$MAP_DIR/$name" \
+    "$MAPS_DIR/${name%.yaml}/${name}" \
+    "$MAPS_DIR/$name"; do
+    if [ -f "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  echo "[错误] 未找到地图: $name" >&2
   list_maps
   return 1
 }
@@ -270,7 +333,7 @@ resolve_map() {
 if [ -z "$MAP_FILE" ]; then
   if [ -z "$MAP_NAME" ]; then
     for candidate in "${WORLD}_tunnel" "$WORLD"; do
-      if [ -f "$MAP_DIR/${candidate}.yaml" ]; then
+      if resolve_map "$candidate" >/dev/null 2>&1; then
         MAP_NAME="$candidate"
         break
       fi
@@ -372,6 +435,37 @@ cleanup_orphaned_gazebo() {
   WAIT_SECONDS="${GAZEBO_CLEANUP_WAIT_SECONDS:-5}" "$SCRIPT_DIR/kill_gzb.sh"
 }
 
+# ---------- 启动前清理残留 ----------
+# 每次启动前依次跑 kill_nav.sh / kill_gzb.sh / kill_rviz.sh: 上一次异常退出留下的
+# Gazebo (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的仿真抢 /clock、抢
+# RViz 窗口; Nav2 导航栈不清掉则更隐蔽 —— launch 会被下面的 start_once 判为"已在运行"
+# 而跳过, 于是节点继续用**旧参数**(膨胀半径/限速都是 configure 期读的)跑。
+# 跳过本步骤: PREKILL=0 ./script/start_sim_nav.sh
+prekill_leftovers() {
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "[dry-run] 跳过启动前清理 (kill_nav.sh / kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+  if [ "${PREKILL:-1}" = "0" ]; then
+    echo "[提示] PREKILL=0, 跳过启动前清理 (kill_nav.sh / kill_gzb.sh / kill_rviz.sh)。"
+    return 0
+  fi
+
+  echo "[清理] 启动前先结束残留的 Nav2 导航栈 / Gazebo / RViz 进程..."
+  local name
+  for name in kill_nav.sh kill_gzb.sh kill_rviz.sh; do
+    if [ ! -x "$SCRIPT_DIR/$name" ]; then
+      echo "[警告] 未找到可执行脚本: $SCRIPT_DIR/$name (跳过)" >&2
+      continue
+    fi
+    if ! "$SCRIPT_DIR/$name"; then
+      # 退出码非 0 只代表"还有进程没死透", 两个 kill 脚本该 SIGINT/SIGKILL 的都发过了;
+      # 这里只告警不阻断, 免得清理失败反而连启动都做不了。
+      echo "[警告] $SCRIPT_DIR/$name 退出码非 0: 可能有进程未能结束, 继续启动。" >&2
+    fi
+  done
+}
+
 # ---------- 终端 ----------
 open_term() {
   local title="$1"
@@ -423,6 +517,8 @@ esac
 printf '\n终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
 echo
 
+prekill_leftovers
+
 SIM_CMD="ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=${WORLD} gui:=${USE_GUI} run_immediately:=${RUN_IMMEDIATELY}"
 
 if [ "$DRY_RUN" != "1" ]; then
@@ -464,7 +560,7 @@ cat <<EOF
 
 启动流程处理完成。
   - 导航栈刚起时打印 "waiting for clock" 属正常, 等 Gazebo 起来后会自行继续。
-  - Gazebo 若不是直接运行(--run), 需要点播放后仿真才推进。
+  - Gazebo $( [ "$RUN_IMMEDIATELY" = "true" ] && echo "已直接开始运行(gz sim -r), 不用点播放。" || echo "以暂停启动(--no-run), 需要点播放后仿真才推进。" )
   - Gazebo 里车出现后, 在 RViz 用 "2D Goal Pose" / "Nav2 Goal" 下发目标点。
 
 速度链路检查 (新终端):

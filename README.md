@@ -83,7 +83,7 @@ srm_nav_27/
 └── dependencies.repos        vcs 依赖清单
 ```
 
-关于 `maps/` 与包内 `map/`、`pcd/` 的分工：**包内目录是随包发布的默认数据**（如 `srm27_nav_bringup/map/real/srm_site_01.*`），**工作区根 `maps/` 是现场采集的场地地图**。两者都可用 `--map` 指定。
+关于 `maps/` 与包内 `map/`、`pcd/` 的分工：**包内目录是随包发布的默认数据**（如 `srm27_nav_bringup/map/real/srm_site_01.*`），**工作区根 `maps/` 是现场采集的场地地图**。两者都可用 `--map`（仿真脚本为 `-m/--map`）指定；仿真与实车一键脚本都会先查包内目录、再查工作区根 `maps/`。
 
 ### 2.3 包清单
 
@@ -317,7 +317,8 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 `srm27_gazebo_simulator/srm_sim.launch.py` 的关键参数：`config_file`（默认 `config/srm_sim.yaml`）、
 `robot_name`（默认取配置里的 `red_standard_robot1`）、`world`、`world_sdf`、`gui`、
-`run_immediately`（默认 `false`，Gazebo 以暂停状态启动）。
+`run_immediately`（launch 自身默认 `false`，Gazebo 以暂停状态启动；
+`script/start_sim_nav.sh` 默认传 `true`，即起来就自动运行，`--no-run` 可改回暂停）。
 
 `srm27_chassis_control/srm_chassis_control.launch.py` 的关键参数：`namespace`、`use_sim_time`、
 `params_file`、`start_rotation_sender`、`rotation_mode`、`rotation_speed`、`rotation_offset`、
@@ -341,8 +342,9 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
 | `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
-| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`。替代 RViz Nav2 面板的途经点模式，避免 `navigate_through_poses` 的航点折返问题 |
+| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车**；实车/仿真通用（仿真命名空间自动探测，`--namespace` 可显式指定） |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
+| `script/kill_nav.sh` | 清理残留的 Nav2 导航栈（入口 launch 进程 + 整棵子进程树 + 命名空间匹配的孤儿节点）。改完膨胀半径/限速等 configure 期参数后必须重启导航栈，否则跑的还是旧值 |
 | `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
 
 实车：
@@ -358,6 +360,17 @@ map ──► odom ──► base_link ──┬─► front_mid360
 ./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令
 ./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
 ```
+
+> **实车链已同步仿真链的两项优化（2026-10-09，见 `docs/minco实车迁移实施记录(ai).md` §4.11）**
+> ① 两份实车 params（`config/real/nav2_params_srm.yaml`、`..._minco.yaml`）的
+> `default_nav_through_poses_bt_xml` 都换成 `navigate_through_poses_route_aware.xml`、
+> `plugin_lib_names` 都加了 `srm27_remove_passed_goals_bt_node`（多目标航点不再"回头折返"）；
+> ② `config/real/nav2_params_srm_minco.yaml` 的代价地图 `robot_radius` 0.33 → **0.40**
+> （= MINCO 硬要求的 0.38 + 0.02；Omni 那份不动，保持车体外廓 0.33 以便走窄道）。
+> 上机前**必须先** `colcon build --packages-select srm27_nav_plugins srm27_nav_bringup`：
+> 行为树由 bringup 提供、自研 BT 节点的 `.so` 由 plugins 提供，都是 `bt_navigator` 启动时
+> 按 `plugin_lib_names` 里的库名 `dlopen` 的。`start_real_nav.sh` 现在会在启动前检查这两样东西
+> 是否已在本工作区，缺了直接拒绝启动并提示重编哪个包。
 
 实车建图（SLAM）：
 
@@ -391,7 +404,8 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 ```bash
 ./script/start_waypoints.sh                       # 点选模式：RViz 点航点，再调 ~/start 开始
-./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点
+./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点（每个点都停车）
+./script/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式：除最后一个点外都不停车
 ./script/start_waypoints.sh --save-file m.yaml    # 只收集，~/save 存盘（教点模式）
 ./script/start_waypoints.sh --retry 2 --timeout 30 --on-failure skip --loop
 ```
@@ -414,6 +428,102 @@ fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门�
 因为它不经过 `RemovePassedGoals`，`xy_goal_tolerance` 与航点删除半径的耦合约束也随之消失，
 收紧到达容差不再有副作用。
 
+**途径点模式（`--pass-through`，默认关闭）**：把整个列表一次交给 `navigate_through_poses`——
+前 N-1 个点只是途径点，第 N 个是终点。全局路径一次规划穿过所有点，控制器只在**路径末端（终点）**
+做减速与到达判定（`OmniPidPursuitController` 的 `approach_velocity_scaling_dist` 也是按路径末点算的），
+所以**途径点不刹车，到终点才停**；终点精度与逐点模式相同（都用 `general_goal_checker`，`xy_goal_tolerance` 0.4 m）。
+用的是 `behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml`，其中
+`RemovePassedGoals(radius="0.35")` 与 `general_goal_checker.xy_goal_tolerance`、控制器前瞻
+（`min/max_lookahead_dist` 0.3/0.6）是一组耦合参数，要调一起调（xml 里有注释）。
+失败时按 `--retry` **重发还没开过的剩余点**（车已开过的点不会再被当成目标，靠 TF 跟踪，
+判定半径 `--passed-radius`，默认 0.8 m），retry 用完再按 `--on-failure abort/skip`；
+只剩终点一个点时自动退回 `NavigateToPose`，保证终点精确到达。
+
+**回头检测（`--backtrack-guard`，途径点模式默认开）**：2026-10-09 在空场仿真里实测发现，
+nav2 的 `RemovePassedGoals`（负责"车开过哪个途径点就把它从目标列表里删掉"，radius=0.35）
+在这套部署上**不生效**：车贴着途径点 0.05~0.34 m 开过去，点照样留着（车离 #3 只有 0.01 m 时全局
+路径里 #3 还在；2 点最小实验里车离第一个点 0.09 m，路径里仍带着"回头去它"的腿）。于是 3 Hz 重规划
+每次生成一条回头腿，车就在两个点之间来回绕（剩余距离 5.8↔9.3 m 反复跳，一个 7 点任务跑 93 s、
+9 次 recovery）。排除过：`map↔odom` 重合（launch 默认 0，实测恒等）、跟踪偏差（平均 0.05 m /
+最大 0.18 m）、控制器轨迹校验（0 次失败）。
+所以脚本不再指望 nav2 删点：反馈里的 `distance_remaining` 比"本段最好成绩"回退了
+`--backtrack-gain`（默认 1.0 m）**且车确实在远离它当前该去的那个点**（二次确认，见下）就判定折返
+→ 取消当前航段 → 按自己的进度（`--passed-radius` 默认 0.8 m）**只重发还没开过的点**，被卡住的点
+自然出局。同一个点连续 `--backtrack-limit`（默认 3）次无进展就交给常规失败策略，避免无限重发。
+`--no-backtrack-guard` 可关掉。代价：每次介入会让车停一下（本来就在原地折返，所以是净赚）。
+
+> **二次确认那半条判据不能删（2026-10-09 深夜实测）**：`distance_remaining` 自己会跳 —— 车开到
+> #1/#2 一带时它先从 ~10 m 掉到 **2.93 m**、再跳回 **7.85 m**（退了 4.9 m）。这是 nav2 对
+> `navigate_through_poses` 的反馈按"当前那条规划路径"算出来的，计划一变它就跳，跟用不用自研
+> BT 节点无关（同一起点、数值一模一样：`2.98 → 7.94`）。只看它就判折返的话**每个任务都会在
+> 同一个地方误报一次**，于是"取消航段 + 只重发脚本以为还没开过的点"把计划越切越短 ——
+> 现场看到的就是**"跑到第 2/3 个点就直冲最后那个终点"**。真折返有个抖动没有的特征：车在
+> **远离当前目标点**，所以脚本再要求"车到当前目标的距离比历史最近值远 ≥ gain 米"。
+
+**根治版：`RemovePassedGoalsByRoute`（自研 BT 节点，仿真 MINCO 已启用）**
+`srm27_nav_plugins` 里新增了一个行为树节点，替代 nav2 的 `RemovePassedGoals`。判据：
+① 车离该点 ≤ `radius`（0.6 m）——车就在它旁边；
+② "到过又走开"：车曾进到该点 `approach_radius`（1.0 m）以内（这个记忆只挂在**当前队首**上，
+队首换人就清零），现在离它 ≥ `route_margin`（0.3 m）**并且比下一个点更近**（即正朝路线后面走）
+—— 覆盖"路径被障碍膨胀推开、贴不到点上"的情况。两个条件必须同时满足。
+另外两条硬规矩：**只删列表头部的连续前缀**（非队首的点只有"车已经在它旁边"且前面都删掉时才一起删），
+**最后一个点（终点）永不删除**（到达仍由 goal checker 判定，于是"radius 必须小于 `xy_goal_tolerance`"
+那条耦合约束也不存在了）。
+
+> 为什么不用"按路线弧长投影"（2026-10-09 现场踩了两次，别再改回去）：8 字任务
+> `missions/227_1006_waypoint1.yaml` 里车起点离 #1 有 1.09 m、离**终点**只有 0.86 m（八字的头和尾
+> 几乎贴在一起），"整条路线取最近点"的全局投影会落到路线末端 ⇒ 判定"车已经走过整条路线" ⇒
+> 6 个途径点在 3.6 s 内被删光、车 7.4 s 冲终点，**八字跑不了**。改成"限窗 + 单调弧长进度"后
+> 又翻车：车抄近道从八字中间穿过去时，它到 #3→#4 那一小段的垂距只有 0.98 m（任何能容纳障碍绕行的
+> 走廊阈值都会放行），于是没到过的 #3 又被判成"走过"，第一瓣照样被切掉。现在只认"物理上靠近过"。
+
+配套改动：
+- 新行为树 `behavior_trees/navigate_through_poses_route_aware.xml`（只把那个节点换掉，其余与旧 BT 一致），
+  只有 `config/simulation/nav2_params_srm_minco.yaml` 指过去；同文件的 `plugin_lib_names` 里加了
+  `srm27_remove_passed_goals_bt_node`（nav2 的 bt_navigator 是按库名直接 `dlopen` 自注册的，
+  **编译时必须定义 `BT_PLUGIN_EXPORT`**，否则符号不导出、加载时报找不到节点）。
+- 同一份 params 的代价地图 `robot_radius` 由 0.45 回调到 **0.40**：planner_server 判"起点/终点这一格
+  是不是障碍"用的就是它，0.45 会把"车自己那一格"也判成障碍 → `Either of the start or goal pose are
+  an obstacle!`（实测：车开到 #2 一带时 planner 连续 8 次规划失败、控制器 `Failed to make progress`）
+  → BT 清代价地图重试（现场表现为在 #2/#3/#4 附近进 recovery）。车实际离障碍的距离由控制器决定
+  （≥0.38 m），所以两个需求把它夹在 0.38 附近，取 0.40。
+- 单元测试 `srm27_nav_plugins/test/test_remove_passed_goals_by_route.cpp`（16 个用例：两条判据各自的
+  正/反例、只删连续前缀、队列记忆不跨队首、无 TF 不乱删、连判两拍稳定，以及 4 个"八字被切掉"的实测
+  场景回归 + 末端节点"这棵 BT 用到的每个节点名都在已加载的库里注册过"）。
+- 其它三份参数文件（仿真 Omni、实车 Omni/MINCO）**本次未切换**，仍用 nav2 原版节点；要切的话改两处：
+  `default_nav_through_poses_bt_xml` 指向新 BT + `plugin_lib_names` 加自研库名。
+
+实测（空场仿真 `-w srm_empty -m 227_1006`，车起点离终点 #7 只有 0.88 m —— 就是以前跑不动的那个位置，
+用 `script/waypoint_mission.py --pass-through` 跑）：7 个航点一个 `navigate_through_poses` 下发，
+**0 次 recovery、0 次规划失败、0 次回头检测**，10.8 s 跑完，7 个点按顺序依次通过（最近通过距离
+0.13~0.44 m）；节点日志每拍只删 1 个点，删的时候车离它 0.36~0.60 m。
+（对比修复前：同一任务 7.4 s"成功"，6 个途径点在 3.6 s 内被删光，车直接冲终点。）
+
+仿真（Gazebo）里跑同一套航点：
+
+```bash
+./script/start_sim_nav.sh                        # 先起仿真 + 导航栈（默认命名空间 red_standard_robot1）
+./script/start_waypoints.sh --file m.yaml        # 命名空间自动探测，直接这样跑
+./script/start_waypoints.sh --file m.yaml --namespace red_standard_robot1   # 也可以显式指定
+./script/start_waypoints.sh --save-file m.yaml   # 仿真里教点，一样能存盘
+```
+
+- 仿真导航栈跑在命名空间下，导航 action 在 `/<ns>/navigate_to_pose`、`/<ns>/navigate_through_poses`，
+  TF 话题在 `/<ns>/tf`（nav2 与仿真两边的 launch 都有 `SetRemap("/tf", "tf")`）。
+  `start_waypoints.sh` 会从 `ros2 action list` 自动认出这个命名空间（根命名空间没有 `/navigate_to_pose`
+  而恰好有一个 `/<ns>/navigate_to_pose` 时），也可以 `--namespace` 显式给；显式给时不探测。
+  脚本只把**导航 action 与 TF** 挂到命名空间下，自己的服务仍在 `/waypoint_mission/*`，所以实车/仿真命令写法一致。
+- 点选不用改：`.rviz` 里 `2D Goal Pose`/`Publish Point` 填的是绝对话题 `/goal_pose`、`/clicked_point`
+  （仿真 RViz 也发这两个绝对话题），脚本同时订阅绝对名与 `/<ns>/` 名，谁发就收谁的。
+- 坐标系不用改：仿真 params 里 `global_frame=map`、`robot_base_frame=base_link`，没有加前缀。
+- 仿真里**不要**加 `--use-sim-time`：Gazebo 暂停时脚本会跟着 `/clock` 冻住（没有 `/clock` 时则静默不干活）；
+  本脚本只发导航目标、不依赖仿真时间，不加反而更稳。只有回放 rosbag 才需要它。
+- ⚠ `--pass-through` 依赖一组互相耦合的参数：共享 BT 的 `RemovePassedGoals radius=0.35` 必须**小于**
+  `general_goal_checker.xy_goal_tolerance`（否则终点会在判定到达前被删掉），又要**大于**车切内弯擦过途径点的
+  实际偏移量（否则擦过的点删不掉会折返），而后者由控制器前瞻决定。实车与仿真两份 Omni 参数现在都是
+  **容差 0.4 + 前瞻 0.6/0.3/0.6**，这组关系两边都成立（2026-10-09 之前仿真是 0.15 + 1.0/0.5/1.0，仿真里末端会判失败）。
+  改动其中任一项都要重新核对这三者的关系（详见 BT xml 里的注释）。
+
 > [!WARNING]
 > `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的
 > `cmd_vel` 就把控制量归零，启动时也先发零速帧。所以旧文档里"杀掉发速度的节点后车不会自己停"
@@ -427,7 +537,8 @@ fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门�
 ./script/start_sim_nav.sh -h                    # 打印脚本头部的完整用法
 ./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
 ./script/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty --run    # 空场 + Gazebo 直接开始运行
+./script/start_sim_nav.sh -w srm_empty          # 空场（Gazebo 默认起来就自动运行）
+./script/start_sim_nav.sh --no-run              # Gazebo 保持暂停，手动点播放
 ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
 ./script/start_sim_nav.sh --rotation-mode periodic \
     --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
@@ -437,9 +548,23 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 
 常用参数：`-w/--world`（`rmuc_2025` / `rmuc_2024` / `rmul_2024` / `rmul_2025` / `srm_empty`）、
 `-m/--map`（地图名或 YAML 绝对路径）、`-p/--params`（默认 `config/simulation/nav2_params_srm.yaml`）、
-`--gui/--no-gui`、`--run/--no-run`、`--smoother/--no-smoother`、`--rviz/--no-rviz`、
+`--gui/--no-gui`、`--run/--no-run`（默认 `--run`：Gazebo 直接开始运行）、
+`--smoother/--no-smoother`、`--rviz/--no-rviz`、
 `--rotation-mode/-speed/-offset/-amplitude/-period/-phase/-wave`、`--rotation/--no-rotation`、
 `--teleop/--no-teleop`。
+
+`-m` 只给名字时（不带 `/`）按以下顺序解析，全部落空会打印可用地图清单后退出：
+
+```text
+src/srm27_navigation/srm27_nav_bringup/map/simulation/<名字>.yaml   # 包内仿真地图
+maps/<名字>/<名字>.yaml                                              # 工作空间根目录 maps/ 下按目录存放
+maps/<名字>.yaml                                                     # 或直接平铺在 maps/ 下
+```
+
+`maps/` 是工作空间根目录下放现场采集 / SLAM 新出地图的地方，`start_sim_nav.sh` 与 `start_real_nav.sh`
+用的是同一套搜索规则，所以新图不必再拷进包内 `map/simulation/`。两个目录出现同名地图时以包内
+`map/simulation/` 优先，仿真默认地图不会被 `maps/` 里的同名文件顶掉；`maps/<目录>/<其它名字>.yaml`
+（例如 rosbag 的 `metadata.yaml`）不会被误当成地图。
 
 仿真脚本除了按顺序拉起各节点，还多了几层保护：`flock` 保证 Gazebo 单实例启动、清理上次 `ros2 launch`
 遗留的孤儿节点（避免新旧 `/clock` 同时发布）、地图与参数文件的存在性校验（`--params` 必须是绝对路径）、
@@ -586,7 +711,7 @@ ros2 launch srm27_bringup bringup.launch.py \
 ```bash
 ./script/start_sim_nav.sh                    # 默认 rmuc_2025 + 隧道地图，不自转
 ./script/start_sim_nav.sh -m rmuc_2025       # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty --run # 空场调试，Gazebo 直接开始运行
+./script/start_sim_nav.sh -w srm_empty      # 空场调试（Gazebo 起来就自动运行）
 ```
 
 等价的拆开手动启动方式：

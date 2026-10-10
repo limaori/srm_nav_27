@@ -337,6 +337,16 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
            << " 有效前缀=" << report.effective_prefix_duration
            << "s 需要=" << report.required_prefix_duration << "s"
            << " 最大速度=" << report.max_speed << " 最大加速度=" << report.max_acceleration;
+    // 覆盖不足是最难归因的一类失败：它取决于**当前速度**（制动要覆盖
+    // reaction_latency + v/a_brake）与轨迹的**实际总时长**，两者都不在上面那几个数里。
+    // 2026-10-09 实车日志只留下 "有效前缀=0.2611s 需要=0.6s"，无法区分
+    // "当前速度太大、制动覆盖不足" 与 "末端没有静止、不能按静止延拓"。
+    detail << " | 当前速度=" << (_request.state.valid ? _request.state.velocity.norm() : 0.0)
+           << "m/s 制动需覆盖=" << report.required_stop_time << "s"
+           << " 轨迹总时长=" << total << "s"
+           << " 末端速度=" << trajectory.endVelocity().norm()
+           << " 末端加速度=" << trajectory.endAcceleration().norm()
+           << " 末端静止=" << (report.ends_at_rest ? "true" : "false");
     result.reason = detail.str();
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
     return result;

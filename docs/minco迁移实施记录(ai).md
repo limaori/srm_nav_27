@@ -2,7 +2,9 @@
 
 > 依据：[迁移minco实施方案(ai).md](迁移minco实施方案%28ai%29.md)（下称“方案”）。
 > 本次范围：用户确认的 **P0 关键修复 + P1 数学核心与 ESDF + P2 低速 MINCO+MPC 闭环**。
-> **P3–P6 未实施**（JPS 前端、报告式双次 MPC 的完整验收、SE(2) 与窄通道仲裁、实车辨识与全场回归）。
+> **P3、P4、P6 未实施**（JPS 前端、报告式双次 MPC 的完整验收、SE(2) 与窄通道仲裁、全场回归）；
+> **P5 部分实施**（实车入口与离线预检已完成，实车辨识未做）—— 见
+> [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md)。
 > 状态标记：【已实现】代码完成并通过编译与单元测试；【未验证】没有在 Gazebo/实车上跑过；
 > 【未实施】本次没有做。
 
@@ -440,6 +442,31 @@ smoother `max_velocity [1.5, 1.5, 0.0]`、`max_accel [3.0, 3.0, 0.0]`（yaw 钳 
 1. `min_y_velocity_threshold`：实车 Omni 配置是 `0.5`，仿真 Omni 是 `0.001`。**没有把仿真改成 0.5** ——
    方案 §2.2 明确指出 0.5 会把全向底盘的低速横移反馈抹成零；实车 MINCO 配置已是 0.001。
    建议把实车 Omni 也改到 0.001，而不是把仿真改坏。
+   > **后续（2026-10-09）**：按"仿真参数跟实车一致"的决策，**仿真 Omni 已改回 `0.5`**，
+   > 同批把仿真 Omni 的 `general_goal_checker.xy_goal_tolerance`(0.15→0.4)、`FollowPath` 前瞻
+   > (1.0/0.5/1.0→0.6/0.3/0.6)、`min_approach_linear_velocity`(0.5→0.4)、
+   > `inflation_radius`(0.7→0.5，local+global)、`global_costmap.track_unknown_space`(→true)、
+   > `terrain_analysis_ext.vehicleHeight`(0.5→1.0) 也对齐了实车（见
+   > `config/simulation/nav2_params_srm.yaml` 头部表格）。上面"建议改实车"那条依然成立：
+   > 真要动实车 Omni 的 `min_y_velocity_threshold` 时，仿真这边要一起改。
+   >
+   > **再后续（2026-10-09 深夜，仿真 MINCO）**：把三个症状分开定位并修掉：
+   > ① "车走不动+来回跑" = MINCO 轨迹校验要求 0.38 m 净空而规划器只保证 0.33 m → 代价地图
+   > `robot_radius` 提到 0.40（先试过 0.45，但 0.45 会让 planner 把"车自己那一格"也判成障碍）；
+   > ② "途径点删不掉、剩余距离来回跳" = nav2 的 `RemovePassedGoals` 实测不生效 → 换自研 BT 节点
+   > `srm27_nav_plugins::RemovePassedGoalsByRoute`（判据 = "半径 0.6 m" 或 "到过 1.0 m 又走开且比
+   > 下一个点更近"；只删列表头部连续前缀；终点永不删），新 BT
+   > `behavior_trees/navigate_through_poses_route_aware.xml`；③ 脚本 `--backtrack-guard` 加
+   > 二次确认（`distance_remaining` 自己会跳：实测车到 #1/#2 一带 2.93→7.85 m，只看它每个任务
+   > 都会误报折返，把计划越切越短 → 现场表现为"跑到第 2/3 个点就直冲最后那个终点"）。
+   > 效果：一个 7 点任务从 93 s / 9 次 recovery 变成 10.8 s / 0 次。
+   >
+   > **同晚的插曲（值得记一笔）**：`RemovePassedGoalsByRoute` 第一版按"路线弧长投影"判"已通过"，
+   > 8 字任务直接跑不了 —— 227_1006_waypoint1 里车起点离 #1 有 1.09 m、离**终点**只有 0.86 m
+   > （八字头尾几乎贴在一起），"整条路线取最近点"的全局投影落到路线末端 ⇒ 判定"已经走过整条路线"
+   > ⇒ 6 个途径点 3.6 s 内删光、7.4 s 冲终点。第二版"限窗 + 单调弧长进度"仍翻车：车抄近道时到
+   > #3→#4 那一段的垂距只有 0.98 m，能容纳障碍绕行的走廊阈值都会放行 ⇒ 没到过的 #3 又被判成走过。
+   > 最终只认"物理上靠近过"这一种证据，并把这两个失败场景写成单元测试钉死（16 个用例）。
 2. `rotation_controller.wz_max` / `rotation_test_sender.wz_max` 仍是 `2.0`（仿真自转测试链路）。
    mux 已钳到 1.0，所以最终输出与实车一致；这两个是仿真测试工具，未动。
 3. 实车侧自身存在一处**不一致**（本次未改，属于实车配置问题）：
@@ -849,13 +876,31 @@ D400/D415，`model_builder.py`、`navigation_launch.py` 等既有文件同样报
    窗口；**不**降低全局 `required_prefix_duration`，也**不**因 `terminal` 标志跳过制动/净空检查。
 3. 不换 MPC 模型、不调大加速度、不动轮地摩擦系数、不加电机扭矩模型。
 
+## 6.9 第八轮：实车终点往返（2026-10-09 14:00 现场日志）
+
+现场日志与源码快照归档在 `log_diag/real_goal_20261009_140024/`（`REPORT.md`）。
+三条成因都在源码里可查，已修复：
+
+| 问题 | 位置 | 处理 |
+|---|---|---|
+| `computeVelocityCommands()` 丢弃传入的 `_goal_checker`，MPC 一直把车往精确末点修正；`terminal_reached_radius` 只在局部路径不足两点时生效；`at_goal_stop_` 无法覆盖仍然有效的旧轨迹 | `minco_mpc_controller.cpp` | 新增 `TerminalStop` 状态机，作为独立于轨迹存在性的停车分支：进入阈值取目标检查器的 xy 容差，一进容差立即给零速 |
+| 会话重置阈值取 1 mm（小于规划器末点抖动），同一个任务在终点前被反复判成“新目标”，清空轨迹/热启动/重规划状态 | `setPlan()` | 新增 `goal_change_tolerance`（默认 0.10 m）；会话重置日志带上原因/末点坐标/坐标系 |
+| 终点短停车轨迹被拒：`有效前缀=0.2611s 需要=0.6s`。根因是 `reaction_latency` 与 `state_timeout` 共用同一个参数，而实车为跟上 10 Hz 里程计把 `state_timeout` 提到了 0.25 | `makeValidatorConfig()` | 新增 `safety.reaction_latency`（0 = 退回 `state_timeout`，仿真行为不变）；实车取 0.10 s；失败日志补上当前速度/制动需覆盖时长/末端速度加速度/末端是否静止 |
+| 过期 twist：`sensor_scan_generation` 在差分不可用时沿用上一条有效速度，车已停但下游仍读到 0.3 m/s | 配置 | 两侧 `max_sample_gap` 由 0.20 放宽到 0.60 s，让长间隔给出真实差分速度（差商噪声正比于 1/dt）；**不**清零，避免让目标检查器在车还在动时判成功 |
+| 终点振荡：控制器一直追精确末点，冲过后反向修正 | `computeVelocityCommands()` 原先丢弃传入的 `_goal_checker` | 新增 `TerminalStop` 终点急停：一进目标检查器容差就立即给零速，控制器不再输出任何朝末点或背向末点的速度（不再要求先慢下来才接管，那等于永不接管） |
+| 到点判定依赖角速度：`nav2_controller::StoppedGoalChecker` 把 `|wz| <= rot_stopped_velocity` 与平动停稳写在同一组 AND 条件里，配置层无法只关一条；而导航既不产生也不控制 `wz`（自转归下位机），自转中的哨兵会永远判不了到点 | 新增插件 | 自建 `srm27_nav_plugins::OmniStoppedGoalChecker`：位置 + 航向 + **平动**停稳，角速度完全不参与；配置删掉 `rot_stopped_velocity` / `stateful` |
+
+新增测试：`test_terminal_stop.cpp`（10 用例）、`test_omni_stopped_goal_checker.cpp`（10 用例，含 pluginlib 按名字加载）、
+预检回归 `test_minco_real_preflight.py`（18 用例）。本次全量：**255 个功能用例全部通过**（4 个包）。
+详细说明与验收判据见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md) §4.6–§4.9。
+
 ## 7. 未完成项与后续阶段
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P3 | JPS 局部前端、报告式 `enable_report_fine_heuristic` 的实测标定、保留安全前缀的重规划（`kPrefixReuse` 目前只在策略层判定，未实现前缀拼接求解） | 【未实施】 |
 | P4 | 报告式双次 MPC 的完整验收（代码路径已有 `two_pass_reference`，默认关闭且未实测）、mux 的 `NAV_SE2` 等五模式仲裁、窄通道 `APPROACH_ALIGN/NARROW_TRACK/EXIT_HOLD` 状态机、Action 会话守护 | 【未实施】 |
-| P5 | 实车入口 `nav_srm_real_launch.py`、延迟/制动/外形的实车辨识、速度内环参数档案 | 【未实施】；当前实车 MINCO YAML 中的加速度、制动减速度、延迟均为**占位建议值** |
+| P5 | 实车入口、延迟/制动/外形的实车辨识、速度内环参数档案 | **部分实施** —— 见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md)：实车入口改用 `script/start_real_nav.sh --controller minco`（未新增 `nav_srm_real_launch.py`，理由见该文 §1/§8）、新增离线预检脚本、修掉实车 `/odometry` 10 Hz 对 `state_timeout` 的阻塞项；**延迟/制动/外形辨识仍未做**，实车 MINCO YAML 里这三项仍是占位/仿真标定值 |
 | P6 | 全场回归矩阵、性能报告、默认配置切换、移除 Omni 依赖 | 【未实施】 |
 
 其它已知缺口（诚实记录，不当作已完成）：
@@ -868,10 +913,19 @@ D400/D415，`model_builder.py`、`navigation_launch.py` 等既有文件同样报
 3. **窄通道几何**：阶段一使用圆形 0.33 m 包络，`yaw_policy.narrow_track` 的净空阈值只是占位；
    把雷达移到大 yaw 后的活动外参适配（方案 §5.5）完全没有实施。
 4. **仿真/实车验证**：Gazebo 仿真已跑过多轮（§6.1–§6.8 都是现场运行后的修复），但 P2 的验收场景
-   （空场前进/横移/斜移/停止/抢占）仍未逐项跑完；**实车一次都没跑过**。
+   （空场前进/横移/斜移/停止/抢占）仍未逐项跑完；**实车仍未跑过**（实车入口与验收清单见
+   [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md)）。
    MINCO YAML 里的加速度、制动减速度、延迟都是占位/仿真标定值（§6.8.1 的 `command_lookahead`
    明确按仿真标定），上实车前必须按方案 §10 的 P5 重新辨识。
+   实车侧的额外阻塞项：`/odometry` 在实车只有约 10 Hz（跟随雷达帧率），
+   沿用仿真的 `state_timeout: 0.10` 会让状态被周期性判为过期 —— 实车已改为 `0.25`。
 5. **TF 无超时查询的日志噪声**：`StateAdapter` 在 `planning_frame != odom` 且变换不可用时会
    调用 tf2 的 `lookupTransform`（超时为 0，不会阻塞），tf2 自身会打印一条 ERROR 级
    “需要专用线程”提示。正常配置下 `planning_frame == odom`，不会走到这条路径；
    若后续确需跨系查询，应当在控制器侧自行管理 TF 线程模型再处理这条日志。
+6. ~~仿真配置里到点几何不自洽~~【已修复】：仿真的
+   `general_goal_checker.xy_goal_tolerance` 原为 0.15，小于
+   `FollowPath.terminal_reached_radius = 0.20`，车在 0.15~0.20 m 处会被插件判成
+   `already_at_goal`（不算失败）但目标检查器不接受，随后进度检查器把目标判失败。
+   现已将实车与仿真的 `xy_goal_tolerance` 统一为 **0.50 m**，该不自洽消失；
+   详见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md) §4.4。
