@@ -279,6 +279,9 @@ rotation_controller
   `wz` 只取 `rotation_velocity` 并限到 `wz_max=2.0`；导航输入的 `angular.z` 一律丢弃并统计次数。
 - 默认限幅与超时：`vx_max=vy_max=v_max=0.5 m/s`、`wz_max=2.0 rad/s`、`nav_timeout=0.3 s`、
   `rotation_timeout=0.1 s`、合成频率 200 Hz。
+  ⚠ 这一组是**节点里的兜底默认值**；实际生效的限幅写在
+  `srm27_nav_bringup/config/simulation/speed_limits.yaml` 的 `srm_cmd_mux` 段，
+  由 launch 启动时合并进来（见 `docs/导航速度调试指南.md` §1/§2）。
 - 自转请求超时默认 0.5 s（`rotation_controller`），自转波形时间取仿真时间。
 - `srm_velocity_adapter` 超时默认 0.1 s、转发频率 200 Hz，含 NaN/Inf 时按零速处理并计数。
 - 急停/暂停/退出都会清零：`/<ns>/srm_cmd_mux/stop_all` 保持零输出直到 `resume_all`；

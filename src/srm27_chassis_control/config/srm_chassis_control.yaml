@@ -1,7 +1,13 @@
 # SRM 底盘控制链路配置。
 #
-# 本文件只描述 srm_cmd_mux / rotation_controller / rotation_test_sender 三个节点；
-# 速度限幅与超时的权威默认值也在这里，便于一次性调整测试范围。
+# 本文件只描述 srm_cmd_mux / rotation_controller / rotation_test_sender 三个节点。
+# 本文件里没有速度限幅：mux 与自转链的限幅（vx_max/vy_max/v_max/wz_max、
+# rotation_controller 的 wz_max/max_angular_accel）统一写在
+#   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
+# 的 srm_cmd_mux / rotation_controller 段，由 launch/nav_srm_simulation_launch.py
+# 在启动时合并进来（唯一来源，避免"改一处漏一处"）。
+# 直接单独 launch 本包的 launch 文件（不经过导航入口）时不会合并，届时
+# cmd_mux 会退回节点里的保守默认值 0.5 m/s——只适合单独调试自转/mux，不要用来跑导航。
 
 srm_cmd_mux:
   ros__parameters:
@@ -15,19 +21,10 @@ srm_cmd_mux:
     # 超时清零
     nav_timeout: 0.3                      # 导航输入超时（s）
     rotation_timeout: 0.1                 # 自转输入超时（s）
-    # 限幅（1.5 m/s，与实车一致；2026-10-09 的"仿真提速档 3.0"已撤销）
-    # 本 mux 只存在于仿真链路：实车导航链是 smoother(max_velocity 1.5) → fake_vel_transform →
-    # cmd_vel_chassis → 串口（srm27_nav_protocol max_vx/vy 2.5、max_wz 1.0），并不经过本 mux。
-    # 撤销提速的原因：3.0 m/s 下切内弯的横向偏移量超过行为树 RemovePassedGoals 的 radius=0.35，
-    # 途经点删不掉 → 3 Hz 重规划把路径绕回去 → 车在途径点之间来回跑
-    # （详见 config/simulation/nav2_params_srm_minco.yaml 文件头）。
-    # 必须与仿真 MINCO 的 FollowPath.limits.max_linear_speed 和 velocity_smoother 的
-    # 上下界保持一致；mux 是 cmd_vel_sim 的最后一道钳位，留低就会把速度整个吃掉。
-    # wz 仍取实车串口协议的 1.0 rad/s（自转链路独立，未改）。
-    vx_max: 1.5                           # 前向速度上限（m/s）
-    vy_max: 1.5                           # 左向速度上限（m/s）
-    v_max: 1.5                            # 平移合速度上限（m/s，按向量模长）
-    wz_max: 1.0                           # 自转角速度上限（rad/s，实车串口协议上限）
+    # 限幅：见文件头——vx_max / vy_max / v_max / wz_max 在 speed_limits.yaml 里。
+    # 本 mux 只存在于仿真链路：实车导航链是 smoother → fake_vel_transform →
+    # cmd_vel_chassis → 串口（srm27_nav_protocol），并不经过本 mux。
+    # 注意 mux 的限幅参数**没有**动态回调，改 speed_limits.yaml 后必须重启节点。
     diagnostics_period: 0.5               # 诊断发布周期（s）
 
 rotation_controller:
@@ -37,8 +34,8 @@ rotation_controller:
     output_topic: "rotation_velocity"
     publish_rate: 200.0
     request_timeout: 0.5                  # 自转请求超时（s）
-    max_angular_accel: 0.0                # 角加速度上限（rad/s^2），0 表示不限制
-    wz_max: 2.0
+    # 自转限幅（wz_max / max_angular_accel）同样在 speed_limits.yaml 的
+    # rotation_controller 段；自转不经导航链路，只有那一处能限住它。
     diagnostics_period: 0.5
 
 rotation_test_sender:

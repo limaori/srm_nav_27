@@ -671,10 +671,10 @@ controller_server:
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.0                             # 非全局目标时的末端速度（米/秒）
 
-      # 有效约束：与实车现有速度链（velocity_smoother max_velocity 3.5 / max_accel 3.0、
-      # 串口 max_wz 1.0）对齐。
-      # 2026-10-09: 平移上限由 1.50 提到 3.50（与 smoother 的 3.5 对齐）。预检(0 阻塞/7 警告)
-      # 对这条改动的判读如下，改这一行必须一起看：
+      # 限速已移到 config/real/speed_limits.yaml 的 controller_server@minco 段
+      # （唯一来源：与 Omni 变体、velocity_smoother 一起定义，改档位只改那一份；
+      #  这里再写 limits.* 会与覆盖层冲突并直接报错）。
+      # 当前 3.50 m/s 是 2026-10-09 的试验档，配套判读（改这一行必须一起看）：
       #   1) 校验硬门槛变成 3.50×1.02 = 3.57 → "max speed exceeds the effective limit" 这类
       #      判死基本消失（原门槛 1.53，实测状态速度到 1.66 就整条被丢）。
       #   2) 制动覆盖: 要求有效前缀 >= 0.10 + 3.50/3.00 = 1.267 s；horizon 2.0 m 下最短局部
@@ -686,13 +686,9 @@ controller_server:
       #      （横向半径 2.5 m）—— horizon、局部地图尺寸、a_max 要一起重新标。
       #   4) 终点急停: 预检给出的进入速度 = min(v_max, sqrt(2·a_plan·tol)) = 1.732 m/s，
       #      要求底盘可保证减速度 >= v_entry²/(4·tol) = 1.50 m/s²（当前按 3.0 占位估计）。
-      #   5) 串口层 max_vx/max_vy = 2.50 会静默削掉出口（对齐系数 0.8 下 0.8×3.5 = 2.8 > 2.5），
-      #      要真的放开速度必须同步放宽这两个值——那是安全限幅，需单独决定。
-      limits:                                           # 有效约束（必须与 smoother/串口一致）
-        max_linear_speed: 3.50                          # 平移合速度上限（米/秒）
-        max_linear_accel: 4.00                          # 平移合加速度上限（米/秒^2）
-        max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
-        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
+      #   5) 串口层 max_vx/max_vy = 3.5、对齐系数 0.80 → 实车出口最大 2.8 m/s，
+      #      所以实车链的这一档实际卡在**串口缩放**上，不在这里；要放开速度必须
+      #      同步决定 srm27_nav_protocol 的 linear_velocity_scale 与 max_vx/vy（安全限幅）。
 
       mpc:                                              # MPC 求解器
         model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
@@ -914,9 +910,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/real/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     service_name: "global_costmap/get_costmap"
     max_radius: 2.0
     visualize: false
@@ -940,16 +935,13 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # 禁止导航控制底盘自转 (ω 恒为 0)，底盘朝向由云台控制。
     # behavior_server 的 Spin 恢复行为不走本话题，不受影响。
-    # 与 FollowPath.limits 一致：初期测试档位为平移合速度 0.5 m/s。
+    # 速度上下界与加速度上限已移到 config/real/speed_limits.yaml 的
+    # velocity_smoother@minco 段（唯一来源）：max_velocity / min_velocity / max_accel /
+    # max_decel 都在那里，改档位只改那一份（本文件里再写会与覆盖层冲突并报错）。
     # 上下界对称；阶段一 yaw_policy.mode = xy_only 时导航命令的 wz 恒为 0，
-    # 启用 SE(2) 阶段时必须同步提高这里的 yaw 界并改用 NAV_SE2 仲裁模式。
-    max_velocity: [3.5, 3.5, 0.0]      # 最大速度[x,y,yaw]，与实车 Omni 配置一致
-    min_velocity: [-3.5, -3.5, 0.0]    # 最小速度[x,y,yaw]，与上界对称
-    # 2026-10-09: ±3.0 → ±4.0，与 FollowPath.limits.max_linear_accel 一起动。
-    # 不平移同步就会"规划按 4.0 算、实际按 3.0 执行"，MPC 会持续看到跟踪滞后
-    # （表现为指令与 odom 长期对不上，终点附近更明显）。
-    max_accel: [4.0, 4.0, 0.0]         # 最大加速度[x,y,yaw]
-    max_decel: [-4.0, -4.0, 0.0]       # 最大减速度[x,y,yaw]
+    # 启用 SE(2) 阶段时必须同步放开那里的 yaw 界并改用 NAV_SE2 仲裁模式。
+    # 平移加速度必须与控制器 limits.max_linear_accel 一起动，否则"规划按 4.0 算、
+    # 实际按 3.0 执行"，MPC 会持续看到跟踪滞后（终点附近尤其明显）。
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

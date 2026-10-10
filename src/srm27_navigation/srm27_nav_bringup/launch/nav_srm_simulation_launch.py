@@ -36,8 +36,9 @@
 """
 
 import os
+import sys
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -51,6 +52,16 @@ from launch.substitutions import LaunchConfiguration, PythonExpression, TextSubs
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import RewrittenYaml
+
+# 速度限幅的合并模块装在 lib/<包名> 下（scripts/srm_speed_limits.py），
+# 预检脚本与本 launch 共用同一份实现。
+_SCRIPTS_DIR = os.path.join(
+    get_package_prefix("srm27_nav_bringup"), "lib", "srm27_nav_bringup"
+)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from srm_speed_limits import SpeedLimitParams  # noqa: E402
 
 
 def _normalize_map_argument(context):
@@ -82,6 +93,7 @@ def generate_launch_description():
     prior_pcd_file = LaunchConfiguration("prior_pcd_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
+    speed_limits_file = LaunchConfiguration("speed_limits_file")
     autostart = LaunchConfiguration("autostart")
     use_composition = LaunchConfiguration("use_composition")
     use_respawn = LaunchConfiguration("use_respawn")
@@ -168,6 +180,7 @@ def generate_launch_description():
             "prior_pcd_file": prior_pcd_file,
             "use_sim_time": use_sim_time,
             "params_file": params_file,
+            "speed_limits_file": speed_limits_file,
             "autostart": autostart,
             "use_composition": use_composition,
             "use_respawn": use_respawn,
@@ -199,10 +212,17 @@ def generate_launch_description():
             # 都是这条链的权威值，必须与控制器规划用的 limits 一致。虽然该 launch 的默认值
             # 已经指向包内配置，但显式传递能让"参数从哪来"在启动命令里可见，也避免将来
             # 默认值变化时静默改变行为。
-            "params_file": os.path.join(
-                get_package_share_directory("srm27_chassis_control"),
-                "config",
-                "srm_chassis_control.yaml",
+            #
+            # 限速本身已经搬到 config/simulation/speed_limits.yaml（唯一来源），这里用
+            # SpeedLimitParams 在启动时把它合并进底盘配置：mux 与自转链拿到的是同一份
+            # 速度档位，改档位不用再回来改这个文件。
+            "params_file": SpeedLimitParams(
+                os.path.join(
+                    get_package_share_directory("srm27_chassis_control"),
+                    "config",
+                    "srm_chassis_control.yaml",
+                ),
+                speed_limits_file,
             ),
             "start_rotation_sender": start_rotation_sender,
             "rotation_mode": LaunchConfiguration("rotation_mode"),
@@ -298,6 +318,20 @@ def generate_launch_description():
                 bringup_dir, "config", "simulation", "nav2_params_srm.yaml"
             ),
             description="Full path to the ROS2 parameters file to use for all launched nodes",
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "speed_limits_file",
+            default_value=os.path.join(
+                bringup_dir, "config", "simulation", "speed_limits.yaml"
+            ),
+            description=(
+                "仿真速度限幅的唯一来源（控制器 / 平滑器 / mux / 恢复行为的限幅参数）。"
+                "启动时合并进 Nav2 参数文件与底盘控制参数文件；控制器、平滑器、mux 三层"
+                "的限速都在这里改。给空串可关闭合并，但那会退回插件默认值"
+                "（Omni v_linear_max 默认 3.0 m/s），只适合排查问题。"
+            ),
         )
     )
     ld.add_action(

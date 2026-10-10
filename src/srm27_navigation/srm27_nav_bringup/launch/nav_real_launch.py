@@ -14,8 +14,9 @@
 
 
 import os
+import sys
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
@@ -39,6 +40,7 @@ def generate_launch_description():
     prior_pcd_file = LaunchConfiguration("prior_pcd_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
+    speed_limits_file = LaunchConfiguration("speed_limits_file")
     autostart = LaunchConfiguration("autostart")
     use_composition = LaunchConfiguration("use_composition")
     use_respawn = LaunchConfiguration("use_respawn")
@@ -97,6 +99,17 @@ def generate_launch_description():
             bringup_dir, "config", "real", "nav2_params_upstream.yaml"
         ),
         description="Full path to the ROS2 parameters file to use for all launched nodes",
+    )
+
+    declare_speed_limits_file_cmd = DeclareLaunchArgument(
+        "speed_limits_file",
+        default_value=os.path.join(bringup_dir, "config", "real", "speed_limits.yaml"),
+        description=(
+            "实车速度限幅的唯一来源（控制器 / 平滑器 / 恢复行为的限幅参数）。"
+            "启动时合并进 Nav2 参数文件；串口限幅不在这里（见 srm27_nav_protocol）。"
+            "给空串可关闭合并，但那会退回插件默认值（Omni v_linear_max 默认 3.0 m/s），"
+            "上实车前不要这么用。"
+        ),
     )
 
     declare_autostart_cmd = DeclareLaunchArgument(
@@ -185,6 +198,7 @@ def generate_launch_description():
             "prior_pcd_file": prior_pcd_file,
             "use_sim_time": use_sim_time,
             "params_file": params_file,
+            "speed_limits_file": speed_limits_file,
             "autostart": autostart,
             "use_composition": use_composition,
             "use_respawn": use_respawn,
@@ -210,6 +224,7 @@ def generate_launch_description():
     ld.add_action(declare_prior_pcd_file_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
+    ld.add_action(declare_speed_limits_file_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)
     ld.add_action(declare_rviz_config_file_cmd)

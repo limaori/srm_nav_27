@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import os
+import sys
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -33,6 +34,16 @@ from launch_ros.actions import Node, PushRosNamespace, SetRemap
 from launch_ros.descriptions import ParameterFile
 from nav2_common.launch import ReplaceString, RewrittenYaml
 
+# 速度限幅的合并模块装在 lib/<包名> 下（scripts/srm_speed_limits.py），
+# 预检脚本与本 launch 共用同一份实现。
+_SCRIPTS_DIR = os.path.join(
+    get_package_prefix("srm27_nav_bringup"), "lib", "srm27_nav_bringup"
+)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from srm_speed_limits import AUTO, SpeedLimitParams  # noqa: E402
+
 
 def generate_launch_description():
     # Get the launch directory
@@ -46,6 +57,7 @@ def generate_launch_description():
     prior_pcd_file = LaunchConfiguration("prior_pcd_file")
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
+    speed_limits_file = LaunchConfiguration("speed_limits_file")
     autostart = LaunchConfiguration("autostart")
     use_composition = LaunchConfiguration("use_composition")
     use_respawn = LaunchConfiguration("use_respawn")
@@ -61,6 +73,14 @@ def generate_launch_description():
 
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {"use_sim_time": use_sim_time, "yaml_filename": map_yaml_file}
+
+    # 速度限幅（控制器 / 平滑器 / mux / 恢复行为）只写在 config/<mode>/speed_limits.yaml 里，
+    # 这里在启动时把它合并进参数文件：合并后的临时文件才是各节点真正读的那份。
+    # speed_limits_file 默认 "auto" = 参数文件同目录的 speed_limits.yaml（仅对
+    # nav2_params_srm*.yaml 生效）；传 "" 可关闭合并（见 scripts/srm_speed_limits.py）。
+    # ⚠ 必须放在 ReplaceString 之前：ReplaceString 会把参数文件先落到 /tmp 的临时文件上，
+    #   那时"按文件名认 mode"的自动查找就失效了（文件名不再是 nav2_params_srm*.yaml）。
+    params_file = SpeedLimitParams(params_file, speed_limits_file)
 
     # Only it applies when `namespace` is not empty.
     # '<robot_namespace>' keyword shall be replaced by 'namespace' launch argument
@@ -120,6 +140,18 @@ def generate_launch_description():
         "params_file",
         default_value=os.path.join(bringup_dir, "config", "simulation", "nav2_params.yaml"),
         description="Full path to the ROS2 parameters file to use for all launched nodes",
+    )
+
+    declare_speed_limits_file_cmd = DeclareLaunchArgument(
+        "speed_limits_file",
+        default_value=AUTO,
+        description=(
+            "速度限幅覆盖层（config/<mode>/speed_limits.yaml）。auto = 与参数文件同目录下"
+            "自动查找（只对 nav2_params_srm*.yaml 生效）；给绝对路径可显式指定。"
+            "覆盖层的值优先，且参数文件里不得重复定义同一键。"
+            "给空串可关闭合并，但那会退回插件默认值（Omni v_linear_max 默认 3.0 m/s，"
+            "比档位高），只适合排查问题。"
+        ),
     )
 
     declare_autostart_cmd = DeclareLaunchArgument(
@@ -258,6 +290,7 @@ def generate_launch_description():
     ld.add_action(declare_prior_pcd_file_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
+    ld.add_action(declare_speed_limits_file_cmd)
     ld.add_action(declare_autostart_cmd)
     ld.add_action(declare_use_composition_cmd)
     ld.add_action(declare_use_respawn_cmd)

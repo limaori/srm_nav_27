@@ -475,10 +475,9 @@ controller_server:
       use_rotate_to_heading_treshold: 0.1
       min_approach_linear_velocity: 0.4
       approach_velocity_scaling_dist: 1.0
-      v_linear_min: -1.5
-      v_linear_max: 1.5
-      v_angular_min: -1.0
-      v_angular_max: 1.0
+      # 平移/自转**限速**已移到 config/real/speed_limits.yaml（唯一来源）：
+      # 那里同时定义 Omni 与 MINCO 两个变体的控制器、平滑器限幅，改档位只改那一份。
+      # v_linear_max/min、v_angular_max/min 在本文件里不再写（写了会与覆盖层冲突并报错）。
       curvature_min: 0.4
       curvature_max: 0.7
       reduction_ratio_at_high_curvature: 0.5
@@ -642,9 +641,8 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/real/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     service_name: "global_costmap/get_costmap"
     max_radius: 2.0
     visualize: false
@@ -668,10 +666,9 @@ velocity_smoother:
     feedback: "OPEN_LOOP"
     # 禁止导航控制底盘自转 (ω 恒为 0)，底盘朝向由云台控制。
     # behavior_server 的 Spin 恢复行为不走本话题，不受影响。
-    max_velocity: [1.5, 1.5, 0.0]      # 硬上限: 首跑限速, 跑通后再放 (yaw 钳 0)
-    min_velocity: [-1.5, -1.5, 0.0]    # yaw 下限同样钳 0
-    max_accel: [3.0, 3.0, 0.0]         # 随限速等比降低
-    max_decel: [-3.0, -3.0, 0.0]      # 随限速等比降低
+    # 速度上下界与加速度上限已移到 config/real/speed_limits.yaml 的
+    # velocity_smoother@omni 段（唯一来源）：max_velocity / min_velocity / max_accel /
+    # max_decel 都在那里，改档位只改那一份（本文件里再写会与覆盖层冲突并报错）。
     odom_topic: "odometry"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

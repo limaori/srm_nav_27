@@ -13,6 +13,14 @@
 #
 #   导航只产生 vx/vy; mux 丢弃导航输入的 angular.z。自转由独立自转链路给出。
 #
+# 速度限幅 (控制器 / 平滑器 / mux / 恢复行为 / 自转) 的**唯一来源**:
+#   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
+#   launch 启动时把它合并进 nav2_params_srm*.yaml 与 srm_chassis_control.yaml,
+#   参数文件里不再写这些键 (两处都写且值不同 -> 启动直接报错)。
+#   改档位只改那一份; 改完用下面的自检看"卡住速度的是哪一层":
+#     python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py
+# 详见 docs/导航速度调试指南.md §1/§2。
+#
 # 模式说明 (本脚本只做导航):
 #   slam:=False  use_pcd_localization:=False
 #     -> 由 map_server 加载现成的 PGM/YAML 地图, map->odom 为静态 TF,

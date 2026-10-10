@@ -492,8 +492,8 @@ controller_server:
         # jerk 权重按实车限速标定：w_jerk=1.0 时最小 jerk 会严重压制速度
         # （实车档实测只跑到 1.116/1.5 m/s、2 m 起停用 3.36 s，理论时间最优 1.83 s）；
         # 降到 0.2 后 1.438/1.50 m/s、2.59 s，同时保留 jerk 惩罚、加速度只用掉 57% 上限。
-        w_jerk: 0.2                                     # jerk 能量权重
-        w_time: 10.0                                    # 总时长权重
+        w_jerk: 0.5                                     # jerk 能量权重
+        w_time: 20.0                                    # 总时长权重
         w_obstacle: 100.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
@@ -508,20 +508,17 @@ controller_server:
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
         optimization_clearance_margin: 0.05
         resample_step: 0.10                             # 前端弧长重采样步长（米）
-        corner_speed_ratio: 0.35                        # 转角处最低速度比例
+        corner_speed_ratio: 0.8                       # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.8                             # 仅视野截断且制动延伸已验证时保留；目标/地图/障碍边界停稳
 
-      # 有效约束：1.5 m/s，与实车一致（仿真提速档 3.0 已撤销，原因见文件头）。
-      # 已同步 velocity_smoother 上下界与 srm_cmd_mux 的 vx_max/vy_max/v_max；
-      # 实车链路同样是 smoother max_velocity 1.5 / max_accel 3.0、串口 max_wz 1.0。
+      # 限速已移到 config/simulation/speed_limits.yaml 的 controller_server@minco 段
+      # （唯一来源，与 Omni 变体、velocity_smoother、srm_cmd_mux 一起定义，改档位只改那一份）。
+      # 这里不再写 limits.*，写了会与覆盖层冲突并直接报错。
       # 阶段一 yaw_policy.mode = xy_only，MPC 的角速度权限实际为 0，max_angular_* 只对未来模式生效。
-      limits:                                           # 有效约束（必须与 mux/smoother 一致）
-        max_linear_speed: 1.50                          # 平移合速度上限（米/秒）
-        max_linear_accel: 3.00                          # 平移合加速度上限（米/秒^2）
-        max_angular_speed: 1.00                         # 角速度上限（弧度/秒）
-        max_angular_accel: 0.50                         # 角加速度上限（弧度/秒^2，实车无对应值）
+      # ⚠ 改限速前请连带看：planning_horizon（视野决定可达峰值 √(a·d)）、
+      #   safety.braking_deceleration（未辨识的制动能力）、w_jerk（会吃掉实际速度）。
 
       mpc:                                              # MPC 求解器
         model: velocity_integrator                     # 阶段一基线：z=[x,y,yaw], u=[vx,vy,wz]
@@ -731,9 +728,8 @@ behavior_server:
     robot_base_frame: base_link                      # 机器人坐标系
     transform_tolerance: 0.1                               # TF变换容差（秒）
     simulate_ahead_time: 2.0                               # 行为碰撞前向模拟时间（秒）
-    max_rotational_vel: 1.0                                # 最大旋转速度（弧度/秒）
-    min_rotational_vel: 0.4                                # 最小旋转速度（弧度/秒）
-    rotational_acc_lim: 3.2                                # 旋转加速度上限（弧度/秒²）
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/simulation/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     # params for srm27_nav_behaviors/BackUpFreeSpace
     service_name: "global_costmap/get_costmap"            # 后退行为查询全局地图的服务名
     max_radius: 2.0                                        # 搜索自由空间的最大半径（米）
@@ -756,13 +752,10 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 平移上限 1.5 m/s，与实车一致（仿真提速档 3.0 已撤销，原因见文件头）；
-    # 必须与 FollowPath.limits.max_linear_speed 及 srm_cmd_mux 的 vx_max/vy_max/v_max 一致。
-    # yaw 仍钳 0（阶段一导航命令 wz 本来也为 0，自转走 rotation_velocity 独立链路、不经 smoother）。
-    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
-    max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
-    max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
+    # 速度上下界与加速度上限已移到 config/simulation/speed_limits.yaml 的
+    # velocity_smoother@minco 段（唯一来源）。按分量钳位（scale_velocities: False），
+    # 斜向合速度由 srm_cmd_mux.v_max 兜底；yaw 分量只影响直通，导航 wz 恒为 0。
+    # 这一层低于控制器上限时会把提速整个吃掉——改档位请在 speed_limits.yaml 里一起改。
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]

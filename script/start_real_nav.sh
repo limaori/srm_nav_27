@@ -33,6 +33,15 @@
 #       MINCO 插件不发布 -> 永远走"控制器不活跃"分支, 行为不可预测。
 #   --controller omni 或显式 --fake-vel-transform 可以恢复旧链路。
 #
+# 速度限幅 (控制器 / 平滑器 / 恢复行为) 的**唯一来源**:
+#   src/srm27_navigation/srm27_nav_bringup/config/real/speed_limits.yaml
+#   launch 启动时把它合并进 nav2_params_srm*.yaml (参数文件里不再写这些键;
+#   两处都写且值不同 -> 启动直接报错)。串口限幅仍在 srm27_nav_protocol 自己的
+#   config 里 (而且限幅作用在 linear_velocity_scale 缩放**之后**)。
+#   改档位只改那一份; 改完先跑自检看"卡住速度的是哪一层", 再按下面的预检清单复核:
+#     python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py
+# 详见 docs/导航速度调试指南.md §1/§2。
+#
 # ⚠ 安全须知 (务必先读):
 #   1) srm27_nav_protocol 的发送线程按 send_rate_hz (默认 100 Hz) 重发"最近一次"收到的速度,
 #      并带 0.5 s 看门狗 (cmd_timeout_sec): cmd_vel_chassis 超过 0.5 s 没更新就把控制量归零。

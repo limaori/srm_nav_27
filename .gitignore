@@ -21,6 +21,7 @@
 
 # Local editor files
 .vscode/
+tmp/
 .idea/
 
 # Generated map and visualization artifacts
@@ -46,3 +47,4 @@ sentry_*/
 # .data 与 .posegraph；没有这两条否定规则，它们会在这里被静默丢弃）
 !maps/**/*.data
 !maps/**/*.posegraph
+

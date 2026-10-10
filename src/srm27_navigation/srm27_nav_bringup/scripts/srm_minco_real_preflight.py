@@ -55,6 +55,17 @@ except ImportError:  # pragma: no cover - 正常 ROS 环境一定有 PyYAML
     print("错误: 需要 PyYAML (python3-yaml)。", file=sys.stderr)
     sys.exit(2)
 
+# 速度限幅（控制器 / 平滑器 / 恢复行为）只写在 config/<mode>/speed_limits.yaml，
+# 预检必须看到**合并后**的值，否则会误报 "缺少 limits.max_linear_speed"。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import srm_speed_limits as speed_limits
+except ImportError as exc:  # pragma: no cover - 安装缺失才会发生
+    print(
+        "错误: 无法导入 srm_speed_limits（应与本脚本同目录）: %s" % exc, file=sys.stderr
+    )
+    sys.exit(2)
+
 MINCO_PLUGIN = "srm27_minco_controller::MincoMpcController"
 OMNI_PLUGIN = "srm27_omni_pid_controller::OmniPidPursuitController"
 
@@ -155,6 +166,15 @@ def _find_protocol_config(params_path):
 def load_yaml(path):
     with open(path, encoding="utf-8") as stream:
         return yaml.safe_load(stream)
+
+
+def load_params(path, speed_limits_file=speed_limits.AUTO):
+    """读参数文件并把速度限幅覆盖层合并进来（与 launch 完全同一条路径）。
+
+    限速已经不在参数文件里了（唯一来源是 config/<mode>/speed_limits.yaml），
+    所以"只看参数文件"会漏掉控制器/平滑器的实际上限。
+    """
+    return speed_limits.merge_params_files(path, speed_limits_file)
 
 
 # --------------------------------------------------------------------------
@@ -747,7 +767,8 @@ def check_real_sim_divergence(cfg, sim_path, report):
         report.add(NOTE, "未对照仿真配置", "找不到仿真 MINCO 参数文件, 跳过差异对照。")
         return
     try:
-        sim = load_yaml(sim_path)
+        # 仿真那份也要按同一规则合并速度限幅，否则"限速在覆盖层里"会被当成两边都没有。
+        sim = load_params(sim_path).merged
     except Exception as exc:  # pragma: no cover
         report.add(WARN, "读取仿真配置失败", str(exc))
         return
@@ -792,6 +813,9 @@ def main(argv=None):
                         help="srm27_nav_protocol 的配置 YAML; 缺省按工作空间布局自动查找")
     parser.add_argument("--sim-params", default=None,
                         help="仿真 MINCO 参数 YAML, 用于差异对照; 缺省按工作空间布局自动查找")
+    parser.add_argument("--speed-limits", default=speed_limits.AUTO,
+                        help="速度限幅覆盖层 (config/<mode>/speed_limits.yaml); "
+                             "默认 auto = 与参数文件同目录自动查找, 传空串则不合并")
     parser.add_argument("--expect-minco", action="store_true",
                         help="要求 FollowPath.plugin 必须是 MincoMpcController, 否则算阻塞问题")
     args = parser.parse_args(argv)
@@ -799,8 +823,14 @@ def main(argv=None):
     if not os.path.isfile(args.params):
         print("错误: 参数文件不存在: %s" % args.params, file=sys.stderr)
         return 2
+    overlay_path = None
     try:
-        cfg = load_yaml(args.params)
+        merged = load_params(args.params, args.speed_limits)
+        cfg = merged.merged
+        overlay_path = merged.overlay_path
+    except speed_limits.SpeedLimitError as exc:
+        print("错误: 速度限幅覆盖层无法合并: %s" % exc, file=sys.stderr)
+        return 2
     except Exception as exc:
         print("错误: 解析参数文件失败: %s" % exc, file=sys.stderr)
         return 2
@@ -821,6 +851,11 @@ def main(argv=None):
 
     report = Report()
     print("参数文件: %s" % os.path.abspath(args.params))
+    if overlay_path:
+        print("速度限幅: %s (已合并)" % overlay_path)
+        print(speed_limits.format_chain(cfg, indent="          "))
+    else:
+        print("速度限幅: 未合并覆盖层 (--speed-limits %r)" % args.speed_limits)
     if protocol_path:
         print("串口配置: %s" % protocol_path)
     if sim_path:

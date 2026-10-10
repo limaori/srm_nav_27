@@ -425,11 +425,10 @@ controller_server:
       use_rotate_to_heading_treshold: 0.1                # 旋转到路径方向阈值（弧度）
       min_approach_linear_velocity: 0.4                  # 接近目标时的最小线速度（米/秒）；与实车一致
       approach_velocity_scaling_dist: 1.0                # 开始减速的距离（米）
-      # 与实车 Omni 配置（real/nav2_params_srm.yaml）对齐，保证 A/B 对照使用同一套限速。
-      v_linear_min: -1.5                                 # 最小线速度（米/秒）
-      v_linear_max: 1.5                                  # 最大线速度（米/秒）
-      v_angular_min: -1.0                                # 最小角速度（弧度/秒）
-      v_angular_max: 1.0                                 # 最大角速度（弧度/秒）
+      # 平移/自转**限速**已移到 config/simulation/speed_limits.yaml（唯一来源）：
+      # 那里同时定义 Omni 与 MINCO 两个变体的控制器、平滑器、mux 限幅，改档位只改那一份。
+      # v_linear_max/min、v_angular_max/min 在本文件里不再写（写了会与覆盖层冲突并报错）。
+      # 下面这些"曲线"参数不是硬上限，仍留在这里（见 docs/导航速度调试指南.md §4.3）。
       curvature_min: 0.4                                # 低曲率阈值
       curvature_max: 0.7                                # 高曲率阈值
       reduction_ratio_at_high_curvature: 0.5            # 高曲率时的速度降低比例
@@ -598,9 +597,8 @@ behavior_server:
     robot_base_frame: base_link                      # 机器人坐标系
     transform_tolerance: 0.1                               # TF变换容差（秒）
     simulate_ahead_time: 2.0                               # 行为碰撞前向模拟时间（秒）
-    max_rotational_vel: 1.0                                # 最大旋转速度（弧度/秒）
-    min_rotational_vel: 0.4                                # 最小旋转速度（弧度/秒）
-    rotational_acc_lim: 3.2                                # 旋转加速度上限（弧度/秒²）
+    # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
+    # config/simulation/speed_limits.yaml 的 behavior_server 段（四份参数文件共用同一组值）。
     # params for srm27_nav_behaviors/BackUpFreeSpace
     service_name: "global_costmap/get_costmap"            # 后退行为查询全局地图的服务名
     max_radius: 2.0                                        # 搜索自由空间的最大半径（米）
@@ -623,11 +621,8 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 与实车 velocity_smoother 完全一致（实车 yaw 钳 0）。
-    max_velocity: [1.5, 1.5, 0.0]                          # 最大速度[x,y,yaw]
-    min_velocity: [-1.5, -1.5, 0.0]                        # 最小速度[x,y,yaw]
-    max_accel: [3.0, 3.0, 0.0]                             # 最大加速度[x,y,yaw]
-    max_decel: [-3.0, -3.0, 0.0]                           # 最大减速度[x,y,yaw]
+    # 速度上下界与加速度上限已移到 config/simulation/speed_limits.yaml（唯一来源）：
+    # max_velocity / min_velocity / max_accel / max_decel 都在那里按控制器变体分别定义。
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]
