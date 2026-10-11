@@ -427,7 +427,6 @@ resolve_prior_pcd() {
         echo "[错误] --prior-pcd 指定的文件不存在: $name" >&2; return 1 ;;
   esac
   for dir in ${PRIOR_PCD_SEARCH_DIRS//:/ } "$WS_DIR/pcd/simulation" \
-             "$WS_DIR/tmp/gicp_validation" \
              "$WS_DIR/src/srm27_navigation/srm27_nav_bringup/pcd/simulation"; do
     [ -n "$dir" ] || continue
     if [ -f "$dir/$name" ]; then printf '%s' "$dir/$name"; return 0; fi
@@ -440,8 +439,8 @@ resolve_prior_pcd() {
 if [ "$USE_GICP" = "true" ]; then
   if [ -z "$PRIOR_PCD_FILE" ]; then
     echo "[错误] --gicp 需要 --prior-pcd <先验点云 PCD>" >&2
-    echo "[提示] 仓库里 pcd/simulation 目前只有 readme, 需要先建图 (slam:=True) 或用" >&2
-    echo "       src/srm27_navigation/srm27_gicp_validation/tools/rebuild_prior_map.py 生成。" >&2
+    echo "[提示] 仓库里 pcd/simulation 目前只有 readme, 需要先建图 (slam:=True), 或用" >&2
+    echo "       script/pcd_to_mapframe.py 把建图产物处理成 GICP 要的坐标系后放进该目录。" >&2
     exit 1
   fi
   PRIOR_PCD_FILE="$(resolve_prior_pcd "$PRIOR_PCD_FILE")" || exit 1
