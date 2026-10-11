@@ -266,6 +266,23 @@ small_gicp_relocalization:
     robot_base_frame: "base_link"                       # 只用于把 RViz 的初始位姿从 base 系转到 odom 系
     lidar_frame: "base_link"                            # 与 base_frame 相同 => 先验点云原样使用（见"情况一"）
     init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]           # [x, y, z, roll, pitch, yaw]；含义是 map->odom 的初值
+    # ---- 冷启动大角度恢复 (2026-10-11 实车实测后开) ----
+    # 关着的时候, 每一次接受都要满足 max_rotation_step(默认 0.5 rad = 28.6°)。而冷启动时
+    # "上一个已接受位姿"就是 init_pose(恒等), 于是车只要放歪超过 28.6°, 正确解也会被这条
+    # 守卫拒掉 —— 而且因为从未接受、map->odom 从未发布, 位姿不会更新, 形成死锁:
+    # 实测 2026-10-11 20:38 那趟 69 次尝试 accepted=0 / initialized=0, 其中 4 次算出同一
+    # 正确解 (rmse 0.146 m / 内点率 99.7% / dpos 0.35 m) 全部只栽在 "step_rotation"
+    # (dangle 0.933 rad = 53.5° > 0.5 rad)。车确实是故意放歪的。
+    # 开启后: 冷启动阶段(未 initialized)放宽到 init_max_rotation_step(默认 1.75 rad = 100°)
+    # 与 init_max_translation_step(默认 2.0 m), 首次接受即 initialized, map->odom 从此刻起发布;
+    # 进入跟踪阶段后自动回到 max_rotation_step 的 0.5 rad 平滑限制。
+    # 质量门限(min_inlier_ratio / max_registration_rmse)不变, 错解照样被拒。
+    init_acceptance_enable: true                        # 默认 false; 关闭时 >28.6° 的初值误差无法恢复
+    # init_max_rotation_step: 1.75                      # 默认 1.75 rad = 100°; 放歪超过它就得用 --map-to-odom 给初值
+    # init_max_translation_step: 2.0                    # 默认 2.0 m
+    # 想更稳(但更贵)可再开 init_hypothesis_enable: 冷启动时在粗初值周围生成多个航向候选,
+    # 次优候选质量太接近就判歧义、继续观察, 不会误接受。单靠 init_acceptance 时若担心
+    # "接受了错的解", 就核对首次接受后的 map->base_link 是否与实车实际位置一致。
     # 先验 PCD 由 launch 的 prior_pcd_file 传入。
     # maps/srm_site_01.pcd（camera_init 原始点云）与地图差约 239°，不能直接用于重定位。
 

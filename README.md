@@ -341,7 +341,10 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | 脚本 | 用途 |
 | --- | --- |
 | `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
-| `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套 |
+| `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套；`--record-bag` 建图同时录原始点云/IMU（见 §5.2 三维 PCD 那节） |
+| `script/record_mapping_bag.sh` | **建图同步录包**（供 `start_real_slam.sh --record-bag` 调用，也可单独跑）：默认录 `/livox/lidar`(CustomMsg) + `/livox/imu` + `/tf` + `/tf_static`，自己等 `/livox/lidar` 出现、查磁盘余量、拒绝往非空目录混录，退出时检查 `metadata.yaml` 是否写出（缺了就是废包）。`--derived` 追加派生话题，`--map-name` 让目录名带上地图名 |
+| `script/build_pcd_from_bag.sh` | **从录包离线重建三维 PCD 并转成地图系**：起回放链路（`start_lidar:=False use_sim_time:=True save_pcd:=True`）→ 等 `/point_lio` **真的订阅上**点云/IMU → 放包 → SIGINT 让 Point-LIO 落盘 → 校验完整性 → 落 `maps/pcd/<名字>.pcd` → **自动调 `pcd_to_mapframe.py` 转出 `maps/pcd/<名字>_mapframe.pcd`**（`--no-mapframe` 可关）。跑之前会保住旧的 `point_lio/PCD/scans.pcd`，并拒绝在已有建图链路运行时启动 |
+| `script/pcd_to_mapframe.py` | **把 `camera_init` 系点云转到 pgm 地图系**，输出与输入同目录的 `<名字>_mapframe.pcd`：用墙点对占据栅格的最近邻评分三段式搜 (yaw, dx, dy)，只做平面变换不动 z，头部按 `srm_site_01.pcd` 的格式标注坐标系与所用变换，残差超门限或输入已转过时拒绝输出。不转系直接 `--reloc` 会让车差 90° 而 GICP 不报错 |
 | `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车**；实车/仿真通用（仿真命名空间自动探测，`--namespace` 可显式指定） |
 | `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
 | `script/kill_nav.sh` | 清理残留的 Nav2 导航栈（入口 launch 进程 + 整棵子进程树 + 命名空间匹配的孤儿节点）。改完膨胀半径/限速等 configure 期参数后必须重启导航栈，否则跑的还是旧值 |
@@ -351,15 +354,29 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 ```bash
 ./script/start_real_nav.sh -h                    # 打印脚本头部的完整用法
-./script/start_real_nav.sh                       # 默认 --lio + 自动选地图，启动全链路
+./script/start_real_nav.sh                       # 默认：MINCO 控制器 + --reloc + 自动选地图
 ./script/start_real_nav.sh -m xjl0914            # 指定地图（maps/ 下的名字）
-./script/start_real_nav.sh --reloc --prior-pcd /abs/map.pcd
+./script/start_real_nav.sh --prior-pcd /abs/prior.pcd   # 指定重定位先验点云
+./script/start_real_nav.sh --no-reloc            # 不用重定位：LIO + 静态 map->odom，不需要先验 PCD
+./script/start_real_nav.sh --lio                 # 同上（等价写法）
+./script/start_real_nav.sh -c omni               # 换回 Omni 控制器
 ./script/start_real_nav.sh --slam                # 边建图边导航
-./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系）
+./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系；只对静态 map->odom 生效）
 ./script/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
 ./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令
 ./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
 ```
+
+> **默认值（2026-10-11 改）**：控制器默认 **MINCO**（等价 `-c minco`，参数文件 `config/real/nav2_params_srm_minco.yaml`），
+> 定位方式默认 **`--reloc`**（`small_gicp` 与先验 PCD 配准后发布 `map→odom`）。两点后果要注意：
+> ① 默认启动**要求该地图存在先验点云** `maps/pcd/<地图名>_mapframe.pcd`，没有会直接报错并列出查找路径
+> （加 `--no-reloc` 或 `--lio` 可退回静态 `map->odom`，此时**不需要 PCD**，`map->odom` 取 `--map-to-odom`
+> 的值，默认 `0 0 0`，即车停在 map 原点朝 +x；`--no-reloc` 会压过环境变量 `START_RELOC=1`，
+> 与 `--reloc` 同时给时以命令行里靠后的那个为准）；② MINCO 会自动关闭 `fake_vel_transform`、把导航出口对准
+> `cmd_vel_chassis`，并跑一轮 MINCO 专属预检（插件可解析 / `use_sim_time` 一致 / 各层限速自洽 /
+> 里程计频率与 `state_timeout` 匹配）。`-c auto` 仍可用；**只给 `-p` 而不给 `-c`** 时按参数文件里的
+> `FollowPath.plugin` 自动判定，所以把 `-p` 指到 Omni 文件不会因默认值是 minco 而被拦下。
+> `--map-to-odom` 只影响静态 `map->odom`，在 `--reloc` 下不生效（重定位初值来自参数文件里的 `init_pose`）。
 
 > **实车链已同步仿真链的两项优化（2026-10-09，见 `docs/minco实车迁移实施记录(ai).md` §4.11）**
 > ① 两份实车 params（`config/real/nav2_params_srm.yaml`、`..._minco.yaml`）的
@@ -383,9 +400,11 @@ map ──► odom ──► base_link ──┬─► front_mid360
 ./script/start_real_slam.sh --save xjl0914 --force
 ./script/start_real_slam.sh --save xjl0914 --wait 30   # 服务还没就绪时最多等 30 秒
 ./script/start_real_slam.sh --save-pcd           # 另让 Point-LIO 退出时落盘累积点云
+./script/start_real_slam.sh --record-bag         # 建图同时录原始点云/IMU（事后能重建三维 PCD）
+./script/start_real_slam.sh --record-bag --bag-name xjl0914 --bag-derived
 ./script/start_real_slam.sh --list-maps          # 列出工作区现有地图
 ./script/start_real_slam.sh -n                   # 只解析并打印将执行的命令
-./script/start_real_slam.sh --stop               # 先发零速，再结束建图链路节点
+./script/start_real_slam.sh --stop               # 先发零速，再结束建图链路节点（录包进程先收尾再退）
 ```
 
 > [!IMPORTANT]
@@ -399,6 +418,121 @@ map ──► odom ──► base_link ──┬─► front_mid360
 服务是否可用用 `--no-daemon` 做全新发现来判断：ros2 daemon 缓存里会留下已退出节点的服务名，
 查缓存会得到假阳性，进而对着不存在的服务发请求并挂住。
 建图与导航都会发布 `map → odom`，两者不能并行；脚本启动前会检测导航栈并在冲突时拒绝启动。
+
+**三维 PCD 从哪来（`--record-bag`，2026-10-11 增）**：`maps/<名字>/` 那四件套里**没有点云**，
+转不出 PCD。`slam_toolbox` 只吃 `pointcloud_to_laserscan` 拍平后的 `/scan`
+（`mapping_params.yaml` 里 `scan_topic: /scan`，`livox_scan` 高度上切一条水平线，0.5–20 m、720 束），
+`.posegraph` / `.data` 是 OpenKarto 的 boost 序列化，内容只有 `karto::LocalizedRangeScan`、
+`karto::LaserRangeFinder`、`karto::Pose2` 这类二维对象。三维点云只有两个来源：
+① `--save-pcd` 让 Point-LIO 在**正常退出**时把累积点云写到
+`src/srm27_navigation/point_lio/PCD/scans.pcd`（文件名写死、覆盖式，`kill -9` 不落盘，参数不对只能重跑）；
+② `--record-bag` 建图时顺手录原始数据，事后随时离线重建。
+录包由 `script/record_mapping_bag.sh` 承担（`--record-bag` 只负责起一个标签页），默认录
+`/livox/lidar`（`xfer_format: 4` 下这里是 **CustomMsg**，带逐点 `offset_time`，重建点云的关键）
++ `/livox/imu` + `/tf` + `/tf_static`，约 240 MB/分钟；`--bag-derived` 追加
+`/cloud_registered`、`/aft_mapped_to_init`、`/scan`、`/map`（省掉重跑 LIO，体积翻倍）。
+落盘在 `log_diag/mapping_bag_<地图名|时间戳>/`（该目录整体被 `.gitignore` 忽略）。
+重建**一条命令就够**（`script/build_pcd_from_bag.sh`，2026-10-11 增）：它自己起回放链路、放包、SIGINT 收尾、
+校验 PCD 完整性，再**接着调用 `script/pcd_to_mapframe.py` 转成地图系**（默认开，`--no-mapframe` 关），
+最后在 `maps/pcd/` 下留两份：
+
+```bash
+./script/build_pcd_from_bag.sh --name 227_1011     # 一条命令
+
+# 产出:
+#   maps/pcd/227_1011.pcd            camera_init 系原始件 (Point-LIO 产物)
+#   maps/pcd/227_1011_mapframe.pcd   地图系成品  <- --reloc 用这份
+```
+
+```bash
+./script/build_pcd_from_bag.sh                  # 不给 --name 就从录包目录名自动推
+./script/build_pcd_from_bag.sh --no-mapframe    # 只重建, 不转系
+./script/build_pcd_from_bag.sh --map-yaml <路径> # 转系用别的地图 yaml
+./script/build_pcd_from_bag.sh --force          # 覆盖已存在的同名产出
+./script/build_pcd_from_bag.sh -n               # 只打印将执行的步骤
+```
+
+转系这步**默认自动做**是有原因的：不转就 `--reloc`，车会被定位到差约 90° 的姿态上而 GICP 不报错，
+这种事不该靠人记。地图 yaml（`maps/<名字>/<名字>.yaml`）不存在时（还没 `--save`）只告警并给出手动命令。
+
+它顺手挡掉的几个坑（都是手工做时踩到的）：先确认包里真有 `/livox/lidar` + `/livox/imu`（缺 IMU 的包
+Point-LIO 跑不起来）；把已存在的 `point_lio/PCD/scans.pcd` 改名成 `scans_<改动时间>.pcd` **保住**再跑
+（那条路径由编译期 `ROOT_DIR` 写死、是覆盖式的，之前就这么丢过一份）；拒绝在已有建图链路运行时启动
+（两个 `point_lio` 抢同一条 TF，出来的图必然错）；只回放 `/livox/lidar` + `/livox/imu`、**不回放 `/tf`**
+（链路自己会发 `odom->base_link` 与 `base_link->livox_frame`）。
+
+`start_real_nav.sh` 的 `--prior-pcd <名字>` 与 `--list-maps` 按下面的顺序找先验点云
+（`**_mapframe` 版必须排在原始件前面**，否则会静默挑到 `camera_init` 系那份）：
+
+```text
+maps/<名字>_mapframe.pcd          已转地图系（旧布局，仍兼容）
+maps/pcd/<名字>_mapframe.pcd      已转地图系（现行产品）
+maps/pcd/<名字>.pcd               Point-LIO camera_init 系原始件（退路；选中时会告警）
+maps/<名字>.pcd
+<包>/pcd/real/<名字>.pcd
+```
+
+手工重建（不用脚本时的等价步骤）：
+
+```bash
+# 1) 只放原始话题，别放 /tf —— 新起的链路自己会发 odom->base_link 与 base_link->livox_frame
+ros2 bag play log_diag/mapping_bag_xjl0914_<时间戳> --clock --topics /livox/lidar /livox/imu
+# 2) 另开终端：不起雷达驱动、用仿真时间、开落盘
+ros2 launch srm27_nav_bringup real_mapping_launch.py start_lidar:=False use_sim_time:=True save_pcd:=True
+# 3) 放完 Ctrl+C 正常退出 -> point_lio/PCD/scans.pcd（再自己挪到 maps/pcd/<名字>.pcd）
+```
+
+两种情况产出的 PCD 都在 Point-LIO 自己的 `camera_init` 系（建图起点雷达位姿），**不是** `map` 系；
+`--reloc` 需要的是地图系点云，两类点云的区别与实测偏差见
+`config/real/nav2_params_srm.yaml` 中 `small_gicp_relocalization` 那段的注释（情况一/情况二）。
+
+**从 `camera_init` 转到地图系（`script/pcd_to_mapframe.py`，2026-10-11 增）**：`camera_init` 与 pgm 地图系
+相差一个**固定的平面旋转**——雷达相对 `base_link` 装了 −90°（launch 的 `lidar_rpy`）。直接拿原始点云
+`--reloc`，车会被定位到差 90° 的姿态上，**而且 GICP 不会报错**。工具用「点云的墙点 vs pgm 的占据栅格」
+做最近邻评分，三段式搜 (yaw, dx, dy) 并烘进点云，输出**与输入同目录的 `<名字>_mapframe.pcd`**
+（原始件不动，两种点云靠名字区分系别）：
+
+```bash
+python3 script/pcd_to_mapframe.py \
+    --pcd maps/pcd/227_1011.pcd \
+    --map maps/227_1011/227_1011.yaml
+# -> maps/pcd/227_1011_mapframe.pcd
+# 实测 227_1011: identity 处中位最近邻 0.5533 m -> 搜出 yaw=-90.50°, dx=0.240, dy=-0.120
+#                -> 0.0261 m（参照 srm_site_01.pcd 与 srm_site_01.pgm 是 0.026 m）
+```
+
+搜出来的 **−90.50°** 与挂载外参的平面量（−90.00°）一致到 0.5° 以内，是自洽的。工具按仓库既有约定
+只做平面 yaw+平移、**不动 z**，并在头部标注坐标系与所用变换（与 `pcd/real/srm_site_01.pcd` 同一格式；
+`start_real_nav.sh` 启动时的"头部未标注坐标系"告警靠这个消掉）。名字里的 `_mapframe` 是名字那层的防线，
+头部注释是第二层：工具靠它识破"已经转过了"——对已转好的点云再跑一次会被**拒绝**（退出码 1，除非
+`--force`），防止再多转 90°。其它保护：残差超门限**拒绝输出**而不是给一个看着像成功的错文件；
+先写临时文件、回读复核通过才原子替换。
+
+搜索用的是「粗段找 yaw 候选 → 逐 yaw **连续**细化平移（坐标下降）→ yaw 也连续细化」。平移必须连续细化
+而不是走固定网格：评分面在 0.1 m 量级就非常陡（同一 yaw 下 (0.2,−0.1) 是 0.030 m，挪到网格节点
+(0.25,0.0) 就是 0.068 m），峰顶落在网格节点之间时所有 yaw 的分数会被拉平，yaw 分辨力丢失，
+搜索会锁在错的 yaw 上交出"看着能用、其实歪了 2°"的结果（这个 bug 实测出现过：−88.00°/0.0406 m，
+改成坐标下降后是 −90.50°/0.0261 m）。已知变换时可用 `--no-search --yaw/--dx/--dy` 跳过搜索，
+`--dry-run` 只评估。原始件随时可由录包重建：`./script/build_pcd_from_bag.sh --name <名字> --force`。
+
+⚠️ 每次重新 `build_pcd_from_bag.sh` 重建出来的点云**不是逐点可复现的**（实测两趟：1872905 点 /
+x 跨度 16.34 m vs 1892437 点 / 12.82 m，原点落点不同），所以**重建之后必须重新转一次系**，
+不能把旧的 `_mapframe.pcd` 配新的原始件用。`build_pcd_from_bag.sh` 现在会等 `/point_lio`
+**真的订阅上** `/livox/lidar` + `/livox/imu` 才放包（只等节点上线不够：DDS 的 reader-writer 匹配
+比节点上线晚，这时放包会静默丢掉开头几秒，原点就跑到轨迹中途去了）。
+
+于是实车重定位就是：
+
+```bash
+./script/start_real_nav.sh --reloc -m 227_1011 --prior-pcd 227_1011
+```
+
+`--prior-pcd 227_1011` 实测命中的是 `maps/pcd/227_1011_mapframe.pcd`（`_mapframe` 版在搜索顺序里
+排在原始件前面）。**不要把 `lidar_frame` 改回 `livox_imu`**：那是给"情况二"用的挂载变换，
+与已转系的地图系点云凑一起会再绕 Z 多转 −90°。
+录包必须靠 Ctrl+C 或 `--stop` 结束：rosbag2 只在 SIGINT 收尾时写 `metadata.yaml`，
+缺了它的目录无法回放（用 `ros2 bag reindex <目录>` 可救回）；`--stop` 会给录包进程单独留 30 秒收尾
+（`BAG_FINALIZE_WAIT` 可调）再强杀，并在结束时逐个报告 bag 目录是否完整。
 
 航点任务（导航栈起来之后用）：
 

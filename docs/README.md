@@ -4,6 +4,7 @@
 - [MID360 setup](mid360使用指南.md): network configuration and LiDAR bringup.
 - [哨兵导航 TF 与下位机数据接口](哨兵导航TF与下位机数据接口(ai).md): MID-360 安装与底盘自旋的四种组合、传感器分工及上下位机通信约定。(AI 生成)
 - [Simulation data flow](仿真数据流(ai).md): topics, frames and control paths in simulation (updated for the SRM chain). (AI 生成)
+- [GICP 初始重定位仿真验证方案](GICP初始重定位仿真验证方案.md): 地图与真值坐标对齐、固定数据与完整链路验证、初值误差/退化测试矩阵、启动命令、成功判据与验收指标。
 - [Controller comparison](局部规划器相关(ai).md): current controller and alternatives.
 - [MINCO + MPC 从零详解](MINCO与MPC局部规划控制器从零详解.md): 面向初学者，结合当前源码讲解 ESDF、MINCO 轨迹优化、MPC 跟踪、线程与速度链，附参数说明、仿真练习、排错方法和实现边界。
 - [MINCO migration implementation plan](迁移minco实施方案%28ai%29.md): 基于中科大 2025 技术报告、当前 SRM 代码和北理 navi_minco_bit 的迁移方案，含源码复用清单、接口修正、MINCO/MPC 设计、阶段验收与回退；测试从 0.5 m/s 起步，上限 1.0 m/s。(AI 生成)

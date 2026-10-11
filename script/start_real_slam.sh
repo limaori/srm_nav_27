@@ -43,6 +43,8 @@
 #   ./script/start_real_slam.sh --no-rviz             # 无图形界面 (无头 NUC)
 #   ./script/start_real_slam.sh --save 227_1006       # 另开终端: 存图到 maps/227_1006/
 #   ./script/start_real_slam.sh --save site01 --force # 同名地图已存在时覆盖
+#   ./script/start_real_slam.sh --record-bag          # 建图同时录原始点云/IMU (事后可重建 PCD)
+#   ./script/start_real_slam.sh --record-bag --bag-name 227_1010 --bag-derived
 #   ./script/start_real_slam.sh -n                    # 只解析并打印将执行的命令, 不启动
 #   ./script/start_real_slam.sh --list-maps           # 列出工作区现有地图
 #   ./script/start_real_slam.sh --stop                # 先发零速, 再结束建图链路节点
@@ -52,6 +54,10 @@
 #       --out-dir <绝对路径>    存图输出目录, 默认 <工作空间>/maps/<名字>
 #       --wait <秒>             存图前最多等 slam_toolbox 服务出现的秒数 (默认 8; 0 = 不等)
 #       --force                 存图时允许覆盖已存在的同名地图文件
+#       --record-bag            建图同时录包 (另起标签页跑 script/record_mapping_bag.sh)
+#       --bag-name <名字>       录包目录名带上地图名, 建议与稍后 --save 的名字一致
+#       --bag-derived           录包时追加 /cloud_registered /aft_mapped_to_init /scan /map
+#       --bag-out-dir <绝对路径> 录包输出目录, 默认 <工作空间>/log_diag/mapping_bag_<名字|时间戳>
 #   -p, --params <绝对路径>     建图参数, 默认 config/real/mapping_params.yaml
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
 #       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.15 -0.15 0.22)
@@ -70,6 +76,7 @@
 #
 # 环境变量 (同名参数均可由环境变量给默认值):
 #   SAVE_MAP_NAME MAP_OUT_DIR FORCE_SAVE WAIT_FOR_SLAM PARAMS_FILE LIDAR_CONFIG_FILE
+#   RECORD_BAG BAG_NAME BAG_DERIVED BAG_OUT_DIR BAG_TOPICS BAG_MIN_FREE_GB BAG_FINALIZE_WAIT
 #   LIDAR_XYZ LIDAR_RPY START_LIDAR USE_SIM_TIME SAVE_PCD
 #   USE_RVIZ USE_CHASSIS USE_JOY JOY_DEV
 #   OPEN_MODE(tab|window) TERMINAL DRY_RUN SRM27_WS_DIR PREKILL
@@ -86,6 +93,12 @@
 #   - 存图的 PCD (--save-pcd) 落在 src/srm27_navigation/point_lio/PCD/scans.pcd,
 #     它是 Point-LIO 自己坐标系下的原始点云, **不是**地图坐标系下的先验点云,
 #     直接拿给 --reloc 用会错位; 需要先按 docs 里的流程转到地图坐标系。
+#   - --record-bag 另起一个标签页跑 script/record_mapping_bag.sh, 录
+#     /livox/lidar(CustomMsg, 含逐点 offset_time) + /livox/imu + /tf + /tf_static,
+#     约 240 MB/分钟 (Mid-360 满速)。这是唯一能事后重建三维 PCD 的原始数据:
+#     slam_toolbox 的 .posegraph/.data 只存二维位姿图, 里面没有点云, 事后转不出来。
+#     结束录包必须走 Ctrl+C 或 --stop (rosbag2 靠 SIGINT 才会写 metadata.yaml,
+#     被 kill -9 的包无法回放)。
 # =============================================================
 
 set -euo pipefail
@@ -145,12 +158,32 @@ WAIT_FOR_SLAM="${WAIT_FOR_SLAM:-8}"
 SLAM_NODE_NAME="slam_toolbox"
 SLAM_SERVICE="/slam_toolbox/save_map"
 
+# 建图同步录包: 由 script/record_mapping_bag.sh 承担, 这里只决定要不要起、起在哪。
+# 录的是原始点云/IMU, 是事后重建三维 PCD 的唯一来源 (见文件头说明)。
+RECORD_BAG="${RECORD_BAG:-0}"
+BAG_NAME="${BAG_NAME:-}"
+BAG_DERIVED="${BAG_DERIVED:-0}"
+BAG_OUT_DIR="${BAG_OUT_DIR:-}"
+# --stop 等录包进程收尾 (写 metadata.yaml) 的最长秒数: 大包里这一步要刷缓存,
+# 5 秒那轮统一超时不够, 单独给它留时间, 免得被后面那轮 SIGKILL 打断收尾。
+BAG_FINALIZE_WAIT="${BAG_FINALIZE_WAIT:-30}"
+BAG_SCRIPT="$SCRIPT_DIR/record_mapping_bag.sh"
+
 # ---------- 进程识别 ----------
 # 方括号包住首字符, 避免 pgrep 匹配到脚本自身命令行。
 MAPPING_PATTERN='[r]eal_mapping_launch\.py'
 NAV_PATTERN='[n]av2_stack_launch\.py|[n]av_real_launch\.py|[n]av2_slam_launch\.py|[s]tart_real_nav\.sh'
 CHASSIS_PATTERN='[s]rm27_nav_protocol'
 JOY_PATTERN='[j]oy_teleop_launch\.py'
+# 录包进程有两条命令行要一起认: 外层是脚本本身, 内层是它 exec 出来的 ros2。
+# 两个都得收到 SIGINT —— 只杀掉外层脚本的话, ros2 会变成孤儿继续录,
+# 而 metadata.yaml 永远不写, 这一趟录制整体作废。
+BAG_PATTERNS=(
+  '[r]ecord_mapping_bag\.sh'
+  '[r]os2 bag record'
+)
+# 其中真正写 metadata.yaml 的那个: --stop 的收尾等待只认它。
+BAG_RECORDER_PATTERN='[r]os2 bag record'
 # 停止时按名字兜底清理 (launch 被强杀时子节点可能残留)。
 RESIDUAL_PATTERNS=(
   '[p]ointlio_mapping'
@@ -288,10 +321,37 @@ stop_mapping() {
   # 建图链路本来就要 Ctrl+C 结束; 这里先 SIGINT 让 Point-LIO / slam_toolbox
   # 走正常退出流程 (--save-pcd 的落盘就在这一步)。
   signal_matching INT "${patterns[@]}" || echo "[提示] 未发现正在运行的建图相关进程。"
+
+  # 录包进程单独处理: rosbag2 是在退出时才把内存里的缓存刷盘并写 metadata.yaml 的,
+  # 那一步可能要好几十秒 (几 GB 的包)。它混在下面那轮 5 秒超时里一定被 SIGKILL,
+  # 结果是拿到一堆无法回放的 db3。所以先给它 SIGINT, 等它自己退出再走后面那轮。
+  if signal_matching INT "${BAG_PATTERNS[@]}"; then
+    echo "[停止] 已通知录包进程收尾 (写 metadata.yaml), 最多等 ${BAG_FINALIZE_WAIT} 秒..."
+    local waited=0
+    # 只等真正的 ros2 录包进程 —— metadata.yaml 是它写的; 外层
+    # record_mapping_bag.sh 只是壳子, 它退没退跟包完不完整无关。
+    # 这里用 matching_pids 而不是 pgrep: 后者会把"命令行里恰好含 ros2 bag record
+    # 这几个字"的无关进程(比如调用者自己的 shell)也算成在跑, 于是白等满 30 秒
+    # 再打一条吓人的假警告。
+    while [ "$waited" -lt "$BAG_FINALIZE_WAIT" ]; do
+      if [ -z "$(matching_pids "$BAG_RECORDER_PATTERN")" ]; then
+        break
+      fi
+      sleep 2
+      waited=$((waited + 2))
+    done
+    if [ -n "$(matching_pids "$BAG_RECORDER_PATTERN")" ]; then
+      echo "[警告] 录包进程 ${BAG_FINALIZE_WAIT} 秒内没退完, 下面会被强制结束。" >&2
+      echo "[警告] 被强杀的 bag 缺 metadata.yaml 无法回放; 用 ls 检查 bag 目录再决定是否重录。" >&2
+    else
+      echo "[停止] 录包进程已收尾 (等待 ${waited} 秒)。"
+    fi
+  fi
+
   sleep 5
 
   local killed=0
-  if signal_matching KILL "${patterns[@]}"; then
+  if signal_matching KILL "${patterns[@]}" "${BAG_PATTERNS[@]}"; then
     killed=1
   fi
   if [ "$killed" = "1" ]; then
@@ -301,6 +361,16 @@ stop_mapping() {
   if is_true "$SAVE_PCD" && [ -f "$PCD_SAVE_PATH" ]; then
     echo "[停止] Point-LIO 累积点云: $PCD_SAVE_PATH"
   fi
+  # 录完必看的自检: 没有 metadata.yaml 的 bag 目录等于废数据, 别等回放时才发现。
+  local bag_dir
+  for bag_dir in "$WS_DIR"/log_diag/mapping_bag_*/; do
+    [ -d "$bag_dir" ] || continue
+    if [ -f "$bag_dir/metadata.yaml" ]; then
+      printf '[停止] 录包完整: %s (%s)\n' "$bag_dir" "$(du -sh "$bag_dir" 2>/dev/null | cut -f1)"
+    else
+      printf '[停止] 警告: %s 缺 metadata.yaml, 这个包无法回放。\n' "$bag_dir" >&2
+    fi
+  done
 }
 
 # ---------- 存图 ----------
@@ -507,6 +577,10 @@ while [ $# -gt 0 ]; do
     --out-dir)       MAP_OUT_DIR="${2:?--out-dir 需要绝对路径}"; shift 2 ;;
     --wait)          WAIT_FOR_SLAM="${2:?--wait 需要秒数}"; shift 2 ;;
     --force)         FORCE_SAVE=1; shift ;;
+    --record-bag)    RECORD_BAG=1; shift ;;
+    --bag-name)      BAG_NAME="${2:?--bag-name 需要名字}"; shift 2 ;;
+    --bag-derived)   BAG_DERIVED=1; shift ;;
+    --bag-out-dir)   BAG_OUT_DIR="${2:?--bag-out-dir 需要绝对路径}"; shift 2 ;;
     -p|--params)     PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
     --lidar-config)  LIDAR_CONFIG_FILE="${2:?--lidar-config 需要路径}"; shift 2 ;;
     --lidar-xyz)     LIDAR_XYZ="${2:?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
@@ -536,12 +610,32 @@ case "$WAIT_FOR_SLAM" in
     exit 2 ;;
 esac
 
+# 录包三个参数放在一起校验: 单独给 --bag-name / --bag-derived 而没加 --record-bag
+# 是最容易犯的错, 而且错得很安静 (什么都录不到), 所以这里直接拦下来。
+if ! is_true "$RECORD_BAG" && { [ -n "$BAG_NAME" ] || [ -n "$BAG_OUT_DIR" ] || is_true "$BAG_DERIVED"; }; then
+  echo "[错误] 给了 --bag-name/--bag-out-dir/--bag-derived, 但没有 --record-bag。" >&2
+  echo "[提示] 补上 --record-bag, 或去掉这些录包参数。" >&2
+  exit 2
+fi
+if [ -n "$BAG_OUT_DIR" ] && [ "${BAG_OUT_DIR#/}" = "$BAG_OUT_DIR" ]; then
+  echo "[错误] --bag-out-dir 必须是绝对路径: $BAG_OUT_DIR" >&2
+  exit 2
+fi
+if is_true "$RECORD_BAG" && [ ! -x "$BAG_SCRIPT" ]; then
+  echo "[错误] 录包脚本不可用: $BAG_SCRIPT" >&2
+  echo "[提示] 需要可执行权限: chmod +x $BAG_SCRIPT" >&2
+  exit 1
+fi
+
 # ---------- 默认路径 ----------
 [ -n "$PARAMS_FILE" ] || PARAMS_FILE="$MAP_PARAMS_DEFAULT"
 [ -n "$LIDAR_CONFIG_FILE" ] || LIDAR_CONFIG_FILE="$LIDAR_CONFIG_DEFAULT"
 
 # ---------- 存图分支 (与启动互斥: --save 只存图, 不起新节点) ----------
 if [ "$ACTION_START" = "0" ]; then
+  if is_true "$RECORD_BAG"; then
+    echo "[提示] --record-bag 只在启动链路时生效; 本次是 --save 分支, 不涉及录包。" >&2
+  fi
   save_map "$SAVE_MAP_NAME"
   exit 0
 fi
@@ -670,6 +764,36 @@ JOY_CMD="$JOY_CMD joy_vel:=cmd_vel_chassis"
 JOY_CMD="$JOY_CMD joy_dev:=$JOY_DEV"
 JOY_CMD="$JOY_CMD joy_config_file:=$(q "$JOY_PARAMS_DEFAULT")"
 
+# 录包: 真正的活都在 record_mapping_bag.sh 里 (等话题、查磁盘、收尾自检),
+# 这里只把参数拼好并单独占一个标签页。目录名由子脚本按时间戳自己生成
+# (它会把实际路径打在自己那一页上), 这里只做摘要显示。
+# 注意: 下面一律用 if 而不是 `[ ... ] && ...` —— 后者条件为假时整行退出码是 1,
+# 在 set -e 下会把脚本直接带崩。
+BAG_NAME_PREFIX=""
+if [ -n "$BAG_NAME" ]; then
+  BAG_NAME_PREFIX="${BAG_NAME}_"
+fi
+# BAG_BASE_DIR / BAG_TOPICS / BAG_MIN_FREE_GB 由子脚本自己从环境变量读 (子进程继承),
+# 这里只把摘要显示对: 用户显式给了基目录就照实说。
+BAG_DIR_DESC="${BAG_OUT_DIR:-${BAG_BASE_DIR:-$WS_DIR/log_diag}/mapping_bag_${BAG_NAME_PREFIX}<时间戳>}"
+
+BAG_CMD=""
+if is_true "$RECORD_BAG"; then
+  BAG_CMD="$(q "$BAG_SCRIPT")"
+  if [ -n "$BAG_NAME" ]; then
+    BAG_CMD="$BAG_CMD --map-name $(q "$BAG_NAME")"
+  fi
+  if [ -n "$BAG_OUT_DIR" ]; then
+    BAG_CMD="$BAG_CMD --out-dir $(q "$BAG_OUT_DIR")"
+  fi
+  if is_true "$BAG_DERIVED"; then
+    BAG_CMD="$BAG_CMD --derived"
+  fi
+  if is_true "$USE_SIM_TIME"; then
+    BAG_CMD="$BAG_CMD --use-sim-time"
+  fi
+fi
+
 # ---------- 启动摘要 ----------
 echo "================= SRM 实车 SLAM 建图 ================="
 echo "  工作空间    : $WS_DIR"
@@ -681,6 +805,12 @@ echo "  use_sim_time: $CLOCK_ARG    RViz: $(bool_arg "$USE_RVIZ")"
 echo "  底盘串口    : $([ "$USE_CHASSIS" = "1" ] && echo "启动 (cmd_vel_chassis -> 串口)" || echo "不启动")"
 echo "  手柄遥控    : $([ "$USE_JOY" = "1" ] && echo "启动 (设备 $JOY_DEV, 输出 cmd_vel_chassis)" || echo "不启动")"
 echo "  累积点云    : $([ "$SAVE_PCD" = "1" ] && echo "开 (退出时写 $PCD_SAVE_PATH)" || echo "关")"
+if is_true "$RECORD_BAG"; then
+  echo "  建图录包    : 开 -> $BAG_DIR_DESC"
+  echo "                $(if is_true "$BAG_DERIVED"; then echo "原始 + 派生话题, 约 480 MB/分钟"; else echo "原始话题, 约 240 MB/分钟"; fi)"
+else
+  echo "  建图录包    : 关 (想要事后能重建 PCD 就加 --record-bag)"
+fi
 echo "  TF 发布者   : map->odom = slam_toolbox, odom->base_link = sensor_scan_generation"
 echo "======================================================"
 
@@ -749,6 +879,10 @@ fi
 if is_true "$USE_JOY"; then
   add_step "SRM27 手柄遥控" "$JOY_PATTERN" "$JOY_CMD"
 fi
+if is_true "$RECORD_BAG"; then
+  # 录包放最后起: 让它排在雷达驱动之后, /livox/lidar 出现得更早, 少等一会儿。
+  add_step "SRM27 建图录包" "${BAG_PATTERNS[0]}" "$BAG_CMD"
+fi
 
 TOTAL=${#STEP_TITLES[@]}
 
@@ -789,8 +923,29 @@ cat <<EOF
   ./script/start_real_slam.sh --save <名字>          # -> maps/<名字>/{pgm,yaml,posegraph,data}
   ./script/start_real_slam.sh --save <名字> --force  # 同名已存在时覆盖
 
-结束 (先发零速再停节点):
+结束 (先发零速再停节点, 录包进程会先收尾再退):
   ./script/start_real_slam.sh --stop
+EOF
+
+if is_true "$RECORD_BAG"; then
+  cat <<EOF
+
+录包 (这次开了; 收尾只认 Ctrl+C / --stop):
+  - 原始数据落在 $BAG_DIR_DESC, 实际路径看"SRM27 建图录包"标签页第一行。
+  - 这四类文件里只有它能在事后重建三维 PCD: slam_toolbox 的 .posegraph/.data
+    是二维位姿图 (karto LocalizedRangeScan + Pose2), 没有点云, 转不出来。
+  - 别用 kill -9 / 直接关标签页: rosbag2 只在 SIGINT 收尾时写 metadata.yaml,
+    缺了它的 bag 无法回放, 整趟白录。
+  - 事后重建 PCD:
+      ros2 bag play <bag 目录> --clock --topics /livox/lidar /livox/imu
+      ros2 launch srm27_nav_bringup real_mapping_launch.py \\
+          start_lidar:=False use_sim_time:=True save_pcd:=True
+    放完 Ctrl+C 正常退出 -> src/srm27_navigation/point_lio/PCD/scans.pcd
+    注意它仍在 Point-LIO 的 camera_init 系, 不是 map 系, 重定位前还要转。
+EOF
+fi
+
+cat <<EOF
 
 链路自检 (新终端):
   cd '$WS_DIR' && source install/setup.bash
