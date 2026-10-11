@@ -354,15 +354,29 @@ map ──► odom ──► base_link ──┬─► front_mid360
 
 ```bash
 ./script/start_real_nav.sh -h                    # 打印脚本头部的完整用法
-./script/start_real_nav.sh                       # 默认 --lio + 自动选地图，启动全链路
+./script/start_real_nav.sh                       # 默认：MINCO 控制器 + --reloc + 自动选地图
 ./script/start_real_nav.sh -m xjl0914            # 指定地图（maps/ 下的名字）
-./script/start_real_nav.sh --reloc --prior-pcd /abs/map.pcd
+./script/start_real_nav.sh --prior-pcd /abs/prior.pcd   # 指定重定位先验点云
+./script/start_real_nav.sh --no-reloc            # 不用重定位：LIO + 静态 map->odom，不需要先验 PCD
+./script/start_real_nav.sh --lio                 # 同上（等价写法）
+./script/start_real_nav.sh -c omni               # 换回 Omni 控制器
 ./script/start_real_nav.sh --slam                # 边建图边导航
-./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系）
+./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系；只对静态 map->odom 生效）
 ./script/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
 ./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令
 ./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
 ```
+
+> **默认值（2026-10-11 改）**：控制器默认 **MINCO**（等价 `-c minco`，参数文件 `config/real/nav2_params_srm_minco.yaml`），
+> 定位方式默认 **`--reloc`**（`small_gicp` 与先验 PCD 配准后发布 `map→odom`）。两点后果要注意：
+> ① 默认启动**要求该地图存在先验点云** `maps/pcd/<地图名>_mapframe.pcd`，没有会直接报错并列出查找路径
+> （加 `--no-reloc` 或 `--lio` 可退回静态 `map->odom`，此时**不需要 PCD**，`map->odom` 取 `--map-to-odom`
+> 的值，默认 `0 0 0`，即车停在 map 原点朝 +x；`--no-reloc` 会压过环境变量 `START_RELOC=1`，
+> 与 `--reloc` 同时给时以命令行里靠后的那个为准）；② MINCO 会自动关闭 `fake_vel_transform`、把导航出口对准
+> `cmd_vel_chassis`，并跑一轮 MINCO 专属预检（插件可解析 / `use_sim_time` 一致 / 各层限速自洽 /
+> 里程计频率与 `state_timeout` 匹配）。`-c auto` 仍可用；**只给 `-p` 而不给 `-c`** 时按参数文件里的
+> `FollowPath.plugin` 自动判定，所以把 `-p` 指到 Omni 文件不会因默认值是 minco 而被拦下。
+> `--map-to-odom` 只影响静态 `map->odom`，在 `--reloc` 下不生效（重定位初值来自参数文件里的 `init_pose`）。
 
 > **实车链已同步仿真链的两项优化（2026-10-09，见 `docs/minco实车迁移实施记录(ai).md` §4.11）**
 > ① 两份实车 params（`config/real/nav2_params_srm.yaml`、`..._minco.yaml`）的
