@@ -467,7 +467,8 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 右侧该显示的属性里调一下：Size (m) = 0.03、Style = Points、Color Transformer = Intensity（这样地面/墙面按反射率分色，比纯白清楚得多）。
 
-### 实车重定位测试
+### 实车启动导航脚本（默认minco+mpc+初始gicp重定位）
 ```bash
-./script/start_real_nav.sh --reloc -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
+./script/start_real_nav.sh c -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
 ```
+### 记得改完代码要source install/setup.bash更新！！！
