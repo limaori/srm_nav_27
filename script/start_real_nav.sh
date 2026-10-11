@@ -124,6 +124,17 @@
 #     launch 专有的 $(find-pkg-share ...) 语法, ros2 run 不会展开, 故再用
 #     -p user_config_path:=<绝对路径> 覆盖一次。
 #   - map / prior_pcd_file / params_file 一律传绝对路径。
+#   - 先验点云按以下顺序找 (--prior-pcd 给名字时; 给绝对路径则直接用):
+#       maps/<名字>_mapframe.pcd            已转地图系 (旧布局, 仍兼容)
+#       maps/pcd/<名字>_mapframe.pcd        已转地图系 (现行产品: build_pcd_from_bag.sh
+#                                          从录包重建出 maps/pcd/<名字>.pcd, 再用
+#                                          script/pcd_to_mapframe.py 转出 _mapframe 版)
+#       maps/pcd/<名字>.pcd                 Point-LIO camera_init 系原始件 (退路, 会告警)
+#       maps/<名字>.pcd
+#       <包>/pcd/real/<名字>.pcd
+#     **_mapframe 版必须排在原始件前面**: 两者同名只差后缀, 顺序反了就会静默挑到
+#     camera_init 系那份, 车被定位在差 90° 的姿态上而 GICP 不报错。
+#     原始件被选中时下面那条"头部未标注坐标系"的告警会响 (它头部没有 frame 注释)。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
 #   - 想建图请只用 --slam; 建图与导航不要各起一套, 否则多个节点争抢 map->odom。
 # =============================================================
@@ -152,6 +163,9 @@ PKG_DIR="$(pick_dir "$PKG_INSTALL" "$PKG_SRC")"
 MAP_REAL_DIR="$PKG_DIR/map/real"
 MAP_SIM_DIR="$PKG_DIR/map/simulation"
 PCD_REAL_DIR="$PKG_DIR/pcd/real"
+# 实车先验点云的**主要落地点**: 由 script/build_pcd_from_bag.sh 从录包重建, 再用
+# script/pcd_to_mapframe.py 就地转成地图系 (每张图就这一份 <名字>.pcd, 名字即地图名)。
+PCD_MAPS_DIR="$WS_DIR/maps/pcd"
 SRC_MAP_REAL_DIR="$PKG_SRC/map/real"
 
 # ---------- 可配置项 ----------
@@ -288,6 +302,8 @@ resolve_prior_pcd() {
   fi
   for cand in \
     "$WS_DIR/maps/${name}_mapframe.pcd" \
+    "$PCD_MAPS_DIR/${name}_mapframe.pcd" \
+    "$PCD_MAPS_DIR/$name.pcd" \
     "$WS_DIR/maps/$name.pcd" \
     "$PCD_REAL_DIR/$name.pcd"; do
     [ -f "$cand" ] && { readlink -f "$cand"; return 0; }
@@ -305,8 +321,9 @@ list_maps() {
     case " $seen " in *" $name "*) continue ;; esac
     seen="$seen $name"
     pcd="无"
-    if [ -f "$WS_DIR/maps/${name}_mapframe.pcd" ] || [ -f "$WS_DIR/maps/$name.pcd" ] \
-       || [ -f "$PCD_REAL_DIR/$name.pcd" ]; then
+    if [ -f "$WS_DIR/maps/${name}_mapframe.pcd" ] || [ -f "$PCD_MAPS_DIR/${name}_mapframe.pcd" ] \
+       || [ -f "$PCD_MAPS_DIR/$name.pcd" ] \
+       || [ -f "$WS_DIR/maps/$name.pcd" ] || [ -f "$PCD_REAL_DIR/$name.pcd" ]; then
       pcd="有"
     fi
     printf '  %-22s 先验PCD: %-3s %s\n' "$name" "$pcd" "$f"
@@ -318,7 +335,10 @@ list_maps() {
   echo
   echo "地图目录  : $WS_DIR/maps  (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml)"
   echo "          : $MAP_REAL_DIR"
-  echo "先验PCD   : $WS_DIR/maps/<名字>_mapframe.pcd / $PCD_REAL_DIR/<名字>.pcd"
+  echo "先验PCD   : $PCD_MAPS_DIR/<名字>_mapframe.pcd   (已转地图系, --reloc 用这份)"
+  echo "          : $PCD_MAPS_DIR/<名字>.pcd            (Point-LIO camera_init 系原始件)"
+  echo "          : $WS_DIR/maps/<名字>_mapframe.pcd"
+  echo "          : $PCD_REAL_DIR/<名字>.pcd"
   echo "注意: --reloc 需要先验 PCD, 且该 PCD 必须已经在地图坐标系下。"
 }
 
@@ -807,10 +827,15 @@ if [ "$RELOC_ON" = "1" ]; then
   if ! PRIOR_PCD="$(resolve_prior_pcd "$PRIOR_PCD_FILE")"; then
     echo "[错误] 重定位需要先验点云, 但未找到: $PRIOR_PCD_FILE" >&2
     echo "[错误] 已查找: $WS_DIR/maps/${PRIOR_PCD_FILE}_mapframe.pcd" >&2
+    echo "[错误]           $PCD_MAPS_DIR/${PRIOR_PCD_FILE}_mapframe.pcd" >&2
+    echo "[错误]           $PCD_MAPS_DIR/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误]           $WS_DIR/maps/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误]           $PCD_REAL_DIR/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误] 用 --prior-pcd <路径> 指定。" >&2
     echo "[错误] 注意: PCD 必须在地图坐标系下, Point-LIO camera_init 系的原始点云不能直接用。" >&2
+    echo "[错误] 有录包的话可以先重建再转系:" >&2
+    echo "[错误]   ./script/build_pcd_from_bag.sh --name <名字>" >&2
+    echo "[错误]   python3 script/pcd_to_mapframe.py --pcd maps/pcd/<名字>.pcd --map maps/<名字>/<名字>.yaml" >&2
     exit 1
   fi
   # 坐标系自检: mapframe 版本头部有标注, camera_init 系的原始点云通常没有。

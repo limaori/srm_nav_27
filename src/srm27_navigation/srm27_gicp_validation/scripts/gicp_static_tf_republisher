@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""安装到 lib/<package>/ 的入口（ros2 run / ros2 launch 需要这个位置）。"""
+from srm27_gicp_validation.gicp_static_tf_republisher import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

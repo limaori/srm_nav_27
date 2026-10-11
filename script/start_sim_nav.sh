@@ -26,8 +26,17 @@
 #     -> 由 map_server 加载现成的 PGM/YAML 地图, map->odom 为静态 TF,
 #        odom->base_link 由 simulation_ground_truth_odometry 给出;
 #        不启动 slam_toolbox / Point-LIO / small_gicp_relocalization。
-#   如果需要建图或重定位, 请另起 launch (slam:=True 或 use_pcd_localization:=True),
-#   不要与本脚本同时运行, 否则多个节点会争抢 map->odom。
+#   如果需要建图, 请另起 launch (slam:=True), 不要与本脚本同时运行,
+#   否则多个节点会争抢 map->odom。
+#
+#   初始重定位 (GICP):
+#     --gicp 会把定位方式切成 use_pcd_localization:=True + use_lio_odometry:=False:
+#       * 先验 PCD 由 --prior-pcd 给出, 可由 --prior-pcd-manifest 自动推出初值;
+#       * odom->base_link 交给 sensor_scan_generation (launch 会覆盖参数文件里的
+#         publish_tf: False), 真值里程计适配器不再启动;
+#       * 本脚本不再发静态 map->odom, map->odom 只由 small_gicp_relocalization 发布。
+#     这样地图原点与先验点云原点一致时, 机器人出生即"已知位置"; 若已知先验点云相对
+#     出生点有偏移, 用 --init-pose 直接给 map->odom 初值 (方案 §5 的 T_M_O_init)。
 #
 # 用法:
 #   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认), 不自转
@@ -38,12 +47,25 @@
 #   ./script/start_sim_nav.sh --rotation-mode periodic \
 #       --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
 #   ./script/start_sim_nav.sh --no-rviz --no-rotation          # 只跑仿真 + 导航
+#   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
+#       --map /abs/prior.yaml --no-rotation                    # 用 GICP 初始重定位
+#   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
+#       --init-pose "0,0,0,0,0,0.5236"                         # 手动给 map->odom 初值
 #   DRY_RUN=1 ./script/start_sim_nav.sh                        # 只打印将执行的命令
 #
 # 参数:
 #   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
 #   -m, --map     <名字|绝对路径>  地图名(自动补 .yaml)或 YAML 绝对路径
 #   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params_srm.yaml
+#       --gicp / --no-gicp       是否用 GICP 初始重定位 (默认关闭 = 原来的静态地图模式)
+#       --prior-pcd <绝对路径>   先验点云 PCD (--gicp 时必填)
+#       --prior-pcd-manifest <绝对路径>
+#                                先验点云清单 (重建工具生成的 *_manifest.yaml);
+#                                给出时会按其中的 T_M_W 与 srm_sim.yaml 的出生点自动
+#                                推出 init_pose, 并在两者不一致时告警
+#       --init-pose "<x,y,z,roll,pitch,yaw>"
+#                                map->odom 初值, 等价于 nav2 参数的 init_pose;
+#                                给了就以它为准 (不再从 manifest 推导)
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
@@ -62,6 +84,7 @@
 #
 # 环境变量:
 #   WORLD MAP MAP_NAME PARAMS_FILE USE_RVIZ USE_GUI RUN_IMMEDIATELY
+#   USE_GICP PRIOR_PCD_FILE PRIOR_PCD_MANIFEST INIT_POSE GICP_RUN_ID
 #   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
 #   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
 #   START_ROTATION_SENDER ENABLE_TELEOP
@@ -119,6 +142,14 @@ ROTATION_SINE_WAVE="${ROTATION_SINE_WAVE:-true}"
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
+
+# 初始重定位 (GICP)
+USE_GICP="${USE_GICP:-0}"                    # 1 = use_pcd_localization:=True
+PRIOR_PCD_FILE="${PRIOR_PCD_FILE:-}"         # 先验点云 PCD 绝对路径
+PRIOR_PCD_MANIFEST="${PRIOR_PCD_MANIFEST:-}" # 先验点云清单 (可选, 用于推导 init_pose)
+PRIOR_PCD_SEARCH_DIRS="${PRIOR_PCD_SEARCH_DIRS:-}"  # 额外搜索目录 (冒号分隔)
+INIT_POSE="${INIT_POSE:-}"                   # map->odom 初值 [x,y,z,roll,pitch,yaw]
+GICP_RUN_ID="${GICP_RUN_ID:-}"               # 写入逐次诊断的试验编号
 WORLD_FROM_USER="${WORLD:-}"
 WORLD=""
 
@@ -136,6 +167,11 @@ while [ $# -gt 0 ]; do
     -w|--world)   WORLD_FROM_USER="${2:?--world 需要一个世界名}"; shift 2 ;;
     -m|--map)     MAP_FILE="${2:?--map 需要地图名或绝对路径}"; shift 2 ;;
     -p|--params)  PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
+    --gicp)       USE_GICP="1"; shift ;;
+    --no-gicp)    USE_GICP="0"; shift ;;
+    --prior-pcd)          PRIOR_PCD_FILE="${2:?--prior-pcd 需要绝对路径}"; shift 2 ;;
+    --prior-pcd-manifest) PRIOR_PCD_MANIFEST="${2:?--prior-pcd-manifest 需要绝对路径}"; shift 2 ;;
+    --init-pose)          INIT_POSE="${2:?--init-pose 需要 x,y,z,roll,pitch,yaw}"; shift 2 ;;
     --rviz)       USE_RVIZ="True"; shift ;;
     --no-rviz)    USE_RVIZ="False"; shift ;;
     --gui)        USE_GUI="true"; shift ;;
@@ -379,6 +415,136 @@ USE_GUI="$(norm_switch "$USE_GUI")"
 RUN_IMMEDIATELY="$(norm_switch "$RUN_IMMEDIATELY")"
 ROTATION_SINE_WAVE="$(norm_switch "$ROTATION_SINE_WAVE")"
 
+# ---------- 初始重定位 (GICP) 前置解析 ----------
+USE_GICP="$(norm_switch "${USE_GICP:-0}")"
+NAV_EXTRA_ARGS=""
+
+# 先验 PCD: 接受绝对路径, 或文件名(在若干常用目录里找)
+resolve_prior_pcd() {
+  local name="$1" dir
+  case "$name" in
+    /*) [ -f "$name" ] && { printf '%s' "$name"; return 0; }
+        echo "[错误] --prior-pcd 指定的文件不存在: $name" >&2; return 1 ;;
+  esac
+  for dir in ${PRIOR_PCD_SEARCH_DIRS//:/ } "$WS_DIR/pcd/simulation" \
+             "$WS_DIR/tmp/gicp_validation" \
+             "$WS_DIR/src/srm27_navigation/srm27_nav_bringup/pcd/simulation"; do
+    [ -n "$dir" ] || continue
+    if [ -f "$dir/$name" ]; then printf '%s' "$dir/$name"; return 0; fi
+    if [ -f "$dir/$name.pcd" ]; then printf '%s' "$dir/$name.pcd"; return 0; fi
+  done
+  echo "[错误] 找不到先验点云 '$name'。请用 --prior-pcd 给绝对路径。" >&2
+  return 1
+}
+
+if [ "$USE_GICP" = "true" ]; then
+  if [ -z "$PRIOR_PCD_FILE" ]; then
+    echo "[错误] --gicp 需要 --prior-pcd <先验点云 PCD>" >&2
+    echo "[提示] 仓库里 pcd/simulation 目前只有 readme, 需要先建图 (slam:=True) 或用" >&2
+    echo "       src/srm27_navigation/srm27_gicp_validation/tools/rebuild_prior_map.py 生成。" >&2
+    exit 1
+  fi
+  PRIOR_PCD_FILE="$(resolve_prior_pcd "$PRIOR_PCD_FILE")" || exit 1
+  [ -z "$PRIOR_PCD_MANIFEST" ] && [ -f "${PRIOR_PCD_FILE%.pcd}_manifest.yaml" ] && \
+    PRIOR_PCD_MANIFEST="${PRIOR_PCD_FILE%.pcd}_manifest.yaml"
+  printf -v PRIOR_PCD_Q '%q' "$PRIOR_PCD_FILE"
+  NAV_EXTRA_ARGS=" use_pcd_localization:=True use_lio_odometry:=False prior_pcd_file:=${PRIOR_PCD_Q}"
+  # 栅格图 (map_server 用) 与先验点云必须同原点, 但它不是定位输入;
+  # 若同目录正好有一张同名栅格图, 提示一下, 不自动替换 (避免顺序耦合)。
+  if [ -z "${MAP:-}" ] && [ -f "${PRIOR_PCD_FILE%.pcd}.yaml" ]; then
+    echo "[提示] 未显式 -m/--map, 当前用默认地图; 若先验点云是同源重建的, 建议:"
+    echo "       -m ${PRIOR_PCD_FILE%.pcd}.yaml"
+  fi
+else
+  NAV_EXTRA_ARGS=" use_pcd_localization:=False"
+fi
+
+# ---------- GICP: 由建图清单推导 map->odom 初值 ----------
+# init_pose 是 small_gicp_relocalization 的节点参数, 语义是 map->odom 初值,
+# 与"机器人在 map 里的位姿"不是同一个量 (方案 §2)。
+#   T_M_O_init = T_M_W · T_W_B(spawn)
+# odom 与地图在出生点同原点, 因此建图起点 == 出生点 时上面结果就是恒等矩阵;
+# 两者不同原点时, 这个式子正好给出让机器人出现在正确位置所需的初值。
+if [ "$USE_GICP" = "true" ]; then
+  read_spawn() {
+    python3 - "$SIM_CONFIG" "${1:-x}" <<'PYEOF'
+import sys
+import yaml
+cfg = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8"))
+print(cfg.get("robot", {}).get(sys.argv[2], ""))
+PYEOF
+  }
+  SPAWN_X="$(read_spawn x)"; SPAWN_Y="$(read_spawn y)"; SPAWN_YAW="$(read_spawn yaw)"
+
+  if [ -n "$PRIOR_PCD_MANIFEST" ] && [ -f "$PRIOR_PCD_MANIFEST" ]; then
+    if [ -z "$INIT_POSE" ]; then
+      INIT_POSE="$(python3 - "$PRIOR_PCD_MANIFEST" "$SPAWN_X" "$SPAWN_Y" "$SPAWN_YAW" <<'PYEOF'
+import math
+import sys
+import yaml
+
+manifest, sx, sy, syaw = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+rows = yaml.safe_load(open(manifest, "r", encoding="utf-8")).get("map_origin", {}).get("T_M_W")
+if not rows:
+    sys.exit("manifest 缺少 map_origin.T_M_W")
+
+
+def inverse(t):
+    out = [[t[j][i] for j in range(3)] + [0.0] for i in range(3)]
+    for i in range(3):
+        out[i][3] = -sum(t[j][i] * t[j][3] for j in range(3))
+    out.append([0.0, 0.0, 0.0, 1.0])
+    return out
+
+
+def mul(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+t_m_w = [[float(v) for v in row] for row in rows]
+c, s = math.cos(syaw), math.sin(syaw)
+t_w_b = [[c, -s, 0.0, sx], [s, c, 0.0, sy], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+# odom 原点就在出生点 (odom:=T_W_B(spawn)), 因此
+#   T_M_O_init = T_M_W · T_W_B(spawn) = inverse(T_W_B(spawn)) · T_W_B(spawn) = I
+# 建图起点与出生点一致时结果就是恒等; 不一致时正好给出需要的初值。
+t_m_o = mul(t_m_w, t_w_b)
+print("%.6f,%.6f,%.6f,0.0,0.0,%.6f" % (t_m_o[0][3], t_m_o[1][3], t_m_o[2][3],
+                                       math.atan2(t_m_o[1][0], t_m_o[0][0])))
+PYEOF
+)" || { echo "[错误] 从 $PRIOR_PCD_MANIFEST 推导 init_pose 失败。" >&2; exit 1; }
+      echo "[提示] 由 $(basename "$PRIOR_PCD_MANIFEST") 的 T_M_W 与出生点 (${SPAWN_X}, ${SPAWN_Y}, yaw ${SPAWN_YAW}) 推出 init_pose=${INIT_POSE}"
+    fi
+
+    MANIFEST_SPAWN="$(python3 - "$PRIOR_PCD_MANIFEST" <<'PYEOF'
+import sys
+import yaml
+spawn = yaml.safe_load(open(sys.argv[1], "r", encoding="utf-8")) \
+    .get("map_origin", {}).get("spawn_pose_world", {})
+print("%s|%s|%s" % (spawn.get("x", ""), spawn.get("y", ""), spawn.get("yaw", "")))
+PYEOF
+)"
+    MS_X="${MANIFEST_SPAWN%%|*}"
+    MS_REST="${MANIFEST_SPAWN#*|}"
+    MS_Y="${MS_REST%%|*}"
+    MS_YAW="${MS_REST#*|}"
+    if [ -n "$MS_X" ] && [ "$MS_X" != "$SPAWN_X" ]; then
+      echo "[警告] 先验点云清单的建图出生点是 (${MS_X}, ${MS_Y}, yaw ${MS_YAW}), 与 srm_sim.yaml 的" >&2
+      echo "       (${SPAWN_X}, ${SPAWN_Y}, yaw ${SPAWN_YAW}) 不一致: 两张图不是同一原点," >&2
+      echo "       RViz 里先验点云会与机器人错位。请把 srm_sim.yaml 的 robot.x/y/yaw 改回建图时的" >&2
+      echo "       位置, 或用 --init-pose 显式给 map->odom 初值。" >&2
+    fi
+  else
+    echo "[提示] 未找到先验点云清单 (${PRIOR_PCD_FILE%.pcd}_manifest.yaml), 无法自动推导 init_pose。"
+    echo "       将使用 init_pose=${INIT_POSE:-0,0,0,0,0,0}; 若先验点云原点不是出生点, 请在" >&2
+    echo "       RViz 用 2D Pose Estimate 给初值, 或用 --init-pose 指定。" >&2
+  fi
+
+  [ -z "$INIT_POSE" ] && INIT_POSE="0,0,0,0,0,0"
+  GICP_RUN_ID="${GICP_RUN_ID:-$(date +%Y%m%dT%H%M%S)}"
+fi
+
+
+
 if [ -n "$WORLD_FROM_USER" ] && [ -n "$GZ_WORLD" ] && [ "$GZ_WORLD" != "$WORLD" ]; then
   echo "[提示] 世界由 srm_sim.yaml 的 '$GZ_WORLD' 覆盖为 '$WORLD'。"
 fi
@@ -504,7 +670,15 @@ printf '========== SRM27 仿真 NAV 导航 (世界: %s) ==========\n' "$WORLD"
 printf '工作空间  : %s\n' "$WS_DIR"
 printf '地图      : %s\n' "$MAP_FILE"
 printf '参数文件  : %s\n' "$PARAMS_FILE"
-printf '定位方式  : 静态地图 + 仿真真值里程计 (slam:=False, use_pcd_localization:=False)\n'
+if [ "$USE_GICP" = "true" ]; then
+  printf '定位方式  : GICP 初始重定位 (slam:=False, use_pcd_localization:=True, use_lio_odometry:=False)\n'
+  printf '先验点云  : %s\n' "$PRIOR_PCD_FILE"
+  [ -n "$PRIOR_PCD_MANIFEST" ] && printf '点云清单  : %s\n' "$PRIOR_PCD_MANIFEST"
+  printf 'map->odom 初值: [%s]\n' "$INIT_POSE"
+  printf '试验编号  : %s (写入逐次诊断 run_id)\n' "$GICP_RUN_ID"
+else
+  printf '定位方式  : 静态地图 + 仿真真值里程计 (slam:=False, use_pcd_localization:=False)\n'
+fi
 printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
 printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
 printf '自转测试  : 发送器 %s  模式 %s' "$START_ROTATION_SENDER" "$ROTATION_MODE"
@@ -543,7 +717,39 @@ fi
 echo "[2/3] 启动速度合成 + 导航栈 + RViz..."
 MAP_FILE_Q="$(printf '%q' "$MAP_FILE")"
 PARAMS_FILE_Q="$(printf '%q' "$PARAMS_FILE")"
-NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False use_pcd_localization:=False use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE}"
+
+# GICP 模式下把 init_pose 写进一份临时参数副本: init_pose 是 small_gicp_relocalization
+# 的节点参数, launch 入口没有为它开独立 launch 参数, 直接改副本最省事且可追溯。
+if [ "$USE_GICP" = "true" ]; then
+  GICP_PARAMS_FILE="${TMPDIR:-/tmp}/gicp_nav2_params_$$.yaml"
+  cp "$PARAMS_FILE" "$GICP_PARAMS_FILE"
+  python3 - "$GICP_PARAMS_FILE" "$INIT_POSE" "$GICP_RUN_ID" <<'PYEOF'
+import sys
+import yaml
+
+path, init_pose, run_id = sys.argv[1], sys.argv[2], sys.argv[3]
+values = [float(v) for v in init_pose.split(",")]
+if len(values) != 6:
+    sys.exit("init_pose 需要 6 个数: x,y,z,roll,pitch,yaw")
+text = open(path, "r", encoding="utf-8").read()
+data = yaml.safe_load(text)
+node = None
+for key in data:
+    if key.split("/")[-1] == "small_gicp_relocalization":
+        node = data[key]
+        break
+if node is None:
+    sys.exit("参数文件里找不到 small_gicp_relocalization 段")
+node.setdefault("ros__parameters", {})["init_pose"] = values
+node["ros__parameters"]["run_id"] = run_id
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(data, stream, allow_unicode=True, sort_keys=False)
+print(f"[提示] init_pose={values} run_id={run_id} 已写入临时参数副本 {path}")
+PYEOF
+  PARAMS_FILE_Q="$(printf '%q' "$GICP_PARAMS_FILE")"
+  echo "[提示] GICP 参数副本: $GICP_PARAMS_FILE"
+fi
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE}"
 start_once "SRM27 导航 + 速度合成 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ "$ENABLE_TELEOP" = "1" ]; then

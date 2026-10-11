@@ -442,3 +442,32 @@ script/start_sim_nav.sh -w srm_empty -m 227_1006
 ```bash
 ./script/start_waypoints.sh --file missions/227_1006_waypoint1.yaml --pass-through
 ```
+# 2026-10-11
+### slam建图录制rosbag
+```bash
+./script/start_real_slam.sh --record-bag --bag-name 地图名
+# 另起终端
+./script/start_real_slam.sh --save 地图名
+./script/start_real_slam.sh --stop
+```
+### 通过rosbag重建pcd（默认读最新的rosbag，且自动转到map系）
+```bash
+./script/build_pcd_from_bag.sh --name pcd地图名
+```
+### 可视化pcd
+```bash
+source /home/srm/srm_nav_27/install/setup.bash
+ros2 run pcl_ros pcd_to_pointcloud --ros-args \
+    -p file_name:=/home/srm/srm_nav_27/maps/pcd/地图名.pcd \
+    -p tf_frame:=camera_init
+```
+再打开rviz,终端输入rviz2
+左侧 Global Options → Fixed Frame：把默认的 map 改成 camera_init。
+左下 Add → 选 By topic 页 → 找 /cloud_pcd → PointCloud2 → OK。
+
+右侧该显示的属性里调一下：Size (m) = 0.03、Style = Points、Color Transformer = Intensity（这样地面/墙面按反射率分色，比纯白清楚得多）。
+
+### 实车重定位测试
+```bash
+./script/start_real_nav.sh --reloc -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
+```
