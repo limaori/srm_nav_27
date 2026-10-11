@@ -53,10 +53,12 @@
 #   3) 底盘能动之后, 先在 RViz 用很小的目标点试一次, 确认车头方向/正负号都对。
 #
 # 用法:
-#   ./script/start_real_nav.sh                       # 默认 --lio + Omni 控制器, 启动全部
+#   ./script/start_real_nav.sh                       # 默认 --reloc + MINCO 控制器, 启动全部
 #   ./script/start_real_nav.sh --controller minco    # MINCO + MPC 控制器 (默认关闭 fake_vel_transform)
 #   ./script/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
-#   ./script/start_real_nav.sh --reloc --prior-pcd /abs/map.pcd
+#   ./script/start_real_nav.sh --prior-pcd /abs/map.pcd      # 指定重定位先验点云
+#   ./script/start_real_nav.sh --no-reloc                    # 不用重定位: LIO + 静态 map->odom, 不需要先验 PCD
+#   ./script/start_real_nav.sh -c omni                       # 换回 Omni 控制器
 #   ./script/start_real_nav.sh --slam                # 边建图边导航
 #   ./script/start_real_nav.sh --map-to-odom 0 0 0   # 指定起步位姿 (map 系, 弧度)
 #   ./script/start_real_nav.sh --no-rviz --no-joy    # 只起链路, 不开图形界面
@@ -69,19 +71,25 @@
 #       --prior-pcd <名字|路径> 重定位先验点云, 默认与地图同名
 #       --map-to-odom X Y YAW   静态 map->odom 初值 (m, m, rad), 即"车现在停的位置
 #                               在地图坐标系里的位姿"; 默认 0 0 0 (车在 map 原点)
-#   -p, --params <绝对路径>     Nav2 参数, 默认 config/real/nav2_params_srm.yaml
+#   -p, --params <绝对路径>     Nav2 参数, 默认由控制器决定 (默认 minco ->
+#                              config/real/nav2_params_srm_minco.yaml)
 #   -c, --controller <auto|omni|minco>
-#                              局部控制器选择 (默认 auto):
-#                                auto  = 读 -p 指定的参数文件里的 FollowPath.plugin 自动判断;
-#                                        若 -p 没给, 用 Omni 默认文件。
+#                              局部控制器选择 (默认 minco):
+#                                minco = config/real/nav2_params_srm_minco.yaml (默认)
 #                                omni  = config/real/nav2_params_srm.yaml
-#                                minco = config/real/nav2_params_srm_minco.yaml
+#                                auto  = 读参数文件里的 FollowPath.plugin 自动判断;
+#                                        **只给 -p 而没给 -c 时也走这条路**, 于是
+#                                        "-p 指到 Omni 文件"不会被默认值 minco 拦下。
 #                              选 minco 时自动: 关闭 fake_vel_transform (可用
 #                              --fake-vel-transform 显式恢复)、把导航出口对准 cmd_vel_chassis、
 #                              并做一轮 MINCO 专属预检 (插件是否可解析 / use_sim_time 一致 /
 #                              各层限速是否自洽 / 里程计频率与 state_timeout 是否匹配)。
 #       --minco / --omni        等价于 --controller minco / --controller omni
-#       --slam / --reloc / --lio / --static   定位方式, 四者互斥 (默认 --lio)
+#       --slam / --reloc / --lio / --static   定位方式, 四者互斥 (默认 --reloc)
+#       --no-reloc              关掉重定位 = 等价于 --lio: Point-LIO 里程计 + 静态
+#                               map->odom, **不需要先验 PCD**。默认 --reloc 要求地图有
+#                               maps/pcd/<地图名>_mapframe.pcd, 没有就用这个 (或 --lio)。
+#                               与 --reloc 同时给时以命令行里靠后的那个为准。
 #       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.15 -0.15 0.22)
 #       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 -0.06981317007977318 0 -1.5707963267948966)
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
@@ -103,7 +111,7 @@
 #
 # 环境变量 (同名参数均可由环境变量给默认值):
 #   MAP MAP_NAME PRIOR_PCD_FILE PARAMS_FILE CONTROLLER LIDAR_CONFIG_FILE NAMESPACE
-#   START_SLAM START_RELOC START_LIO START_STATIC
+#   START_SLAM START_RELOC START_LIO START_STATIC NO_RELOC
 #   USE_RVIZ USE_ROBOT_STATE_PUB USE_CHASSIS USE_JOY USE_COMPOSITION
 #   USE_VELOCITY_SMOOTHER USE_FAKE_VEL_TRANSFORM
 #   LIDAR_XYZ LIDAR_RPY MAP_TO_ODOM_X MAP_TO_ODOM_Y MAP_TO_ODOM_YAW LOG_LEVEL
@@ -124,6 +132,17 @@
 #     launch 专有的 $(find-pkg-share ...) 语法, ros2 run 不会展开, 故再用
 #     -p user_config_path:=<绝对路径> 覆盖一次。
 #   - map / prior_pcd_file / params_file 一律传绝对路径。
+#   - 先验点云按以下顺序找 (--prior-pcd 给名字时; 给绝对路径则直接用):
+#       maps/<名字>_mapframe.pcd            已转地图系 (旧布局, 仍兼容)
+#       maps/pcd/<名字>_mapframe.pcd        已转地图系 (现行产品: build_pcd_from_bag.sh
+#                                          从录包重建出 maps/pcd/<名字>.pcd, 再用
+#                                          script/pcd_to_mapframe.py 转出 _mapframe 版)
+#       maps/pcd/<名字>.pcd                 Point-LIO camera_init 系原始件 (退路, 会告警)
+#       maps/<名字>.pcd
+#       <包>/pcd/real/<名字>.pcd
+#     **_mapframe 版必须排在原始件前面**: 两者同名只差后缀, 顺序反了就会静默挑到
+#     camera_init 系那份, 车被定位在差 90° 的姿态上而 GICP 不报错。
+#     原始件被选中时下面那条"头部未标注坐标系"的告警会响 (它头部没有 frame 注释)。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
 #   - 想建图请只用 --slam; 建图与导航不要各起一套, 否则多个节点争抢 map->odom。
 # =============================================================
@@ -152,6 +171,9 @@ PKG_DIR="$(pick_dir "$PKG_INSTALL" "$PKG_SRC")"
 MAP_REAL_DIR="$PKG_DIR/map/real"
 MAP_SIM_DIR="$PKG_DIR/map/simulation"
 PCD_REAL_DIR="$PKG_DIR/pcd/real"
+# 实车先验点云的**主要落地点**: 由 script/build_pcd_from_bag.sh 从录包重建, 再用
+# script/pcd_to_mapframe.py 就地转成地图系 (每张图就这一份 <名字>.pcd, 名字即地图名)。
+PCD_MAPS_DIR="$WS_DIR/maps/pcd"
 SRC_MAP_REAL_DIR="$PKG_SRC/map/real"
 
 # ---------- 可配置项 ----------
@@ -180,14 +202,17 @@ fi
 FAKE_VEL_CLI_GIVEN=0
 
 # 局部控制器: auto (按参数文件内容判断) / omni / minco。
-CONTROLLER="${CONTROLLER:-auto}"
+CONTROLLER="${CONTROLLER:-minco}"
 CONTROLLER_CLI_GIVEN=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
 START_LIO="${START_LIO:-0}"
 START_STATIC="${START_STATIC:-0}"
-# 命令行是否显式给过定位方式。没给才在解析之后套用默认 --lio
+# --no-reloc: 显式不用重定位 (此时不需要先验 PCD), 退回 LIO 里程计 + 静态 map->odom。
+# 单独一个变量是为了区分"没提过重定位"和"明确关掉重定位"——后者要压过默认值 --reloc。
+NO_RELOC="${NO_RELOC:-0}"
+# 命令行是否显式给过定位方式。没给才在解析之后套用默认 --reloc
 # (默认值不能在这里就写进 START_LIO, 否则 --slam 会叠成"两个模式同时开")。
 MODE_GIVEN=0
 
@@ -288,6 +313,8 @@ resolve_prior_pcd() {
   fi
   for cand in \
     "$WS_DIR/maps/${name}_mapframe.pcd" \
+    "$PCD_MAPS_DIR/${name}_mapframe.pcd" \
+    "$PCD_MAPS_DIR/$name.pcd" \
     "$WS_DIR/maps/$name.pcd" \
     "$PCD_REAL_DIR/$name.pcd"; do
     [ -f "$cand" ] && { readlink -f "$cand"; return 0; }
@@ -305,8 +332,9 @@ list_maps() {
     case " $seen " in *" $name "*) continue ;; esac
     seen="$seen $name"
     pcd="无"
-    if [ -f "$WS_DIR/maps/${name}_mapframe.pcd" ] || [ -f "$WS_DIR/maps/$name.pcd" ] \
-       || [ -f "$PCD_REAL_DIR/$name.pcd" ]; then
+    if [ -f "$WS_DIR/maps/${name}_mapframe.pcd" ] || [ -f "$PCD_MAPS_DIR/${name}_mapframe.pcd" ] \
+       || [ -f "$PCD_MAPS_DIR/$name.pcd" ] \
+       || [ -f "$WS_DIR/maps/$name.pcd" ] || [ -f "$PCD_REAL_DIR/$name.pcd" ]; then
       pcd="有"
     fi
     printf '  %-22s 先验PCD: %-3s %s\n' "$name" "$pcd" "$f"
@@ -318,7 +346,10 @@ list_maps() {
   echo
   echo "地图目录  : $WS_DIR/maps  (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml)"
   echo "          : $MAP_REAL_DIR"
-  echo "先验PCD   : $WS_DIR/maps/<名字>_mapframe.pcd / $PCD_REAL_DIR/<名字>.pcd"
+  echo "先验PCD   : $PCD_MAPS_DIR/<名字>_mapframe.pcd   (已转地图系, --reloc 用这份)"
+  echo "          : $PCD_MAPS_DIR/<名字>.pcd            (Point-LIO camera_init 系原始件)"
+  echo "          : $WS_DIR/maps/<名字>_mapframe.pcd"
+  echo "          : $PCD_REAL_DIR/<名字>.pcd"
   echo "注意: --reloc 需要先验 PCD, 且该 PCD 必须已经在地图坐标系下。"
 }
 
@@ -394,7 +425,8 @@ while [ $# -gt 0 ]; do
     # 模式开关各自独立置位, 不互相覆盖: 同时给两个会被下面的互斥检查明确拒绝,
     # 比"后者悄悄覆盖前者"更适合实车 (起错定位方式 = 车不动或 TF 打架)。
     --slam)           START_SLAM=1; MODE_GIVEN=1; shift ;;
-    --reloc|--relocalization) START_RELOC=1; MODE_GIVEN=1; shift ;;
+    --reloc|--relocalization) START_RELOC=1; NO_RELOC=0; MODE_GIVEN=1; shift ;;
+    --no-reloc)       START_RELOC=0; NO_RELOC=1; MODE_GIVEN=1; shift ;;
     --lio|--lio-only) START_LIO=1; MODE_GIVEN=1; shift ;;
     --static)         START_STATIC=1; MODE_GIVEN=1; shift ;;
     --lidar-xyz)      LIDAR_XYZ="${2:?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
@@ -431,12 +463,30 @@ RELOC_ON="$(to01 "$START_RELOC")"
 LIO_ON="$(to01 "$START_LIO")"
 STATIC_ON="$(to01 "$START_STATIC")"
 
-# 一个模式都没给 (命令行没给、环境变量也没给) -> 默认 --lio, 实车推荐。
+# --no-reloc: 把重定位关掉 (即使 START_RELOC 被环境变量打开), 于是**不需要先验 PCD**。
+if is_true "$NO_RELOC"; then
+  RELOC_ON=0
+  START_RELOC=0
+fi
+
+# 一个模式都没给 (命令行没给、环境变量也没给) -> 默认 --reloc, 实车默认。
+# 前提是这张地图有先验点云 (maps/pcd/<地图名>_mapframe.pcd); 没有的话下面 resolve 会
+# 报错并告诉你缺哪份、怎么生成。想回到"静态 map->odom"用 --no-reloc 或 --lio。
 if [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -eq 0 ] && [ "$MODE_GIVEN" = "0" ]; then
+  RELOC_ON=1
+  START_RELOC=1
+  echo "[提示] 未指定定位方式, 默认按 --reloc 启动 (small_gicp 与先验 PCD 配准后发布 map->odom)。"
+  echo "[提示] 需要该地图的先验点云 maps/pcd/<地图名>_mapframe.pcd。"
+  echo "[提示] 不用重定位 (也就不需要 PCD): --no-reloc; 其他: --slam / --static, 见 --help。"
+fi
+
+# --no-reloc 单独给 (没搭别的模式): 就是 LIO 里程计 + 静态 map->odom, map->odom 取
+# --map-to-odom 的值 (默认 0 0 0, 即车停在 map 原点朝 +x)。
+if is_true "$NO_RELOC" && [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -eq 0 ]; then
   LIO_ON=1
   START_LIO=1
-  echo "[提示] 未指定定位方式, 默认按 --lio 启动 (Point-LIO 里程计 + 静态 map->odom)。"
-  echo "[提示] 其他选择: --reloc / --slam / --static, 见 --help。"
+  echo "[提示] --no-reloc: Point-LIO 里程计 + 静态 map->odom (不需要先验 PCD;"
+  echo "[提示]             map->odom 默认 0 0 0, 用 --map-to-odom X Y YAW 改)。"
 fi
 
 if [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -gt 1 ]; then
@@ -470,24 +520,10 @@ case "$LOG_LEVEL" in
   *) echo "[错误] --log-level 只支持 debug/info/warn/error/fatal" >&2; exit 2 ;;
 esac
 
-# ---------- 默认路径 ----------
-if [ -z "$PARAMS_FILE" ]; then
-  PARAMS_FILE="$PKG_DIR/config/real/nav2_params_srm.yaml"
-  if [ ! -f "$PARAMS_FILE" ]; then
-    PARAMS_FILE="$PKG_SRC/config/real/nav2_params_srm.yaml"
-  fi
-fi
-if [ -z "$LIDAR_CONFIG_FILE" ]; then
-  LIDAR_CONFIG_FILE="$PKG_DIR/config/real/mid360_user_config.json"
-  if [ ! -f "$LIDAR_CONFIG_FILE" ]; then
-    LIDAR_CONFIG_FILE="$PKG_SRC/config/real/mid360_user_config.json"
-  fi
-fi
-
-# ---------- 局部控制器: 选参数文件 + 定默认速度链路 ----------
+# ---------- 局部控制器: 先定控制器, 再由它决定用哪份参数文件 ----------
 # 迁移 MINCO 时最容易出错的不是算法, 而是"以为加载了 MINCO 其实还是 Omni":
-# 默认参数文件是 Omni 那份, 换控制器必须换文件。这里把"选哪个控制器"变成一等参数,
-# 并在启动前把插件名、use_sim_time、限速自洽性都核对一遍 (见后面的预检)。
+# 控制器和参数文件必须一致 (靠 FollowPath.plugin 区分), 所以顺序是
+# 控制器 -> 参数文件 -> 一致性核对, 而不是先定文件再猜控制器。
 MINCO_PARAMS_DEFAULT="$PKG_DIR/config/real/nav2_params_srm_minco.yaml"
 if [ ! -f "$MINCO_PARAMS_DEFAULT" ]; then
   MINCO_PARAMS_DEFAULT="$PKG_SRC/config/real/nav2_params_srm_minco.yaml"
@@ -498,11 +534,41 @@ if [ ! -f "$OMNI_PARAMS_DEFAULT" ]; then
 fi
 MINCO_PLUGIN_NAME="srm27_minco_controller::MincoMpcController"
 
+# 只给了 -p、没显式选控制器: 交给下面按文件里的插件自动判定。
+# 否则默认值 minco 会把"-p 指到 Omni 文件"这种老用法按"minco 却加载 Omni 文件"拦下来,
+# 而用户其实只是想把参数文件指过去。
+if [ "$CONTROLLER" = "minco" ] && [ "$CONTROLLER_CLI_GIVEN" = "0" ] && [ "$PARAMS_FILE_GIVEN" = "1" ]; then
+  CONTROLLER="auto"
+fi
+
 case "$CONTROLLER" in
   auto|omni|minco) ;;
   *) echo "[错误] --controller 只支持 auto / omni / minco, 收到: $CONTROLLER" >&2; exit 2 ;;
 esac
 
+# ---------- 默认路径 ----------
+# 默认控制器是 minco, 所以默认参数文件也是 MINCO 那份; -c omni 才用 Omni 那份。
+# -p 显式给了就以 -p 为准 (auto 判定与后面的一致性检查再兜底)。
+if [ -z "$PARAMS_FILE" ]; then
+  if [ "$CONTROLLER" = "omni" ]; then
+    PARAMS_FILE="$OMNI_PARAMS_DEFAULT"
+  else
+    PARAMS_FILE="$MINCO_PARAMS_DEFAULT"
+  fi
+  if [ ! -f "$PARAMS_FILE" ]; then
+    echo "[错误] 默认参数文件不存在: $PARAMS_FILE" >&2
+    exit 1
+  fi
+fi
+if [ -z "$LIDAR_CONFIG_FILE" ]; then
+  LIDAR_CONFIG_FILE="$PKG_DIR/config/real/mid360_user_config.json"
+  if [ ! -f "$LIDAR_CONFIG_FILE" ]; then
+    LIDAR_CONFIG_FILE="$PKG_SRC/config/real/mid360_user_config.json"
+  fi
+fi
+
+# ---------- 局部控制器: 速度链路与默认值 ----------
+# (MINCO/OMNI 默认文件与控制器校验已在前面完成, 这里只处理从控制器派生出来的默认值。)
 if [ "$CONTROLLER_CLI_GIVEN" = "1" ] && [ "$PARAMS_FILE_GIVEN" = "0" ]; then
   case "$CONTROLLER" in
     minco) PARAMS_FILE="$MINCO_PARAMS_DEFAULT" ;;
@@ -807,10 +873,16 @@ if [ "$RELOC_ON" = "1" ]; then
   if ! PRIOR_PCD="$(resolve_prior_pcd "$PRIOR_PCD_FILE")"; then
     echo "[错误] 重定位需要先验点云, 但未找到: $PRIOR_PCD_FILE" >&2
     echo "[错误] 已查找: $WS_DIR/maps/${PRIOR_PCD_FILE}_mapframe.pcd" >&2
+    echo "[错误]           $PCD_MAPS_DIR/${PRIOR_PCD_FILE}_mapframe.pcd" >&2
+    echo "[错误]           $PCD_MAPS_DIR/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误]           $WS_DIR/maps/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误]           $PCD_REAL_DIR/$PRIOR_PCD_FILE.pcd" >&2
     echo "[错误] 用 --prior-pcd <路径> 指定。" >&2
     echo "[错误] 注意: PCD 必须在地图坐标系下, Point-LIO camera_init 系的原始点云不能直接用。" >&2
+    echo "[错误] 有录包的话可以先重建再转系:" >&2
+    echo "[错误]   ./script/build_pcd_from_bag.sh --name <名字>" >&2
+    echo "[错误]   python3 script/pcd_to_mapframe.py --pcd maps/pcd/<名字>.pcd --map maps/<名字>/<名字>.yaml" >&2
+    echo "[提示] 只是想先把链路跑起来 (用静态 map->odom): 加 --lio。" >&2
     exit 1
   fi
   # 坐标系自检: mapframe 版本头部有标注, camera_init 系的原始点云通常没有。
@@ -916,7 +988,7 @@ if [ "$SLAM_ON" = "1" ]; then
 elif [ "$RELOC_ON" = "1" ]; then
   MODE_DESC="先验 PCD 重定位 (small_gicp 发布 map->odom)"
 elif [ "$LIO_ON" = "1" ]; then
-  MODE_DESC="Point-LIO 里程计 + 静态 map->odom (实车推荐)"
+  MODE_DESC="Point-LIO 里程计 + 静态 map->odom"
 else
   MODE_DESC="静态地图, 无里程计来源"
 fi
