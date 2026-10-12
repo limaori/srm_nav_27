@@ -20,8 +20,11 @@
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
   <depend>example_interfaces</depend>
+  <!-- fakeyaw 链路的诊断计数（fake_vel_transform/diagnostics） -->
+  <depend>diagnostic_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_clang_format</test_depend>
   <test_depend>ament_cmake_clang_tidy</test_depend>
   <test_depend>ament_cmake_black</test_depend>

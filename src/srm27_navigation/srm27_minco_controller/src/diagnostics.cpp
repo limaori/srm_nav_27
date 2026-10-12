@@ -115,12 +115,21 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
 
   addString(values, "yaw_mode", _diagnostics.yaw_mode);
   addString(values, "command_owner", _diagnostics.command_owner);
+  addString(values, "command_frame", _diagnostics.command_frame);
   addNumber(values, "command_age", _diagnostics.command_age);
   addNumber(values, "applied_speed_scale", _diagnostics.applied_speed_scale);
   addString(values, "stop_reason", _diagnostics.stop_reason);
   addNumber(values, "stop_request_time", _diagnostics.stop_request_time);
   addNumber(values, "output_zero_time", _diagnostics.output_zero_time);
   addNumber(values, "actual_stop_time", _diagnostics.actual_stop_time);
+
+  // 角速度的"请求 / 应用 / 限幅原因"三件套：迁移后导航拥有 wz，
+  // 现场必须能区分"导航没请求 wz""请求了但被限幅""真的下发了"（方案 §4.1.2）。
+  addNumber(values, "yaw_reference", _diagnostics.yaw_reference);
+  addNumber(values, "mpc_requested_wz", _diagnostics.mpc_requested_wz);
+  addNumber(values, "applied_wz", _diagnostics.applied_wz);
+  addString(values, "wz_clamp_reason", _diagnostics.wz_clamp_reason);
+  addCount(values, "rejected_spin_request_count", _diagnostics.rejected_spin_request_count);
 
   addNumber(values, "requested_vx", _diagnostics.requested_vx);
   addNumber(values, "requested_vy", _diagnostics.requested_vy);

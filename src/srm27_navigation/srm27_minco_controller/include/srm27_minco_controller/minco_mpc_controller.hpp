@@ -33,6 +33,7 @@
 #include <vector>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "srm27_minco_controller/command_frame.hpp"
 #include "srm27_minco_controller/costmap_adapter.hpp"
 #include "srm27_minco_controller/diagnostics.hpp"
 #include "srm27_minco_controller/planning_worker.hpp"
@@ -144,6 +145,13 @@ private:
   // 参数
   std::string planning_frame_{"odom"};
   std::string base_frame_{"base_link"};
+  /// \brief 速度命令所在的坐标系（方案 §3.2）。
+  ///
+  /// 等于 `base_frame` 时输出真实车体系速度；等于 `fake_base_frame` 时输出
+  /// odom 对齐的平移速度，把唯一的坐标转换留给 `fake_vel_transform`。
+  std::string command_frame_{"base_link"};
+  /// \brief fakeyaw 迁移用的虚拟车体系名（用于校验 `command_frame`）。
+  std::string fake_base_frame_{"base_link_fake"};
   std::string odom_topic_{"odometry"};
   double replan_frequency_{10.0};
   double planning_horizon_{2.0};
@@ -161,6 +169,8 @@ private:
   double prediction_dt_{0.02};
   std::string mpc_model_name_{"velocity_integrator"};
   YawMode yaw_mode_{YawMode::kXyOnly};
+  /// \brief 命令系语义（由 `command_frame` 与 frame 名解析得到，方案 §4.1.3）。
+  CommandFrameMode command_frame_mode_{CommandFrameMode::kRobotBase};
   double yaw_narrow_clearance_threshold_{0.60};
   bool yaw_allow_reverse_{true};
   double state_max_sample_gap_{0.20};

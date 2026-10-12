@@ -1,0 +1,20 @@
+header:
+  stamp:
+    sec: 1791797235
+    nanosec: 996468301
+  frame_id: ''
+status:
+- level: "\0"
+  name: 'srm27_gazebo_simulator: velocity_adapter'
+  message: 速度转发正常
+  hardware_id: red_standard_robot1
+  values:
+  - key: gz_topic
+    value: red_standard_robot1/cmd_vel
+  - key: command_timeout
+    value: '0.100000'
+  - key: commands
+    value: '63425'
+  - key: non_finite_commands
+    value: '0'
+---

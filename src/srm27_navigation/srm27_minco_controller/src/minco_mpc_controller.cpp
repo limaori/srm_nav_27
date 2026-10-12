@@ -177,10 +177,20 @@ void MincoMpcController::configure(
   configured_ = true;
   RCLCPP_INFO(
     node->get_logger(),
-    "MincoMpcController 已配置: planning_frame=%s base_frame=%s horizon=%.2f m "
-    "replan=%.1f Hz v_max=%.2f m/s a_max=%.2f m/s^2 yaw_mode=%s",
-    planning_frame_.c_str(), base_frame_.c_str(), planning_horizon_, replan_frequency_,
-    limits_.max_linear_speed, limits_.max_linear_accel, yaw_policy_.modeName());
+    "MincoMpcController 已配置: planning_frame=%s base_frame=%s command_frame=%s(%s) "
+    "horizon=%.2f m replan=%.1f Hz v_max=%.2f m/s a_max=%.2f m/s^2 yaw_mode=%s "
+    "wz 权限=%.3f rad/s",
+    planning_frame_.c_str(), base_frame_.c_str(), command_frame_.c_str(),
+    toString(command_frame_mode_), planning_horizon_, replan_frequency_,
+    limits_.max_linear_speed, limits_.max_linear_accel, yaw_policy_.modeName(),
+    limits_.max_angular_speed);
+  if (command_frame_mode_ == CommandFrameMode::kOdomAlignedFake) {
+    RCLCPP_INFO(
+      node->get_logger(),
+      "MincoMpcController: command_frame=%s 与 odom 对齐 —— 控制器**不做** R(-yaw)，"
+      "平移速度原样输出，唯一的坐标转换由 fake_vel_transform 负责（方案 §3.2）。",
+      command_frame_.c_str());
+  }
 }
 
 bool MincoMpcController::loadParameters(std::string * _reason)
@@ -204,6 +214,12 @@ bool MincoMpcController::loadParameters(std::string * _reason)
 
   declare("planning_frame", std::string("odom"));
   declare("base_frame", std::string("base_link"));
+  // 速度命令的坐标系（方案 §3.2）：
+  //   command_frame == base_frame      -> 输出真实车体系速度（现状；由本控制器做 R(-psi)）
+  //   command_frame == fake_base_frame -> 输出 odom 对齐的平移速度（fakeyaw 迁移；
+  //                                        唯一的转换在 fake_vel_transform 里做）
+  declare("command_frame", std::string("base_link"));
+  declare("fake_base_frame", std::string("base_link_fake"));
   declare("odom_topic", std::string("odometry"));
   declare("replan_frequency", 10.0);
   declare("planning_horizon", 2.0);
@@ -293,6 +309,8 @@ bool MincoMpcController::loadParameters(std::string * _reason)
 
   node->get_parameter(name + ".planning_frame", planning_frame_);
   node->get_parameter(name + ".base_frame", base_frame_);
+  node->get_parameter(name + ".command_frame", command_frame_);
+  node->get_parameter(name + ".fake_base_frame", fake_base_frame_);
   node->get_parameter(name + ".odom_topic", odom_topic_);
   node->get_parameter(name + ".replan_frequency", replan_frequency_);
   node->get_parameter(name + ".planning_horizon", planning_horizon_);
@@ -387,6 +405,10 @@ bool MincoMpcController::loadParameters(std::string * _reason)
 
   if (!parseYawMode(yaw_mode_text, yaw_mode_)) {
     return fail("unsupported yaw_policy.mode: " + yaw_mode_text);
+  }
+  if (!resolveCommandFrame(
+        command_frame_, base_frame_, fake_base_frame_, command_frame_mode_, _reason)) {
+    return false;
   }
   if (polynomial_order_ != Trajectory2D::kPolynomialOrder) {
     return fail("only the quintic MINCO representation (polynomial_order: 5) is supported");
@@ -976,7 +998,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::stopCommand(
 {
   geometry_msgs::msg::TwistStamped command;
   command.header.stamp = _node->now();
-  command.header.frame_id = base_frame_;
+  command.header.frame_id = command_frame_;
   command.twist.linear.x = 0.0;
   command.twist.linear.y = 0.0;
   command.twist.linear.z = 0.0;
@@ -997,6 +1019,11 @@ geometry_msgs::msg::TwistStamped MincoMpcController::stopCommand(
   diagnostics_.requested_vx = 0.0;
   diagnostics_.requested_vy = 0.0;
   diagnostics_.requested_wz = 0.0;
+  diagnostics_.applied_wz = 0.0;
+  diagnostics_.mpc_requested_wz = 0.0;
+  diagnostics_.yaw_reference = 0.0;
+  diagnostics_.wz_clamp_reason = "stop";
+  diagnostics_.command_frame = command_frame_;
   has_previous_input_ = false;
   return command;
 }
@@ -1022,6 +1049,8 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   const double now_stamp = node->now().seconds();
   diagnostics_ = ControllerDiagnostics();
   diagnostics_.yaw_mode = yaw_policy_.modeName();
+  diagnostics_.command_frame = command_frame_;
+  diagnostics_.rejected_spin_request_count = yaw_policy_.rejectedSpinRequestCount();
   diagnostics_.map_version = map_version_;
   diagnostics_.path_version = path_version_;
   diagnostics_.limits_version = limits_version_;
@@ -1183,6 +1212,11 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
 
   // 9) 跟踪参考。
   yaw_policy_.setCurrentYaw(state.yaw);
+  // 到点保持（`se2` 的 stop_rotation_on_goal）：已进入终点急停或已判定到达时，航向参考
+  // 冻结，避免"还在追切线 → 车一直在转 → 停稳条件永远不满足"（方案 §4.1.5）。
+  if (stop_rotation_on_goal_) {
+    yaw_policy_.setGoalHold(terminal_stop_.active() || at_goal_stop_);
+  }
   TrackingReferenceResult reference;
   if (!reference_builder_.build(*trajectory, state, mpc_model_, yaw_policy_, reference)) {
     return fail("tracking reference failed: " + reference.message);
@@ -1261,7 +1295,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     }
   }
 
-  // 12) 取执行时刻的预测速度并转换到车体系。
+  // 12) 取执行时刻的预测速度并转换到命令坐标系（方案 §3.2、§4.1.3）。
   Eigen::VectorXd command;
   if (!mpc_solver_.commandAt(solution, command_lookahead_, command)) {
     return fail("failed to extract the predicted command");
@@ -1272,26 +1306,35 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 两种模型的 yaw 都直接是预测状态的第 3 维；命令生效时刻的 yaw 与命令时间一致。
   const double yaw_at_actuation = solution.z(2, lookahead_index);
   Eigen::Vector2d velocity_odom(command(0), command(1));
-  Eigen::Vector2d velocity_body =
-    srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
+  // `base_link` 命令系：在这里做唯一的 R(-psi)；`base_link_fake`（odom 对齐）命令系：
+  // 原样输出 odom 平移速度，转换全部留给 fake_vel_transform —— 两边都做就是重复旋转。
+  Eigen::Vector2d velocity_command =
+    velocityInCommandFrame(velocity_odom, yaw_at_actuation, command_frame_mode_);
   double omega_command = command(2);
+  // 方案 §4.1.2 要求记录"请求的 wz"与"限幅原因"，这里先把 MPC 原始请求存下来。
+  const double requested_omega = omega_command;
+  std::string wz_clamp_reason = "none";
 
-  if (!velocity_body.allFinite() || !std::isfinite(omega_command)) {
+  if (!velocity_command.allFinite() || !std::isfinite(omega_command)) {
     return fail("MPC produced a non-finite command");
   }
 
   // 13) 输出前检查：合速度、自转与相对上一条命令的变化量。
+  //     ⚠ 模长限幅在 odom 系与车体系下等价（纯 yaw 旋转），所以用命令系的速度即可。
   diagnostics_.applied_speed_scale = 1.0;
-  const double speed = velocity_body.norm();
+  const double speed = velocity_command.norm();
   if (speed > limits_.max_linear_speed) {
     const double scale = limits_.max_linear_speed / speed;
     diagnostics_.applied_speed_scale = scale;
     velocity_odom *= scale;
-    velocity_body *= scale;
+    velocity_command *= scale;
   }
   if (std::abs(omega_command) > limits_.max_angular_speed) {
     omega_command = srm27_minco_core::clampToRange(
       omega_command, -limits_.max_angular_speed, limits_.max_angular_speed);
+    // 区分两种限幅原因：策略本身把权限设成 0（xy_only），还是真的撞到速度上限。
+    wz_clamp_reason = (limits_.max_angular_speed <= 0.0) ? "yaw_policy_zero_angular_limit"
+                                                         : "angular_speed_limit";
   }
   if (has_previous_input_ && previous_applied_input_.size() == mpc_model_.inputDim()) {
     // 平移与自转的变化量不得突破有效加速度上限（下游还有 mux 的末端限幅）。
@@ -1301,7 +1344,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     const double max_delta = limits_.max_linear_accel * interval;
     if (delta.norm() > max_delta) {
       velocity_odom = previous_odom + delta.normalized() * max_delta;
-      velocity_body = srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
+      velocity_command = velocityInCommandFrame(velocity_odom, yaw_at_actuation, command_frame_mode_);
     }
     // 下周期的差分基准必须是本周期限幅后的输出，而不是 MPC 未执行的原始请求。
     previous_applied_input_(0) = velocity_odom.x();
@@ -1319,9 +1362,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
 
   geometry_msgs::msg::TwistStamped command_msg;
   command_msg.header.stamp = node->now();
-  command_msg.header.frame_id = base_frame_;
-  command_msg.twist.linear.x = velocity_body.x();
-  command_msg.twist.linear.y = velocity_body.y();
+  command_msg.header.frame_id = command_frame_;
+  command_msg.twist.linear.x = velocity_command.x();
+  command_msg.twist.linear.y = velocity_command.y();
   command_msg.twist.linear.z = 0.0;
   command_msg.twist.angular.x = 0.0;
   command_msg.twist.angular.y = 0.0;
@@ -1330,6 +1373,12 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   diagnostics_.requested_vx = command_msg.twist.linear.x;
   diagnostics_.requested_vy = command_msg.twist.linear.y;
   diagnostics_.requested_wz = command_msg.twist.angular.z;
+  // 方案 §4.1.2：requested/applied wz、yaw 参考与限幅原因都要能被"事后查账"。
+  diagnostics_.applied_wz = omega_command;
+  diagnostics_.mpc_requested_wz = requested_omega;
+  diagnostics_.yaw_reference = reference.z_ref(2, 0);
+  diagnostics_.wz_clamp_reason = wz_clamp_reason;
+  diagnostics_.command_frame = command_frame_;
   diagnostics_.command_owner = "navigation";
   diagnostics_.command_age = std::max(0.0, now_stamp - trajectory->generated_stamp);
   diagnostics_.stop_reason = "none";

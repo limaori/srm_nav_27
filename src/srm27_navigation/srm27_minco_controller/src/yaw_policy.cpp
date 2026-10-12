@@ -40,6 +40,10 @@ bool parseYawMode(const std::string & _text, YawMode & _mode)
     _mode = YawMode::kNarrowTrack;
     return true;
   }
+  if (_text == "se2") {
+    _mode = YawMode::kSe2;
+    return true;
+  }
   return false;
 }
 
@@ -54,6 +58,8 @@ const char * toString(YawMode _mode)
       return "spin";
     case YawMode::kNarrowTrack:
       return "narrow_track";
+    case YawMode::kSe2:
+      return "se2";
   }
   return "unknown";
 }
@@ -94,6 +100,7 @@ void YawPolicy::reset(double _yaw)
   spin_omega_ = 0.0;
   spin_request_active_ = false;
   narrow_track_active_ = false;
+  goal_hold_ = false;
   last_tangent_time_ = 0.0;
   last_tangent_yaw_ = _yaw;
   has_last_tangent_ = false;
@@ -101,6 +108,12 @@ void YawPolicy::reset(double _yaw)
 
 void YawPolicy::setSpinRequest(double _omega)
 {
+  // 只有 SPIN 模式才允许外部自转请求参与 yaw 参考。`kSe2`（导航拥有 wz）下
+  // 接受它等于让独立自转绕过导航直接决定角速度（方案 §4.1.2 明确禁止）。
+  if (configured_ && config_.mode != YawMode::kSpin) {
+    ++rejected_spin_request_count_;
+    return;
+  }
   spin_omega_ = std::isfinite(_omega) ? _omega : 0.0;
   spin_request_active_ = true;
 }
@@ -148,7 +161,16 @@ bool YawPolicy::yawReference(
       return true;
     }
     case YawMode::kFollowTangent:
-    case YawMode::kNarrowTrack: {
+    case YawMode::kNarrowTrack:
+    case YawMode::kSe2: {
+      if (config_.mode == YawMode::kSe2 && goal_hold_) {
+        // 到点保持：航向参考冻结在当前连续航向，角速度参考为 0。
+        // 到点后继续追切线会让"停稳"这个停止条件永远不满足（方案 §4.1.5）。
+        _yaw = _previous_yaw;
+        _omega = 0.0;
+        has_last_tangent_ = false;
+        return true;
+      }
       if (!_tangent_valid) {
         // 低速时切线不确定：保持上一有效朝向，避免 atan2(0,0) 触发跳变。
         _yaw = _previous_yaw;

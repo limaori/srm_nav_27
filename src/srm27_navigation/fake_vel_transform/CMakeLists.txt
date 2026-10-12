@@ -37,6 +37,14 @@ rclcpp_components_register_node(${PROJECT_NAME}
 #############
 
 if(BUILD_TESTING)
+  # 纯数学（fakeyaw 坐标转换）的行为测试：不依赖 ROS 运行时，验证 psi=0/±pi/2/pi 的
+  # 速度方向与 wz 逐条透传（方案 §4.1.3、§5 P0 的通过条件）。
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_velocity_transform test/test_velocity_transform.cpp)
+  target_include_directories(test_velocity_transform PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+
   set(ament_cmake_clang_format_CLANG_FORMAT_VERSION 21)
   set(ament_cmake_clang_format_CONFIG_FILE "${CMAKE_SOURCE_DIR}/.clang-format")
   set(ament_cmake_clang_tidy_CONFIG_FILE "${CMAKE_SOURCE_DIR}/.clang-tidy")

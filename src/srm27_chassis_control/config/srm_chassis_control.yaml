@@ -8,12 +8,24 @@
 # 在启动时合并进来（唯一来源，避免"改一处漏一处"）。
 # 直接单独 launch 本包的 launch 文件（不经过导航入口）时不会合并，届时
 # cmd_mux 会退回节点里的保守默认值 0.5 m/s——只适合单独调试自转/mux，不要用来跑导航。
+#
+# wz 所有权（方案 §4.3）：`srm_cmd_mux.wz_control_mode` 决定最终 wz 的来源 ——
+# `legacy_independent_rotation`（旧链路，wz 来自 rotation_velocity）或
+# `nav_se2`（导航拥有 wz，rotation 输入被拒绝）。导航入口会按 fakeyaw 开关重写它。
 
 srm_cmd_mux:
   ros__parameters:
     use_sim_time: True
+    # wz 的所有权模式（方案 §4.3）。**不允许**用"wz 是否为零"猜所有权：
+    #   legacy_independent_rotation: 平移与 wz 都按旧链路（导航只给平移，wz 来自
+    #     rotation_velocity）；导航输入的 angular.z 会被丢弃并计数。
+    #   nav_se2: 导航拥有 wz（平移与 wz 都来自导航；fakeyaw 迁移链上 nav_topic 应指向
+    #     cmd_vel_nav_body）。此时 rotation_velocity 输入被**拒绝**（只告警 + 计数），
+    #     绝不存在 nav_wz + rotation_wz 的相加路径。
+    # 由 launch/nav_srm_simulation_launch.py 按 use_fakeyaw_transform / wz_control_mode 重写。
+    wz_control_mode: "legacy_independent_rotation"
     # 输入
-    nav_topic: "cmd_vel_nav"              # 导航平移速度（车体系，wz 会被丢弃）
+    nav_topic: "cmd_vel_nav"              # 导航速度（车体系）；legacy 下 wz 被丢弃
     rotation_topic: "rotation_velocity"   # 独立自转速度（只取 angular.z）
     # 输出：mux 是 cmd_vel_sim 的唯一发布者
     output_topic: "cmd_vel_sim"

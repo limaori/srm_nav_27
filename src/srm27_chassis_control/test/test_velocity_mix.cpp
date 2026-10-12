@@ -21,7 +21,10 @@
 
 using srm27_chassis_control::MixInput;
 using srm27_chassis_control::MixLimits;
+using srm27_chassis_control::MixMode;
 using srm27_chassis_control::mixVelocity;
+using srm27_chassis_control::parseMixMode;
+using srm27_chassis_control::toString;
 
 namespace
 {
@@ -153,4 +156,80 @@ TEST(VelocityMix, RotationSurvivesTranslationLimiting)
   const auto output = mixVelocity(input, defaultLimits());
   EXPECT_NEAR(std::hypot(output.vx, output.vy), 0.5, 1e-12);
   EXPECT_DOUBLE_EQ(output.wz, 1.5);
+}
+
+// ---------------------------------------------------------------- nav_se2 模式
+// 迁移模式：wz 只来自导航，且**绝不**与独立自转相加（方案 §4.3）。
+TEST(VelocityMixNavSe2, NavigationOwnsYawRate)
+{
+  MixInput input;
+  input.nav_vx = 0.3;
+  input.nav_wz = 0.8;
+  // 故意同时塞入独立自转：它必须被完全忽略，否则就是"角速度双重叠加"。
+  input.rotation_wz = 1.5;
+  const auto output = mixVelocity(input, defaultLimits(), MixMode::kNavSe2);
+  EXPECT_DOUBLE_EQ(output.vx, 0.3);
+  EXPECT_DOUBLE_EQ(output.wz, 0.8);
+  EXPECT_FALSE(output.wz_clamped);
+}
+
+// nav_se2 下的导航 wz 同样要按 wz_max 限幅，并给出限幅标志。
+TEST(VelocityMixNavSe2, NavigationYawRateIsClamped)
+{
+  MixInput input;
+  input.nav_wz = -7.5;
+  const auto output = mixVelocity(input, defaultLimits(), MixMode::kNavSe2);
+  EXPECT_DOUBLE_EQ(output.wz, -2.0);
+  EXPECT_TRUE(output.wz_clamped);
+}
+
+// 旧模式下导航 wz 不得出现在输出里（回归：防止迁移改动把旧链路带坏）。
+TEST(VelocityMixNavSe2, LegacyModeIgnoresNavigationYawRate)
+{
+  MixInput input;
+  input.nav_vx = 0.2;
+  input.nav_wz = 1.7;
+  input.rotation_wz = 0.0;
+  const auto output = mixVelocity(input, defaultLimits(), MixMode::kLegacyIndependentRotation);
+  EXPECT_DOUBLE_EQ(output.wz, 0.0);
+  EXPECT_EQ(output.mode, MixMode::kLegacyIndependentRotation);
+}
+
+// 非有限的导航 wz 在 nav_se2 下必须按 0 处理，并标记为被限幅。
+TEST(VelocityMixNavSe2, NonFiniteNavigationYawRateBecomesZero)
+{
+  MixInput input;
+  input.nav_wz = std::numeric_limits<double>::quiet_NaN();
+  const auto output = mixVelocity(input, defaultLimits(), MixMode::kNavSe2);
+  EXPECT_DOUBLE_EQ(output.wz, 0.0);
+  EXPECT_TRUE(output.wz_clamped);
+}
+
+// wz_max 非正时自转必须被完全禁止（安全兜底）。
+TEST(VelocityMixNavSe2, NonPositiveYawLimitBlocksRotation)
+{
+  MixInput input;
+  input.nav_wz = 0.5;
+  MixLimits limits = defaultLimits();
+  limits.wz_max = 0.0;
+  const auto output = mixVelocity(input, limits, MixMode::kNavSe2);
+  EXPECT_DOUBLE_EQ(output.wz, 0.0);
+  EXPECT_TRUE(output.wz_clamped);
+}
+
+// 模式解析：参数用全名，同时接受命令行常用的简写。
+TEST(VelocityMixNavSe2, ParseModeRoundTrip)
+{
+  MixMode mode = MixMode::kNavSe2;
+  EXPECT_TRUE(parseMixMode("legacy_independent_rotation", mode));
+  EXPECT_EQ(mode, MixMode::kLegacyIndependentRotation);
+  EXPECT_TRUE(parseMixMode("nav_se2", mode));
+  EXPECT_EQ(mode, MixMode::kNavSe2);
+  EXPECT_TRUE(parseMixMode("rotation", mode));
+  EXPECT_EQ(mode, MixMode::kLegacyIndependentRotation);
+  EXPECT_TRUE(parseMixMode("nav", mode));
+  EXPECT_EQ(mode, MixMode::kNavSe2);
+  EXPECT_FALSE(parseMixMode("guess_from_wz", mode));
+  EXPECT_STREQ(toString(MixMode::kNavSe2), "nav_se2");
+  EXPECT_STREQ(toString(MixMode::kLegacyIndependentRotation), "legacy_independent_rotation");
 }

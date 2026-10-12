@@ -6,12 +6,17 @@
 #   标签页 2: 速度合成 + Nav2 导航栈 + RViz (含独立自转测试发送器)
 #   标签页 3: 手柄自转 (可选, 默认关闭; 需要手柄, 输出 remap 到 rotation_cmd)
 #
-# 速度链路 (与实施方案 3.3 一致):
-#   Nav2 controller ─cmd_vel_nav─┐
-#                                ├─ srm_cmd_mux ─cmd_vel_sim─► SRM 速度适配器 → Gazebo
-#   rotation_test_sender ─ rotation_controller ─ rotation_velocity ┘
+# 速度链路有两种模式 (见 docs/wz控制迁移导航与fakeyaw仿真实施方案.md):
 #
-#   导航只产生 vx/vy; mux 丢弃导航输入的 angular.z。自转由独立自转链路给出。
+#   [默认] 旧基线 (--wz-source rotation): 导航只产生 vx/vy, wz 由独立自转链路给出
+#     Nav2 controller ─cmd_vel_nav─┐
+#                                  ├─ srm_cmd_mux(legacy) ─cmd_vel_sim─► 速度适配器
+#     rotation_test_sender ─ rotation_controller ─ rotation_velocity ┘
+#
+#   [迁移] fakeyaw + 导航拥有 wz (--fakeyaw / --wz-source nav):
+#     MINCO/Nav2(base_link_fake) ─cmd_vel_nav_fake─► fake_vel_transform
+#        ─cmd_vel_nav_body─► srm_cmd_mux(nav_se2) ─cmd_vel_sim─► 速度适配器
+#     底盘真实 yaw 由导航的 wz 积分得到; 独立自转链路被拒绝。
 #
 # 速度限幅 (控制器 / 平滑器 / mux / 恢复行为 / 自转) 的**唯一来源**:
 #   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
@@ -51,12 +56,17 @@
 #       --map /abs/prior.yaml --no-rotation                    # 用 GICP 初始重定位
 #   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
 #       --init-pose "0,0,0,0,0,0.5236"                         # 手动给 map->odom 初值
+#   ./script/start_sim_nav.sh --fakeyaw -w srm_empty           # 迁移链路 (导航拥有 wz)
+#   ./script/start_sim_nav.sh --wz-source nav -w srm_empty     # 同上 (等价写法)
+#   ./script/start_sim_nav.sh --fakeyaw --no-run               # 迁移链路 + Gazebo 暂停
 #   DRY_RUN=1 ./script/start_sim_nav.sh                        # 只打印将执行的命令
 #
 # 参数:
 #   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
 #   -m, --map     <名字|绝对路径>  地图名(自动补 .yaml)或 YAML 绝对路径
 #   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params_srm.yaml
+#                             (--fakeyaw / --wz-source nav 时默认换成
+#                              config/simulation/nav2_params_srm_fakeyaw.yaml)
 #       --gicp / --no-gicp       是否用 GICP 初始重定位 (默认关闭 = 原来的静态地图模式)
 #       --prior-pcd <绝对路径>   先验点云 PCD (--gicp 时必填)
 #       --prior-pcd-manifest <绝对路径>
@@ -66,6 +76,9 @@
 #       --init-pose "<x,y,z,roll,pitch,yaw>"
 #                                map->odom 初值, 等价于 nav2 参数的 init_pose;
 #                                给了就以它为准 (不再从 manifest 推导)
+#       --wz-source <nav|rotation>  wz 归谁所有 (默认 rotation = 旧基线)
+#       --fakeyaw / --no-fakeyaw    是否启用 fake_vel_transform 迁移链路
+#                                   (--wz-source nav 会自动打开)
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
@@ -87,7 +100,7 @@
 #   USE_GICP PRIOR_PCD_FILE PRIOR_PCD_MANIFEST INIT_POSE GICP_RUN_ID
 #   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
 #   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
-#   START_ROTATION_SENDER ENABLE_TELEOP
+#   START_ROTATION_SENDER ENABLE_TELEOP WZ_SOURCE USE_FAKEYAW
 #   OPEN_MODE(tab|window) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
@@ -130,6 +143,13 @@ USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
 ENABLE_TELEOP="${ENABLE_TELEOP:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
+# wz 控制迁移开关 (方案 §4.4):
+#   WZ_SOURCE=rotation (默认) 旧基线; nav = 导航拥有 wz (要求 fakeyaw 链路)
+#   USE_FAKEYAW=1 启用 fake_vel_transform (fakeyaw 迁移链路)
+WZ_SOURCE="${WZ_SOURCE:-rotation}"
+USE_FAKEYAW="${USE_FAKEYAW:-0}"
+#: 用户是否显式给过 --wz-source（用于判断 --fakeyaw/--no-fakeyaw 是否与之矛盾）。
+WZ_SOURCE_GIVEN=0
 START_ROTATION_SENDER="${START_ROTATION_SENDER:-1}"
 ROTATION_MODE="${ROTATION_MODE:-stop}"
 ROTATION_SPEED="${ROTATION_SPEED:-0.0}"
@@ -194,6 +214,9 @@ while [ $# -gt 0 ]; do
                           shift 2 ;;
     --rotation)     START_ROTATION_SENDER="1"; shift ;;
     --no-rotation)  START_ROTATION_SENDER="0"; shift ;;
+    --wz-source)  WZ_SOURCE="${2:?--wz-source 需要 nav|rotation}"; WZ_SOURCE_GIVEN="1"; shift 2 ;;
+    --fakeyaw)    USE_FAKEYAW="1"; shift ;;
+    --no-fakeyaw) USE_FAKEYAW="0"; shift ;;
     --teleop)     ENABLE_TELEOP="1"; shift ;;
     --no-teleop)  ENABLE_TELEOP="0"; shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -201,6 +224,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---------- wz 控制迁移开关 ----------
+# 两个开关是同一件事的两种写法，互相蕴含：
+#   --wz-source nav   <=> 导航拥有 wz <=> 需要 fake_vel_transform 迁移链路
+# 只有"显式给矛盾组合"才报错（--fakeyaw --wz-source rotation / --no-fakeyaw --wz-source nav）。
+case "$(printf '%s' "$WZ_SOURCE" | tr '[:upper:]' '[:lower:]')" in
+  nav)      WZ_SOURCE="nav" ;;
+  rotation) WZ_SOURCE="rotation" ;;
+  *) echo "[错误] --wz-source 只支持 nav / rotation" >&2; exit 2 ;;
+esac
+if [ "$USE_FAKEYAW" = "1" ] && [ "$WZ_SOURCE_GIVEN" = "1" ] && [ "$WZ_SOURCE" = "rotation" ]; then
+  echo "[错误] --fakeyaw 与 --wz-source rotation 矛盾: fakeyaw 迁移链路的前提就是" >&2
+  echo "       导航拥有 wz; 否则导航会输出 wz、而 mux 又把它丢弃 (两处都不生效)。" >&2
+  exit 2
+fi
+if [ "$USE_FAKEYAW" = "0" ] && [ "$WZ_SOURCE_GIVEN" = "1" ] && [ "$WZ_SOURCE" = "nav" ]; then
+  echo "[错误] --no-fakeyaw 与 --wz-source nav 矛盾: 导航拥有 wz 必须经" >&2
+  echo "       fake_vel_transform 把速度从 fake 系转到真实车体系。" >&2
+  exit 2
+fi
+if [ "$USE_FAKEYAW" = "1" ] || [ "$WZ_SOURCE" = "nav" ]; then
+  WZ_SOURCE="nav"
+  USE_FAKEYAW="1"
+  # 迁移链路上独立自转输入会被 mux 拒绝 (nav_se2): 关掉自转测试发送器与手柄自转。
+  START_ROTATION_SENDER="0"
+  ENABLE_TELEOP=0
+fi
 # ---------- 环境检查 ----------
 if [ ! -f "$WS_DIR/install/setup.bash" ]; then
   echo "[错误] 未找到 $WS_DIR/install/setup.bash" >&2
@@ -272,9 +321,16 @@ fi
 MAPS_DIR="$WS_DIR/maps"
 
 if [ -z "$PARAMS_FILE" ]; then
-  PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
+  # 迁移链路默认用 fakeyaw 那份配置 (base_link_fake + se2 + StoppedGoalChecker);
+  # 旧基线仍是 nav2_params_srm.yaml。用 -p 显式指定时以用户给的为准。
+  if [ "$WZ_SOURCE" = "nav" ]; then
+    PARAMS_DEFAULT_NAME="nav2_params_srm_fakeyaw.yaml"
+  else
+    PARAMS_DEFAULT_NAME="nav2_params_srm.yaml"
+  fi
+  PARAMS_FILE="$PKG_SRC/config/simulation/$PARAMS_DEFAULT_NAME"
   if [ ! -f "$PARAMS_FILE" ]; then
-    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm.yaml"
+    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/$PARAMS_DEFAULT_NAME"
   fi
 fi
 
@@ -553,6 +609,16 @@ case "$ROTATION_MODE" in
   *) echo "[错误] --rotation-mode 只支持 stop / constant / periodic" >&2; exit 2 ;;
 esac
 
+if [ "$WZ_SOURCE" = "nav" ]; then
+  USE_FAKEYAW_ARG="True"
+  WZ_SOURCE_ARG="nav"
+  COMMAND_FRAME_ARG="base_link_fake"
+else
+  USE_FAKEYAW_ARG="False"
+  WZ_SOURCE_ARG="rotation"
+  COMMAND_FRAME_ARG="base_link"
+fi
+
 if [ "$START_ROTATION_SENDER" = "0" ] || [ "$START_ROTATION_SENDER" = "false" ] || [ "$START_ROTATION_SENDER" = "no" ]; then
   START_ROTATION_SENDER="False"
 else
@@ -680,6 +746,15 @@ else
 fi
 printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
 printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
+printf 'wz 归属   : %s%s\n' "$WZ_SOURCE" \
+  "$([ "$USE_FAKEYAW" = "1" ] && echo '  (fake_vel_transform 迁移链路: 导航拥有 wz, 底盘 yaw 由 wz 积分)' || echo '  (旧基线: wz 来自独立自转链路)')"
+if [ "$WZ_SOURCE" = "nav" ]; then
+  printf '速度链    : Nav2[cmd_vel_nav_fake] -> fake_vel_transform[cmd_vel_nav_body] -> srm_cmd_mux(nav_se2) -> cmd_vel_sim -> Gazebo\n'
+  printf 'TF owner  : odom->base_link = 定位/真值里程计;  base_link->base_link_fake = fake_vel_transform\n'
+else
+  printf '速度链    : Nav2[cmd_vel_nav] + rotation_velocity -> srm_cmd_mux(legacy) -> cmd_vel_sim -> Gazebo\n'
+  printf 'TF owner  : odom->base_link = 定位/真值里程计 (无 fake 系)\n'
+fi
 printf '自转测试  : 发送器 %s  模式 %s' "$START_ROTATION_SENDER" "$ROTATION_MODE"
 case "$ROTATION_MODE" in
   constant) printf '  角速度 %s rad/s' "$ROTATION_SPEED" ;;
@@ -748,7 +823,9 @@ PYEOF
   PARAMS_FILE_Q="$(printf '%q' "$GICP_PARAMS_FILE")"
   echo "[提示] GICP 参数副本: $GICP_PARAMS_FILE"
 fi
-NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE}"
+# 定位方式由 NAV_EXTRA_ARGS 统一给出 (main: use_pcd_localization / use_lio_odometry /
+# prior_pcd_file); 本迁移新增的三个开关跟在它后面, 与定位方式正交。
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} wz_control_mode:=${WZ_SOURCE_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE}"
 start_once "SRM27 导航 + 速度合成 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ "$ENABLE_TELEOP" = "1" ]; then
@@ -768,17 +845,7 @@ cat <<EOF
   - Gazebo $( [ "$RUN_IMMEDIATELY" = "true" ] && echo "已直接开始运行(gz sim -r), 不用点播放。" || echo "以暂停启动(--no-run), 需要点播放后仿真才推进。" )
   - Gazebo 里车出现后, 在 RViz 用 "2D Goal Pose" / "Nav2 Goal" 下发目标点。
 
-速度链路检查 (新终端):
-  cd '$WS_DIR' && source install/setup.bash
-  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav --once         # 导航平移速度 (angular.z 应为 0)
-  ros2 topic echo /${ROBOT_NS}/rotation_velocity --once   # 独立自转速度
-  ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # 合成后的最终执行命令
-  ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
-  ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
-  ros2 run tf2_ros tf2_echo map base_link                 # 完整 TF 链: map->odom->base_link
-  ros2 topic echo /${ROBOT_NS}/diagnostics --once         # 合成与超时状态
-
-切换自转模式 (无需重启导航):
+切换自转模式 (无需重启导航, 仅旧基线; 迁移链路请用导航目标点):
   ros2 service call /${ROBOT_NS}/rotation_test_sender/disable std_srvs/srv/Trigger
   ros2 param set /${ROBOT_NS}/rotation_test_sender rotation_mode periodic
   ros2 param set /${ROBOT_NS}/rotation_test_sender offset 1.0
@@ -793,3 +860,40 @@ cat <<EOF
 清理残留:
   ./script/kill_gzb.sh && ./script/kill_rviz.sh
 EOF
+
+if [ "$WZ_SOURCE" = "nav" ]; then
+  cat <<EOF
+
+速度链路检查 (新终端):
+  cd '$WS_DIR' && source install/setup.bash
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav_fake --once    # 导航请求 (fake 系, 含 wz)
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav_body --once    # fake 转换后 (车体系, wz 应逐条相同)
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # mux 最终输出 (含导航 wz)
+  ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
+  ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
+  ros2 run tf2_ros tf2_echo base_link base_link_fake      # fakeyaw TF: yaw 应等于 -底盘 yaw
+  ros2 run tf2_ros tf2_echo map base_link                 # 完整 TF 链
+  ros2 topic echo /${ROBOT_NS}/diagnostics --once         # mux: wz_source=mavigation
+  ros2 topic echo /${ROBOT_NS}/fake_vel_transform/diagnostics --once  # wz 透传误差/过期 yaw 计数
+
+记录要求 (方案 §6): 必须区分"导航请求 wz"(cmd_vel_nav_fake.angular.z)、
+"转换器输出 wz"(cmd_vel_nav_body.angular.z)、"mux 最终 wz"(cmd_vel_sim.angular.z)、
+"里程计实际 wz"(odometry.twist.angular.z), 不能只看 Gazebo 模型是否转动。
+
+P0 自检 (不需要 Gazebo):
+  python3 script/check_wz_fakeyaw_chain.py
+EOF
+else
+  cat <<EOF
+
+速度链路检查 (新终端):
+  cd '$WS_DIR' && source install/setup.bash
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav --once         # 导航平移速度 (angular.z 应为 0)
+  ros2 topic echo /${ROBOT_NS}/rotation_velocity --once   # 独立自转速度
+  ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # 合成后的最终执行命令
+  ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
+  ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
+  ros2 run tf2_ros tf2_echo map base_link                 # 完整 TF 链: map->odom->base_link
+  ros2 topic echo /${ROBOT_NS}/diagnostics --once         # 合成与超时状态
+EOF
+fi

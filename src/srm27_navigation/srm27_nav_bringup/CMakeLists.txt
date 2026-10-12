@@ -35,7 +35,7 @@ find_package(ament_lint_auto REQUIRED)
   find_program(SRM27_PYTHON3_EXECUTABLE NAMES python3 REQUIRED)
   find_package(ament_cmake_test REQUIRED)
   foreach(test_name test_pose_math test_ground_truth_odometry_pose test_minco_real_preflight
-                    test_speed_limits)
+                    test_speed_limits test_fakeyaw_launch_wiring)
     ament_add_test(${test_name}
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO
       COMMAND ${SRM27_PYTHON3_EXECUTABLE}
