@@ -1,2 +1,0 @@
-WARNING: topic [/red_standard_robot1/fake_vel_transform/diagnostics] does not appear to be published yet
-Could not determine the type for the passed topic

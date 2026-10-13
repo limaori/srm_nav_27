@@ -287,6 +287,23 @@ def generate_launch_description():
         "'nav_se2' if '", wz_control_mode, "' == 'nav' else 'legacy_independent_rotation'",
     ])
 
+    # 航向策略（阶段二小陀螺进线，方案 §4.1.2）：yaw_mode=auto 时按链路推导 ——
+    # 迁移链 se2（导航拥有 wz）、旧链路 xy_only（MPC 不控自转）；显式 spin 表示
+    # 外部自转请求经 rotation_cmd -> rotation_velocity -> MINCO setSpinRequest 进线。
+    yaw_mode_arg = LaunchConfiguration("yaw_mode")
+    effective_yaw_mode = PythonExpression([
+        "'", yaw_mode_arg, "' if '", yaw_mode_arg, "' != 'auto' else ('se2' if ",
+        use_fakeyaw_transform, " else 'xy_only')",
+    ])
+    # 判停器与航向策略必须配套：spin 模式下车到点仍在自转（小陀螺驻车），
+    # StoppedGoalChecker 的角速度判停永远不会通过，必须换成只看平移的
+    # OmniStoppedGoalChecker；非 spin 时保持迁移链/旧链路各自的文件值。
+    effective_goal_checker = PythonExpression([
+        "'srm27_nav_plugins::OmniStoppedGoalChecker' if '", yaw_mode_arg,
+        "' == 'spin' else ('nav2_controller::StoppedGoalChecker' if ",
+        use_fakeyaw_transform, " else 'srm27_nav_plugins::OmniStoppedGoalChecker')",
+    ])
+
     # 点云转换节点使用的参数：与旧入口一致，按命名空间 root_key 重写 use_sim_time。
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -296,6 +313,22 @@ def generate_launch_description():
             convert_types=True,
         ),
         allow_substs=True,
+    )
+
+    # Nav2 栈的参数文件：在通用文件之上注入航向策略与判停器（点分全路径，
+    # 见 nav2_common RewrittenYaml 的 substitute_params"total path"分支）。
+    # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装，这里先包
+    # 会双重嵌套导致参数加载不到。实车链（start_real_nav.sh）直接走
+    # nav2_stack_launch、不经过本包装，其 yaw_policy/判停器不受影响。
+    nav_stack_params = RewrittenYaml(
+        source_file=params_file,
+        root_key=None,
+        param_rewrites={
+            "controller_server.ros__parameters.FollowPath.yaw_policy.mode": effective_yaw_mode,
+            "controller_server.ros__parameters.general_goal_checker.plugin":
+                effective_goal_checker,
+        },
+        convert_types=True,
     )
 
     # 1) Gazebo 世界 + SRM 模型 + 传感器桥接 + 速度执行（可选，默认由启动脚本拉起）
@@ -348,7 +381,7 @@ def generate_launch_description():
             "map": map_yaml_file,
             "prior_pcd_file": prior_pcd_file,
             "use_sim_time": use_sim_time,
-            "params_file": params_file,
+            "params_file": nav_stack_params,
             "speed_limits_file": speed_limits_file,
             "autostart": autostart,
             "use_composition": use_composition,
@@ -424,6 +457,17 @@ def generate_launch_description():
     ld.add_action(
         DeclareLaunchArgument(
             "namespace", default_value="red_standard_robot1", description="Top-level namespace"
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "yaw_mode",
+            default_value="auto",
+            description=(
+                "MINCO 航向策略：auto=按链路推导（迁移链 se2 / 旧链路 xy_only）；"
+                "spin=外部自转请求进线（阶段二小陀螺，配合 script/spin_control.sh）；"
+                "se2 / xy_only 为显式指定。spin 时判停器自动换成 OmniStoppedGoalChecker"
+            ),
         )
     )
     ld.add_action(

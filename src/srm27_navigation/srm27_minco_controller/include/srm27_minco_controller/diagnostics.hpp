@@ -101,6 +101,11 @@ struct ControllerDiagnostics
   /// 非零即说明"有独立自转想混进 yaw 参考"，迁移链上必须为 0（方案 §4.1.2）。
   std::uint64_t rejected_spin_request_count{0};
 
+  /// \brief 当前自转请求（rad/s）；仅 SPIN 模式进线（阶段二小陀螺），其余模式恒为 0。
+  double spin_request{0.0};
+  /// \brief 自转请求是否新鲜（超时未更新按撤回处理；SPIN 模式下 false 即停转）。
+  bool spin_request_fresh{false};
+
   // 终点收敛（2026-10-09 实车终点振荡诊断）
   /// \brief 当前位姿到路径末点的距离（m）。
   double terminal_distance{0.0};

@@ -134,6 +134,9 @@ private:
   bool goal_hold_{false};
   /// \brief 被拒绝的独立自转请求次数（非 `kSpin` 模式下传入时 +1）。
   std::uint64_t rejected_spin_request_count_{0};
+  /// \brief SPIN 模式的参考 yaw 积分器（随 wz 参考推进，重规划时重新锚定当前航向）。
+  double spin_ref_yaw_{0.0};
+  double last_spin_time_{-1.0};
   /// \brief 上一次 FOLLOW/NARROW 模式给出的切向参考，用于估计角速度参考。
   double last_tangent_time_{0.0};
   double last_tangent_yaw_{0.0};

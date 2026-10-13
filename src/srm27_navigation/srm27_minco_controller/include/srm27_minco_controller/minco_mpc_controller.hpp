@@ -111,6 +111,10 @@ private:
   /// \brief 轨迹作废（新目标、取消、限速收紧、定位重置、失活）。
   void invalidateTrajectory(const std::string & _reason, double _now_stamp);
 
+  /// \brief 自转请求进线（阶段二小陀螺）：`kSpin` 模式下把新鲜请求喂给航向策略，
+  ///   超时视为撤回；其余模式只更新诊断，不触碰策略。
+  void refreshSpinRequest();
+
   /// \brief 组装一条受控零速度命令并记录停止原因。
   geometry_msgs::msg::TwistStamped stopCommand(
     const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const std::string & _reason,
@@ -153,6 +157,13 @@ private:
   /// \brief fakeyaw 迁移用的虚拟车体系名（用于校验 `command_frame`）。
   std::string fake_base_frame_{"base_link_fake"};
   std::string odom_topic_{"odometry"};
+  /// \brief 自转请求进线话题（阶段二小陀螺，方案 §4.1.2）。
+  ///
+  /// 订阅旧链路自转速度链的输出（已含 wz_max / 加速度限幅），`kSpin` 模式下
+  /// 每一拍喂给航向策略；其余模式只缓存不进线。
+  std::string spin_request_topic_{"rotation_velocity"};
+  /// \brief 自转请求新鲜窗口（秒）：超时未更新按"撤回请求"处理（车停止自转）。
+  double spin_request_timeout_{0.25};
   double replan_frequency_{10.0};
   double planning_horizon_{2.0};
   double planning_deadline_ms_{30.0};
@@ -279,6 +290,13 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_{};
   double last_diagnostics_stamp_{0.0};
+
+  // 自转请求缓存（spin_request.topic 的最近一条；stamp 用 steady 时钟）
+  std::mutex spin_request_mutex_{};
+  double spin_request_value_{0.0};
+  double spin_request_stamp_{-1.0};
+  /// \brief 自转请求进线订阅（configure 时创建；kSpin 模式消费）。
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_request_sub_{};
 };
 
 }  // namespace srm27_minco_controller

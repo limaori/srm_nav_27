@@ -104,6 +104,9 @@ void YawPolicy::reset(double _yaw)
   last_tangent_time_ = 0.0;
   last_tangent_yaw_ = _yaw;
   has_last_tangent_ = false;
+  // SPIN 参考 yaw 积分器一并复位（新会话从当前航向重新锚定）。
+  spin_ref_yaw_ = _yaw;
+  last_spin_time_ = -1.0;
 }
 
 void YawPolicy::setSpinRequest(double _omega)
@@ -204,12 +207,20 @@ bool YawPolicy::yawReference(
       return true;
     }
     case YawMode::kSpin: {
-      // SPIN 参考 yaw 连续积分；请求过期后按停止处理，不自动沿用旧自转。
-      // 没有有效请求时按停止处理，不自动沿用独立自转。
+      // SPIN: wz 参考来自外部请求；参考 yaw 必须与 wz 参考**同向积分**——
+      // 若 yaw 参考恒定，MPC 的航向跟踪项会抵消自转参考（实测解出 wz≈0）。
+      // 每次重规划（采样时间回绕）从当前连续航向重新起积分；请求过期后
+      // omega=0，yaw 参考冻结（车停转）。
       const double requested = spin_request_active_ ? spin_omega_ : 0.0;
-      _yaw = _previous_yaw;
       _omega = srm27_minco_core::clampToRange(
         requested, -config_.max_angular_speed, config_.max_angular_speed);
+      if (last_spin_time_ < 0.0 || _trajectory_time < last_spin_time_) {
+        spin_ref_yaw_ = current_yaw_;
+      } else {
+        spin_ref_yaw_ += _omega * (_trajectory_time - last_spin_time_);
+      }
+      last_spin_time_ = _trajectory_time;
+      _yaw = srm27_minco_core::unwrapAngleNear(_previous_yaw, spin_ref_yaw_);
       return true;
     }
   }

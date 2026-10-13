@@ -130,6 +130,9 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
   addNumber(values, "applied_wz", _diagnostics.applied_wz);
   addString(values, "wz_clamp_reason", _diagnostics.wz_clamp_reason);
   addCount(values, "rejected_spin_request_count", _diagnostics.rejected_spin_request_count);
+  // 自转请求进线（阶段二小陀螺）：现场用这两个键确认"请求有没有到 MINCO、新不新鲜"。
+  addNumber(values, "spin_request", _diagnostics.spin_request);
+  addString(values, "spin_request_fresh", _diagnostics.spin_request_fresh ? "true" : "false");
 
   addNumber(values, "requested_vx", _diagnostics.requested_vx);
   addNumber(values, "requested_vy", _diagnostics.requested_vy);

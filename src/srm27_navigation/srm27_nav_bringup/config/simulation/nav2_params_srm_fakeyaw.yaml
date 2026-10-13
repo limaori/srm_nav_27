@@ -422,6 +422,8 @@ controller_server:
     #   导航拥有 wz 之后，「到达」这件事包含角速度 —— 用只检查平动的
     #   OmniStoppedGoalChecker 会让「车还在原地转」也被判成功，于是底盘带着残余 wz
     #   进入下一个目标。这里换成 Nav2 自带的 StoppedGoalChecker 并显式给出角速度阈值。
+    #   例外: 小陀螺（--yaw-mode spin）时 launch 会把它改写回 OmniStoppedGoalChecker
+    #   —— 持续自转是操作手要的驻车状态，判停只看平移（launch/nav_srm_simulation_launch.py）。
     general_goal_checker:
       plugin: "nav2_controller::StoppedGoalChecker"
       stateful: True                                    # 是否保存目标检查状态
@@ -564,10 +566,19 @@ controller_server:
       yaw_policy:                                       # 航向策略
         # se2 = 迁移模式（方案 §4.1.1）：MPC 拥有角速度权限，航向参考只来自路径切线
         # （不引入任何「独立自转请求」），到点后冻结航向参考；回退用 mode: xy_only。
+        # 小陀螺（阶段二）由 start_sim_nav.sh --yaw-mode spin 把 mode 改写为 spin：
+        # 自转请求经 rotation_cmd -> rotation_velocity -> setSpinRequest 进线。
         mode: se2                                       # 导航拥有 wz：MPC 输出角速度
         stop_rotation_on_goal: True                     # 到点后停止自转参考
         narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
+
+      # 自转请求进线（阶段二小陀螺）：SPIN 模式下每一拍喂给航向策略；其余模式
+      # 只缓存不进线。话题接旧链路自转速度链的输出（已含 wz_max / 加速度限幅）。
+      # 手动控制: script/spin_control.sh on <rad/s> / off / status。
+      spin_request:
+        topic: rotation_velocity                        # 请求话题（相对命名空间）
+        timeout: 0.25                                   # 新鲜窗口（秒）；超时按撤回处理（停转）
 
       safety:                                           # 几何与安全
         robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
@@ -630,7 +641,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.5                               # 障碍膨胀半径（米）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 global_costmap:
@@ -677,7 +688,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.5                               # 障碍膨胀半径（米）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.

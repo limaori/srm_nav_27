@@ -506,10 +506,44 @@ ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=red_standa
   tf2_echo 输出走 stdout 缓冲，建议落盘再读。
 - 采样旋转工况时，body/odom 快照必须同一时刻（9.1 的教训）。
 
-### 9.7 现场还开着的东西（会话结束时状态）
+### 9.7 小陀螺导航实测（2026-10-12 晚，经 start_sim_nav.sh 正式入口）
 
-- Gazebo 无头（`world:=srm_empty`）与导航栈（fakeyaw 配置）作为后台作业仍在运行，
-  供用户从自己的终端接入观察。
+脚本入口增强（本次提交）：`OPEN_MODE=direct`——无终端环境不弹 gnome-terminal，
+子进程日志落 `.sim_run/logs/`，脚本末尾 `wait` 作为宿主托管全部子进程
+（结束仿真=结束脚本进程组）；`.sim_run/env.sh` 补 `XDG_RUNTIME_DIR`
+（`/run/user/1000` 只读导致 Gazebo 锁文件创建失败）。
+
+**迁移链下小陀螺的现状（重要结论）**：
+- mux `wz_control_mode=nav_se2` **按设计拒绝**独立自转输入（方案 §4.1.2，
+  启动日志明确打印"独立自转输入 [rotation_velocity] 被拒绝"）；
+- MINCO `yaw_policy.mode=spin` 基础设施已就位（`setSpinRequest`、请求过期即停、
+  非 spin 模式拒绝并计数），但**控制器没有任何话题进线调用它**——迁移链的真小陀螺
+  属于方案阶段二，当前未接线；
+- 因此脚本显式禁止 `--fakeyaw --wz-source rotation` 组合是正确的。
+
+**旧链路（默认 `--wz-source rotation`）小陀螺实测**：
+`./script/start_sim_nav.sh -w srm_empty -m rmuc_2025 --no-rviz --no-gui
+ --rotation-mode constant --rotation-speed <X>`：
+
+| 自转指令 | 实际自转 | 目标 | 结果 | 位移方向误差 | 路径弯曲度 | 用时(运动段) |
+|---|---|---|---|---|---|---|
+| 1.0 rad/s | 0.99 | (1.2,0) 直行 | SUCCEEDED | 1.5° | — | ~1.5 s |
+| 1.0 rad/s | 0.99 | (1.5,1.2) 斜向 | SUCCEEDED | 1.5° | — | ~1.1 s |
+| 3.0 rad/s | **2.0**（被钳） | (1.2,0) 直行 | SUCCEEDED | 5.7° | 1.00 | ~0.9 s |
+
+- 3.0→2.0 的钳制点：`speed_limits.yaml` 的 `rotation_controller.wz_max: 2.0`
+  （唯一限幅来源，设计如此；不是 mux 的 4.0）。
+- 到点后 nav 归零、车保持恒速自转（驻车小陀螺）；legacy 检查器（xy 容差 0.4）
+  不含角速度停稳条件——这正是迁移配置换 `StoppedGoalChecker` 的原因。
+- 结论：低转速 + 简单场景下旧链路可用，方向误差随转速近似线性增大
+  （1.5°@1 rad/s → 5.7°@2 rad/s）；车体系速度 + 自转的补偿全靠 50 Hz 重规划，
+  更高转速/复杂场景才是迁移链（fake 系速度）的主场。
+- 数据：`.sim_run/gyro_nav{,2,3}_samples.csv`。
+
+### 9.8 现场还开着的东西（会话结束时状态）
+
+- 旧链路小陀螺导航栈（`rotation-speed 3.0` → 实际 2.0 rad/s 钳制值，Gazebo 无头 +
+  导航）作为后台作业仍在运行，供用户从自己的终端接入观察。
 - 用户侧接入：
   ```bash
   source /opt/ros/humble/setup.bash && source /home/srm/srm_nav_27/install/setup.bash
@@ -523,4 +557,49 @@ ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=red_standa
   gz sim -g -v 1
   ```
 - 停止：向会话发起人要（后台作业 job_kill），或对launch进程组 Ctrl-C。
+
+## 10. 阶段二：迁移链小陀螺进线（2026-10-13）
+
+### 10.1 实现内容
+
+- **自转请求进线**（`minco_mpc_controller.cpp/.hpp`）：订阅 `spin_request.topic`
+  （默认 `rotation_velocity`，RELIABLE 与 rotation_controller 匹配），缓存最近一条
+  （steady 时钟）；`computeVelocityCommands` 每周期调 `refreshSpinRequest()`：
+  `kSpin` 模式下新鲜请求喂 `setSpinRequest`、超时（`spin_request.timeout` 默认
+  0.25 s）喂 `clearSpinRequest`；非 SPIN 模式只缓存不进线（避免旧链常驻 0 速流
+  刷满拒绝计数）。诊断新增 `spin_request` / `spin_request_fresh` 两个键。
+- **SPIN yaw 参考积分**（`yaw_policy.cpp`，关键修复）：原实现 `_yaw = _previous_yaw`
+  恒定，MPC 航向跟踪项与自转参考对抗，实测解出 `applied_wz≈0`；改为按 wz 参考
+  逐采样积分（`spin_ref_yaw_`），重规划时从当前连续航向重新锚定。修复后
+  fake/sim/里程计三层 wz 峰值一致（2.09/2.09/2.09 rad/s @ 请求 2.0）。
+- **终点急停保留自转**：进入判停圈后 `terminal_stop` 原本全零；`kSpin` 且请求
+  新鲜时只刹平移、保留 wz（导航会话结束后 wz 随之停止，mux 零速兜底）。
+- **launch 注入**（`nav_srm_simulation_launch.py`）：新增 `yaw_mode` 参数
+  （auto/se2/spin/xy_only，默认 auto=迁移链 se2 / 旧链 xy_only）；用
+  RewrittenYaml 点分全路径改写 `FollowPath.yaw_policy.mode` 与
+  `general_goal_checker.plugin` 后再传给 nav2_stack。spin 时判停器自动换
+  `OmniStoppedGoalChecker`（持续自转是驻车状态，判停只看平移）。
+  **实车链不受影响**：改写只在仿真入口包一层，navigation_launch/nav2_stack_launch
+  未动。
+- **脚本默认切换**（`start_sim_nav.sh`）：默认 = 迁移链（`--no-fakeyaw` /
+  `--wz-source rotation` 显式降级旧链）；新增 `--yaw-mode`；spin+旧链组合报错。
+- **手动转速控制**（`script/spin_control.sh`）：`on <rad/s>` / `off` / `status`，
+  20 Hz 持发 `rotation_cmd`（停发即超时撤回）。
+
+### 10.2 验证（srm_empty + 227_1011 图）
+
+- 目标 (0,0)→(1.2,0)：**Goal succeeded**，0.86 s；采样见车在 map (0.555,0.03)
+  处 yaw 29.5°↑、fk_wz=+1.53、里程计 +1.65（边走边转）；yaw 0→81.4° 与
+  2 rad/s × 0.86 s 一致；`rejected_spin_request_count=0`。
+- 请求撤回（`spin_control.sh off`）后自转停止 ✓。
+- 数据：`.sim_run/gyro_migrated_samples.csv`。
+
+### 10.3 已知边界
+
+- 导航会话结束后自转停止（wz 归导航所有，mux 零速兜底）——"到点持续自转"需
+  后续给 mux 加 spin 旁路或常驻伪目标，当前架构不提供。
+- 227_1011 实采图 + srm_empty 空世界组合：起/终点距图上墙 < 膨胀半径时规划器报
+  "start or goal pose are an obstacle" 并触发恢复循环（恢复行为还可能把车顶进
+  更贴墙的位置）——目标点离图上墙至少留 0.6 m。
+- `ros2 action send_goal` 在沙盒下偶发响应丢失（bt 日志为准，见 §9.6）。
 
