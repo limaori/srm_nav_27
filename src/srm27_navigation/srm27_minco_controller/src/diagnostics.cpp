@@ -130,6 +130,18 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
   addString(values, "terminal_active", _diagnostics.terminal_active ? "true" : "false");
   addNumber(values, "terminal_tolerance", _diagnostics.terminal_tolerance);
 
+  addCount(values, "consecutive_plan_failures", _diagnostics.consecutive_plan_failures);
+  addCount(
+    values, "failure_ladder_stage", static_cast<std::uint64_t>(_diagnostics.failure_ladder_stage));
+  addNumber(values, "failure_speed_scale", _diagnostics.failure_speed_scale);
+  addCount(values, "degraded_candidate_count", _diagnostics.degraded_candidate_count);
+  addCount(
+    values, "active_failure_patches",
+    static_cast<std::uint64_t>(_diagnostics.active_failure_patches));
+  addCount(
+    values, "failure_injection", static_cast<std::uint64_t>(_diagnostics.failure_injection));
+  addString(values, "last_violation_pos", _diagnostics.last_violation_pos);
+
   array.status.push_back(status);
   return array;
 }

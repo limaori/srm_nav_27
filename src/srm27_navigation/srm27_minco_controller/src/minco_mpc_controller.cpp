@@ -171,6 +171,19 @@ void MincoMpcController::configure(
     node->create_publisher<nav_msgs::msg::Path>(plugin_name_ + "/mpc_prediction", rclcpp::QoS(1));
   diagnostics_pub_ = node->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     plugin_name_ + "/diagnostics", rclcpp::QoS(1));
+  // 故障注入开关（演练重规划阶梯）：用默认 VOLATILE+RELIABLE，与
+  // `ros2 topic pub --once` 的默认 QoS 直接匹配（TRANSIENT_LOCAL 订阅端会
+  // 拒绝 VOLATILE 发布者，现场表现为"开关发不进去"）。
+  failure_injection_sub_ = node->create_subscription<std_msgs::msg::Bool>(
+    plugin_name_ + "/failure_injection", rclcpp::QoS(1),
+    [this](const std_msgs::msg::Bool::SharedPtr _msg) {
+      failure_injection_.store(_msg->data);
+      if (auto locked = parent_.lock()) {
+        RCLCPP_WARN(
+          locked->get_logger(), "MincoMpcController: 故障注入已%s（重规划阶梯演练）",
+          _msg->data ? "开启" : "关闭");
+      }
+    });
   planning_input_pub_ = node->create_publisher<nav_msgs::msg::Path>(
     plugin_name_ + "/planning_input_path", rclcpp::QoS(1));
 
@@ -291,6 +304,15 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("state.max_yaw_jump", 1.20);
   declare("state.velocity_filter_alpha", 0.35);
 
+  // 重规划失败处理阶梯（默认值即行为开关：参数文件不写这些键时阶梯按默认启用）。
+  declare("failure_ladder.cold_start_after", 3);        // 连续失败 N 次后改冷启动+降速
+  declare("failure_ladder.speed_backoff_after", 6);     // 连续失败 N 次后再降一档速度
+  declare("failure_ladder.backoff_factor", 0.5);        // 每档速度缩放系数
+  declare("failure_patch.radius", 0.15);                // 失败位置临时膨胀补丁半径（m）
+  declare("failure_patch.ttl", 3.0);                    // 补丁存活时间（s）
+  declare("failure_patch.min_distance", 0.5);           // 距车太近的位置不打补丁（m）
+  declare("failure_patch.max_count", 4);                // 同时生效的补丁上限
+
   node->get_parameter(name + ".planning_frame", planning_frame_);
   node->get_parameter(name + ".base_frame", base_frame_);
   node->get_parameter(name + ".odom_topic", odom_topic_);
@@ -305,6 +327,14 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".publish_visualization", publish_visualization_);
   node->get_parameter(name + ".terminal_reached_radius", terminal_reached_radius_);
   node->get_parameter(name + ".goal_change_tolerance", goal_change_tolerance_);
+  node->get_parameter(name + ".failure_ladder.cold_start_after", failure_ladder_cold_start_after_);
+  node->get_parameter(
+    name + ".failure_ladder.speed_backoff_after", failure_ladder_speed_backoff_after_);
+  node->get_parameter(name + ".failure_ladder.backoff_factor", failure_ladder_backoff_factor_);
+  node->get_parameter(name + ".failure_patch.radius", failure_patch_radius_);
+  node->get_parameter(name + ".failure_patch.ttl", failure_patch_ttl_);
+  node->get_parameter(name + ".failure_patch.min_distance", failure_patch_min_distance_);
+  node->get_parameter(name + ".failure_patch.max_count", failure_patch_max_count_);
   node->get_parameter(name + ".terminal.enabled", terminal_stop_config_.enabled);
   node->get_parameter(name + ".terminal.tolerance", terminal_stop_config_.tolerance);
   node->get_parameter(name + ".terminal.exit_margin", terminal_stop_config_.exit_margin);
@@ -546,6 +576,7 @@ void MincoMpcController::deactivate()
   worker_.stop();
   worker_.clear();
   invalidateTrajectory("deactivated", 0.0);
+  resetFailureLadder();
   yaw_policy_.clearSpinRequest();
   reference_builder_.reset();
   replan_manager_.reset();
@@ -645,6 +676,9 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
     replan_manager_.reset();
     terminal_stop_.reset();
     invalidateTrajectory("new navigation goal", now_stamp);
+    // 新会话 = 新的建轨尝试：失败阶梯复位（失败位置补丁保留，由 TTL 自然过期）。
+    resetFailureLadder();
+    last_violation_pos_text_ = "none";
     if (node) {
       // 记录"为什么"是新会话：只报一句"新会话 #N"在现场无法区分
       // "用户换了目标"、"规划器末点抖动"还是"坐标系变了"。
@@ -758,6 +792,58 @@ void MincoMpcController::refreshMap(double _stamp, const ControllerDiagnostics &
   }
 
   const bool version_changed = version != map_version_;
+  // 第 3 层：把"失败位置临时膨胀补丁"盖到快照上再建距离场。补丁只影响**候选生成
+  // 与校验**（优化器/校验器/局部路径裁剪读同一份 ESDF），不改 costmap、不改参数；
+  // TTL 过期自动消失，距车过近的位置在添加时已被护栏拦下。
+  {
+    std::lock_guard<std::mutex> lock(failure_patches_mutex_);
+    if (!failure_patches_.empty()) {
+      failure_patches_.erase(
+        std::remove_if(
+          failure_patches_.begin(), failure_patches_.end(),
+          [_stamp](const FailurePatch & _patch) { return _patch.expire_stamp <= _stamp; }),
+        failure_patches_.end());
+    }
+    if (!failure_patches_.empty()) {
+      std::vector<srm27_minco_core::CellState> cells;
+      cells.reserve(static_cast<std::size_t>(snapshot.sizeX()) * static_cast<std::size_t>(snapshot.sizeY()));
+      for (int my = 0; my < snapshot.sizeY(); ++my) {
+        for (int mx = 0; mx < snapshot.sizeX(); ++mx) {
+          cells.push_back(snapshot.cell(mx, my));
+        }
+      }
+      int stamped = 0;
+      for (const FailurePatch & patch : failure_patches_) {
+        int cx = 0;
+        int cy = 0;
+        snapshot.worldToCell(patch.position.x(), patch.position.y(), cx, cy);
+        const int radius_cells =
+          std::max(1, static_cast<int>(std::ceil(patch.radius / snapshot.resolution())));
+        for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
+          for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
+            if (dx * dx + dy * dy > radius_cells * radius_cells) {
+              continue;
+            }
+            const int mx = cx + dx;
+            const int my = cy + dy;
+            if (
+              mx >= 0 && mx < snapshot.sizeX() && my >= 0 && my < snapshot.sizeY() &&
+              cells[static_cast<std::size_t>(my) * static_cast<std::size_t>(snapshot.sizeX()) +
+                    static_cast<std::size_t>(mx)] == srm27_minco_core::CellState::kFree) {
+              cells[static_cast<std::size_t>(my) * static_cast<std::size_t>(snapshot.sizeX()) +
+                    static_cast<std::size_t>(mx)] = srm27_minco_core::CellState::kOccupied;
+              ++stamped;
+            }
+          }
+        }
+      }
+      if (stamped > 0) {
+        snapshot.reset(
+          snapshot.originX(), snapshot.originY(), snapshot.resolution(), snapshot.sizeX(),
+          snapshot.sizeY(), std::move(cells), version, snapshot.stamp());
+      }
+    }
+  }
   auto esdf = std::make_shared<srm27_minco_core::Esdf2D>();
   if (!esdf->build(snapshot, esdf_config_)) {
     RCLCPP_WARN_THROTTLE(
@@ -856,6 +942,12 @@ void MincoMpcController::requestReplan(
   planning_request.path = planning_path_;
   planning_request.state = _state;
   planning_request.limits = limits_;
+  // 阶梯的运行时速度缩放：只作用于**候选生成与本次校验上限**，不改参数文件、
+  // 不动 base_limits_（下次成功后自动恢复）。速度是这里唯一动的杠杆：
+  // 转弯半径 ∝ v²/a，降速直接把"切墙角"的解空间找回来。
+  if (failure_speed_scale_ < 1.0 && failure_ladder_stage_ > 0) {
+    planning_request.limits.max_linear_speed *= failure_speed_scale_;
+  }
   planning_request.minco_config = minco_config_;
   planning_request.initializer_config = initializer_config_;
   // 本插件持有的路径是 Nav2 下发的全局路径，其末点即当前 FollowPath 任务的目标。
@@ -868,11 +960,126 @@ void MincoMpcController::requestReplan(
   planning_request.terminal_reached_radius = terminal_reached_radius_;
   // 距离场以只读快照交给工作线程；工作线程不持有 costmap 锁。
   planning_request.esdf = std::const_pointer_cast<const srm27_minco_core::Esdf2D>(esdf_);
-  planning_request.use_warm_start = decision.use_warm_start && has_warm_start_;
+  // 阶梯强制冷启动：热启动复用的是上一条**被拒轨迹**的前缀，初值本身在错误盆地
+  // 里，继续热启动只会在原地打转（2026-10-13 拐角切墙案例的 26 次同配方重试）。
+  planning_request.use_warm_start =
+    decision.use_warm_start && has_warm_start_ && !failure_force_cold_;
   planning_request.warm_inner_points = warm_inner_points_;
   planning_request.warm_durations = warm_durations_;
   planning_request.replan_type = static_cast<int>(decision.type);
+  planning_request.inject_failure = failure_injection_.load();
   worker_.submit(planning_request);
+}
+
+void MincoMpcController::updateFailureLadder(const PlanningResult & _result, double _now_stamp)
+{
+  ++consecutive_plan_failures_;
+  if (_result.has_violation_position) {
+    char buffer[64];
+    std::snprintf(
+      buffer, sizeof(buffer), "(%.2f, %.2f)", _result.violation_position.x(),
+      _result.violation_position.y());
+    last_violation_pos_text_ = buffer;
+  }
+  consecutive_plan_successes_ = 0;  // 失败打断成功连击
+  const int previous_stage = failure_ladder_stage_;
+  if (
+    failure_ladder_speed_backoff_after_ > 0 &&
+    consecutive_plan_failures_ >=
+      static_cast<std::uint64_t>(failure_ladder_speed_backoff_after_)) {
+    failure_ladder_stage_ = 2;  // 冷启动 + 二次降速（factor²，默认 0.25）
+  } else if (
+    failure_ladder_cold_start_after_ > 0 &&
+    consecutive_plan_failures_ >=
+      static_cast<std::uint64_t>(failure_ladder_cold_start_after_)) {
+    failure_ladder_stage_ = std::max(failure_ladder_stage_, 1);  // 冷启动 + 半速
+  }
+  applyLadderStage();
+  if (failure_ladder_stage_ != previous_stage) {
+    RCLCPP_WARN(
+      (parent_.lock())->get_logger(),
+      "MincoMpcController: 重规划阶梯 %d → %d（连续失败 #%lu，%s，速度 ×%.2f，越界点 %s）",
+      previous_stage, failure_ladder_stage_,
+      static_cast<unsigned long>(consecutive_plan_failures_),
+      failure_ladder_stage_ == 1 ? "冷启动+半速" : (failure_ladder_stage_ == 2 ? "冷启动+1/4速" : "正常"),
+      failure_speed_scale_, last_violation_pos_text_.c_str());
+  }
+  maybeAddFailurePatch(_result, _now_stamp);
+}
+
+void MincoMpcController::maybeAddFailurePatch(const PlanningResult & _result, double _now_stamp)
+{
+  if (failure_patch_radius_ <= 0.0 || failure_patch_ttl_ <= 0.0) {
+    return;
+  }
+  // 从第 cold_start_after+1 次连续失败开始打补丁（先让阶梯的降速试一轮）。
+  if (
+    consecutive_plan_failures_ <
+    static_cast<std::uint64_t>(std::max(1, failure_ladder_cold_start_after_ + 1))) {
+    return;
+  }
+  if (!_result.has_violation_position) {
+    return;
+  }
+  // 护栏：越界点离车太近时不打（补丁会把车自己困在障碍里，连安全停车都规划不出）。
+  if (
+    _result.has_request_position &&
+    (_result.violation_position - _result.request_position).norm() < failure_patch_min_distance_) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(failure_patches_mutex_);
+  // 聚类：已有补丁覆盖的越界点不重复添加。
+  for (const FailurePatch & patch : failure_patches_) {
+    if ((patch.position - _result.violation_position).norm() <= failure_patch_radius_) {
+      return;
+    }
+  }
+  if (static_cast<int>(failure_patches_.size()) >= std::max(1, failure_patch_max_count_)) {
+    // 上限：淘汰最老的补丁。
+    failure_patches_.erase(failure_patches_.begin());
+  }
+  FailurePatch patch;
+  patch.position = _result.violation_position;
+  patch.radius = failure_patch_radius_;
+  patch.expire_stamp = _now_stamp + failure_patch_ttl_;
+  failure_patches_.push_back(patch);
+  // 立即让在执行的轨迹对补丁复验：轨迹若穿过补丁区会被重新规划绕开。
+  invalidateTrajectory("failure patch added", _now_stamp);
+  RCLCPP_WARN(
+    (parent_.lock())->get_logger(),
+    "MincoMpcController: 越界点 %s 打临时膨胀补丁（半径 %.2f m，%.1f s 后过期，当前 %d 个）",
+    last_violation_pos_text_.c_str(), patch.radius, failure_patch_ttl_,
+    static_cast<int>(failure_patches_.size()));
+}
+
+void MincoMpcController::resetFailureLadder()
+{
+  consecutive_plan_failures_ = 0;
+  consecutive_plan_successes_ = 0;
+  failure_ladder_stage_ = 0;
+  applyLadderStage();
+}
+
+void MincoMpcController::applyLadderStage()
+{
+  switch (failure_ladder_stage_) {
+    case 2:
+      failure_force_cold_ = true;
+      failure_speed_scale_ =
+        srm27_minco_core::clampToRange(
+          failure_ladder_backoff_factor_ * failure_ladder_backoff_factor_, 0.05, 1.0);
+      break;
+    case 1:
+      failure_force_cold_ = true;
+      failure_speed_scale_ =
+        srm27_minco_core::clampToRange(failure_ladder_backoff_factor_, 0.05, 1.0);
+      break;
+    default:
+      failure_ladder_stage_ = 0;
+      failure_force_cold_ = false;
+      failure_speed_scale_ = 1.0;
+      break;
+  }
 }
 
 void MincoMpcController::harvestPlanningResult(double _now_stamp)
@@ -908,6 +1115,11 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
     RCLCPP_WARN_THROTTLE(
       (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
       "MincoMpcController: 规划失败 (%s): %s", result.status.c_str(), result.reason.c_str());
+    // 只统计**当前会话**的失败：迟到/过期会话的结果不进阶梯（否则换目标后旧结果
+    // 会把失败计数灌水，阶梯卡在高档位下不来）。
+    if (result.status == "validation_failed" && result.versions.goal_epoch == goal_epoch_) {
+      updateFailureLadder(result, _now_stamp);
+    }
     return;
   }
   // 版本校验：迟到的旧会话结果不得重新激活运动。
@@ -930,6 +1142,30 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
   // 通过版本校验的成功结果到达：清除"到点停车"状态。
   // 终点急停（terminal_stop_）不在这里清：它是位置状态，只由离开成功区域或换目标解除。
   at_goal_stop_ = false;
+  // 阶梯迟滞：一次成功**不**回到全速——连续 3 次成功才退一档（2→1→0）。
+  // 否则窄弯里会震荡：降速成功→立刻全速→再失败→恢复行为循环（2026-10-14 实测
+  // 22 次复位 / 90+ 次恢复的爬行）。失败计数清零；档位由成功连击驱动衰减。
+  consecutive_plan_failures_ = 0;
+  if (failure_ladder_stage_ > 0) {
+    ++consecutive_plan_successes_;
+    if (consecutive_plan_successes_ >= 3) {
+      const int previous_stage = failure_ladder_stage_;
+      --failure_ladder_stage_;
+      consecutive_plan_successes_ = 0;
+      applyLadderStage();
+      RCLCPP_INFO(
+        (parent_.lock())->get_logger(),
+        "MincoMpcController: 规划连续 3 次成功，阶梯降档 %d → %d（速度 ×%.2f）",
+        previous_stage, failure_ladder_stage_, failure_speed_scale_);
+    }
+  }
+  if (result.degraded) {
+    ++degraded_candidate_count_;
+    RCLCPP_WARN(
+      (parent_.lock())->get_logger(),
+      "MincoMpcController: 提交降级候选（有效前缀+制动延伸，原候选在 %.2f s 越界）: %s",
+      result.validation.first_violation_time, result.reason.c_str());
+  }
   std::string reason;
   if (!replan_manager_.canCommit(result.trajectory, result.versions, _now_stamp, &reason)) {
     diagnostics_.rejected_stale_result_count += 1;
@@ -1027,6 +1263,17 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   diagnostics_.limits_version = limits_version_;
   diagnostics_.goal_epoch = goal_epoch_;
   diagnostics_.trajectory_id = trajectory_id_;
+  // 重规划阶梯状态（跨周期成员 → 每周期诊断）。
+  diagnostics_.consecutive_plan_failures = consecutive_plan_failures_;
+  diagnostics_.failure_ladder_stage = failure_ladder_stage_;
+  diagnostics_.failure_speed_scale = failure_speed_scale_;
+  diagnostics_.degraded_candidate_count = degraded_candidate_count_;
+  diagnostics_.failure_injection = failure_injection_.load() ? 1 : 0;
+  diagnostics_.last_violation_pos = last_violation_pos_text_;
+  {
+    std::lock_guard<std::mutex> lock(failure_patches_mutex_);
+    diagnostics_.active_failure_patches = static_cast<int>(failure_patches_.size());
+  }
 
   const auto fail = [this, &node, &now_stamp](const std::string & _reason) {
     diagnostics_.total_control_time_ms = 0.0;

@@ -472,3 +472,11 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ./script/start_real_nav.sh c -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
 ```
 ### 记得改完代码要source install/setup.bash更新！！！
+
+# 2026-10-14
+### 阶段todo list
+1.minco规划失败后的重规划策略（转角拐太急会规划失败，净空太小）
+2.minco调优
+3.进recovery判定
+4.脱困处理，与成功脱困的判定
+5.改通信协议，收下位机发上来的测出来的vx,vy,wz,yaw

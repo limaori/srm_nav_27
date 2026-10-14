@@ -28,6 +28,7 @@
 #include <nav2_util/lifecycle_node.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
 #include <string>
 #include <vector>
@@ -103,6 +104,14 @@ private:
 
   /// \brief 取回并提交后台规划结果。
   void harvestPlanningResult(double _now_stamp);
+  /// \brief 校验失败后推进重规划阶梯（计数/档位/速度缩放/诊断文本）。
+  void updateFailureLadder(const PlanningResult & _result, double _now_stamp);
+  /// \brief 连续失败聚在同一位置时，往 ESDF 打临时膨胀补丁（带 TTL，距车过近则跳过）。
+  void maybeAddFailurePatch(const PlanningResult & _result, double _now_stamp);
+  /// \brief 复位阶梯状态（新会话/失活时调用）。
+  void resetFailureLadder();
+  /// \brief 按当前档位刷新速度缩放与冷启动标志（档位是唯一事实来源）。
+  void applyLadderStage();
 
   /// \brief 把里程计坐标系下的路径转换到规划坐标系。
   bool updatePathInPlanningFrame(double _now_stamp, std::string * _reason);
@@ -246,6 +255,42 @@ private:
   double last_control_stamp_{0.0};
   bool has_last_control_stamp_{false};
   std::uint64_t last_odom_reset_count_{0};
+
+  // —— 重规划失败处理阶梯（2026-10-13 阶段三）——
+  /// \brief 当前会话连续校验失败次数（校验失败 +1；迟滞衰减/新会话复位）。
+  std::uint64_t consecutive_plan_failures_{0};
+  /// \brief 连续规划成功次数（迟滞用：连续 3 次成功才退一档，防止"成功→瞬间全速→再失败"震荡）。
+  std::uint64_t consecutive_plan_successes_{0};
+  /// \brief 阶梯档位：0=正常，1=冷启动+降速，2=冷启动+再降速。
+  int failure_ladder_stage_{0};
+  /// \brief 本次尝试的运行时速度缩放（作用于候选生成与校验上限，不改参数文件）。
+  double failure_speed_scale_{1.0};
+  /// \brief 阶梯是否强制冷启动（跳过热启动初值）。
+  bool failure_force_cold_{false};
+  /// \brief 通过校验的"前缀+制动"降级候选累计数。
+  std::uint64_t degraded_candidate_count_{0};
+  /// \brief 最近一次越界位置文本（诊断用，跨周期保留）。
+  std::string last_violation_pos_text_{"none"};
+  /// \brief 故障注入开关（演练重规划阶梯；topic 触发，正常导航恒为关）。
+  std::atomic<bool> failure_injection_{false};
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr failure_injection_sub_{};
+  /// \brief 失败位置临时膨胀补丁（带 TTL；盖在 ESDF 快照上，仅影响候选生成侧）。
+  struct FailurePatch
+  {
+    Eigen::Vector2d position{0.0, 0.0};
+    double radius{0.0};
+    double expire_stamp{0.0};
+  };
+  std::vector<FailurePatch> failure_patches_{};
+  std::mutex failure_patches_mutex_{};
+  /// \brief 阶梯阈值（新参数，默认值写在 declare 里，参数文件不需要改）。
+  int failure_ladder_cold_start_after_{3};
+  int failure_ladder_speed_backoff_after_{6};
+  double failure_ladder_backoff_factor_{0.5};
+  double failure_patch_radius_{0.15};
+  double failure_patch_ttl_{3.0};
+  double failure_patch_min_distance_{0.5};
+  int failure_patch_max_count_{4};
 
   std::uint64_t switched_trajectory_count_{0};
   double build_start_stamp_{-1.0};

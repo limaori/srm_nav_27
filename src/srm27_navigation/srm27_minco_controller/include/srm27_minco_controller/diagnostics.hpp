@@ -97,6 +97,22 @@ struct ControllerDiagnostics
   double requested_vx{0.0};
   double requested_vy{0.0};
   double requested_wz{0.0};
+
+  // 重规划失败处理阶梯（2026-10-13 阶段三）
+  /// \brief 当前会话连续校验失败次数（成功/新会话复位）。
+  std::uint64_t consecutive_plan_failures{0};
+  /// \brief 阶梯档位：0=正常(热启动+全速) 1=冷启动+半速 2=冷启动+1/4 速。
+  int failure_ladder_stage{0};
+  /// \brief 本次尝试的运行时速度缩放（仅作用于候选生成，不改参数文件）。
+  double failure_speed_scale{1.0};
+  /// \brief 通过校验的"前缀+制动"降级候选累计数。
+  std::uint64_t degraded_candidate_count{0};
+  /// \brief 当前生效的失败位置临时膨胀补丁数。
+  int active_failure_patches{0};
+  /// \brief 故障注入开关状态（演练用）。
+  int failure_injection{0};
+  /// \brief 最近一次越界位置（规划坐标系文本），无越界时为 "none"。
+  std::string last_violation_pos{"none"};
 };
 
 /// \brief 把诊断字段填成 `DiagnosticArray`。
