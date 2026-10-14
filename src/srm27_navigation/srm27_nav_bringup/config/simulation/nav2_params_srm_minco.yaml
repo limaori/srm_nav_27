@@ -506,7 +506,7 @@ controller_server:
         # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
         # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
-        optimization_clearance_margin: 50.0
+        optimization_clearance_margin: 0.1
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         corner_speed_ratio: 0.8                       # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
