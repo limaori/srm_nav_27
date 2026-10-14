@@ -480,3 +480,8 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 3.进recovery判定
 4.脱困处理，与成功脱困的判定
 5.改通信协议，收下位机发上来的测出来的vx,vy,wz,yaw
+
+### 启动minco仿真
+```bash
+./script/start_sim_nav.sh -w srm_empty -m 227_1011 --controller minco
+```
