@@ -616,7 +616,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.1                               # 障碍膨胀半径（米）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 global_costmap:
