@@ -25,138 +25,6 @@
 
 namespace srm27_minco_controller
 {
-namespace
-{
-using srm27_minco_core::Trajectory2D;
-
-/// \brief 把一段五次多项式系数从 tau=0 基平移到 tau=_offset 基（低阶在前 c0..c5）。
-///        p(τ) = Σ_k c_k (τ0+τ)^k = Σ_j [ Σ_{k≥j} c_k·C(k,j)·τ0^(k-j) ] τ^j
-bool shiftPiecePolynomial(
-  const Trajectory2D::Coefficients & _c, double _offset, Trajectory2D::Coefficients & _out)
-{
-  if (!std::isfinite(_offset)) {
-    return false;
-  }
-  static constexpr int kBinomial[6][6] = {
-    {1, 0, 0, 0, 0, 0},   {1, 1, 0, 0, 0, 0},   {1, 2, 1, 0, 0, 0},
-    {1, 3, 3, 1, 0, 0},   {1, 4, 6, 4, 1, 0},   {1, 5, 10, 10, 5, 1}};
-  double power = 1.0;  // offset^0
-  _out = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  for (int j = 0; j < 6; ++j) {
-    double sum = 0.0;
-    double p = power;  // offset^(k-j)，随 k 递增
-    for (int k = j; k < 6; ++k) {
-      sum += _c[static_cast<std::size_t>(k)] * kBinomial[k][j] * p;
-      p *= _offset;
-    }
-    _out[static_cast<std::size_t>(j)] = sum;
-    power *= _offset;
-  }
-  return true;
-}
-
-/// \brief 把轨迹截断到 `[0, _cut]`：完整复制前缀段，含截点的段做多项式平移收缩。
-///        输出 `_end_state`（截点位置/速度/加速度）供制动延伸段使用。
-bool truncateTrajectory(
-  const Trajectory2D & _src, double _cut, Trajectory2D & _out, Eigen::Vector2d & _end_position,
-  Eigen::Vector2d & _end_velocity, Eigen::Vector2d & _end_acceleration)
-{
-  const int pieces = _src.pieceCount();
-  if (pieces < 1 || !(_cut > 0.0) || !(_cut <= _src.totalDuration() + 1.0e-6)) {
-    return false;
-  }
-  _out.clear();
-  _out.reserve(static_cast<std::size_t>(pieces) + 1);
-  double accumulated = 0.0;
-  for (int i = 0; i < pieces; ++i) {
-    const double duration = _src.durations()[static_cast<std::size_t>(i)];
-    const double piece_end = accumulated + duration;
-    if (piece_end <= _cut + 1.0e-9) {
-      // 整段都在前缀内：原样复制。
-      if (!_out.addPiece(
-            _src.xCoefficients()[static_cast<std::size_t>(i)],
-            _src.yCoefficients()[static_cast<std::size_t>(i)], duration)) {
-        return false;
-      }
-    } else if (accumulated < _cut - 1.0e-9) {
-      // 截点落在本段内：按剩余时长收缩并平移系数。
-      const double tau0 = _cut - accumulated;
-      Trajectory2D::Coefficients x_shifted, y_shifted;
-      if (
-        !shiftPiecePolynomial(_src.xCoefficients()[static_cast<std::size_t>(i)], tau0, x_shifted) ||
-        !shiftPiecePolynomial(_src.yCoefficients()[static_cast<std::size_t>(i)], tau0, y_shifted)) {
-        return false;
-      }
-      if (!_out.addPiece(x_shifted, y_shifted, tau0)) {
-        return false;
-      }
-      break;
-    } else {
-      break;
-    }
-    accumulated = piece_end;
-  }
-  if (_out.pieceCount() < 1 || !(_out.totalDuration() > 0.0)) {
-    return false;
-  }
-  const double cut = std::min(_cut, _out.totalDuration());
-  _end_position = _out.positionAt(cut);
-  _end_velocity = _out.velocityAt(cut);
-  _end_acceleration = _out.accelerationAt(cut);
-  return true;
-}
-
-/// \brief 追加"从当前状态匀减速到静止"的五次多项式段（边界条件 p0,v0,a0 → p1,0,0）。
-bool appendBrakePiece(
-  Trajectory2D & _trajectory, const Eigen::Vector2d & _p0, const Eigen::Vector2d & _v0,
-  const Eigen::Vector2d & _a0, double _duration)
-{
-  if (!(_duration > 0.0) || !std::isfinite(_duration)) {
-    return false;
-  }
-  const double speed = _v0.norm();
-  if (!(speed > 1.0e-3)) {
-    return false;
-  }
-  // 匀减速位移：v0·T − a·T²/2，取 a = 2·|v0|/T 即位移 = v0·T/2。
-  const Eigen::Vector2d direction = _v0 / speed;
-  const Eigen::Vector2d p1 = _p0 + direction * (speed * _duration * 0.5);
-  // 逐轴解三阶线性方程组（Cramer，行列式恒为 2·T^? 非零）：
-  //   c3·T³ + c4·T⁴ + c5·T⁵ = r1
-  //   3c3·T² + 4c4·T³ + 5c5·T⁴ = r2
-  //   6c3·T + 12c4·T² + 20c5·T³ = r3
-  Trajectory2D::Coefficients cx{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  Trajectory2D::Coefficients cy{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  cx[0] = _p0.x(); cx[1] = _v0.x(); cx[2] = 0.5 * _a0.x();
-  cy[0] = _p0.y(); cy[1] = _v0.y(); cy[2] = 0.5 * _a0.y();
-  for (int axis = 0; axis < 2; ++axis) {
-    const double p0 = axis == 0 ? _p0.x() : _p0.y();
-    const double v0 = axis == 0 ? _v0.x() : _v0.y();
-    const double a0 = axis == 0 ? _a0.x() : _a0.y();
-    const double p_end = axis == 0 ? p1.x() : p1.y();
-    const double t = _duration;
-    const double r1 = p_end - (p0 + v0 * t + 0.5 * a0 * t * t);
-    const double r2 = -(v0 + a0 * t) * t;
-    const double r3 = -a0 * t * t;
-    const double u3 = (20.0 * r1 - 8.0 * r2 + r3) * 0.5;
-    const double u4 = (14.0 * r2 - 2.0 * r3 - 30.0 * r1) * 0.5;
-    const double u5 = (r3 - 6.0 * r2 + 12.0 * r1) * 0.5;
-    const double c3 = u3 / (t * t * t);
-    const double c4 = u4 / (t * t * t * t);
-    const double c5 = u5 / (t * t * t * t * t);
-    if (!std::isfinite(c3) || !std::isfinite(c4) || !std::isfinite(c5)) {
-      return false;
-    }
-    if (axis == 0) {
-      cx[3] = c3; cx[4] = c4; cx[5] = c5;
-    } else {
-      cy[3] = c3; cy[4] = c4; cy[5] = c5;
-    }
-  }
-  return _trajectory.addPiece(cx, cy, _duration);
-}
-}  // namespace
-
 
 namespace
 {
@@ -290,8 +158,6 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 
   PlanningResult result;
   result.versions = _request.versions;
-  result.request_position = _request.state.position();
-  result.has_request_position = _request.state.valid;
   const double begin = steadyNow();
 
   if (!_request.esdf || !_request.esdf->valid()) {
@@ -444,75 +310,13 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
 
   const double validation_begin = steadyNow();
   TrajectoryValidationReport report;
-  bool valid =
+  const bool valid =
     validator.validate(trajectory, *_request.esdf, _request.state, _request.request_stamp, report);
-  // 故障注入（重规划阶梯演练）：真实校验照常执行、报告字段保持真实值，
-  // 仅把最终结论改判为失败。正常导航恒为 false。
-  if (valid && _request.inject_failure) {
-    valid = false;
-    report.valid = false;
-    report.reason = "injected (failure rehearsal)";
-    report.collision_ok = false;
-  }
   result.validation_time_ms = (steadyNow() - validation_begin) * 1.0e3;
   result.validation = report;
   result.min_clearance = report.min_clearance;
   result.max_speed = report.max_speed;
   result.max_acceleration = report.max_acceleration;
-
-  // 候选修复（第 2 层）：几何越界（碰撞/净空）且有效前缀足够长时，不整条丢弃——
-  // 截断到有效前缀末、追加"匀减速到静止"的制动延伸段，再走**同一套硬校验**。
-  // 校验通过才算数，安全标准与正常候选完全一致；修复只是多给优化器一个候选。
-  if (!valid && !_request.inject_failure && !report.collision_ok &&
-      report.effective_prefix_duration >= 0.20 && _request.limits.max_linear_accel > 0.0) {
-    const double prefix_end_speed =
-      trajectory.velocityAt(std::min(report.effective_prefix_duration, trajectory.totalDuration()))
-        .norm();
-    const double brake = _request.validator_config.braking_deceleration > 0.0
-                           ? std::min(
-                               _request.validator_config.braking_deceleration,
-                               _request.limits.max_linear_accel)
-                           : _request.limits.max_linear_accel;
-    if (prefix_end_speed > 0.05 && brake > 0.0) {
-      Trajectory2D repaired;
-      Eigen::Vector2d p_end, v_end, a_end;
-      if (truncateTrajectory(
-            trajectory, report.effective_prefix_duration, repaired, p_end, v_end, a_end)) {
-        const double brake_duration =
-          srm27_minco_core::clampToRange(2.0 * prefix_end_speed / brake, 0.30, 1.50);
-        if (appendBrakePiece(repaired, p_end, v_end, a_end, brake_duration)) {
-          repaired.versions = trajectory.versions;
-          repaired.generated_stamp = trajectory.generated_stamp;
-          repaired.valid_after = trajectory.valid_after;
-          repaired.valid_until = trajectory.valid_until;
-          repaired.terminal_is_global_goal = false;
-          repaired.terminal_requires_stop = true;
-          repaired.terminal_reason = "braking_repair";
-          TrajectoryValidationReport repair_report;
-          const bool repair_valid = validator.validate(
-            repaired, *_request.esdf, _request.state, _request.request_stamp, repair_report);
-          result.validation_time_ms = (steadyNow() - validation_begin) * 1.0e3;
-          if (repair_valid) {
-            result.success = true;
-            result.status = "success_degraded_prefix";
-            result.degraded = true;
-            result.validation = repair_report;
-            result.min_clearance = repair_report.min_clearance;
-            result.max_speed = repair_report.max_speed;
-            result.max_acceleration = repair_report.max_acceleration;
-            result.reason = "prefix " + std::to_string(report.effective_prefix_duration) +
-                            "s + braking " + std::to_string(brake_duration) + "s";
-            result.trajectory = std::move(repaired);
-            result.total_time_ms = (steadyNow() - begin) * 1.0e3;
-            result.latency_ms = (_request.request_steady > 0.0)
-                                  ? std::max(0.0, (steadyNow() - _request.request_steady) * 1.0e3)
-                                  : result.total_time_ms;
-            return result;
-          }
-        }
-      }
-    }
-  }
 
   if (!valid) {
     result.status = "validation_failed";
@@ -525,8 +329,6 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     const double total = trajectory.totalDuration();
     if (report.first_violation_time > 0.0 && report.first_violation_time < total) {
       const Eigen::Vector2d violation_position = trajectory.positionAt(report.first_violation_time);
-      result.violation_position = violation_position;
-      result.has_violation_position = true;
       detail << " | t=" << report.first_violation_time << "s/ " << total << "s pos=("
              << violation_position.x() << ", " << violation_position.y() << ")";
     }

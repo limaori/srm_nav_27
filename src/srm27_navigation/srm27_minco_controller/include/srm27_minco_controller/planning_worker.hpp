@@ -83,9 +83,6 @@ struct PlanningRequest
   std::vector<double> warm_durations{};
   /// \brief 规划类型（诊断用）。
   int replan_type{0};
-  /// \brief 故障注入（演练重规划阶梯）：真实校验照常执行并保留报告字段，
-  /// 但最终结论强制改判为失败。仅供测试观测，正常导航恒为 false。
-  bool inject_failure{false};
 };
 
 /// \brief 一次规划任务的结果。
@@ -103,14 +100,6 @@ struct PlanningResult
   std::string status{"none"};
   /// \brief 失败原因或附加说明。
   std::string reason{};
-  /// \brief 是否为"有效前缀 + 制动延伸"的降级候选（原轨迹在某处越界，截断后补制动段）。
-  bool degraded{false};
-  /// \brief 首次越界位置（规划坐标系，m）；`has_violation_position` 为真时有效。
-  Eigen::Vector2d violation_position{0.0, 0.0};
-  bool has_violation_position{false};
-  /// \brief 请求时刻的车位（规划坐标系），用于失败补丁的"距车过近"护栏。
-  Eigen::Vector2d request_position{0.0, 0.0};
-  bool has_request_position{false};
   std::string terminal_reason{"invalid"};
   double terminal_speed{0.0};
   /// \brief 各阶段耗时（ms）。
