@@ -469,7 +469,7 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 ### 实车启动导航脚本（默认minco+mpc+初始gicp重定位）
 ```bash
-./script/start_real_nav.sh c -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
+./script/start_real_nav.sh -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
 ```
 ### 记得改完代码要source install/setup.bash更新！！！
 
@@ -484,4 +484,8 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ### 启动minco仿真
 ```bash
 ./script/start_sim_nav.sh -w srm_empty -m 227_1011 --controller minco
+```
+### 启动实车
+```bash
+./script/start_real_nav.sh -m 227_1011 --controller minco --prior-pcd 227_1011_mapframe
 ```
