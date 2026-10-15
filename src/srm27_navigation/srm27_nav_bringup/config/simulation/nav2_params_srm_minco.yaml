@@ -21,7 +21,24 @@
 #     落在 planning_horizon 3.0 m 与 8 m 局部地图内（比提速档时更宽裕）。
 #   * 加速度/角速度仍是联调建议值，不能当作已辨识的制动能力；TrajectoryValidator 的
 #     制动减速度参数必须来自实车辨识。
-#   * 代价地图 robot_radius 0.33 → 0.45（2026-10-09，仅仿真）：
+#   * 【2026-10-14 校正】代价地图 robot_radius = 0.33（= safety.robot_radius，车身包络）。
+#     必须满足不变量 **规划器禁行带 < 控制器硬净空**。规划器 theta_star 的判据是
+#     "代价 ≤ 252 才算可走"（isSafe()：253/254/255 一律当障碍），而 Nav2 膨胀层把 inscribed
+#     半径（= 本行 robot_radius，按 0.05 m 栅格量化）以内的格子写成 253 —— 于是 robot_radius
+#     0.40 时禁行带 0.40 m **大于**控制器硬净空 0.38 m：控制器允许车开到 0.38~0.40 m 处，
+#     规划器却把车自己那一格判成障碍，报 "Either of the start or goal pose are an obstacle!"，
+#     bt_navigator 连做两轮 ClearEntireCostmap 再 BackUpFreeSpace —— 也就是"进 recovery"。
+#     （2026-10-14 复现：srm_empty + maps/227_1011 的 C 型通道，15 s 内 4 次。）
+#     改成 0.33 后禁行带只有 0.30 m（6 格），比 0.38 m 低 0.08 m，矛盾消失；规划器可通行的
+#     最窄通道也从 0.80 m 放宽到 0.60 m。
+#     ⚠ 代价：参考路径允许贴到 0.30~0.38 m；若某段真贴着走，MINCO 的硬校验仍会拒那一段
+#       （FollowPath/diagnostics 的 minimum_clearance < 0.38、controller 日志
+#       "trajectory collides"），但**不会再进 recovery**。真要过更窄的通道，该改的是
+#       safety.robot_radius / safety.clearance_margin（安全决定），不是这一行。
+#     ⚠ 实车那份 config/real/nav2_params_srm_minco.yaml 仍是 0.40（同一条矛盾，只是实车那次
+#       GICP 把车姿修正了约 0.09 m 恰好没踩到边界）；要一起改需明确同意。
+#
+#   * 【历史·2026-10-09】代价地图 robot_radius 0.33 → 0.45（仅仿真）：
 #     MINCO 的轨迹校验要求净空 = safety.robot_radius(0.33) + clearance_margin(0.05) = 0.38 m
 #     （ESDF 的障碍种子就是代价地图里的致命栅格），而规划器只保证 robot_radius 那么远 ——
 #     于是规划会给出"贴着障碍 0.33~0.38 m"的路径，控制器一条候选轨迹都不敢走 → 输出零 →
@@ -494,7 +511,7 @@ controller_server:
         # 降到 0.2 后 1.438/1.50 m/s、2.59 s，同时保留 jerk 惩罚、加速度只用掉 57% 上限。
         w_jerk: 0.0                                    # jerk 能量权重
         w_time: 25.0                                    # 总时长权重
-        w_obstacle: 100.0                               # 障碍软约束权重
+        w_obstacle:  500.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
         # 实测（2 m 局部路径、v_max 0.5、a_max 0.3）：w_v=20/w_a=2 -> 0.614/0.637（双超）；
@@ -581,7 +598,7 @@ local_costmap:
       width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
       height: 8                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
-      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器要求 0.38 + 0.02（原 0.33/0.45，原因见文件头）
+      robot_radius: 0.33                                   # 车身包络 = safety.robot_radius；必须 < 控制器硬净空 0.38（0.40 会让规划器把车自己判成障碍→进 recovery，原因见文件头）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
@@ -627,7 +644,7 @@ global_costmap:
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
       robot_base_frame: base_link                   # 机器人坐标系
-      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器要求 0.38 + 0.02（原 0.33/0.45，原因见文件头）
+      robot_radius: 0.33                                   # 车身包络 = safety.robot_radius；必须 < 控制器硬净空 0.38（0.40 会让规划器把车自己判成障碍→进 recovery，原因见文件头）
       resolution: 0.05                                    # 地图分辨率（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
