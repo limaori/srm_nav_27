@@ -20,14 +20,40 @@
 
 1. **动态调整半径**：通过调整搜索的半径范围，机器人在限定的范围内找到足够的自由空间后退。
 2. **退回到自由空间**：机器人根据当前的代价图，找出最接近的自由空间并退回到该位置。
+3. **ESDF 逃逸方向**（`escape_direction_mode: esdf_gradient`，默认）：不再只看"哪里没有致命栅格"，
+   而是由代价图现场建一张 ESDF，取**解析梯度**作为逃逸方向（远离障碍）；梯度退化
+   （深陷障碍内部或大片开阔，双线性插值给出零梯度）时退化为**环形搜索**，在
+   `esdf_search_radius` 半径上取净空最大的方向。
+
+   算法本体是 `srm27_minco_core::RecoveryDecider::planEscapeDirection`，与
+   `srm27_minco_controller` 内部脱困判定（`recovery.*` 参数）**共用同一份实现**，
+   以保证"控制器认为该往哪推"与"行为树实际往哪推"不会分叉。
+
+   ⚠ 这一步在 `onRun` 时执行一次（不是每个周期），会把 `global_costmap` 转成
+   `GridSnapshot` 并建一次距离场，200×200 约 1~2 ms，只在脱困时才付这个代价。
 
 **Parameters:**
 
 - `robot_radius`: 机器人半径，用于确定搜索自由空间时的范围（default：0.1 m）。
 - `max_radius`: 搜索自由空间时的最大半径范围（default：1.0 m）。
 - `service_name`: 获取代价图的服务名称（default："local_costmap/get_costmap"）。
+  本工作区在 `behavior_server` 里配的是 `global_costmap/get_costmap`：
+  全局代价地图才有静态层，局部滚动窗口在脱困那一刻往往看不到出口。
 - `free_threshold`: 定义自由空间的阈值，即自由空间中足够数量的点才能视为有效（default：5）。
 - `visualize`: 是否启用可视化功能。启用后会在 RViz 中显示自由空间和目标位置（default：false）。
+- `escape_direction_mode`: 逃逸方向来源。`esdf_gradient`（default）= ESDF 解析梯度 + 环形搜索；
+  `costmap_gap` = 原实现（按角度扫描每条射线，取连续安全扇区中点），保留作回退与 A/B 对照。
+- `esdf_search_radius`: 梯度退化时的环形搜索半径（default：0.4 m）。
+  应略大于机器人的膨胀半径：太小会搜到自身所在栅格、太大则方向分辨率不足。
+- `esdf_search_samples`: 环形搜索采样数量（default：36，即每 10 度一个）。
+- `esdf_unknown_is_seed`: 未知区域是否按障碍处理（default：true）。
+  必须与控制器 `safety.unknown_is_obstacle` 保持一致，否则两边的可通行区定义不同。
+
+**排查入口**：`escape_direction_mode` 走 ESDF 分支时，行为每次 `onRun` 都会用
+`RCLCPP_WARN` 打一行 `mode=…, 净空 … m, 环形搜索/ESDF 梯度`；`visualize: true` 时
+还会发布 `escape_direction`（蓝色箭头）与 `escape_clearance`（黄色球）标记。
+ESDF 分支不可用（代价图无效 / 机器人在地图外）时会打警告并**回退**到代价图直方图法，
+不会因为"算不出方向"就沿用默认角度盲目前冲。
 
 **Example:**
 
@@ -65,6 +91,10 @@ ros__parameters:
    service_name: "global_costmap/get_costmap"
    free_threshold: 5
    visualize: True
+   escape_direction_mode: "esdf_gradient"
+   esdf_search_radius: 0.4
+   esdf_search_samples: 36
+   esdf_unknown_is_seed: True
 ```
 
 ### 2.2 Layers

@@ -42,6 +42,7 @@
 #include "srm27_minco_core/esdf_2d.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/mpc_solver.hpp"
+#include "srm27_minco_core/recovery_decider.hpp"
 #include "srm27_minco_core/replan_manager.hpp"
 #include "srm27_minco_core/tracking_reference.hpp"
 #include "srm27_minco_core/trajectory_validator.hpp"
@@ -102,7 +103,9 @@ private:
     const srm27_minco_core::State2D & _state, double _now_stamp, double _now_steady);
 
   /// \brief 取回并提交后台规划结果。
-  void harvestPlanningResult(double _now_stamp);
+  ///
+  /// `_state` 只用于规划失败时的脱困分诊（读自身净空），不参与轨迹提交。
+  void harvestPlanningResult(const State2D & _state, double _now_stamp);
 
   /// \brief 把里程计坐标系下的路径转换到规划坐标系。
   bool updatePathInPlanningFrame(double _now_stamp, std::string * _reason);
@@ -132,6 +135,39 @@ private:
 
   /// \brief 从已提交轨迹提取热启动初值。
   void updateWarmStart(const srm27_minco_core::Trajectory2D & _trajectory);
+
+  // === 脱困（迁移自 navi_minco_bit 的 RecoverServer + MincoFsm::RECOVERING） ===
+
+  /// \brief 汇报一次规划失败，达标即进入脱困并算出逃逸速度。
+  ///
+  /// 只在"自身被卡死"（自身净空 < `recovery_stuck_clearance_`）时才计数；
+  /// 净空充足但规划失败属于"前方路障"，应交给重规划绕路而不是脱困。
+  /// \return 是否已进入脱困状态。
+  bool handlePlanningFailure(const State2D & _state, double _now_stamp);
+
+  /// \brief 脱困期间每个控制周期调用：判成功 / 判超时，未退出则输出逃逸命令。
+  /// \return `true` 表示本周期命令已由脱困接管，调用方必须直接返回它。
+  bool updateRecovery(
+    const State2D & _state, double _now_stamp,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node,
+    geometry_msgs::msg::TwistStamped * _command);
+
+  /// \brief 构造一条逃逸命令（世界系速度 -> 车体系 Twist）。
+  ///
+  /// `_escape_velocity` 是规划坐标系（odom）下的世界速度；输出按当前航向转成
+  /// 车体系，仍是 Nav2 要求的 `TwistStamped`。自转恒为零：脱困只平移、不转向，
+  /// 与参考实现"yaw 轨迹锁存当前 yaw"一致。
+  geometry_msgs::msg::TwistStamped makeEscapeCommand(
+    const State2D & _state, const Eigen::Vector2d & _escape_velocity,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node);
+
+  /// \brief 发布脱困可视化（逃逸方向箭头 + 当前净空球），不参与控制。
+  void publishRecoveryDebug(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const State2D & _state,
+    double _clearance);
+
+  /// \brief 退出脱困并清理状态（成功/超时/新目标/取消/失活共用）。
+  void leaveRecovery(const char * _exit_reason, double _now_stamp);
 
   // 插件与生命周期
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_{};
@@ -193,6 +229,30 @@ private:
   double release_timeout_{0.20};
   bool publish_visualization_{true};
 
+  // --- 脱困参数（`recovery.*`） ---
+  //
+  // 判定语义与阈值迁移自 navi_minco_bit 的 `MincoPlanner.recovery_server.*`；
+  // 参考实现里硬编码在 FSM 里的 0.25 / 0.40 两个分诊与成功阈值在这里也变成了参数，
+  // 因为本工作区没有那层 FSM，没有别的地方能承载它们。
+  /// \brief 连续规划失败多少次才允许进入脱困。
+  int recovery_fail_threshold_{5};
+  /// \brief 两次脱困之间的最小间隔（s）。
+  double recovery_cooldown_sec_{1.0};
+  /// \brief 一次脱困会话的最长持续时间（s）。
+  double recovery_window_sec_{3.0};
+  /// \brief 逃逸速度（m/s）。
+  double recovery_escape_speed_{0.5};
+  /// \brief 卡死分诊阈值（m）：自身净空低于该值才计入失败、才允许脱困。
+  double recovery_stuck_clearance_{0.25};
+  /// \brief 脱困成功判据（m）：自身净空恢复到该值以上即判成功。
+  double recovery_escaped_clearance_{0.40};
+  /// \brief 梯度退化时的环形搜索半径（m）。
+  double recovery_search_radius_{0.4};
+  /// \brief 环形搜索的采样数量。
+  int recovery_search_samples_{36};
+  /// \brief 是否发布脱困可视化（`recovery_markers`）。
+  bool recovery_publish_visualization_{true};
+
   // 有效约束
   srm27_minco_core::Limits2D base_limits_{};
   srm27_minco_core::Limits2D limits_{};
@@ -212,6 +272,8 @@ private:
   srm27_minco_core::TrackingReferenceBuilder reference_builder_{};
   srm27_minco_core::TrajectoryValidator validator_{};
   srm27_minco_core::ReplanManager replan_manager_{};
+  /// \brief 脱困判定 / 脱困方向规划 / 脱困成功判定（迁移自 navi_minco_bit 的 RecoverServer）。
+  srm27_minco_core::RecoveryDecider recovery_decider_{};
   srm27_minco_core::MincoOptimizerConfig minco_config_{};
   srm27_minco_core::TrajectoryInitializer::Config initializer_config_{};
   srm27_minco_core::Esdf2D::Config esdf_config_{};
@@ -257,6 +319,18 @@ private:
   double output_zero_stamp_{0.0};
   double actual_stop_stamp_{0.0};
 
+  // --- 脱困运行期状态 ---
+  /// \brief 最近一次脱困时算出的逃逸方向（规划坐标系，单位向量）。
+  Eigen::Vector2d recovery_direction_{Eigen::Vector2d::Zero()};
+  /// \brief 最近一次脱困时算出的逃逸速度（规划坐标系，m/s）。
+  Eigen::Vector2d recovery_escape_velocity_{Eigen::Vector2d::Zero()};
+  /// \brief 进入脱困时自身的净空（m），诊断用。
+  double recovery_entry_clearance_{-1.0};
+  /// \brief 脱困期间累计的输出周期数，诊断用。
+  std::uint64_t recovery_command_count_{0};
+  /// \brief 累计进入脱困的次数，诊断用。
+  std::uint64_t recovery_enter_count_{0};
+
   ControllerDiagnostics diagnostics_{};
 
   // 发布者
@@ -269,6 +343,9 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_{};
   double last_diagnostics_stamp_{0.0};
+  /// \brief 脱困可视化（逃逸方向箭头 + 净空球）。
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+    recovery_marker_pub_{};
 };
 
 }  // namespace srm27_minco_controller

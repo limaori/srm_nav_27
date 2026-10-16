@@ -893,5 +893,44 @@ MINCO 自检 (仿真, 按顺序确认):
        ros2 topic echo /${ROBOT_NS}/FollowPath/diagnostics --once
        关注: planning_result=success、minimum_clearance>0、missed_deadline_count 不持续增长。
   4) 阶段一 MPC 没有自转权限: /${ROBOT_NS}/cmd_vel_nav 的 angular.z 应恒为 0 (自转仍由自转链路负责)。
+
+MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
+  a) 参数真的生效 (configure 期读一次; 改完 yaml 必须重启导航栈):
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.fail_threshold
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.escape_speed
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.stuck_clearance
+     期望 5 / 0.5 / 0.25。启动日志里还有一行 "MincoMpcController 脱困参数: ...",
+     打印的是夹取后实际生效的值, 必须与这里一致 (不一致说明参数文件选错了)。
+  b) 脱困可视化话题存在 (平时是空的, 只有真脱困才有内容):
+       ros2 topic list | grep recovery_markers
+     期望 /${ROBOT_NS}/FollowPath/recovery_markers。
+     RViz 里已预置显示项 "Recovery (MINCO)", 不用手动加:
+       绿线 = 脱困路径规划结果, 蓝箭头 = 本周期下发的那一步, 球 = 当前净空。
+  c) 实时看脱困状态 (只筛脱困字段, 不刷屏):
+       ros2 topic echo /${ROBOT_NS}/FollowPath/diagnostics | grep -E "recovery_(active|trigger|exit|clearance)"
+     正常导航 recovery_active=false; 进脱困为 true 且 recovery_trigger=gradient|circular_search;
+     退出时 recovery_exit=escaped|timeout。
+  d) 怎么把它逼进脱困 (两个条件必须同时成立, 最容易白等的地方):
+       条件 1: 重规划连续失败 fail_threshold(5) 次;
+       条件 2: 机器人自身净空 < stuck_clearance(0.25 m)。
+     ⚠ 条件 2 的净空是相对原始致命栅格算的 (膨胀层不计入), 所以
+       "被膨胀层包住、规划失败"不等于"卡死" —— 那种情况判为"前方路障", 只绕路不脱困。
+     想稳定复现: 用 RViz 的 "2D Goal Pose" 把目标设在死角/墙后, 把车引进退无可退的位置。
+  e) 想先看链路通不通, 把"更容易判卡死"调出来:
+       ⚠ **必须改 yaml 后重启导航栈, 不能用 ros2 param set。**
+       MincoMpcController 只在 configure 期 (loadParameters) 读一次参数, 且**没有注册
+       onSetParameters 回调** (与 rotation_test_sender 不同, 那个有回调所以能热改)。
+       对 controller_server 用 ros2 param set 会"成功返回但毫无效果"—— 这是最费时间的一种坑。
+       做法: 改 config/simulation/nav2_params_srm_minco.yaml 里
+         FollowPath.recovery.fail_threshold: 2      # 更容易进脱困
+         FollowPath.recovery.stuck_clearance: 0.60   # 不必贴到 0.25 m 才算卡死
+       然后 ./script/kill_nav.sh && ./script/start_sim_nav.sh --controller minco
+       (本脚本默认启动前就会自己杀一遍导航栈, 直接重跑也行。)
+       看到链路通了再把这两个值改回 5 / 0.25 复验一遍 —— 正式值才是交付状态。
+  f) 两条脱困链路的分工 (不是互相打架, 是先后兜底):
+       控制器内部脱困 (recovery.window_sec=3 s, 上面那些日志) 先试;
+       3 s 没成功 -> 回重规划; 仍失败 -> 等 build_grace_period(1 s) 抛给行为树
+       -> ClearEntireCostmap x2 + BackUpFreeSpace (现在也走 ESDF 梯度选方向),
+       后者日志在 behavior_server 终端, 关键字 "backing up ... towards free space".
 EOF
 fi

@@ -97,6 +97,30 @@ struct ControllerDiagnostics
   double requested_vx{0.0};
   double requested_vy{0.0};
   double requested_wz{0.0};
+
+  // 脱困（迁移自 navi_minco_bit 的 RecoverServer 诊断面）
+  /// \brief 是否正处于脱困状态。
+  bool recovery_active{false};
+  /// \brief 连续规划失败计数（只在"自身被卡死"时累加）。
+  int recovery_failures{0};
+  /// \brief 累计进入脱困的次数。
+  std::uint64_t recovery_enter_count{0};
+  /// \brief 本次脱困已输出的控制周期数。
+  std::uint64_t recovery_command_count{0};
+  /// \brief 进入脱困的原因：`gradient` / `circular_search` / `no_escape_direction`。
+  std::string recovery_trigger{"none"};
+  /// \brief 退出脱困的原因：`escaped` / `timeout` / `new_goal` / `reset` / `none`。
+  std::string recovery_exit{"none"};
+  /// \brief 进入脱困时自身净空（m）。
+  double recovery_entry_clearance{-1.0};
+  /// \brief 进入脱困时的自身净空（m）；与 entry 同源，便于现场直接看阈值关系。
+  double recovery_clearance{0.0};
+  /// \brief 逃逸方向（规划坐标系）。
+  double recovery_direction_x{0.0};
+  double recovery_direction_y{0.0};
+  /// \brief 逃逸速度（规划坐标系，m/s）。
+  double recovery_escape_vx{0.0};
+  double recovery_escape_vy{0.0};
 };
 
 /// \brief 把诊断字段填成 `DiagnosticArray`。
