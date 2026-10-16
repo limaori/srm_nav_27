@@ -738,6 +738,11 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
         static_cast<unsigned long>(path_version_), previous_distance, goal_change_tolerance_);
     }
   }
+
+  // 每条到达控制器的路径都计数。脱困看门狗（abortStaleRecovery）靠它区分
+  // "同一会话里两次 setPlan 之间" 与 "中间目标被取消、控制器一度没被调用"。
+  // 放在最后：上面的分支有早退，计数必须只在真的收下这条路径时递增。
+  ++plan_delivery_count_;
 }
 
 bool MincoMpcController::updatePathInPlanningFrame(double _now_stamp, std::string * _reason)
@@ -1109,6 +1114,7 @@ bool MincoMpcController::updateRecovery(
   diagnostics_.recovery_entry_clearance = recovery_entry_clearance_;
   diagnostics_.recovery_command_count = recovery_command_count_;
   diagnostics_.recovery_enter_count = recovery_enter_count_;
+  diagnostics_.recovery_stale_abort_count = recovery_stale_abort_count_;
   diagnostics_.recovery_direction_x = recovery_direction_.x();
   diagnostics_.recovery_direction_y = recovery_direction_.y();
   diagnostics_.recovery_escape_vx = recovery_escape_velocity_.x();
@@ -1141,6 +1147,54 @@ void MincoMpcController::leaveRecovery(const char * _exit_reason, double _now_st
   diagnostics_.recovery_enter_count = recovery_enter_count_;
   recovery_command_count_ = 0;
   recovery_entry_clearance_ = -1.0;
+}
+
+bool MincoMpcController::abortStaleRecovery(double _now_stamp, double _call_gap_sec)
+{
+  // 只认一个判据：**两帧 computeVelocityCommands 之间的间隔异常大**。
+  //
+  // 为什么不能用"还没输出过指令"（`recovery_command_count_ == 0`）当判据 —— 那是错的，
+  // 而且已经实测踩过：进入脱困的**那一周期本身**必然还没输出（本函数在 updateRecovery
+  // 之前跑），于是看门狗会在正常脱困里每个周期都把会话掐掉，脱困永远发不出速度。
+  // 2026-10-17 实测现象：0.5 s 内反复「进入脱困 / 脱困停滞复位」共 17 次，
+  // 最后靠人把车挪走才报"脱困成功（输出 0 个周期）"。
+  //
+  // 间隔为什么可靠：控制器只在导航进行中被 Nav2 调用；目标一取消就不再被调用。
+  // 所以"间隔 >> 控制周期"是"中间目标被取消过"的唯一可靠证据。
+  if (!recovery_decider_.isRecovering()) {
+    return false;
+  }
+  if (!std::isfinite(_call_gap_sec) || _call_gap_sec <= 0.0) {
+    return false;   // 没有上一帧记录，无从判断
+  }
+  // 50 Hz 控制周期是 0.02 s，正常抖动远小于它；但**不能取得太小**：
+  // 行为树 recovery（清代价地图 + BackUpFreeSpace）会把 FollowPath 整个停掉，
+  // 那一整段控制器都不被调用，而目标其实还活着。实测那次 backup 单次约 5 s、
+  // 连续 6 次约 30 s。阈值太小会把"BT recovery 期间"误判成"目标被取消"，
+  // 从而把一次本来有效的脱困会话复位掉。
+  // 取 2.0 s：既能覆盖真实的目标取消（实测那次取消空档 6.13 s），
+  // 又不会被 BT recovery 的正常停顿误触发。
+  constexpr double kStaleGapSec = 2.0;
+  if (_call_gap_sec < kStaleGapSec) {
+    return false;
+  }
+
+  ++recovery_stale_abort_count_;
+  RCLCPP_WARN(
+    (parent_.lock())->get_logger(),
+    "MincoMpcController: 脱困停滞复位 —— 两帧控制间隔 %.2f s 远超控制周期"
+    "（阈值 %.2f s），说明中间导航目标被取消过（Nav2 在无目标时不调用控制器），"
+    "而上一次脱困会话还留在状态里。本会话作废并整体复位，避免它在下一个目标到来时"
+    "凭空报「脱困成功」。本次会话已输出 %lu 个周期（累计第 %lu 次）",
+    _call_gap_sec, kStaleGapSec,
+    static_cast<unsigned long>(recovery_command_count_),
+    static_cast<unsigned long>(recovery_stale_abort_count_));
+  leaveRecovery("stale_gap", _now_stamp);
+  // leaveRecovery 只清控制器侧运行期状态；decider 的会话（窗口起点、失败计数、冷却）
+  // 必须一起复位，否则下一个目标会继承上一段的失败计数与冷却窗口。
+  recovery_decider_.reset();
+  diagnostics_.recovery_failures = 0;
+  return true;
 }
 
 void MincoMpcController::publishRecoveryDebug(
@@ -1561,6 +1615,16 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 又放在"轨迹复验"与"重规划请求"之前，因为脱困期间运行这两件事没有意义
   // （复验会把已经在脱困的轨迹判死、重规划会和工作线程抢算力）。
   {
+    // 5.5.0) 停滞看门狗：收拾"目标被取消、脱困状态却留在那儿"的残局。
+    // 必须在 updateRecovery 之前跑 —— 否则冻结的会话会被误判成"成功"（实测 6.13 s
+    // 后凭空报成功）。判据是"两帧控制间隔异常大"，细节见 abortStaleRecovery 的注释。
+    {
+      const double call_gap =
+        (last_compute_call_stamp_ >= 0.0) ? (now_stamp - last_compute_call_stamp_) : -1.0;
+      last_compute_call_stamp_ = now_stamp;
+      abortStaleRecovery(now_stamp, call_gap);
+    }
+
     geometry_msgs::msg::TwistStamped escape_command;
     if (updateRecovery(state, now_stamp, node, &escape_command)) {
       diagnostics_.total_control_time_ms = (steadyNow() - control_begin) * 1.0e3;

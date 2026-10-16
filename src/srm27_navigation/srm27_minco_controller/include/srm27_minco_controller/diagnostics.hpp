@@ -109,8 +109,10 @@ struct ControllerDiagnostics
   std::uint64_t recovery_command_count{0};
   /// \brief 进入脱困的原因：`gradient` / `circular_search` / `no_escape_direction`。
   std::string recovery_trigger{"none"};
-  /// \brief 退出脱困的原因：`escaped` / `timeout` / `new_goal` / `reset` / `none`。
+  /// \brief 退出脱困的原因：`escaped` / `timeout` / `stale_gap` / `new_goal` / `none`。
   std::string recovery_exit{"none"};
+  /// \brief 因"两帧控制间隔异常大（中间目标被取消过）"而作废脱困会话的累计次数。
+  std::uint64_t recovery_stale_abort_count{0};
   /// \brief 进入脱困时自身净空（m）。
   double recovery_entry_clearance{-1.0};
   /// \brief 进入脱困时的自身净空（m）；与 entry 同源，便于现场直接看阈值关系。

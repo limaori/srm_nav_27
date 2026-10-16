@@ -169,6 +169,26 @@ private:
   /// \brief 退出脱困并清理状态（成功/超时/新目标/取消/失活共用）。
   void leaveRecovery(const char * _exit_reason, double _now_stamp);
 
+  /// \brief 脱困"停滞看门狗"：收拾"目标被取消、脱困状态却留在那儿"的残局。
+  ///
+  /// **为什么需要它**：`updateRecovery` 只在 `computeVelocityCommands` 里被调用，
+  /// 而导航目标被取消后 Nav2 就不再调用控制器。于是"目标取消的瞬间正好处在脱困中"
+  /// 会让 `RecoveryDecider` 的会话**静默冻结**：不输出、不推进、不超时；
+  /// 等下一个目标到来才被重新推进，那时车早已被挪走，于是凭空报一句
+  /// "脱困成功"，用时还显示成整个冻结时长（实测 6.13 s / 输出 0 个周期）。
+  ///
+  /// **判据（务必只认这个）**：两帧 `computeVelocityCommands` 之间的**时间间隔**
+  /// 显著大于正常控制周期。控制器只在导航进行中被调用，所以"间隔异常大"是
+  /// "中间目标被取消过"的唯一可靠证据。
+  ///
+  /// ⚠ 曾经用过"`recovery_command_count_ == 0`"当判据，那是**错的**：
+  /// 进入脱困的那一周期必然还没输出，于是看门狗会在正常脱困中每周期把会话掐掉，
+  /// 脱困永远发不出速度（2026-10-17 实测：0.5 s 内反复"进入脱困/停滞复位" 17 次）。
+  ///
+  /// \param _call_gap_sec 本次调用与上次调用之间的间隔（s）；<0 表示没有上次记录。
+  /// \return 是否执行了复位。
+  bool abortStaleRecovery(double _now_stamp, double _call_gap_sec);
+
   // 插件与生命周期
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_{};
   std::string plugin_name_{"FollowPath"};
@@ -330,6 +350,15 @@ private:
   std::uint64_t recovery_command_count_{0};
   /// \brief 累计进入脱困的次数，诊断用。
   std::uint64_t recovery_enter_count_{0};
+  /// \brief `setPlan` 被调用的总次数（含同一目标 3 Hz 刷新），诊断用。
+  std::uint64_t plan_delivery_count_{0};
+  /// \brief 上一次 `computeVelocityCommands` 的 ROS 时间戳；<0 表示尚未记录。
+  ///
+  /// 看门狗靠"两帧间隔异常大"判定中间目标被取消过 —— 这是唯一可靠的判据
+  /// （见 `abortStaleRecovery` 的注释：用"还没输出过"当判据会掐断正常脱困）。
+  double last_compute_call_stamp_{-1.0};
+  /// \brief 脱困停滞被复位过多少次，诊断用。
+  std::uint64_t recovery_stale_abort_count_{0};
 
   ControllerDiagnostics diagnostics_{};
 
