@@ -29,6 +29,12 @@
   <depend>nav2_behaviors</depend>
   <depend>pluginlib</depend>
 
+  <!-- BackUpFreeSpace 的脱困方向规划复用 srm27_minco_core 的 RecoveryDecider
+       （ESDF 解析梯度 + 环形搜索），与 MINCO 控制器内部的脱困判定共用同一份实现。
+       这条依赖是有意为之：本包其余部分仍然只依赖 Nav2，
+       唯一用到 core 的地方就是 back_up_free_space 的逃逸方向。 -->
+  <depend>srm27_minco_core</depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_clang_format</test_depend>

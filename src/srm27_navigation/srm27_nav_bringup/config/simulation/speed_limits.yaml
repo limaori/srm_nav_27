@@ -80,10 +80,10 @@ controller_server@minco:
   ros__parameters:
     FollowPath:
       limits:
-        max_linear_speed: 6.00          # 平移合速度上限（米/秒）
-        max_linear_accel: 10.00         # 平移合加速度上限（米/秒²）
-        max_angular_speed: 5.00         # 角速度上限（弧度/秒）；xy_only 阶段实际权限为 0
-        max_angular_accel: 4.50         # 角加速度上限（弧度/秒²）；同上
+        max_linear_speed: 2.20          # 平移合速度上限（米/秒）
+        max_linear_accel: 3.0         # 平移合加速度上限（米/秒²）
+        max_angular_speed: 6.00         # 角速度上限（弧度/秒）；xy_only 阶段实际权限为 0
+        max_angular_accel: 15.0         # 角加速度上限（弧度/秒²）；同上
 
 # -----------------------------------------------------------------------------
 # 速度平滑器（两个变体各一套：控制器上限不同，平滑器必须分别跟住）
@@ -99,10 +99,10 @@ velocity_smoother@minco:
   ros__parameters:
     # 按分量钳位（scale_velocities: False），所以斜向合速度可以到 √2 × 这里的 x 值；
     # 合速度最终由 srm_cmd_mux.v_max 兜底。
-    max_velocity: [5.0, 5.0, 5.0]       # 最大速度[x,y,yaw]
-    min_velocity: [-5.0, -5.0, -5.0]    # 最小速度[x,y,yaw]
-    max_accel: [6.0, 6.0, 6.0]          # 最大加速度[x,y,yaw]
-    max_decel: [-6.0, -6.0, -6.0]       # 最大减速度[x,y,yaw]
+    max_velocity: [2.2, 2.2, 6.0]       # 最大速度[x,y,yaw]
+    min_velocity: [-2.2, -2.2, -6.0]    # 最小速度[x,y,yaw]
+    max_accel: [3.0, 3.0, 15.0]          # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, -15.0]       # 最大减速度[x,y,yaw]
 
 # -----------------------------------------------------------------------------
 # 速度合成 mux（合并进 srm27_chassis_control/config/srm_chassis_control.yaml）
@@ -113,10 +113,10 @@ velocity_smoother@minco:
 # -----------------------------------------------------------------------------
 srm_cmd_mux:
   ros__parameters:
-    vx_max: 5.0                         # 前向速度上限（米/秒，按分量）
-    vy_max: 5.0                         # 左向速度上限（米/秒，按分量）
-    v_max: 6.0                          # 平移合速度上限（米/秒，按向量模长）
-    wz_max: 4.0                         # 自转角速度上限（弧度/秒，取实车串口协议口径）
+    vx_max: 2.2                         # 前向速度上限（米/秒，按分量）
+    vy_max: 2.2                         # 左向速度上限（米/秒，按分量）
+    v_max: 2.5                          # 平移合速度上限（米/秒，按向量模长）
+    wz_max: 6.0                         # 自转角速度上限（弧度/秒，取实车串口协议口径）
 
 # -----------------------------------------------------------------------------
 # 独立自转链路（同样合并进 srm_chassis_control.yaml）

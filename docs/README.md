@@ -11,6 +11,7 @@
 - [MINCO/MPC migration notes](局部规划器迁移MINCO_MPC方案(ai).md): staged design proposal.
 - [MINCO migration implementation record](minco迁移实施记录(ai).md): P0/P1/P2 落地记录 —— 新增 vendor/core/controller 三个包、odometry 语义修复、MPC 与 MINCO 关键实现选择、构建/测试/启动命令、未完成项与已知缺口。(AI 生成)
 - [MINCO 实车迁移实施记录与上电验收清单](minco实车迁移实施记录(ai).md): 把仿真跑通的 MINCO+MPC 接到实车 —— 仿真/实车链路差异对照、`script/start_real_nav.sh --controller minco` 入口与离线预检脚本、本次定位的两个真实阻塞项（实车 `/odometry` 10 Hz 对 `state_timeout`、`fake_vel_transform` 二次旋转）、待辨识清单，以及 S0–S7 分阶段上电验收清单与回退方式；并记录 2026-10-09 实车终点往返的三条成因与修复（终点急停状态机 `TerminalStop`、会话重置阈值、`reaction_latency` 与 `state_timeout` 解耦、过期 twist、到点判定改为不依赖角速度的 `OmniStoppedGoalChecker`、实车与仿真的到点/急停半径统一为 0.50 m)。(AI 生成)
+- [MINCO 脱困机制迁移实施记录](minco脱困机制迁移实施记录(ai).md): 把北理 `navi_minco_bit` 的 `RecoverServer` + `MincoFsm::RECOVERING` 迁移到 Nav2 链路 —— 归类为 `RecoveryDecider`（脱困判定 / 逃逸方向规划 / 脱困成功判定）、控制器旁路 MPC 直接输出逃逸 Twist、`BackUpFreeSpace` 改用 ESDF 解析梯度 + 环形搜索；含阈值对照表、与行为树 recovery 的先后边界、修掉的两个参考实现缺陷、构建测试结果与待运行期验证项。(AI 生成)
 - [TDT navigation notes](tdt开源.md): upstream navigation implementation review.
 - [SRM simulation and independent rotation plan](SRM仿真与导航自转控制实施方案.md): SRM-only simulation, planar Nav2 velocity, and separate chassis rotation control.
 - [SRM simulation and rotation implementation notes](SRM仿真与自转控制实现(ai).md): 落地说明 —— 三个新包的职责、速度/自转接口表、合成与安全优先级、启动方式、测试矩阵与实测结论。(AI 生成)

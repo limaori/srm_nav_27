@@ -42,6 +42,8 @@
 #   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认), 不自转
 #   ./script/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
 #   ./script/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
+#   ./script/start_sim_nav.sh --controller minco               # 局部控制器换 MINCO+MPC (自动挑 minco 参数文件)
+#   ./script/start_sim_nav.sh --controller omni                # 显式回到全向 PID 控制器 (历史默认)
 #   ./script/start_sim_nav.sh --no-run                         # Gazebo 保持暂停, 手动点播放
 #   ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
 #   ./script/start_sim_nav.sh --rotation-mode periodic \
@@ -56,7 +58,19 @@
 # 参数:
 #   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
 #   -m, --map     <名字|绝对路径>  地图名(自动补 .yaml)或 YAML 绝对路径
-#   -p, --params  <绝对路径>  Nav2 参数文件, 默认 config/simulation/nav2_params_srm.yaml
+#   -p, --params  <绝对路径>  Nav2 参数文件; 不给时由 --controller 决定 (不给 -c 就是 Omni 那份)
+#   -c, --controller <auto|omni|minco>
+#                            局部控制器 = 用哪份 Nav2 参数文件 (与 start_real_nav.sh 同名同义):
+#                              minco -> config/simulation/nav2_params_srm_minco.yaml
+#                                       (FollowPath = srm27_minco_controller::MincoMpcController)
+#                              omni  -> config/simulation/nav2_params_srm.yaml
+#                                       (FollowPath = srm27_omni_pid_controller::OmniPidPursuitController)
+#                              auto  -> 默认值: 按参数文件里 FollowPath 的插件判定。
+#                            注意默认是 auto, 所以"什么都不给"仍然是 Omni 那份, 行为与以前一致;
+#                            只给 -p 时也按 auto 判定 (老命令 `-p .../nav2_params_srm_minco.yaml`
+#                            照样工作, 并且会认出是 MINCO)。-c 与 -p 同时给出时以 -p 加载,
+#                            但会校验两者不矛盾: 选错直接报错, 不让"名字是 MINCO、跑的是 Omni"溜过去。
+#       --minco / --omni     等价于 --controller minco / --controller omni
 #       --gicp / --no-gicp       是否用 GICP 初始重定位 (默认关闭 = 原来的静态地图模式)
 #       --prior-pcd <绝对路径>   先验点云 PCD (--gicp 时必填)
 #       --prior-pcd-manifest <绝对路径>
@@ -83,7 +97,7 @@
 #   -h, --help                显示本帮助
 #
 # 环境变量:
-#   WORLD MAP MAP_NAME PARAMS_FILE USE_RVIZ USE_GUI RUN_IMMEDIATELY
+#   WORLD MAP MAP_NAME PARAMS_FILE CONTROLLER USE_RVIZ USE_GUI RUN_IMMEDIATELY
 #   USE_GICP PRIOR_PCD_FILE PRIOR_PCD_MANIFEST INIT_POSE GICP_RUN_ID
 #   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
 #   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
@@ -142,6 +156,13 @@ ROTATION_SINE_WAVE="${ROTATION_SINE_WAVE:-true}"
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
+PARAMS_FILE_GIVEN=0
+
+# 局部控制器 (决定用哪份 Nav2 参数文件): auto 按参数文件里的 FollowPath 插件判定,
+# omni / minco 显式指定。默认 auto 是刻意选的 —— 不指定时仍然落在 Omni 那份文件上,
+# 与历史行为完全一致; 只有 -c minco / --minco 才切到 MINCO+MPC。
+CONTROLLER="${CONTROLLER:-auto}"
+CONTROLLER_CLI_GIVEN=0
 
 # 初始重定位 (GICP)
 USE_GICP="${USE_GICP:-0}"                    # 1 = use_pcd_localization:=True
@@ -166,7 +187,11 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -w|--world)   WORLD_FROM_USER="${2:?--world 需要一个世界名}"; shift 2 ;;
     -m|--map)     MAP_FILE="${2:?--map 需要地图名或绝对路径}"; shift 2 ;;
-    -p|--params)  PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
+    -p|--params)  PARAMS_FILE="${2:?--params 需要绝对路径}"; PARAMS_FILE_GIVEN=1; shift 2 ;;
+    -c|--controller) CONTROLLER="${2:?--controller 需要 auto|omni|minco}"
+                     CONTROLLER_CLI_GIVEN=1; shift 2 ;;
+    --minco)      CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
+    --omni)       CONTROLLER="omni";  CONTROLLER_CLI_GIVEN=1; shift ;;
     --gicp)       USE_GICP="1"; shift ;;
     --no-gicp)    USE_GICP="0"; shift ;;
     --prior-pcd)          PRIOR_PCD_FILE="${2:?--prior-pcd 需要绝对路径}"; shift 2 ;;
@@ -271,11 +296,35 @@ fi
 # 两个目录同名时以包内 map/simulation/ 优先, 保证仿真默认地图不被意外顶掉。
 MAPS_DIR="$WS_DIR/maps"
 
+# 两份仿真 Nav2 参数文件: Omni (历史默认) 与 MINCO+MPC。优先源码目录 (symlink-install 下与
+# install 一致), 退化到 install。选中哪份由 --controller 决定, 只给 -p 则按文件内容判定。
+OMNI_PARAMS_DEFAULT="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
+if [ ! -f "$OMNI_PARAMS_DEFAULT" ]; then
+  OMNI_PARAMS_DEFAULT="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm.yaml"
+fi
+MINCO_PARAMS_DEFAULT="$PKG_SRC/config/simulation/nav2_params_srm_minco.yaml"
+if [ ! -f "$MINCO_PARAMS_DEFAULT" ]; then
+  MINCO_PARAMS_DEFAULT="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml"
+fi
+MINCO_PLUGIN_NAME="srm27_minco_controller::MincoMpcController"
+
+# 只给了 -p、没显式选控制器: 交给下面的 auto 判定, 免得"-p 指到 Omni 文件"被当成
+# "选了 minco 却加载 Omni 文件"拦下来 (与 start_real_nav.sh 同一套规则)。
+if [ "$CONTROLLER_CLI_GIVEN" = "0" ] && [ "$PARAMS_FILE_GIVEN" = "1" ]; then
+  CONTROLLER="auto"
+fi
+
+case "$CONTROLLER" in
+  auto|omni|minco) ;;
+  *) echo "[错误] --controller 只支持 auto / omni / minco, 收到: $CONTROLLER" >&2; exit 2 ;;
+esac
+
 if [ -z "$PARAMS_FILE" ]; then
-  PARAMS_FILE="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
-  if [ ! -f "$PARAMS_FILE" ]; then
-    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm.yaml"
-  fi
+  case "$CONTROLLER" in
+    omni)  PARAMS_FILE="$OMNI_PARAMS_DEFAULT" ;;
+    minco) PARAMS_FILE="$MINCO_PARAMS_DEFAULT" ;;
+    auto)  PARAMS_FILE="$OMNI_PARAMS_DEFAULT" ;;   # 不给控制器时保持历史默认 (Omni 那份)
+  esac
 fi
 
 # Gazebo 世界与 SRM 初始位姿由 srm27_gazebo_simulator/config/srm_sim.yaml 给出。
@@ -391,6 +440,33 @@ if [ ! -f "$PARAMS_FILE" ]; then
 fi
 if [ "${PARAMS_FILE#/}" = "$PARAMS_FILE" ]; then
   echo "[错误] 参数文件必须是绝对路径: $PARAMS_FILE" >&2
+  exit 1
+fi
+
+# ---------- 局部控制器判定 (auto 由文件内容认, 显式指定则校验文件是否对得上) ----------
+# 判据与 start_real_nav.sh 一致: 参数文件里有没有 MINCO 的 FollowPath 插件。
+if [ "$CONTROLLER" = "auto" ]; then
+  if grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+    CONTROLLER="minco"
+  else
+    CONTROLLER="omni"
+  fi
+fi
+
+# 显式选 minco 但文件里没有 MINCO 插件 -> 直接失败, 不让"名字是 MINCO、跑的是 Omni"溜过去。
+if [ "$CONTROLLER" = "minco" ] && ! grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+  echo "[错误] --controller minco, 但参数文件里没有 $MINCO_PLUGIN_NAME:" >&2
+  echo "[错误]   $PARAMS_FILE" >&2
+  echo "[提示] MINCO 仿真参数文件: $MINCO_PARAMS_DEFAULT" >&2
+  exit 1
+fi
+
+# 反向也拦一下: 显式选 omni 却加载了 MINCO 那份, 表现同样是"选的与实际跑的不一致"。
+if [ "$CONTROLLER" = "omni" ] && grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+  echo "[错误] --controller omni, 但参数文件里是 $MINCO_PLUGIN_NAME:" >&2
+  echo "[错误]   $PARAMS_FILE" >&2
+  echo "[提示] Omni 仿真参数文件: $OMNI_PARAMS_DEFAULT" >&2
+  echo "[提示] 想跑 MINCO 就用 --controller minco (不给 -p 时会自动选对文件)。" >&2
   exit 1
 fi
 
@@ -669,6 +745,12 @@ printf '========== SRM27 仿真 NAV 导航 (世界: %s) ==========\n' "$WORLD"
 printf '工作空间  : %s\n' "$WS_DIR"
 printf '地图      : %s\n' "$MAP_FILE"
 printf '参数文件  : %s\n' "$PARAMS_FILE"
+# FollowPath 实际用的插件直接从参数文件里读出来打印 —— 比按名字猜可靠, 选错文件时一眼可见。
+FOLLOWPATH_PLUGIN="$(grep -A3 -E '^[[:space:]]*FollowPath:' "$PARAMS_FILE" 2>/dev/null \
+  | grep -m1 -E '^[[:space:]]*plugin:' \
+  | sed -e 's/^[^"]*"//' -e 's/".*$//')"
+printf '控制器    : %s%s\n' "$CONTROLLER" \
+  "$([ -n "$FOLLOWPATH_PLUGIN" ] && printf '  (FollowPath = %s)' "$FOLLOWPATH_PLUGIN")"
 if [ "$USE_GICP" = "true" ]; then
   printf '定位方式  : GICP 初始重定位 (slam:=False, use_pcd_localization:=True, use_lio_odometry:=False)\n'
   printf '先验点云  : %s\n' "$PRIOR_PCD_FILE"
@@ -793,3 +875,62 @@ cat <<EOF
 清理残留:
   ./script/kill_gzb.sh && ./script/kill_rviz.sh
 EOF
+
+# 只有真的跑 MINCO 才打印这段自检: 换控制器最容易出的错是"以为换了, 其实参数文件没选对"。
+if [ "$CONTROLLER" = "minco" ]; then
+  cat <<EOF
+
+MINCO 自检 (仿真, 按顺序确认):
+  1) 插件真的被加载 (不是"launch 没报错"就算):
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.plugin
+       期望: srm27_minco_controller::MincoMpcController
+       若显示 Omni, 说明参数文件选错了 (--controller minco 会自动选对文件; 但若旧进程还在,
+       也会看到旧值 —— 那种情况先 ./script/kill_nav.sh)。
+  2) 轨迹真的算出来了:
+       ros2 topic hz /${ROBOT_NS}/FollowPath/minco_trajectory
+       ros2 topic hz /${ROBOT_NS}/FollowPath/mpc_prediction
+  3) 诊断健康 (判"卡在哪"的第一手证据, 失败路径也会发布):
+       ros2 topic echo /${ROBOT_NS}/FollowPath/diagnostics --once
+       关注: planning_result=success、minimum_clearance>0、missed_deadline_count 不持续增长。
+  4) 阶段一 MPC 没有自转权限: /${ROBOT_NS}/cmd_vel_nav 的 angular.z 应恒为 0 (自转仍由自转链路负责)。
+
+MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
+  a) 参数真的生效 (configure 期读一次; 改完 yaml 必须重启导航栈):
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.fail_threshold
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.escape_speed
+       ros2 param get /${ROBOT_NS}/controller_server FollowPath.recovery.stuck_clearance
+     期望 5 / 0.5 / 0.25。启动日志里还有一行 "MincoMpcController 脱困参数: ...",
+     打印的是夹取后实际生效的值, 必须与这里一致 (不一致说明参数文件选错了)。
+  b) 脱困可视化话题存在 (平时是空的, 只有真脱困才有内容):
+       ros2 topic list | grep recovery_markers
+     期望 /${ROBOT_NS}/FollowPath/recovery_markers。
+     RViz 里已预置显示项 "Recovery (MINCO)", 不用手动加:
+       绿线 = 脱困路径规划结果, 蓝箭头 = 本周期下发的那一步, 球 = 当前净空。
+  c) 实时看脱困状态 (只筛脱困字段, 不刷屏):
+       ros2 topic echo /${ROBOT_NS}/FollowPath/diagnostics | grep -E "recovery_(active|trigger|exit|clearance)"
+     正常导航 recovery_active=false; 进脱困为 true 且 recovery_trigger=gradient|circular_search;
+     退出时 recovery_exit=escaped|timeout。
+  d) 怎么把它逼进脱困 (两个条件必须同时成立, 最容易白等的地方):
+       条件 1: 重规划连续失败 fail_threshold(5) 次;
+       条件 2: 机器人自身净空 < stuck_clearance(0.25 m)。
+     ⚠ 条件 2 的净空是相对原始致命栅格算的 (膨胀层不计入), 所以
+       "被膨胀层包住、规划失败"不等于"卡死" —— 那种情况判为"前方路障", 只绕路不脱困。
+     想稳定复现: 用 RViz 的 "2D Goal Pose" 把目标设在死角/墙后, 把车引进退无可退的位置。
+  e) 想先看链路通不通, 把"更容易判卡死"调出来:
+       ⚠ **必须改 yaml 后重启导航栈, 不能用 ros2 param set。**
+       MincoMpcController 只在 configure 期 (loadParameters) 读一次参数, 且**没有注册
+       onSetParameters 回调** (与 rotation_test_sender 不同, 那个有回调所以能热改)。
+       对 controller_server 用 ros2 param set 会"成功返回但毫无效果"—— 这是最费时间的一种坑。
+       做法: 改 config/simulation/nav2_params_srm_minco.yaml 里
+         FollowPath.recovery.fail_threshold: 2      # 更容易进脱困
+         FollowPath.recovery.stuck_clearance: 0.60   # 不必贴到 0.25 m 才算卡死
+       然后 ./script/kill_nav.sh && ./script/start_sim_nav.sh --controller minco
+       (本脚本默认启动前就会自己杀一遍导航栈, 直接重跑也行。)
+       看到链路通了再把这两个值改回 5 / 0.25 复验一遍 —— 正式值才是交付状态。
+  f) 两条脱困链路的分工 (不是互相打架, 是先后兜底):
+       控制器内部脱困 (recovery.window_sec=3 s, 上面那些日志) 先试;
+       3 s 没成功 -> 回重规划; 仍失败 -> 等 build_grace_period(1 s) 抛给行为树
+       -> ClearEntireCostmap x2 + BackUpFreeSpace (现在也走 ESDF 梯度选方向),
+       后者日志在 behavior_server 终端, 关键字 "backing up ... towards free space".
+EOF
+fi
