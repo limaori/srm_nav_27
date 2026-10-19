@@ -33,7 +33,6 @@
 #include <vector>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include "srm27_minco_controller/command_frame.hpp"
 #include "srm27_minco_controller/costmap_adapter.hpp"
 #include "srm27_minco_controller/diagnostics.hpp"
 #include "srm27_minco_controller/planning_worker.hpp"
@@ -43,6 +42,7 @@
 #include "srm27_minco_core/esdf_2d.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/mpc_solver.hpp"
+#include "srm27_minco_core/recovery_decider.hpp"
 #include "srm27_minco_core/replan_manager.hpp"
 #include "srm27_minco_core/tracking_reference.hpp"
 #include "srm27_minco_core/trajectory_validator.hpp"
@@ -103,17 +103,15 @@ private:
     const srm27_minco_core::State2D & _state, double _now_stamp, double _now_steady);
 
   /// \brief 取回并提交后台规划结果。
-  void harvestPlanningResult(double _now_stamp);
+  ///
+  /// `_state` 只用于规划失败时的脱困分诊（读自身净空），不参与轨迹提交。
+  void harvestPlanningResult(const State2D & _state, double _now_stamp);
 
   /// \brief 把里程计坐标系下的路径转换到规划坐标系。
   bool updatePathInPlanningFrame(double _now_stamp, std::string * _reason);
 
   /// \brief 轨迹作废（新目标、取消、限速收紧、定位重置、失活）。
   void invalidateTrajectory(const std::string & _reason, double _now_stamp);
-
-  /// \brief 自转请求进线（阶段二小陀螺）：`kSpin` 模式下把新鲜请求喂给航向策略，
-  ///   超时视为撤回；其余模式只更新诊断，不触碰策略。
-  void refreshSpinRequest();
 
   /// \brief 组装一条受控零速度命令并记录停止原因。
   geometry_msgs::msg::TwistStamped stopCommand(
@@ -138,6 +136,59 @@ private:
   /// \brief 从已提交轨迹提取热启动初值。
   void updateWarmStart(const srm27_minco_core::Trajectory2D & _trajectory);
 
+  // === 脱困（迁移自 navi_minco_bit 的 RecoverServer + MincoFsm::RECOVERING） ===
+
+  /// \brief 汇报一次规划失败，达标即进入脱困并算出逃逸速度。
+  ///
+  /// 只在"自身被卡死"（自身净空 < `recovery_stuck_clearance_`）时才计数；
+  /// 净空充足但规划失败属于"前方路障"，应交给重规划绕路而不是脱困。
+  /// \return 是否已进入脱困状态。
+  bool handlePlanningFailure(const State2D & _state, double _now_stamp);
+
+  /// \brief 脱困期间每个控制周期调用：判成功 / 判超时，未退出则输出逃逸命令。
+  /// \return `true` 表示本周期命令已由脱困接管，调用方必须直接返回它。
+  bool updateRecovery(
+    const State2D & _state, double _now_stamp,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node,
+    geometry_msgs::msg::TwistStamped * _command);
+
+  /// \brief 构造一条逃逸命令（世界系速度 -> 车体系 Twist）。
+  ///
+  /// `_escape_velocity` 是规划坐标系（odom）下的世界速度；输出按当前航向转成
+  /// 车体系，仍是 Nav2 要求的 `TwistStamped`。自转恒为零：脱困只平移、不转向，
+  /// 与参考实现"yaw 轨迹锁存当前 yaw"一致。
+  geometry_msgs::msg::TwistStamped makeEscapeCommand(
+    const State2D & _state, const Eigen::Vector2d & _escape_velocity,
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node);
+
+  /// \brief 发布脱困可视化（逃逸方向箭头 + 当前净空球），不参与控制。
+  void publishRecoveryDebug(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const State2D & _state,
+    double _clearance);
+
+  /// \brief 退出脱困并清理状态（成功/超时/新目标/取消/失活共用）。
+  void leaveRecovery(const char * _exit_reason, double _now_stamp);
+
+  /// \brief 脱困"停滞看门狗"：收拾"目标被取消、脱困状态却留在那儿"的残局。
+  ///
+  /// **为什么需要它**：`updateRecovery` 只在 `computeVelocityCommands` 里被调用，
+  /// 而导航目标被取消后 Nav2 就不再调用控制器。于是"目标取消的瞬间正好处在脱困中"
+  /// 会让 `RecoveryDecider` 的会话**静默冻结**：不输出、不推进、不超时；
+  /// 等下一个目标到来才被重新推进，那时车早已被挪走，于是凭空报一句
+  /// "脱困成功"，用时还显示成整个冻结时长（实测 6.13 s / 输出 0 个周期）。
+  ///
+  /// **判据（务必只认这个）**：两帧 `computeVelocityCommands` 之间的**时间间隔**
+  /// 显著大于正常控制周期。控制器只在导航进行中被调用，所以"间隔异常大"是
+  /// "中间目标被取消过"的唯一可靠证据。
+  ///
+  /// ⚠ 曾经用过"`recovery_command_count_ == 0`"当判据，那是**错的**：
+  /// 进入脱困的那一周期必然还没输出，于是看门狗会在正常脱困中每周期把会话掐掉，
+  /// 脱困永远发不出速度（2026-10-17 实测：0.5 s 内反复"进入脱困/停滞复位" 17 次）。
+  ///
+  /// \param _call_gap_sec 本次调用与上次调用之间的间隔（s）；<0 表示没有上次记录。
+  /// \return 是否执行了复位。
+  bool abortStaleRecovery(double _now_stamp, double _call_gap_sec);
+
   // 插件与生命周期
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_{};
   std::string plugin_name_{"FollowPath"};
@@ -149,21 +200,7 @@ private:
   // 参数
   std::string planning_frame_{"odom"};
   std::string base_frame_{"base_link"};
-  /// \brief 速度命令所在的坐标系（方案 §3.2）。
-  ///
-  /// 等于 `base_frame` 时输出真实车体系速度；等于 `fake_base_frame` 时输出
-  /// odom 对齐的平移速度，把唯一的坐标转换留给 `fake_vel_transform`。
-  std::string command_frame_{"base_link"};
-  /// \brief fakeyaw 迁移用的虚拟车体系名（用于校验 `command_frame`）。
-  std::string fake_base_frame_{"base_link_fake"};
   std::string odom_topic_{"odometry"};
-  /// \brief 自转请求进线话题（阶段二小陀螺，方案 §4.1.2）。
-  ///
-  /// 订阅旧链路自转速度链的输出（已含 wz_max / 加速度限幅），`kSpin` 模式下
-  /// 每一拍喂给航向策略；其余模式只缓存不进线。
-  std::string spin_request_topic_{"rotation_velocity"};
-  /// \brief 自转请求新鲜窗口（秒）：超时未更新按"撤回请求"处理（车停止自转）。
-  double spin_request_timeout_{0.25};
   double replan_frequency_{10.0};
   double planning_horizon_{2.0};
   double planning_deadline_ms_{30.0};
@@ -180,8 +217,6 @@ private:
   double prediction_dt_{0.02};
   std::string mpc_model_name_{"velocity_integrator"};
   YawMode yaw_mode_{YawMode::kXyOnly};
-  /// \brief 命令系语义（由 `command_frame` 与 frame 名解析得到，方案 §4.1.3）。
-  CommandFrameMode command_frame_mode_{CommandFrameMode::kRobotBase};
   double yaw_narrow_clearance_threshold_{0.60};
   bool yaw_allow_reverse_{true};
   double state_max_sample_gap_{0.20};
@@ -214,6 +249,30 @@ private:
   double release_timeout_{0.20};
   bool publish_visualization_{true};
 
+  // --- 脱困参数（`recovery.*`） ---
+  //
+  // 判定语义与阈值迁移自 navi_minco_bit 的 `MincoPlanner.recovery_server.*`；
+  // 参考实现里硬编码在 FSM 里的 0.25 / 0.40 两个分诊与成功阈值在这里也变成了参数，
+  // 因为本工作区没有那层 FSM，没有别的地方能承载它们。
+  /// \brief 连续规划失败多少次才允许进入脱困。
+  int recovery_fail_threshold_{5};
+  /// \brief 两次脱困之间的最小间隔（s）。
+  double recovery_cooldown_sec_{1.0};
+  /// \brief 一次脱困会话的最长持续时间（s）。
+  double recovery_window_sec_{3.0};
+  /// \brief 逃逸速度（m/s）。
+  double recovery_escape_speed_{0.5};
+  /// \brief 卡死分诊阈值（m）：自身净空低于该值才计入失败、才允许脱困。
+  double recovery_stuck_clearance_{0.25};
+  /// \brief 脱困成功判据（m）：自身净空恢复到该值以上即判成功。
+  double recovery_escaped_clearance_{0.40};
+  /// \brief 梯度退化时的环形搜索半径（m）。
+  double recovery_search_radius_{0.4};
+  /// \brief 环形搜索的采样数量。
+  int recovery_search_samples_{36};
+  /// \brief 是否发布脱困可视化（`recovery_markers`）。
+  bool recovery_publish_visualization_{true};
+
   // 有效约束
   srm27_minco_core::Limits2D base_limits_{};
   srm27_minco_core::Limits2D limits_{};
@@ -233,6 +292,8 @@ private:
   srm27_minco_core::TrackingReferenceBuilder reference_builder_{};
   srm27_minco_core::TrajectoryValidator validator_{};
   srm27_minco_core::ReplanManager replan_manager_{};
+  /// \brief 脱困判定 / 脱困方向规划 / 脱困成功判定（迁移自 navi_minco_bit 的 RecoverServer）。
+  srm27_minco_core::RecoveryDecider recovery_decider_{};
   srm27_minco_core::MincoOptimizerConfig minco_config_{};
   srm27_minco_core::TrajectoryInitializer::Config initializer_config_{};
   srm27_minco_core::Esdf2D::Config esdf_config_{};
@@ -278,6 +339,27 @@ private:
   double output_zero_stamp_{0.0};
   double actual_stop_stamp_{0.0};
 
+  // --- 脱困运行期状态 ---
+  /// \brief 最近一次脱困时算出的逃逸方向（规划坐标系，单位向量）。
+  Eigen::Vector2d recovery_direction_{Eigen::Vector2d::Zero()};
+  /// \brief 最近一次脱困时算出的逃逸速度（规划坐标系，m/s）。
+  Eigen::Vector2d recovery_escape_velocity_{Eigen::Vector2d::Zero()};
+  /// \brief 进入脱困时自身的净空（m），诊断用。
+  double recovery_entry_clearance_{-1.0};
+  /// \brief 脱困期间累计的输出周期数，诊断用。
+  std::uint64_t recovery_command_count_{0};
+  /// \brief 累计进入脱困的次数，诊断用。
+  std::uint64_t recovery_enter_count_{0};
+  /// \brief `setPlan` 被调用的总次数（含同一目标 3 Hz 刷新），诊断用。
+  std::uint64_t plan_delivery_count_{0};
+  /// \brief 上一次 `computeVelocityCommands` 的 ROS 时间戳；<0 表示尚未记录。
+  ///
+  /// 看门狗靠"两帧间隔异常大"判定中间目标被取消过 —— 这是唯一可靠的判据
+  /// （见 `abortStaleRecovery` 的注释：用"还没输出过"当判据会掐断正常脱困）。
+  double last_compute_call_stamp_{-1.0};
+  /// \brief 脱困停滞被复位过多少次，诊断用。
+  std::uint64_t recovery_stale_abort_count_{0};
+
   ControllerDiagnostics diagnostics_{};
 
   // 发布者
@@ -290,13 +372,9 @@ private:
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_{};
   double last_diagnostics_stamp_{0.0};
-
-  // 自转请求缓存（spin_request.topic 的最近一条；stamp 用 steady 时钟）
-  std::mutex spin_request_mutex_{};
-  double spin_request_value_{0.0};
-  double spin_request_stamp_{-1.0};
-  /// \brief 自转请求进线订阅（configure 时创建；kSpin 模式消费）。
-  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_request_sub_{};
+  /// \brief 脱困可视化（逃逸方向箭头 + 净空球）。
+  rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+    recovery_marker_pub_{};
 };
 
 }  // namespace srm27_minco_controller

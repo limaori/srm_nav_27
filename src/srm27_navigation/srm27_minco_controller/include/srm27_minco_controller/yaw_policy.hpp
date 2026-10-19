@@ -15,7 +15,6 @@
 #ifndef SRM27_MINCO_CONTROLLER__YAW_POLICY_HPP_
 #define SRM27_MINCO_CONTROLLER__YAW_POLICY_HPP_
 
-#include <cstdint>
 #include <string>
 
 #include "srm27_minco_core/tracking_reference.hpp"
@@ -33,9 +32,6 @@ enum class YawMode {
   kSpin = 2,
   /// \brief 窄通道内保持接近当前姿态的正/反切向。
   kNarrowTrack = 3,
-  /// \brief 迁移模式（方案 §4.1）：MPC 拥有 `wz`，航向参考**只**来自路径切线；
-  /// 独立自转请求在本模式下必须被拒绝（不允许偷偷混入 yaw 参考）。
-  kSe2 = 4,
 };
 
 /// \brief 航向策略：把轨迹与模式映射为 MPC 的航向/角速度参考。
@@ -76,9 +72,6 @@ public:
   ///
   /// 调用方必须每个控制周期在请求仍然新鲜时调用一次；请求过期、导航取消或失活时
   /// 调用 `clearSpinRequest()`。这样不存在“请求超时后仍沿用旧自转”的路径。
-  ///
-  /// **只对 `kSpin` 生效**：`kSe2`（导航拥有 wz）下自转请求会被拒绝并计数，
-  /// 否则独立自转请求会绕过导航的 yaw 参考直接决定角速度（方案 §4.1.2）。
   /// \param _omega 期望角速度（rad/s）。
   void setSpinRequest(double _omega);
 
@@ -87,18 +80,6 @@ public:
 
   /// \brief 当前是否有有效自转请求。
   bool spinRequestActive() const { return spin_request_active_; }
-
-  /// \brief 被拒绝的自转请求次数（`kSe2` 下的"偷偷混入"计数，诊断用）。
-  std::uint64_t rejectedSpinRequestCount() const { return rejected_spin_request_count_; }
-
-  /// \brief 设置"已到点/终点急停"保持：保持当前航向且角速度参考为 0。
-  ///
-  /// `kSe2` 用它实现 `yaw_policy.stop_rotation_on_goal`：到点后不再产生自转参考，
-  /// 避免"停止条件永远不满足"。
-  void setGoalHold(bool _active) { goal_hold_ = _active; }
-
-  /// \brief 当前是否处于到点保持。
-  bool goalHold() const { return goal_hold_; }
 
   /// \brief 更新窄通道判定结果（由控制器根据轨迹净空与通道几何给出）。
   void setNarrowTrackActive(bool _active) { narrow_track_active_ = _active; }
@@ -130,13 +111,6 @@ private:
   double spin_omega_{0.0};
   bool spin_request_active_{false};
   bool narrow_track_active_{false};
-  /// \brief 到点保持（`kSe2` 到点后不再产生自转参考）。
-  bool goal_hold_{false};
-  /// \brief 被拒绝的独立自转请求次数（非 `kSpin` 模式下传入时 +1）。
-  std::uint64_t rejected_spin_request_count_{0};
-  /// \brief SPIN 模式的参考 yaw 积分器（随 wz 参考推进，重规划时重新锚定当前航向）。
-  double spin_ref_yaw_{0.0};
-  double last_spin_time_{-1.0};
   /// \brief 上一次 FOLLOW/NARROW 模式给出的切向参考，用于估计角速度参考。
   double last_tangent_time_{0.0};
   double last_tangent_yaw_{0.0};

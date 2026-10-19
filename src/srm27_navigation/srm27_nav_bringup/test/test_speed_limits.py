@@ -38,8 +38,6 @@ import srm_speed_limits as speed  # noqa: E402
 CONFIG_DIR = PACKAGE_ROOT / "config"
 SIM_PARAMS = CONFIG_DIR / "simulation" / "nav2_params_srm.yaml"
 SIM_MINCO_PARAMS = CONFIG_DIR / "simulation" / "nav2_params_srm_minco.yaml"
-# wz 控制迁移 / fakeyaw 变体：与 MINCO 共用同一套限幅覆盖层（变体判定为 minco）。
-SIM_FAKEYAW_PARAMS = CONFIG_DIR / "simulation" / "nav2_params_srm_fakeyaw.yaml"
 REAL_PARAMS = CONFIG_DIR / "real" / "nav2_params_srm.yaml"
 REAL_MINCO_PARAMS = CONFIG_DIR / "real" / "nav2_params_srm_minco.yaml"
 UPSTREAM_PARAMS = CONFIG_DIR / "real" / "nav2_params_upstream.yaml"
@@ -50,7 +48,6 @@ CHASSIS_PARAMS = (
 PARAMS_CASES = [
     (SIM_PARAMS, speed.VARIANT_OMNI),
     (SIM_MINCO_PARAMS, speed.VARIANT_MINCO),
-    (SIM_FAKEYAW_PARAMS, speed.VARIANT_MINCO),
     (REAL_PARAMS, speed.VARIANT_OMNI),
     (REAL_MINCO_PARAMS, speed.VARIANT_MINCO),
 ]

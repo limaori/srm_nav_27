@@ -23,8 +23,10 @@
 #include <nav2_core/exceptions.hpp>
 #include <nav2_util/node_utils.hpp>
 #include <pluginlib/class_list_macros.hpp>
+#include <memory>
 #include <stdexcept>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <vector>
 
 #include "srm27_minco_core/kinematics.hpp"
 
@@ -173,38 +175,26 @@ void MincoMpcController::configure(
     plugin_name_ + "/diagnostics", rclcpp::QoS(1));
   planning_input_pub_ = node->create_publisher<nav_msgs::msg::Path>(
     plugin_name_ + "/planning_input_path", rclcpp::QoS(1));
-
-  // 自转请求进线：发布端（rotation_controller）是 RELIABLE，订阅端必须同为
-  // RELIABLE 才能匹配（尽力订阅匹配不上可靠发布）。回调只缓存数值与到达时刻
-  // （steady 时钟），新鲜度判定在控制循环里做，避免回调里锁生命周期节点。
-  rclcpp::QoS spin_request_qos(rclcpp::KeepLast(1));
-  spin_request_qos.reliable();
-  spin_request_sub_ = node->create_subscription<geometry_msgs::msg::Twist>(
-    spin_request_topic_, spin_request_qos,
-    [this](geometry_msgs::msg::Twist::SharedPtr _msg) {
-      const double wz = _msg ? _msg->angular.z : 0.0;
-      std::lock_guard<std::mutex> lock(spin_request_mutex_);
-      spin_request_value_ = std::isfinite(wz) ? wz : 0.0;
-      spin_request_stamp_ = steadyNow();
-    });
+  // 脱困可视化：逃逸方向箭头 + 当前净空球。与轨迹/预测分开成独立话题，
+  // 现场可以直接只开这一条来确认"卡死时分诊是否成立、推的方向是否合理"。
+  recovery_marker_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
+    plugin_name_ + "/recovery_markers", rclcpp::QoS(1));
 
   configured_ = true;
   RCLCPP_INFO(
     node->get_logger(),
-    "MincoMpcController 已配置: planning_frame=%s base_frame=%s command_frame=%s(%s) "
-    "horizon=%.2f m replan=%.1f Hz v_max=%.2f m/s a_max=%.2f m/s^2 yaw_mode=%s "
-    "wz 权限=%.3f rad/s spin_request=%s(超时 %.2f s)",
-    planning_frame_.c_str(), base_frame_.c_str(), command_frame_.c_str(),
-    toString(command_frame_mode_), planning_horizon_, replan_frequency_,
-    limits_.max_linear_speed, limits_.max_linear_accel, yaw_policy_.modeName(),
-    limits_.max_angular_speed, spin_request_topic_.c_str(), spin_request_timeout_);
-  if (command_frame_mode_ == CommandFrameMode::kOdomAlignedFake) {
-    RCLCPP_INFO(
-      node->get_logger(),
-      "MincoMpcController: command_frame=%s 与 odom 对齐 —— 控制器**不做** R(-yaw)，"
-      "平移速度原样输出，唯一的坐标转换由 fake_vel_transform 负责（方案 §3.2）。",
-      command_frame_.c_str());
-  }
+    "MincoMpcController 已配置: planning_frame=%s base_frame=%s horizon=%.2f m "
+    "replan=%.1f Hz v_max=%.2f m/s a_max=%.2f m/s^2 yaw_mode=%s",
+    planning_frame_.c_str(), base_frame_.c_str(), planning_horizon_, replan_frequency_,
+    limits_.max_linear_speed, limits_.max_linear_accel, yaw_policy_.modeName());
+  RCLCPP_INFO(
+    node->get_logger(),
+    "MincoMpcController 脱困参数: fail_threshold=%d cooldown=%.2f s window=%.2f s "
+    "escape_speed=%.2f m/s stuck_clearance=%.2f m escaped_clearance=%.2f m "
+    "search=radius %.2f m/%d samples",
+    recovery_fail_threshold_, recovery_cooldown_sec_, recovery_window_sec_,
+    recovery_escape_speed_, recovery_stuck_clearance_, recovery_escaped_clearance_,
+    recovery_search_radius_, recovery_search_samples_);
 }
 
 bool MincoMpcController::loadParameters(std::string * _reason)
@@ -228,12 +218,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
 
   declare("planning_frame", std::string("odom"));
   declare("base_frame", std::string("base_link"));
-  // 速度命令的坐标系（方案 §3.2）：
-  //   command_frame == base_frame      -> 输出真实车体系速度（现状；由本控制器做 R(-psi)）
-  //   command_frame == fake_base_frame -> 输出 odom 对齐的平移速度（fakeyaw 迁移；
-  //                                        唯一的转换在 fake_vel_transform 里做）
-  declare("command_frame", std::string("base_link"));
-  declare("fake_base_frame", std::string("base_link_fake"));
   declare("odom_topic", std::string("odometry"));
   declare("replan_frequency", 10.0);
   declare("planning_horizon", 2.0);
@@ -309,11 +293,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("yaw_policy.narrow_clearance_threshold", 0.60);
   declare("yaw_policy.allow_reverse", true);
 
-  // 自转请求进线（阶段二小陀螺，方案 §4.1.2）：`kSpin` 模式下把外部请求喂给
-  // 航向策略；话题默认接旧链路自转速度链（已含 wz_max / 加速度限幅）。
-  declare("spin_request.topic", std::string("rotation_velocity"));
-  declare("spin_request.timeout", 0.25);
-
   declare("safety.robot_radius", 0.33);
   declare("safety.clearance_margin", 0.05);
   declare("safety.unknown_is_obstacle", true);
@@ -326,10 +305,20 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("state.max_yaw_jump", 1.20);
   declare("state.velocity_filter_alpha", 0.35);
 
+  // 脱困（迁移自 navi_minco_bit 的 `MincoPlanner.recovery_server.*` +
+  // MincoFsm 里硬编码的 0.25 / 0.40 分诊与成功阈值）。
+  declare("recovery.fail_threshold", 5);
+  declare("recovery.cooldown_sec", 1.0);
+  declare("recovery.window_sec", 3.0);
+  declare("recovery.escape_speed", 0.5);
+  declare("recovery.stuck_clearance", 0.25);
+  declare("recovery.escaped_clearance", 0.40);
+  declare("recovery.search_radius", 0.4);
+  declare("recovery.search_samples", 36);
+  declare("recovery.publish_visualization", true);
+
   node->get_parameter(name + ".planning_frame", planning_frame_);
   node->get_parameter(name + ".base_frame", base_frame_);
-  node->get_parameter(name + ".command_frame", command_frame_);
-  node->get_parameter(name + ".fake_base_frame", fake_base_frame_);
   node->get_parameter(name + ".odom_topic", odom_topic_);
   node->get_parameter(name + ".replan_frequency", replan_frequency_);
   node->get_parameter(name + ".planning_horizon", planning_horizon_);
@@ -411,15 +400,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
     name + ".yaw_policy.narrow_clearance_threshold", yaw_narrow_clearance_threshold_);
   node->get_parameter(name + ".yaw_policy.allow_reverse", yaw_allow_reverse_);
 
-  node->get_parameter(name + ".spin_request.topic", spin_request_topic_);
-  node->get_parameter(name + ".spin_request.timeout", spin_request_timeout_);
-  if (!(spin_request_timeout_ > 0.0) || !std::isfinite(spin_request_timeout_)) {
-    return fail("spin_request.timeout must be positive and finite");
-  }
-  if (spin_request_topic_.empty()) {
-    return fail("spin_request.topic must not be empty");
-  }
-
   node->get_parameter(name + ".safety.robot_radius", minco_config_.robot_radius);
   node->get_parameter(name + ".safety.clearance_margin", minco_config_.clearance_margin);
   node->get_parameter(name + ".safety.unknown_is_obstacle", esdf_config_.unknown_is_seed);
@@ -431,12 +411,35 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".state.max_yaw_jump", state_max_yaw_jump_);
   node->get_parameter(name + ".state.velocity_filter_alpha", state_velocity_filter_alpha_);
 
+  // 脱困参数。`configure` 内部会把非法值夹到安全默认并强制
+  // escaped_clearance > stuck_clearance，所以这里不做额外校验、不因参数失败而拒绝启动。
+  {
+    srm27_minco_core::RecoveryConfig recovery_config;
+    node->get_parameter(name + ".recovery.fail_threshold", recovery_config.fail_threshold);
+    node->get_parameter(name + ".recovery.cooldown_sec", recovery_config.cooldown_sec);
+    node->get_parameter(name + ".recovery.window_sec", recovery_config.window_sec);
+    node->get_parameter(name + ".recovery.escape_speed", recovery_config.escape_speed);
+    node->get_parameter(name + ".recovery.stuck_clearance", recovery_config.stuck_clearance);
+    node->get_parameter(name + ".recovery.escaped_clearance", recovery_config.escaped_clearance);
+    node->get_parameter(name + ".recovery.search_radius", recovery_config.search_radius);
+    node->get_parameter(name + ".recovery.search_samples", recovery_config.search_samples);
+    recovery_decider_.configure(recovery_config);
+    // 把夹取后的值回写到成员，供 `handlePlanningFailure` 的分诊判定与日志使用，
+    // 避免"日志里打印的阈值"和"实际生效的阈值"不是同一个数。
+    const srm27_minco_core::RecoveryConfig & effective = recovery_decider_.config();
+    recovery_fail_threshold_ = effective.fail_threshold;
+    recovery_cooldown_sec_ = effective.cooldown_sec;
+    recovery_window_sec_ = effective.window_sec;
+    recovery_escape_speed_ = effective.escape_speed;
+    recovery_stuck_clearance_ = effective.stuck_clearance;
+    recovery_escaped_clearance_ = effective.escaped_clearance;
+    recovery_search_radius_ = effective.search_radius;
+    recovery_search_samples_ = effective.search_samples;
+  }
+  node->get_parameter(name + ".recovery.publish_visualization", recovery_publish_visualization_);
+
   if (!parseYawMode(yaw_mode_text, yaw_mode_)) {
     return fail("unsupported yaw_policy.mode: " + yaw_mode_text);
-  }
-  if (!resolveCommandFrame(
-        command_frame_, base_frame_, fake_base_frame_, command_frame_mode_, _reason)) {
-    return false;
   }
   if (polynomial_order_ != Trajectory2D::kPolynomialOrder) {
     return fail("only the quintic MINCO representation (polynomial_order: 5) is supported");
@@ -565,6 +568,13 @@ void MincoMpcController::activate()
   stopping_ = false;
   stop_reason_ = "none";
   terminal_stop_.reset();
+  // 生命周期重新激活等于全新的会话：脱困计数与冷却起点都必须清零，
+  // 否则一次旧的脱困会把新任务的首次卡死判定挡在冷却窗口之外。
+  recovery_decider_.reset();
+  recovery_direction_.setZero();
+  recovery_escape_velocity_.setZero();
+  recovery_entry_clearance_ = -1.0;
+  recovery_command_count_ = 0;
   if (trajectory_pub_) {
     trajectory_pub_->on_activate();
   }
@@ -576,6 +586,9 @@ void MincoMpcController::activate()
   }
   if (diagnostics_pub_) {
     diagnostics_pub_->on_activate();
+  }
+  if (recovery_marker_pub_) {
+    recovery_marker_pub_->on_activate();
   }
   // 预热 QP：把冷启动（约 8~15 ms）挪出 50 Hz 控制回调。
   std::string warm_reason;
@@ -601,6 +614,7 @@ void MincoMpcController::deactivate()
   replan_manager_.reset();
   state_adapter_.reset();
   terminal_stop_.reset();
+  recovery_decider_.reset();
   has_previous_input_ = false;
   has_last_control_stamp_ = false;
   if (trajectory_pub_) {
@@ -614,6 +628,9 @@ void MincoMpcController::deactivate()
   }
   if (diagnostics_pub_) {
     diagnostics_pub_->on_deactivate();
+  }
+  if (recovery_marker_pub_) {
+    recovery_marker_pub_->on_deactivate();
   }
 }
 
@@ -694,6 +711,14 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
     ++goal_epoch_;
     replan_manager_.reset();
     terminal_stop_.reset();
+    // 脱困状态属于"上一个目标"：换目标时必须整体复位，对应参考实现里
+    // `MincoFsm` 在收到新目标时调用 `recovery_server_->setMissionGoal()`（内部 reset）。
+    // 否则一次旧目标的脱困会把新目标的失败计数与冷却窗口一起继承过来。
+    recovery_decider_.reset();
+    recovery_direction_.setZero();
+    recovery_escape_velocity_.setZero();
+    recovery_entry_clearance_ = -1.0;
+    recovery_command_count_ = 0;
     invalidateTrajectory("new navigation goal", now_stamp);
     if (node) {
       // 记录"为什么"是新会话：只报一句"新会话 #N"在现场无法区分
@@ -713,6 +738,11 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
         static_cast<unsigned long>(path_version_), previous_distance, goal_change_tolerance_);
     }
   }
+
+  // 每条到达控制器的路径都计数。脱困看门狗（abortStaleRecovery）靠它区分
+  // "同一会话里两次 setPlan 之间" 与 "中间目标被取消、控制器一度没被调用"。
+  // 放在最后：上面的分支有早退，计数必须只在真的收下这条路径时递增。
+  ++plan_delivery_count_;
 }
 
 bool MincoMpcController::updatePathInPlanningFrame(double _now_stamp, std::string * _reason)
@@ -869,6 +899,423 @@ void MincoMpcController::updateWarmStart(const Trajectory2D & _trajectory)
   has_warm_start_ = true;
 }
 
+// -----------------------------------------------------------------------------
+// 脱困（迁移自 navi_minco_bit 的 RecoverServer + MincoFsm::RECOVERING）
+//
+// 参考实现的链路是：
+//   FSM 重规划失败 -> RecoverServer::handleReplanFailure（判定 + 算方向）
+//   -> FSM 切 RECOVERING -> 每周期 publishEscapeCommand（伪轨迹 /opt_path）
+//   -> 自家 MPC 跟踪伪轨迹 -> cmd_vel
+//   -> RECOVERING 每周期判 ESDF > 0.40 成功 / 3 s 超时
+//
+// 本工作区没有 FSM、也没有 /opt_path：控制器的唯一速度出口是 computeVelocityCommands
+// 的返回值。因此三类职责的落点是：
+//   * **判定**：`harvestPlanningResult` 里每次规划失败调用 `handlePlanningFailure`；
+//   * **脱困路径规划**：`RecoveryDecider` 用 ESDF 解析梯度（退化时环形搜索）算方向；
+//   * **执行**：`updateRecovery` 在控制周期里直接返回逃逸 Twist，**旁路 MPC**——
+//     等价于参考实现"伪轨迹持续覆盖 MPC 参考"的效果，但少了一层跟踪误差；
+//   * **成功判定**：同一个 `updateRecovery`。
+// -----------------------------------------------------------------------------
+
+bool MincoMpcController::handlePlanningFailure(const State2D & _state, double _now_stamp)
+{
+  if (!_state.valid || !esdf_) {
+    return false;
+  }
+
+  // 诊断必须**先于**任何可能提前返回的分支刷新。
+  //
+  // `computeVelocityCommands` 在 step 3 重置 `diagnostics_`、step 5 调本函数、
+  // step 5.5 才由 `updateRecovery` 改写脱困字段。所以凡是本函数直接返回的分支，
+  // 发布出去的就是 step 5.5 之后的值；只有在这里把"当前真实状态"写全，
+  // "本周期刚脱困成功但重规划又失败一次"这种情形才不会报出错的 recovery_active。
+  diagnostics_.recovery_active = recovery_decider_.isRecovering();
+  diagnostics_.recovery_failures = recovery_decider_.consecutiveFailures();
+  diagnostics_.recovery_exit = recovery_decider_.lastExit();
+
+  // 已经在脱困里：本周期该由 `updateRecovery` 推进，不能再累加失败或重新决策。
+  if (recovery_decider_.isRecovering()) {
+    return true;
+  }
+
+  const srm27_minco_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
+  const double clearance = here.distance;
+  diagnostics_.recovery_clearance = clearance;
+
+  // 卡死分诊（参考实现里硬编码在 MincoFsm 的 `dist < 0.25`）：
+  // 净空充足却规划失败，属于"前方路障"，应该让重规划绕路，而不是把车推离原地。
+  // 只有自身净空不足才算"被卡住"，这时绕路本身也无解，才需要脱困。
+  // ESDF 查询失败（在地图外 / 距离场未建立）时同样不计失败：那种情况下
+  // `RecoveryDecider` 也一定算不出方向，计数只会白白把门限耗掉。
+  if (!here.valid || !std::isfinite(clearance) || clearance >= recovery_stuck_clearance_) {
+    return false;
+  }
+
+  Eigen::Vector2d escape_velocity = Eigen::Vector2d::Zero();
+  const srm27_minco_core::RecoveryDecision decision =
+    recovery_decider_.decide(_now_stamp, _state.position(), *esdf_, &escape_velocity);
+
+  diagnostics_.recovery_failures = recovery_decider_.consecutiveFailures();
+  if (decision == srm27_minco_core::RecoveryDecision::kNone) {
+    return false;
+  }
+  if (decision == srm27_minco_core::RecoveryDecision::kNoEscapeDirection) {
+    // 没方向就不进脱困：没有方向的脱困等于原地不动，只会把可恢复的卡死变成永久卡死。
+    RCLCPP_WARN_THROTTLE(
+      (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
+      "MincoMpcController: 卡死 (净空 %.3f m < %.2f m) 但距离场给不出逃逸方向，"
+      "保持原状态继续重试（不作脱困、不抛异常）",
+      clearance, recovery_stuck_clearance_);
+    return false;
+  }
+
+  // kEscape：进入脱困。
+  recovery_escape_velocity_ = escape_velocity;
+  recovery_direction_ = escape_velocity;
+  if (recovery_direction_.norm() > 1e-9) {
+    recovery_direction_.normalize();
+  }
+  recovery_entry_clearance_ = clearance;
+  recovery_command_count_ = 0;
+  ++recovery_enter_count_;
+  // 建轨宽限必须清零：脱困期间不会有新轨迹，宽限计时留着会让"脱困窗口"
+  // 还没走完就先把 FollowPath 判失败抛给 BT，两条 recovery 链路会互相打架。
+  build_start_stamp_ = -1.0;
+
+  diagnostics_.recovery_active = true;
+  diagnostics_.recovery_trigger = recovery_decider_.lastTrigger();
+  diagnostics_.recovery_entry_clearance = recovery_entry_clearance_;
+  diagnostics_.recovery_enter_count = recovery_enter_count_;
+  diagnostics_.recovery_direction_x = recovery_direction_.x();
+  diagnostics_.recovery_direction_y = recovery_direction_.y();
+  diagnostics_.recovery_escape_vx = recovery_escape_velocity_.x();
+  diagnostics_.recovery_escape_vy = recovery_escape_velocity_.y();
+  RCLCPP_WARN(
+    (parent_.lock())->get_logger(),
+    "MincoMpcController: 进入脱困（触发=%s，进入净空 %.3f m < %.2f m，方向 %.1f deg，速度 %.2f m/s，"
+    "窗口 %.2f s，成功阈值 %.2f m）",
+    recovery_decider_.lastTrigger().c_str(), clearance, recovery_stuck_clearance_,
+    std::atan2(recovery_direction_.y(), recovery_direction_.x()) * 180.0 / M_PI,
+    recovery_escape_speed_, recovery_window_sec_, recovery_escaped_clearance_);
+  return true;
+}
+
+geometry_msgs::msg::TwistStamped MincoMpcController::makeEscapeCommand(
+  const State2D & _state, const Eigen::Vector2d & _escape_velocity,
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node)
+{
+  // 逃逸速度是规划坐标系（odom）下的世界速度，必须转成车体系 —— Nav2 的
+  // TwistStamped 语义是车体系，直接塞世界速度会让车在非零航向下走错方向。
+  Eigen::Vector2d velocity_odom = _escape_velocity;
+  diagnostics_.applied_speed_scale = 1.0;
+  const double speed = velocity_odom.norm();
+  if (speed > limits_.max_linear_speed) {
+    diagnostics_.applied_speed_scale = limits_.max_linear_speed / speed;
+    velocity_odom *= diagnostics_.applied_speed_scale;
+  }
+  const Eigen::Vector2d velocity_body = srm27_minco_core::odomToBodyVelocity(
+    _state.yaw, velocity_odom);
+
+  geometry_msgs::msg::TwistStamped command;
+  command.header.stamp = _node->now();
+  command.header.frame_id = base_frame_;
+  command.twist.linear.x = velocity_body.x();
+  command.twist.linear.y = velocity_body.y();
+  command.twist.linear.z = 0.0;
+  command.twist.angular.x = 0.0;
+  command.twist.angular.y = 0.0;
+  // 脱困只平移、不自转：与参考实现"yaw 伪轨迹锁存当前 yaw"语义一致。
+  command.twist.angular.z = 0.0;
+
+  // 把实际下发的命令记成"上一条命令"，退出脱困后 MPC 的首步差分约束
+  // 才有正确的基准（否则会拿脱困前的旧命令去算加速度变化量）。
+  if (!has_previous_input_ || previous_applied_input_.size() != mpc_model_.inputDim()) {
+    previous_applied_input_ = Eigen::VectorXd::Zero(mpc_model_.inputDim());
+  }
+  previous_applied_input_(0) = velocity_odom.x();
+  previous_applied_input_(1) = velocity_odom.y();
+  previous_applied_input_(2) = 0.0;
+  has_previous_input_ = true;
+  last_control_stamp_ = _node->now().seconds();
+  has_last_control_stamp_ = true;
+
+  diagnostics_.requested_vx = command.twist.linear.x;
+  diagnostics_.requested_vy = command.twist.linear.y;
+  diagnostics_.requested_wz = 0.0;
+  diagnostics_.command_owner = "recovery";
+  diagnostics_.stop_reason = "none";
+  stopping_ = false;
+  return command;
+}
+
+bool MincoMpcController::updateRecovery(
+  const State2D & _state, double _now_stamp,
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node,
+  geometry_msgs::msg::TwistStamped * _command)
+{
+  if (!recovery_decider_.isRecovering()) {
+    return false;
+  }
+  if (_command == nullptr) {
+    return false;
+  }
+
+  // 成功判据用的自身净空：单帧、单点、位置判据，与参考实现一致。
+  // 查询失败（NaN / 地图外）不得判成功 —— 那是"不知道"，不是"脱困了"。
+  double clearance = std::numeric_limits<double>::quiet_NaN();
+  if (esdf_) {
+    const srm27_minco_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
+    if (here.valid && std::isfinite(here.distance)) {
+      clearance = here.distance;
+    }
+  }
+  diagnostics_.recovery_clearance = clearance;
+
+  Eigen::Vector2d escape_velocity = Eigen::Vector2d::Zero();
+  // 逃逸方向由 decider 按**当前位置**每周期重算（对应参考实现 FSM 在 RECOVERING 里
+  // 每次 tick 都调用 calculateEscapeVelocity），所以必须把当前位置与距离场传进去。
+  // 距离场暂时不可用时传一个空对象：decider 会保留上一周期的方向，而不是输出零速。
+  const srm27_minco_core::Esdf2D empty_esdf;
+  const srm27_minco_core::RecoveryExit exit = recovery_decider_.updateRecovery(
+    _now_stamp, _state.position(), esdf_ ? *esdf_ : empty_esdf, clearance, &escape_velocity,
+    /*_log_transitions=*/recovery_command_count_ == 0);
+
+  if (exit != srm27_minco_core::RecoveryExit::kNone) {
+    leaveRecovery(srm27_minco_core::toString(exit), _now_stamp);
+    if (exit == srm27_minco_core::RecoveryExit::kEscaped) {
+      RCLCPP_INFO(
+        _node->get_logger(),
+        "MincoMpcController: 脱困成功（净空 %.3f m > %.2f m，用时 %.2f s，输出 %lu 个周期）",
+        clearance, recovery_escaped_clearance_,
+        _now_stamp - recovery_decider_.lastRecoveryStartSec(),
+        static_cast<unsigned long>(recovery_command_count_));
+    } else {
+      RCLCPP_WARN(
+        _node->get_logger(),
+        "MincoMpcController: 脱困超时（%.2f s 窗口内净空只到 %.3f m，成功阈值 %.2f m，"
+        "输出 %lu 个周期），返回重规划；若仍失败将由建轨宽限抛给行为树兜底",
+        recovery_window_sec_, clearance, recovery_escaped_clearance_,
+        static_cast<unsigned long>(recovery_command_count_));
+    }
+    // 本周期不接管：让正常链路（重规划请求 / 建轨宽限 / BT）立刻接手，
+    // 避免"脱困已结束但本周期还在推车"的多推一个周期。
+    return false;
+  }
+
+  recovery_escape_velocity_ = escape_velocity;
+  if (recovery_escape_velocity_.norm() > 1e-9) {
+    recovery_direction_ = recovery_escape_velocity_.normalized();
+  }
+  ++recovery_command_count_;
+  *_command = makeEscapeCommand(_state, recovery_escape_velocity_, _node);
+
+  diagnostics_.recovery_active = true;
+  diagnostics_.recovery_trigger = recovery_decider_.lastTrigger();
+  diagnostics_.recovery_entry_clearance = recovery_entry_clearance_;
+  diagnostics_.recovery_command_count = recovery_command_count_;
+  diagnostics_.recovery_enter_count = recovery_enter_count_;
+  diagnostics_.recovery_stale_abort_count = recovery_stale_abort_count_;
+  diagnostics_.recovery_direction_x = recovery_direction_.x();
+  diagnostics_.recovery_direction_y = recovery_direction_.y();
+  diagnostics_.recovery_escape_vx = recovery_escape_velocity_.x();
+  diagnostics_.recovery_escape_vy = recovery_escape_velocity_.y();
+  diagnostics_.command_age = 0.0;
+
+  if (recovery_publish_visualization_) {
+    publishRecoveryDebug(_node, _state, clearance);
+  }
+  return true;
+}
+
+void MincoMpcController::leaveRecovery(const char * _exit_reason, double _now_stamp)
+{
+  // 刻意**不**在这里调用 `finishRecovery`：脱困会话已经由 `RecoveryDecider::updateRecovery`
+  // 用同一个 `_now_stamp` 结束并打好了冷却参考点，这里再调一次只会把同一个时刻写第二遍，
+  // 且会让"谁结束了这次脱困"这件事在两个地方各有一份真相。
+  (void)_now_stamp;
+  recovery_escape_velocity_.setZero();
+  recovery_direction_.setZero();
+  // 脱困期间的命令与 MPC 的命令不连续，退出时必须让 MPC 重新建立差分基准。
+  has_previous_input_ = false;
+  has_last_control_stamp_ = false;
+  // "脱困后必须重新获得完整建轨宽限"：否则一次脱困留下的旧计时会让重规划
+  // 在毫秒内就超出宽限抛给 BT，现场就是"脱困成功但 FollowPath 立刻又失败"。
+  build_start_stamp_ = -1.0;
+  diagnostics_.recovery_active = false;
+  diagnostics_.recovery_exit = (_exit_reason != nullptr) ? _exit_reason : "unknown";
+  diagnostics_.recovery_command_count = recovery_command_count_;
+  diagnostics_.recovery_enter_count = recovery_enter_count_;
+  recovery_command_count_ = 0;
+  recovery_entry_clearance_ = -1.0;
+}
+
+bool MincoMpcController::abortStaleRecovery(double _now_stamp, double _call_gap_sec)
+{
+  // 只认一个判据：**两帧 computeVelocityCommands 之间的间隔异常大**。
+  //
+  // 为什么不能用"还没输出过指令"（`recovery_command_count_ == 0`）当判据 —— 那是错的，
+  // 而且已经实测踩过：进入脱困的**那一周期本身**必然还没输出（本函数在 updateRecovery
+  // 之前跑），于是看门狗会在正常脱困里每个周期都把会话掐掉，脱困永远发不出速度。
+  // 2026-10-17 实测现象：0.5 s 内反复「进入脱困 / 脱困停滞复位」共 17 次，
+  // 最后靠人把车挪走才报"脱困成功（输出 0 个周期）"。
+  //
+  // 间隔为什么可靠：控制器只在导航进行中被 Nav2 调用；目标一取消就不再被调用。
+  // 所以"间隔 >> 控制周期"是"中间目标被取消过"的唯一可靠证据。
+  if (!recovery_decider_.isRecovering()) {
+    return false;
+  }
+  if (!std::isfinite(_call_gap_sec) || _call_gap_sec <= 0.0) {
+    return false;   // 没有上一帧记录，无从判断
+  }
+  // 50 Hz 控制周期是 0.02 s，正常抖动远小于它；但**不能取得太小**：
+  // 行为树 recovery（清代价地图 + BackUpFreeSpace）会把 FollowPath 整个停掉，
+  // 那一整段控制器都不被调用，而目标其实还活着。实测那次 backup 单次约 5 s、
+  // 连续 6 次约 30 s。阈值太小会把"BT recovery 期间"误判成"目标被取消"，
+  // 从而把一次本来有效的脱困会话复位掉。
+  // 取 2.0 s：既能覆盖真实的目标取消（实测那次取消空档 6.13 s），
+  // 又不会被 BT recovery 的正常停顿误触发。
+  constexpr double kStaleGapSec = 2.0;
+  if (_call_gap_sec < kStaleGapSec) {
+    return false;
+  }
+
+  ++recovery_stale_abort_count_;
+  RCLCPP_WARN(
+    (parent_.lock())->get_logger(),
+    "MincoMpcController: 脱困停滞复位 —— 两帧控制间隔 %.2f s 远超控制周期"
+    "（阈值 %.2f s），说明中间导航目标被取消过（Nav2 在无目标时不调用控制器），"
+    "而上一次脱困会话还留在状态里。本会话作废并整体复位，避免它在下一个目标到来时"
+    "凭空报「脱困成功」。本次会话已输出 %lu 个周期（累计第 %lu 次）",
+    _call_gap_sec, kStaleGapSec,
+    static_cast<unsigned long>(recovery_command_count_),
+    static_cast<unsigned long>(recovery_stale_abort_count_));
+  leaveRecovery("stale_gap", _now_stamp);
+  // leaveRecovery 只清控制器侧运行期状态；decider 的会话（窗口起点、失败计数、冷却）
+  // 必须一起复位，否则下一个目标会继承上一段的失败计数与冷却窗口。
+  recovery_decider_.reset();
+  diagnostics_.recovery_failures = 0;
+  return true;
+}
+
+void MincoMpcController::publishRecoveryDebug(
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const State2D & _state,
+  double _clearance)
+{
+  if (!recovery_marker_pub_ || !recovery_marker_pub_->is_activated()) {
+    return;
+  }
+  visualization_msgs::msg::MarkerArray markers;
+  const rclcpp::Time stamp = _node->now();
+
+  // 当前净空球：绿=已过成功阈值，黄=仍在卡死分诊区内，红=更危险。
+  visualization_msgs::msg::Marker clearance_marker;
+  clearance_marker.header.frame_id = planning_frame_;
+  clearance_marker.header.stamp = stamp;
+  clearance_marker.ns = "recovery_clearance";
+  clearance_marker.id = 0;
+  clearance_marker.type = visualization_msgs::msg::Marker::SPHERE;
+  clearance_marker.action = visualization_msgs::msg::Marker::ADD;
+  clearance_marker.pose.position.x = _state.x;
+  clearance_marker.pose.position.y = _state.y;
+  clearance_marker.pose.position.z = 0.0;
+  clearance_marker.pose.orientation.w = 1.0;
+  const double clamped_clearance =
+    (std::isfinite(_clearance) && _clearance > 0.0) ? std::min(_clearance, 2.0) : 0.05;
+  clearance_marker.scale.x = 2.0 * clamped_clearance;
+  clearance_marker.scale.y = 2.0 * clamped_clearance;
+  clearance_marker.scale.z = 0.05;
+  if (std::isfinite(_clearance) && _clearance > recovery_escaped_clearance_) {
+    clearance_marker.color.r = 0.0f;
+    clearance_marker.color.g = 1.0f;
+  } else if (std::isfinite(_clearance) && _clearance >= recovery_stuck_clearance_) {
+    clearance_marker.color.r = 1.0f;
+    clearance_marker.color.g = 1.0f;
+  } else {
+    clearance_marker.color.r = 1.0f;
+    clearance_marker.color.g = 0.0f;
+  }
+  clearance_marker.color.b = 0.0f;
+  clearance_marker.color.a = 0.35f;
+  markers.markers.push_back(clearance_marker);
+
+  // 逃逸方向箭头：长度按"逃逸速度 × 脱困窗口"画，现场一眼看出这一轮能推多远。
+  visualization_msgs::msg::Marker arrow;
+  arrow.header.frame_id = planning_frame_;
+  arrow.header.stamp = stamp;
+  arrow.ns = "recovery_escape";
+  arrow.id = 1;
+  arrow.type = visualization_msgs::msg::Marker::ARROW;
+  arrow.action = visualization_msgs::msg::Marker::ADD;
+  arrow.scale.x = 0.06;
+  arrow.scale.y = 0.12;
+  arrow.scale.z = 0.12;
+  arrow.color.r = 0.0f;
+  arrow.color.g = 0.6f;
+  arrow.color.b = 1.0f;
+  arrow.color.a = 1.0f;
+  geometry_msgs::msg::Point start;
+  start.x = _state.x;
+  start.y = _state.y;
+  start.z = 0.0;
+  geometry_msgs::msg::Point end = start;
+  const double reach = recovery_escape_speed_ * recovery_window_sec_;
+  end.x += recovery_direction_.x() * reach;
+  end.y += recovery_direction_.y() * reach;
+  arrow.points.push_back(start);
+  arrow.points.push_back(end);
+  markers.markers.push_back(arrow);
+
+  // 脱困路径（绿线）：把"沿脱困方向场一路前推"的轨迹画出来 —— 这就是脱困路径规划的结果。
+  //
+  // 与上面的箭头不是一回事，两者都要留着：
+  //  * 箭头 = 本周期实际要执行的那一步（方向 × 逃逸速度 × 脱困窗口），是"命令"；
+  //  * 绿线 = 如果一直按每周期重算的方向走会走出什么轨迹，是"路径规划的结果"。
+  // 因为方向随位置重算，绿线通常不是直线。现场判读方式：
+  //   绿线绕开障碍 -> 梯度/环形搜索在工作，脱困方向合理；
+  //   绿线也是一条撞墙的直线 -> 距离场里确实没有出口，该去查地图而不是查本逻辑。
+  //
+  // 本函数只在 `updateRecovery` 判定本周期继续脱困时被调用，所以这里必然处于
+  // 脱困中；只额外护一下距离场（理论上非空，但不要靠"理论上"去解引用）。
+  if (esdf_) {
+    std::vector<Eigen::Vector2d> escape_path;
+    // 步长取逃逸速度在一个控制周期里走过的距离量级（0.1 m ≈ 0.5 m/s @ 200 ms）；
+    // 步数上限按"窗口内理论可达距离"再留一倍余量，避免画出窗口内根本走不完的线。
+    const double reach = recovery_escape_speed_ * recovery_window_sec_;
+    constexpr double kPathStep = 0.1;
+    const int max_steps = static_cast<int>(std::ceil(2.0 * reach / kPathStep));
+    srm27_minco_core::RecoveryDecider::traceEscapePath(
+      *esdf_, Eigen::Vector2d(_state.x, _state.y), recovery_decider_.config(), kPathStep,
+      max_steps, &escape_path);
+    if (escape_path.size() >= 2) {
+      visualization_msgs::msg::Marker path_marker;
+      path_marker.header.frame_id = planning_frame_;
+      path_marker.header.stamp = stamp;
+      path_marker.ns = "recovery_escape_path";
+      path_marker.id = 2;
+      path_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+      path_marker.action = visualization_msgs::msg::Marker::ADD;
+      // scale.x 是线宽（m）。0.06 是 RViz 里常见可见宽度：再细在缩小的视野下会看不清。
+      path_marker.scale.x = 0.06;
+      path_marker.color.r = 0.0f;
+      path_marker.color.g = 1.0f;
+      path_marker.color.b = 0.0f;
+      path_marker.color.a = 1.0f;
+      path_marker.pose.orientation.w = 1.0;
+      path_marker.points.reserve(escape_path.size());
+      for (const Eigen::Vector2d & point : escape_path) {
+        geometry_msgs::msg::Point p;
+        p.x = point.x();
+        p.y = point.y();
+        p.z = 0.0;
+        path_marker.points.push_back(p);
+      }
+      markers.markers.push_back(path_marker);
+    }
+  }
+
+  recovery_marker_pub_->publish(markers);
+}
+
 void MincoMpcController::requestReplan(
   const State2D & _state, double _now_stamp, double _now_steady)
 {
@@ -925,7 +1372,7 @@ void MincoMpcController::requestReplan(
   worker_.submit(planning_request);
 }
 
-void MincoMpcController::harvestPlanningResult(double _now_stamp)
+void MincoMpcController::harvestPlanningResult(const State2D & _state, double _now_stamp)
 {
   PlanningResult result;
   if (!worker_.takeResult(result)) {
@@ -958,6 +1405,14 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
     RCLCPP_WARN_THROTTLE(
       (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
       "MincoMpcController: 规划失败 (%s): %s", result.status.c_str(), result.reason.c_str());
+    // 脱困判定：这是一次真实的规划失败。`handlePlanningFailure` 内部做"卡死 / 前方路障"
+    // 分诊与门限判定，达标即进入脱困（下一周期由 `updateRecovery` 接管输出）。
+    if (handlePlanningFailure(_state, _now_stamp)) {
+      RCLCPP_WARN(
+        (parent_.lock())->get_logger(),
+        "MincoMpcController: 连续规划失败已达门限（%d 次），本周期起由脱困接管输出",
+        recovery_fail_threshold_);
+    }
     return;
   }
   // 版本校验：迟到的旧会话结果不得重新激活运动。
@@ -1005,6 +1460,12 @@ void MincoMpcController::harvestPlanningResult(double _now_stamp)
   stopping_ = false;
   stop_reason_ = "none";
   build_start_stamp_ = -1.0;
+  // 一条真正提交的轨迹是"规划成功"的唯一证据：清零脱困失败计数。
+  // 只在这里清、不在"收到结果"时清，因为被拒的候选轨迹（版本过期 / 提交被拒）
+  // 并不代表重规划能力恢复，拿它清计数会让门限永远跨不过去。
+  // 脱困会话本身不在这里结束：它由 `updateRecovery` 的成功 / 超时判定结束。
+  recovery_decider_.onPlanningSuccess();
+  diagnostics_.recovery_failures = recovery_decider_.consecutiveFailures();
   ++trajectory_id_;
   ++switched_trajectory_count_;
   diagnostics_.trajectory_id = trajectory_id_;
@@ -1026,7 +1487,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::stopCommand(
 {
   geometry_msgs::msg::TwistStamped command;
   command.header.stamp = _node->now();
-  command.header.frame_id = command_frame_;
+  command.header.frame_id = base_frame_;
   command.twist.linear.x = 0.0;
   command.twist.linear.y = 0.0;
   command.twist.linear.z = 0.0;
@@ -1047,11 +1508,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::stopCommand(
   diagnostics_.requested_vx = 0.0;
   diagnostics_.requested_vy = 0.0;
   diagnostics_.requested_wz = 0.0;
-  diagnostics_.applied_wz = 0.0;
-  diagnostics_.mpc_requested_wz = 0.0;
-  diagnostics_.yaw_reference = 0.0;
-  diagnostics_.wz_clamp_reason = "stop";
-  diagnostics_.command_frame = command_frame_;
   has_previous_input_ = false;
   return command;
 }
@@ -1077,8 +1533,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   const double now_stamp = node->now().seconds();
   diagnostics_ = ControllerDiagnostics();
   diagnostics_.yaw_mode = yaw_policy_.modeName();
-  diagnostics_.command_frame = command_frame_;
-  diagnostics_.rejected_spin_request_count = yaw_policy_.rejectedSpinRequestCount();
   diagnostics_.map_version = map_version_;
   diagnostics_.path_version = path_version_;
   diagnostics_.limits_version = limits_version_;
@@ -1097,6 +1551,14 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
       build_start_stamp_ = now_stamp;
     }
     if ((now_stamp - build_start_stamp_) > build_grace_period_) {
+      // 脱困期间不允许把 FollowPath 判失败：本控制器的脱困（RECOVERING 窗口）与
+      // 行为树的 recovery（清代价地图 + BackUpFreeSpace）是两条独立的脱困链路，
+      // 同时放出去会让两套速度指令互相打架。这里让宽限在脱困期间持续重置，
+      // 等价于"脱困窗口 + 建轨宽限"都走完才交给 BT 兜底。
+      if (recovery_decider_.isRecovering()) {
+        build_start_stamp_ = now_stamp;
+        return command;
+      }
       // 超过建轨宽限：交给 BT 处理，而不是永远返回零并假装正常。
       // 本次 FollowPath 也就此结束，下一次调用属于"新的尝试"，必须重新获得完整宽限，
       // 否则恢复行为刚结束就会因为沿用旧计时而在毫秒级再次失败。
@@ -1129,9 +1591,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     RCLCPP_WARN(node->get_logger(), "MincoMpcController: 检测到里程计重置，已作废轨迹");
   }
 
-  // 2.5) 自转请求（阶段二小陀螺）：新鲜请求喂给航向策略，超时视为撤回。
-  refreshSpinRequest();
-
   // 3) 路径转换到规划坐标系。
   if (!updatePathInPlanningFrame(now_stamp, &reason)) {
     return fail("path unavailable: " + reason);
@@ -1147,8 +1606,32 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     return fail("distance field is older than map_timeout");
   }
 
-  // 5) 取回后台结果。
-  harvestPlanningResult(now_stamp);
+  // 5) 取回后台结果（失败会触发脱困判定，所以需要当前状态）。
+  harvestPlanningResult(state, now_stamp);
+
+  // 5.5) 脱困接管：判成功 / 判超时；未退出则本周期输出逃逸速度并直接返回。
+  //
+  // 位置刻意放在"取回结果"之后，让本周期拿到的成功结果有机会先把失败计数清零；
+  // 又放在"轨迹复验"与"重规划请求"之前，因为脱困期间运行这两件事没有意义
+  // （复验会把已经在脱困的轨迹判死、重规划会和工作线程抢算力）。
+  {
+    // 5.5.0) 停滞看门狗：收拾"目标被取消、脱困状态却留在那儿"的残局。
+    // 必须在 updateRecovery 之前跑 —— 否则冻结的会话会被误判成"成功"（实测 6.13 s
+    // 后凭空报成功）。判据是"两帧控制间隔异常大"，细节见 abortStaleRecovery 的注释。
+    {
+      const double call_gap =
+        (last_compute_call_stamp_ >= 0.0) ? (now_stamp - last_compute_call_stamp_) : -1.0;
+      last_compute_call_stamp_ = now_stamp;
+      abortStaleRecovery(now_stamp, call_gap);
+    }
+
+    geometry_msgs::msg::TwistStamped escape_command;
+    if (updateRecovery(state, now_stamp, node, &escape_command)) {
+      diagnostics_.total_control_time_ms = (steadyNow() - control_begin) * 1.0e3;
+      publishDiagnostics(node, diagnostics_, now_stamp);
+      return escape_command;
+    }
+  }
 
   // 6) 已提交轨迹在最新地图上的复验（版本变化或按固定周期）。
   auto trajectory = std::atomic_load(&trajectory_);
@@ -1219,12 +1702,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
         "MincoMpcController: 终点急停中 (距末点 %.3f m <= %.3f m)，等待目标检查器判定停稳",
         distance_to_goal, terminal_stop_.entryTolerance());
       geometry_msgs::msg::TwistStamped command = stopCommand(node, "terminal_stop", now_stamp);
-      // 小陀螺（kSpin + 新鲜自转请求）: 终点急停只刹平移、保留自转 —— 持续自转是
-      // 操作手要的驻车状态（方案 §4.1.2 阶段二）。导航会话结束后 wz 自然停止
-      // （mux 零速兜底），不影响安全性。
-      if (yaw_mode_ == YawMode::kSpin && diagnostics_.spin_request_fresh) {
-        command.twist.angular.z = diagnostics_.spin_request;
-      }
       // stopCommand 的 command_owner 统一是 "stop"；这里改成更具体的原因，
       // 现场才能从 diagnostics 直接区分"终点急停"与其它停车。
       diagnostics_.command_owner = "terminal_stop";
@@ -1249,11 +1726,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
 
   // 9) 跟踪参考。
   yaw_policy_.setCurrentYaw(state.yaw);
-  // 到点保持（`se2` 的 stop_rotation_on_goal）：已进入终点急停或已判定到达时，航向参考
-  // 冻结，避免"还在追切线 → 车一直在转 → 停稳条件永远不满足"（方案 §4.1.5）。
-  if (stop_rotation_on_goal_) {
-    yaw_policy_.setGoalHold(terminal_stop_.active() || at_goal_stop_);
-  }
   TrackingReferenceResult reference;
   if (!reference_builder_.build(*trajectory, state, mpc_model_, yaw_policy_, reference)) {
     return fail("tracking reference failed: " + reference.message);
@@ -1332,7 +1804,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     }
   }
 
-  // 12) 取执行时刻的预测速度并转换到命令坐标系（方案 §3.2、§4.1.3）。
+  // 12) 取执行时刻的预测速度并转换到车体系。
   Eigen::VectorXd command;
   if (!mpc_solver_.commandAt(solution, command_lookahead_, command)) {
     return fail("failed to extract the predicted command");
@@ -1343,35 +1815,26 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 两种模型的 yaw 都直接是预测状态的第 3 维；命令生效时刻的 yaw 与命令时间一致。
   const double yaw_at_actuation = solution.z(2, lookahead_index);
   Eigen::Vector2d velocity_odom(command(0), command(1));
-  // `base_link` 命令系：在这里做唯一的 R(-psi)；`base_link_fake`（odom 对齐）命令系：
-  // 原样输出 odom 平移速度，转换全部留给 fake_vel_transform —— 两边都做就是重复旋转。
-  Eigen::Vector2d velocity_command =
-    velocityInCommandFrame(velocity_odom, yaw_at_actuation, command_frame_mode_);
+  Eigen::Vector2d velocity_body =
+    srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
   double omega_command = command(2);
-  // 方案 §4.1.2 要求记录"请求的 wz"与"限幅原因"，这里先把 MPC 原始请求存下来。
-  const double requested_omega = omega_command;
-  std::string wz_clamp_reason = "none";
 
-  if (!velocity_command.allFinite() || !std::isfinite(omega_command)) {
+  if (!velocity_body.allFinite() || !std::isfinite(omega_command)) {
     return fail("MPC produced a non-finite command");
   }
 
   // 13) 输出前检查：合速度、自转与相对上一条命令的变化量。
-  //     ⚠ 模长限幅在 odom 系与车体系下等价（纯 yaw 旋转），所以用命令系的速度即可。
   diagnostics_.applied_speed_scale = 1.0;
-  const double speed = velocity_command.norm();
+  const double speed = velocity_body.norm();
   if (speed > limits_.max_linear_speed) {
     const double scale = limits_.max_linear_speed / speed;
     diagnostics_.applied_speed_scale = scale;
     velocity_odom *= scale;
-    velocity_command *= scale;
+    velocity_body *= scale;
   }
   if (std::abs(omega_command) > limits_.max_angular_speed) {
     omega_command = srm27_minco_core::clampToRange(
       omega_command, -limits_.max_angular_speed, limits_.max_angular_speed);
-    // 区分两种限幅原因：策略本身把权限设成 0（xy_only），还是真的撞到速度上限。
-    wz_clamp_reason = (limits_.max_angular_speed <= 0.0) ? "yaw_policy_zero_angular_limit"
-                                                         : "angular_speed_limit";
   }
   if (has_previous_input_ && previous_applied_input_.size() == mpc_model_.inputDim()) {
     // 平移与自转的变化量不得突破有效加速度上限（下游还有 mux 的末端限幅）。
@@ -1381,7 +1844,7 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     const double max_delta = limits_.max_linear_accel * interval;
     if (delta.norm() > max_delta) {
       velocity_odom = previous_odom + delta.normalized() * max_delta;
-      velocity_command = velocityInCommandFrame(velocity_odom, yaw_at_actuation, command_frame_mode_);
+      velocity_body = srm27_minco_core::odomToBodyVelocity(yaw_at_actuation, velocity_odom);
     }
     // 下周期的差分基准必须是本周期限幅后的输出，而不是 MPC 未执行的原始请求。
     previous_applied_input_(0) = velocity_odom.x();
@@ -1399,9 +1862,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
 
   geometry_msgs::msg::TwistStamped command_msg;
   command_msg.header.stamp = node->now();
-  command_msg.header.frame_id = command_frame_;
-  command_msg.twist.linear.x = velocity_command.x();
-  command_msg.twist.linear.y = velocity_command.y();
+  command_msg.header.frame_id = base_frame_;
+  command_msg.twist.linear.x = velocity_body.x();
+  command_msg.twist.linear.y = velocity_body.y();
   command_msg.twist.linear.z = 0.0;
   command_msg.twist.angular.x = 0.0;
   command_msg.twist.angular.y = 0.0;
@@ -1410,12 +1873,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   diagnostics_.requested_vx = command_msg.twist.linear.x;
   diagnostics_.requested_vy = command_msg.twist.linear.y;
   diagnostics_.requested_wz = command_msg.twist.angular.z;
-  // 方案 §4.1.2：requested/applied wz、yaw 参考与限幅原因都要能被"事后查账"。
-  diagnostics_.applied_wz = omega_command;
-  diagnostics_.mpc_requested_wz = requested_omega;
-  diagnostics_.yaw_reference = reference.z_ref(2, 0);
-  diagnostics_.wz_clamp_reason = wz_clamp_reason;
-  diagnostics_.command_frame = command_frame_;
   diagnostics_.command_owner = "navigation";
   diagnostics_.command_age = std::max(0.0, now_stamp - trajectory->generated_stamp);
   diagnostics_.stop_reason = "none";
@@ -1533,35 +1990,6 @@ void MincoMpcController::publishVisualization(
     }
     prediction_pub_->publish(path);
   }
-}
-
-void MincoMpcController::refreshSpinRequest()
-{
-  double value = 0.0;
-  double stamp = -1.0;
-  {
-    std::lock_guard<std::mutex> lock(spin_request_mutex_);
-    value = spin_request_value_;
-    stamp = spin_request_stamp_;
-  }
-  const bool fresh = (stamp >= 0.0) && (spin_request_timeout_ > 0.0) &&
-                     ((steadyNow() - stamp) <= spin_request_timeout_);
-  if (yaw_mode_ != YawMode::kSpin) {
-    // 非 SPIN 模式不进线（方案 §4.1.2 的迁移契约）：自转请求只有 `kSpin` 消费；
-    // `se2` 模式下旧链路常驻的 0 速流不应刷满"拒绝自转请求"计数（那个计数
-    // 留给直接调用 setSpinRequest 的调用方）。
-    diagnostics_.spin_request = 0.0;
-    diagnostics_.spin_request_fresh = false;
-    return;
-  }
-  if (fresh) {
-    yaw_policy_.setSpinRequest(value);
-  } else {
-    // 请求撤回（发送端停发超时）：按"无请求"处理，自转停。
-    yaw_policy_.clearSpinRequest();
-  }
-  diagnostics_.spin_request = fresh ? value : 0.0;
-  diagnostics_.spin_request_fresh = fresh;
 }
 
 void MincoMpcController::publishDiagnostics(

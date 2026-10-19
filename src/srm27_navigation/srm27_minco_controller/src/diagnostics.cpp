@@ -115,24 +115,12 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
 
   addString(values, "yaw_mode", _diagnostics.yaw_mode);
   addString(values, "command_owner", _diagnostics.command_owner);
-  addString(values, "command_frame", _diagnostics.command_frame);
   addNumber(values, "command_age", _diagnostics.command_age);
   addNumber(values, "applied_speed_scale", _diagnostics.applied_speed_scale);
   addString(values, "stop_reason", _diagnostics.stop_reason);
   addNumber(values, "stop_request_time", _diagnostics.stop_request_time);
   addNumber(values, "output_zero_time", _diagnostics.output_zero_time);
   addNumber(values, "actual_stop_time", _diagnostics.actual_stop_time);
-
-  // 角速度的"请求 / 应用 / 限幅原因"三件套：迁移后导航拥有 wz，
-  // 现场必须能区分"导航没请求 wz""请求了但被限幅""真的下发了"（方案 §4.1.2）。
-  addNumber(values, "yaw_reference", _diagnostics.yaw_reference);
-  addNumber(values, "mpc_requested_wz", _diagnostics.mpc_requested_wz);
-  addNumber(values, "applied_wz", _diagnostics.applied_wz);
-  addString(values, "wz_clamp_reason", _diagnostics.wz_clamp_reason);
-  addCount(values, "rejected_spin_request_count", _diagnostics.rejected_spin_request_count);
-  // 自转请求进线（阶段二小陀螺）：现场用这两个键确认"请求有没有到 MINCO、新不新鲜"。
-  addNumber(values, "spin_request", _diagnostics.spin_request);
-  addString(values, "spin_request_fresh", _diagnostics.spin_request_fresh ? "true" : "false");
 
   addNumber(values, "requested_vx", _diagnostics.requested_vx);
   addNumber(values, "requested_vy", _diagnostics.requested_vy);
@@ -141,6 +129,21 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
   addNumber(values, "terminal_distance", _diagnostics.terminal_distance);
   addString(values, "terminal_active", _diagnostics.terminal_active ? "true" : "false");
   addNumber(values, "terminal_tolerance", _diagnostics.terminal_tolerance);
+
+  // 脱困：现场最需要的是"到底进没进脱困、为什么进、为什么出、往哪个方向推"。
+  addString(values, "recovery_active", _diagnostics.recovery_active ? "true" : "false");
+  addString(values, "recovery_trigger", _diagnostics.recovery_trigger);
+  addString(values, "recovery_exit", _diagnostics.recovery_exit);
+  addInteger(values, "recovery_failures", _diagnostics.recovery_failures);
+  addCount(values, "recovery_enter_count", _diagnostics.recovery_enter_count);
+  addCount(values, "recovery_command_count", _diagnostics.recovery_command_count);
+  addCount(values, "recovery_stale_abort_count", _diagnostics.recovery_stale_abort_count);
+  addNumber(values, "recovery_entry_clearance", _diagnostics.recovery_entry_clearance);
+  addNumber(values, "recovery_clearance", _diagnostics.recovery_clearance);
+  addNumber(values, "recovery_direction_x", _diagnostics.recovery_direction_x);
+  addNumber(values, "recovery_direction_y", _diagnostics.recovery_direction_y);
+  addNumber(values, "recovery_escape_vx", _diagnostics.recovery_escape_vx);
+  addNumber(values, "recovery_escape_vy", _diagnostics.recovery_escape_vy);
 
   array.status.push_back(status);
   return array;

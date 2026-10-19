@@ -21,7 +21,24 @@
 #     落在 planning_horizon 3.0 m 与 8 m 局部地图内（比提速档时更宽裕）。
 #   * 加速度/角速度仍是联调建议值，不能当作已辨识的制动能力；TrajectoryValidator 的
 #     制动减速度参数必须来自实车辨识。
-#   * 代价地图 robot_radius 0.33 → 0.45（2026-10-09，仅仿真）：
+#   * 【2026-10-14 校正】代价地图 robot_radius = 0.33（= safety.robot_radius，车身包络）。
+#     必须满足不变量 **规划器禁行带 < 控制器硬净空**。规划器 theta_star 的判据是
+#     "代价 ≤ 252 才算可走"（isSafe()：253/254/255 一律当障碍），而 Nav2 膨胀层把 inscribed
+#     半径（= 本行 robot_radius，按 0.05 m 栅格量化）以内的格子写成 253 —— 于是 robot_radius
+#     0.40 时禁行带 0.40 m **大于**控制器硬净空 0.38 m：控制器允许车开到 0.38~0.40 m 处，
+#     规划器却把车自己那一格判成障碍，报 "Either of the start or goal pose are an obstacle!"，
+#     bt_navigator 连做两轮 ClearEntireCostmap 再 BackUpFreeSpace —— 也就是"进 recovery"。
+#     （2026-10-14 复现：srm_empty + maps/227_1011 的 C 型通道，15 s 内 4 次。）
+#     改成 0.33 后禁行带只有 0.30 m（6 格），比 0.38 m 低 0.08 m，矛盾消失；规划器可通行的
+#     最窄通道也从 0.80 m 放宽到 0.60 m。
+#     ⚠ 代价：参考路径允许贴到 0.30~0.38 m；若某段真贴着走，MINCO 的硬校验仍会拒那一段
+#       （FollowPath/diagnostics 的 minimum_clearance < 0.38、controller 日志
+#       "trajectory collides"），但**不会再进 recovery**。真要过更窄的通道，该改的是
+#       safety.robot_radius / safety.clearance_margin（安全决定），不是这一行。
+#     ⚠ 实车那份 config/real/nav2_params_srm_minco.yaml 仍是 0.40（同一条矛盾，只是实车那次
+#       GICP 把车姿修正了约 0.09 m 恰好没踩到边界）；要一起改需明确同意。
+#
+#   * 【历史·2026-10-09】代价地图 robot_radius 0.33 → 0.45（仅仿真）：
 #     MINCO 的轨迹校验要求净空 = safety.robot_radius(0.33) + clearance_margin(0.05) = 0.38 m
 #     （ESDF 的障碍种子就是代价地图里的致命栅格），而规划器只保证 robot_radius 那么远 ——
 #     于是规划会给出"贴着障碍 0.33~0.38 m"的路径，控制器一条候选轨迹都不敢走 → 输出零 →
@@ -494,7 +511,7 @@ controller_server:
         # 降到 0.2 后 1.438/1.50 m/s、2.59 s，同时保留 jerk 惩罚、加速度只用掉 57% 上限。
         w_jerk: 0.0                                    # jerk 能量权重
         w_time: 25.0                                    # 总时长权重
-        w_obstacle: 100.0                               # 障碍软约束权重
+        w_obstacle:  500.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
         # 实测（2 m 局部路径、v_max 0.5、a_max 0.3）：w_v=20/w_a=2 -> 0.614/0.637（双超）；
@@ -506,7 +523,7 @@ controller_server:
         # 优化目标相对硬校验阈值的额外余量（米）。优化器对障碍是软约束，最优点会停在
         # 安全距离附近；与硬阈值取同一值时经常落到阈值下方几毫米（实测 40 次拒绝：
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
-        optimization_clearance_margin: 50.0
+        optimization_clearance_margin: 0.1
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         corner_speed_ratio: 0.8                       # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
@@ -568,6 +585,59 @@ controller_server:
         # 也就是与改动前完全一致的行为。实车把两者拆开了，原因见实车配置文件。
         reaction_latency: 0.0
 
+      # 脱困（迁移自 navi_minco_bit 的 MincoPlanner.recovery_server.* + 其 FSM 里
+      # 硬编码的 0.25/0.40 分诊与成功阈值）。
+      #
+      # 链路：规划连续失败 -> 卡死分诊（自身净空 < stuck_clearance 才算卡死）
+      #      -> 门限 + 冷却 -> 进入脱困：ESDF 解析梯度定方向（梯度退化时环形搜索最开阔方向）
+      #      -> 脱困期间控制器旁路 MPC、直接输出逃逸速度（只平移、不自转）
+      #      -> 净空恢复到 escaped_clearance 判成功 / 超过 window_sec 判超时。
+      #
+      # ⚠ 阈值相对关系必须保持 stuck_clearance(0.25) < escaped_clearance(0.40)。
+      #   两者相等或倒置会让脱困"一进一出"高频振荡；configure 会强行把
+      #   escaped_clearance 抬到 stuck_clearance + 0.15，并在启动日志里打印实际生效值。
+      #
+      # ★ 核心不变量（2026-10-16 由 srm_empty + 227_1011 实测日志反推得出）：
+      #      stuck_clearance >= 代价地图量化禁行带
+      #   右边 = floor(costmap robot_radius / resolution) * resolution。
+      #   本文件 robot_radius 0.33 / resolution 0.05 -> 禁行带 0.30 m。
+      #
+      #   为什么必须这样：规划器（theta_star）把"代价 ≤ 252"当可走，而膨胀层把 inscribed
+      #   半径（= robot_radius 量化后 0.30 m）以内写成 253。于是
+      #     * 车心净空 >= 0.30 m 时规划器**允许**从这里起步（能出路径）；
+      #     * 而 MINCO 硬校验要求净空 = safety.robot_radius + clearance_margin = 0.38 m。
+      #   净空落在 [stuck_clearance, 0.38) 这个带里的车：本地重规划**必然失败**
+      #   （带起点过不了 0.38 校验），可原实现 stuck_clearance 只有 0.25 ——
+      #   判不出"卡死"，脱困永远不接管，车就僵在那里，只能等建轨宽限到期抛给行为树的
+      #   BackUpFreeSpace 兜底。实测复现：2026-10-16 23:51 那次跑，行为树 backup 跑了
+      #   11 次、控制器内部脱困 0 次。
+      #
+      #   所以卡死阈值必须**盖住整个死区**：取 0.40 >= 0.38（硬校验）> 0.30（禁行带）。
+      #   escaped_clearance 随之抬到 0.50，保持"成功阈值 - 卡死阈值 >= 0.10"的间隔 ——
+      #   注意 configure() 只在不足时把 escaped 抬到 stuck + 0.15，所以这里必须显式给 0.50，
+      #   否则会被自动抬成 0.55 而偏离本文件的意图。
+      #
+      # ⚠ 不要为了"让脱困更容易触发"把 costmap robot_radius 抬到 0.40：那会让禁行带
+      #   （0.40）**大于**控制器硬校验（0.38），规划器把车自己那一格判成障碍，
+      #   报 "Either of the start or goal pose are an obstacle!" 直接走行为树 recovery。
+      #   文件头 2026-10-14 条目记录的就是这个坑。
+      # ⚠ 脱困能力有物理上限：escape_speed × window_sec = 0.5 × 3.0 ≈ 1.5 m
+      #   （还要扣掉底盘加速度斜坡）。超出这个位移必然超时，随后由建轨宽限与
+      #   行为树的 BackUpFreeSpace 兜底。
+      recovery:
+        fail_threshold: 5                               # 连续规划失败多少次才允许进入脱困
+        cooldown_sec: 1.0                               # 两次脱困之间的最小间隔（秒）
+        window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
+        escape_speed: 0.5                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
+        # 卡死分诊阈值（米）：低于它才计入失败、才脱困。必须 >= 禁行带(0.30)
+        # 且 >= 控制器硬校验(0.38)，否则 [阈值, 0.38) 是脱困接不了的死区。
+        stuck_clearance: 0.40
+        # 脱困成功判据（米）：净空恢复到它以上算成功。故意留 0.10 间隔避免进出一进一出振荡。
+        escaped_clearance: 0.50
+        search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
+        search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
+        publish_visualization: True                     # 是否发布 recovery_markers 可视化
+
 
 local_costmap:
   local_costmap:
@@ -581,7 +651,7 @@ local_costmap:
       width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
       height: 8                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
-      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器要求 0.38 + 0.02（原 0.33/0.45，原因见文件头）
+      robot_radius: 0.33                                   # 车身包络 = safety.robot_radius；必须 < 控制器硬净空 0.38（0.40 会让规划器把车自己判成障碍→进 recovery，原因见文件头）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
@@ -616,7 +686,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 4.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.7                               # 障碍膨胀半径（米）
+        inflation_radius: 0.1                               # 障碍膨胀半径（米）
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 global_costmap:
@@ -627,7 +697,7 @@ global_costmap:
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
       robot_base_frame: base_link                   # 机器人坐标系
-      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器要求 0.38 + 0.02（原 0.33/0.45，原因见文件头）
+      robot_radius: 0.33                                   # 车身包络 = safety.robot_radius；必须 < 控制器硬净空 0.38（0.40 会让规划器把车自己判成障碍→进 recovery，原因见文件头）
       resolution: 0.05                                    # 地图分辨率（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
@@ -734,6 +804,16 @@ behavior_server:
     service_name: "global_costmap/get_costmap"            # 后退行为查询全局地图的服务名
     max_radius: 2.0                                        # 搜索自由空间的最大半径（米）
     visualize: false                                       # 是否发布后退搜索可视化
+    # 脱困方向来源：esdf_gradient = 由代价图现场建 ESDF，取解析梯度（梯度退化时环形搜索），
+    # 与 MINCO 控制器内部的脱困判定共用同一份实现（srm27_minco_core::RecoveryDecider），
+    # 保证"控制器认为该往哪推"和"行为树实际往哪推"不会分叉。
+    # costmap_gap = 原实现（扫描连续安全扇区取中点），保留作回退与 A/B 对照。
+    # ⚠ 走 esdf_gradient 时每一步都会用 global_costmap 重建一次 ESDF（200×200 约 1~2 ms），
+    #   这是脱困才付的代价，不影响正常导航周期。
+    escape_direction_mode: "esdf_gradient"
+    esdf_search_radius: 0.4                                # 环形搜索半径（米），应略大于膨胀半径
+    esdf_search_samples: 36                                # 环形搜索采样数量
+    esdf_unknown_is_seed: True                             # 未知区域是否按障碍处理（与控制器 safety.unknown_is_obstacle 保持一致）
 
 waypoint_follower:
   ros__parameters:

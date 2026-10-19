@@ -78,33 +78,12 @@ struct ControllerDiagnostics
   // 命令归属与停止
   std::string yaw_mode{"xy_only"};
   std::string command_owner{"navigation"};
-  /// \brief 速度命令所在的坐标系（`command_frame` 参数，方案 §4.1.3）。
-  std::string command_frame{"base_link"};
   double command_age{0.0};
   double applied_speed_scale{1.0};
   std::string stop_reason{"none"};
   double stop_request_time{0.0};
   double output_zero_time{0.0};
   double actual_stop_time{0.0};
-
-  // 航向控制（2026 wz 控制迁移，方案 §4.1.2）
-  /// \brief 本周期 yaw 参考（rad，odom 系），来自路径切线（`se2` 模式）。
-  double yaw_reference{0.0};
-  /// \brief MPC 求解器未经限幅给出的角速度请求（rad/s）。
-  double mpc_requested_wz{0.0};
-  /// \brief 实际写入命令的角速度（rad/s）；停止时恒为 0。
-  double applied_wz{0.0};
-  /// \brief `wz` 被限幅的原因：none / angular_speed_limit / yaw_policy_zero_angular_limit。
-  std::string wz_clamp_reason{"none"};
-  /// \brief 被拒绝的独立自转请求次数（非 SPIN 模式下传入 `setSpinRequest` 的次数）。
-  ///
-  /// 非零即说明"有独立自转想混进 yaw 参考"，迁移链上必须为 0（方案 §4.1.2）。
-  std::uint64_t rejected_spin_request_count{0};
-
-  /// \brief 当前自转请求（rad/s）；仅 SPIN 模式进线（阶段二小陀螺），其余模式恒为 0。
-  double spin_request{0.0};
-  /// \brief 自转请求是否新鲜（超时未更新按撤回处理；SPIN 模式下 false 即停转）。
-  bool spin_request_fresh{false};
 
   // 终点收敛（2026-10-09 实车终点振荡诊断）
   /// \brief 当前位姿到路径末点的距离（m）。
@@ -118,6 +97,32 @@ struct ControllerDiagnostics
   double requested_vx{0.0};
   double requested_vy{0.0};
   double requested_wz{0.0};
+
+  // 脱困（迁移自 navi_minco_bit 的 RecoverServer 诊断面）
+  /// \brief 是否正处于脱困状态。
+  bool recovery_active{false};
+  /// \brief 连续规划失败计数（只在"自身被卡死"时累加）。
+  int recovery_failures{0};
+  /// \brief 累计进入脱困的次数。
+  std::uint64_t recovery_enter_count{0};
+  /// \brief 本次脱困已输出的控制周期数。
+  std::uint64_t recovery_command_count{0};
+  /// \brief 进入脱困的原因：`gradient` / `circular_search` / `no_escape_direction`。
+  std::string recovery_trigger{"none"};
+  /// \brief 退出脱困的原因：`escaped` / `timeout` / `stale_gap` / `new_goal` / `none`。
+  std::string recovery_exit{"none"};
+  /// \brief 因"两帧控制间隔异常大（中间目标被取消过）"而作废脱困会话的累计次数。
+  std::uint64_t recovery_stale_abort_count{0};
+  /// \brief 进入脱困时自身净空（m）。
+  double recovery_entry_clearance{-1.0};
+  /// \brief 进入脱困时的自身净空（m）；与 entry 同源，便于现场直接看阈值关系。
+  double recovery_clearance{0.0};
+  /// \brief 逃逸方向（规划坐标系）。
+  double recovery_direction_x{0.0};
+  double recovery_direction_y{0.0};
+  /// \brief 逃逸速度（规划坐标系，m/s）。
+  double recovery_escape_vx{0.0};
+  double recovery_escape_vy{0.0};
 };
 
 /// \brief 把诊断字段填成 `DiagnosticArray`。

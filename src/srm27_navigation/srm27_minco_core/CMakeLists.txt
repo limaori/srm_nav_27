@@ -18,6 +18,7 @@ add_library(
   src/minco_optimizer.cpp
   src/mpc_model.cpp
   src/mpc_solver.cpp
+  src/recovery_decider.cpp
   src/replan_manager.cpp
   src/tracking_reference.cpp
   src/trajectory_2d.cpp
@@ -56,6 +57,7 @@ if(BUILD_TESTING)
     test/test_minco_optimizer.cpp
     test/test_mpc_solver.cpp
     test/test_mpc_startup.cpp
+    test/test_recovery_decider.cpp
     test/test_replan_manager.cpp
     test/test_smooth_cost.cpp
     test/test_tracking_reference.cpp

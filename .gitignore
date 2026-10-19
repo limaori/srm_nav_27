@@ -8,6 +8,9 @@
 /log_diag/
 /**/__pycache__/
 *.py[cod]
+# colcon 的临时日志：若某次把 ROS_LOG_DIR 指到工作区内（例如 build/），
+# 日志会堆在 build 下而不是 log/，上面 `/log_diag/` 之类规则盖不住它。
+/build/roslog/
 
 # Runtime data and logs
 *.log
@@ -24,12 +27,20 @@
 tmp/
 .idea/
 
+# 本地测试/仿真产生的运行时目录。
+# 这两项此前没有规则覆盖：内容虽小但每次跑测试或仿真脚本都会重新生成，
+# 放任它们变成未跟踪文件，容易被 `git add -A` 误提交。
+/.pytest_cache/
+/.sim_run/
+
 # Generated map and visualization artifacts
 /*.pcd
 /src/srm27_navigation/point_lio/PCD/*.pcd
 /*.pgm
 /*.gv
 /*.pdf
+# 图像编辑器/地图工具处理过程中留下的备份件（如 GIMP 另存 pgm 时的 .pgm.orig）
+*.pgm.orig
 
 # 以下三条原先由 src/srm27_navigation/.gitignore 提供。该文件已作为冗余文件删除，
 # 规则上提到此统一维护，避免本地实车地图产物变成未跟踪文件而被误提交。

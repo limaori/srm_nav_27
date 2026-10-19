@@ -1200,6 +1200,56 @@ MINCO 专属自检 (按顺序确认, 任一步不符就不要放开跑):
 
   分阶段上电的完整验收清单与回退步骤见:
      docs/minco实车迁移实施记录(ai).md
+
+MINCO 脱困自检 (实车; 与仿真同源但多了"车真的会动"这一层风险):
+  ⚠ 前置硬条件: **人在场、手放在物理急停上**。
+     实车没有任何软件急停 —— start_real_nav.sh 顶部已说明: srm27_nav_protocol 没有
+     急停/使能 service, 软件层唯一手段是在 /cmd_vel_chassis 发零速; 而它 0.5 s 看门狗
+     只在进程活着时有效 (kill -9 / 串口掉线时 C 板固件没有超时保护, 会用最后一帧速度)。
+     脱困是一个**主动给 0.5 m/s 平移**的行为, 所以急停只能靠物理按钮或断电。
+  a) 参数真的生效 (configure 期读一次; 改完 yaml 必须重启导航栈):
+       ros2 param get /controller_server FollowPath.recovery.fail_threshold
+       ros2 param get /controller_server FollowPath.recovery.escape_speed
+       ros2 param get /controller_server FollowPath.recovery.stuck_clearance
+       ros2 param get /controller_server FollowPath.recovery.escaped_clearance
+     期望 5 / 0.5 / 0.40 / 0.50。启动日志里还有一行 "MincoMpcController 脱困参数: ...",
+     打印的是夹取后**实际生效**的值, 与此处不一致说明参数文件选错了。
+     ⚠ 这几个参数**不能**用 ros2 param set 热改: 插件只在 configure 期读一次,
+       且没有注册 onSetParameters 回调 —— set 会成功返回但毫无效果。
+       要降档 (见下面 e) 只能改 yaml 后重启。
+  b) 脱困可视化话题存在 (平时为空, 只有真脱困才有内容):
+       ros2 topic list | grep recovery_markers
+     RViz 里已预置显示项 "Recovery (MINCO)" (共用 nav2_default_view.rviz):
+       绿线 = 脱困路径规划结果, 蓝箭头 = 本周期下发的那一步, 球 = 当前净空。
+  c) 观察脱困状态 (只筛脱困字段, 不刷屏):
+       ros2 topic echo /FollowPath/diagnostics | grep -E "recovery_(active|trigger|exit|command_count|stale_abort)"
+     验收看 **recovery_command_count**: 它从 0 变成非 0 才说明脱困**真的输出了逃逸速度**。
+     只看到 recovery_active=true 而 command_count 一直是 0, 等于"进了脱困但没推车"。
+  d) 实测脱困速度到没到底盘 (脱困期间在另一个终端跑):
+       ros2 topic echo /cmd_vel_chassis
+     脱困期间应看到**恒定**的 vx/vy (合速度约 escape_speed × 串口 linear_velocity_scale),
+     wz 恒 0。若这里没有数据, 查 smoother 是否把它吃掉了。
+  e) 首次落地验证请**降档**, 不要直接用 0.5 m/s:
+       改 config/real/nav2_params_srm_minco.yaml 的 FollowPath.recovery:
+         escape_speed: 0.2      # 0.5 -> 0.2, 先确认方向对不对
+         window_sec: 1.5        # 3.0 -> 1.5, 缩短单次推离时长
+       然后重启导航栈。**只在周围空旷的位置人为造卡死**做首次验证,
+       不要在窄通道/障碍密集区试。确认方向与符号都对之后, 再逐步回到 0.5 / 3.0。
+  f) 怎么把它"逼"进脱困 (两个条件必须同时成立, 最容易白等的地方):
+       条件 1: 重规划连续失败 fail_threshold(5) 次;
+       条件 2: 车**自身**净空 < stuck_clearance(0.40 m)。
+     ⚠ 条件 2 的净空是相对**原始致命栅格**算的, 膨胀层不计入 ——
+       "被膨胀层包住、规划失败"不等于"卡死", 那种情况判为"前方路障", 只绕路不脱困。
+     ⚠ **不要用 Gazebo 那套 ign service 瞬移**来造卡死: 实车没有 Gazebo,
+       而且瞬移/挪车会让 Nav2 取消目标, 目标一取消控制器就不再被调用, 脱困发不出速度
+       (仿真里已实测: 报"脱困成功"但 recovery_command_count=0)。
+       实车请用"把车开进死角"或者直接推车到位后再下目标。
+  g) 两条脱困链路的分工 (先后兜底, 不是互相打架):
+       控制器内部脱困 (recovery.window_sec) 先试;
+       没成功 -> 回重规划; 仍失败 -> 等建轨宽限抛给行为树
+       -> ClearEntireCostmap x2 + BackUpFreeSpace (同样走 ESDF 梯度选方向)。
+       ⚠ 行为树那条链路在仿真里出现过"±90° 交替推、原地来回摆约 30 s 没走出去"的现象,
+         实车同理会来回推车 —— 首次验证时尤其注意人流与周围空间。
 EOF
 fi
 

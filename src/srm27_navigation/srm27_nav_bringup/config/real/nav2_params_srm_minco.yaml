@@ -794,6 +794,36 @@ controller_server:
         #   state_timeout(0.25)，比 0.10 更保守（短终点轨迹更容易被拒）。
         reaction_latency: 0.10
 
+      # 脱困（迁移自 navi_minco_bit 的 MincoPlanner.recovery_server.* + 其 FSM 里
+      # 硬编码的 0.25/0.40 分诊与成功阈值）。语义与仿真那份完全一致，见
+      # config/simulation/nav2_params_srm_minco.yaml 里的详细说明。
+      #
+      # 实车与仿真的唯一差异是 escape_speed：实车底盘速度环与制动辨识都慢于仿真，
+      # 0.5 m/s 的逃逸速度在 3 s 窗口里会有一段被加速度斜坡吃掉。这里仍取 0.5
+      # 与仿真对齐（首轮实车验证优先看"方向对不对"，速度可后续单独调）；
+      # 若实测发现"车在动但 3 s 内走不出卡死区"，先加大 window_sec 而不是 escape_speed——
+      # 提高逃逸速度会同时抬高贴障碍时的碰撞风险，而延长时间只是让它多推一会儿。
+      recovery:
+        fail_threshold: 5                               # 连续规划失败多少次才允许进入脱困
+        cooldown_sec: 1.0                               # 两次脱困之间的最小间隔（秒）
+        window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
+        escape_speed: 0.5                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
+        # 卡死分诊阈值（米）：低于它才计入失败、才脱困。
+        # ★ 2026-10-16 由 0.25 抬到 0.40（与仿真同步），原因见
+        #   simulation/nav2_params_srm_minco.yaml 同段的"核心不变量"：
+        #   阈值必须 >= 控制器硬校验要求的净空（safety.robot_radius 0.33 +
+        #   clearance_margin 0.05 = 0.38），否则 [阈值, 0.38) 是"本地重规划必败、
+        #   却判不出卡死"的死区，脱困永远不接管。
+        #   本文件代价地图 robot_radius 是 0.40（见下方 costmap 段），车心净空正常
+        #   打不到 0.25 —— 原值 0.25 在实车上等价于"静态地图永远不触发脱困"。
+        #   ⚠ 实车待实测确认：0.40 会不会在窄通道里被误判成"卡死"而频繁触发脱困。
+        stuck_clearance: 0.40
+        # 脱困成功判据（米）：留 0.10 间隔避免进出一进一出振荡。
+        escaped_clearance: 0.50
+        search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
+        search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
+        publish_visualization: True                     # 是否发布 recovery_markers 可视化
+
 
 local_costmap:
   local_costmap:
@@ -973,6 +1003,13 @@ behavior_server:
     service_name: "global_costmap/get_costmap"
     max_radius: 2.0
     visualize: false
+    # 脱困方向来源：esdf_gradient = 由代价图现场建 ESDF，取解析梯度（梯度退化时环形搜索），
+    # 与 MINCO 控制器内部的脱困判定共用 srm27_minco_core::RecoveryDecider；
+    # costmap_gap = 原实现，保留作回退与 A/B 对照。
+    escape_direction_mode: "esdf_gradient"
+    esdf_search_radius: 0.4
+    esdf_search_samples: 36
+    esdf_unknown_is_seed: True
 
 waypoint_follower:
   ros__parameters:

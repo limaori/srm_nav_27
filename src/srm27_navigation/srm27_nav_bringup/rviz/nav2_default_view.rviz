@@ -566,6 +566,26 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: waypoints
       Value: true
+    # MINCO 控制器的脱困可视化 (srm27_minco_controller, 见
+    # docs/minco脱困机制迁移实施记录(ai).md §7.1):
+    #   绿线 recovery_escape_path = 脱困路径规划结果 (沿脱困方向场前推的轨迹)
+    #   蓝箭头 recovery_escape    = 本周期实际下发的那一步
+    #   球   recovery_clearance   = 当前位置净空 (绿=已达成功阈值 / 黄=卡死分诊区 / 红=更危险)
+    # 只有真的在脱困时才发布; 平时这个话题是空的, 不用管它。
+    # 话题名是相对名: RViz 跑在 namespace 下, 会自动补成
+    # /<namespace>/FollowPath/recovery_markers (与上面的 FollowPath/minco_trajectory 同理)。
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Recovery (MINCO)
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: FollowPath/recovery_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

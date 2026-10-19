@@ -15,6 +15,14 @@
 
 #include "srm27_nav_plugins/behaviors/back_up_free_space.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "nav2_costmap_2d/cost_values.hpp"
+
 namespace srm27_nav_behaviors
 {
 
@@ -30,11 +38,32 @@ void BackUpFreeSpace::onConfigure()
   nav2_util::declare_parameter_if_not_declared(
     node, "service_name", rclcpp::ParameterValue("local_costmap/get_costmap"));
   nav2_util::declare_parameter_if_not_declared(node, "visualize", rclcpp::ParameterValue(false));
+  // 方向来源：默认用 ESDF 解析梯度（与控制器内部的脱困判定同源），
+  // `costmap_gap` 是原实现（扫描"连续安全扇区"取中点）的回退与 A/B 对照。
+  nav2_util::declare_parameter_if_not_declared(
+    node, "escape_direction_mode", rclcpp::ParameterValue(std::string("esdf_gradient")));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "esdf_search_radius", rclcpp::ParameterValue(0.4));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "esdf_search_samples", rclcpp::ParameterValue(36));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "esdf_unknown_is_seed", rclcpp::ParameterValue(true));
 
   node->get_parameter("global_frame", global_frame_);
   node->get_parameter("max_radius", max_radius_);
   node->get_parameter("service_name", service_name_);
   node->get_parameter("visualize", visualize_);
+  node->get_parameter("escape_direction_mode", escape_direction_mode_);
+  node->get_parameter("esdf_search_radius", esdf_search_radius_);
+  node->get_parameter("esdf_search_samples", esdf_search_samples_);
+  node->get_parameter("esdf_unknown_is_seed", esdf_unknown_is_seed_);
+
+  if (escape_direction_mode_ != "esdf_gradient" && escape_direction_mode_ != "costmap_gap") {
+    RCLCPP_WARN(
+      logger_, "escape_direction_mode: '%s' 未识别，回退到 esdf_gradient",
+      escape_direction_mode_.c_str());
+    escape_direction_mode_ = "esdf_gradient";
+  }
 
   costmap_client_ = node->create_client<nav2_msgs::srv::GetCostmap>(service_name_);
 
@@ -84,8 +113,25 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
   pose.y = initial_pose_.pose.position.y;
   pose.theta = tf2::getYaw(initial_pose_.pose.orientation);
 
-  // Find the best direction to back up
-  float best_angle = findBestDirection(costmap, pose, -M_PI, M_PI, max_radius_, M_PI / 32.0);
+  // Find the best direction to back up.
+  //
+  // 方向来源与 MINCO 控制器内部的脱困判定同源（ESDF 解析梯度 + 环形搜索），
+  // 这样"控制器认为该往哪推"和"行为树实际往哪推"不会分叉。
+  // ESDF 分支失败（代价图无效 / 机器人在地图外）时必须回退到代价图直方图法，
+  // 绝不能因为"算不出来"就沿用默认角度盲目前冲。
+  float best_angle = 0.0f;
+  bool direction_ok = false;
+  if (escape_direction_mode_ == "esdf_gradient") {
+    direction_ok = planEscapeDirectionByEsdf(costmap, pose, &best_angle);
+    if (!direction_ok) {
+      RCLCPP_WARN(
+        logger_, "ESDF 逃逸方向不可用（代价图无效或机器人在地图外），回退到代价图直方图法");
+    }
+  }
+  if (!direction_ok) {
+    best_angle = findBestDirection(costmap, pose, -M_PI, M_PI, max_radius_, M_PI / 32.0);
+    last_used_circular_search_ = false;
+  }
 
   // Calculate move command
   twist_x_ = std::cos(best_angle) * command->speed;
@@ -101,7 +147,9 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
     return nav2_behaviors::Status::FAILED;
   }
   RCLCPP_WARN(
-    logger_, "backing up %f meters towards free space at angle %f", command_x_, best_angle);
+    logger_, "backing up %f meters towards free space at angle %f (mode=%s, 净空 %.3f m, %s)",
+    command_x_, best_angle, escape_direction_mode_.c_str(), last_clearance_,
+    last_used_circular_search_ ? "环形搜索" : "ESDF 梯度");
 
   return nav2_behaviors::Status::SUCCEEDED;
 }
@@ -155,6 +203,150 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   vel_pub_->publish(std::move(cmd_vel));
 
   return nav2_behaviors::Status::RUNNING;
+}
+
+bool BackUpFreeSpace::planEscapeDirectionByEsdf(
+  const nav2_msgs::msg::Costmap & costmap, geometry_msgs::msg::Pose2D pose, float * best_angle)
+{
+  if (best_angle == nullptr) {
+    return false;
+  }
+
+  srm27_minco_core::GridSnapshot snapshot;
+  if (!buildGridSnapshot(costmap, &snapshot)) {
+    return false;
+  }
+
+  srm27_minco_core::Esdf2D esdf;
+  srm27_minco_core::Esdf2D::Config esdf_config;
+  esdf_config.unknown_is_seed = esdf_unknown_is_seed_;
+  if (!esdf.build(snapshot, esdf_config)) {
+    return false;
+  }
+
+  srm27_minco_core::RecoveryConfig recovery_config;
+  recovery_config.search_radius = esdf_search_radius_;
+  recovery_config.search_samples = esdf_search_samples_;
+  // 这里只借用"算方向"这一件事，不涉及失败计数/冷却/窗口，那几个成员保持默认即可。
+
+  Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+  double clearance = -1.0;
+  const Eigen::Vector2d position(static_cast<double>(pose.x), static_cast<double>(pose.y));
+  if (!srm27_minco_core::RecoveryDecider::planEscapeDirection(
+        esdf, position, recovery_config, &direction, &clearance)) {
+    return false;
+  }
+
+  last_clearance_ = clearance;
+  const float angle = static_cast<float>(std::atan2(direction.y(), direction.x()));
+  // 诊断标注：`planEscapeDirection` 有三个分支（梯度上升 / 环形搜索 / 失败）。
+  // 这里复现它的分支条件，好让日志能说清"这次方向是梯度给的还是环形搜索给的"——
+  // 两者在现场对应完全不同的处境：梯度 = 还贴着障碍、环形 = 已经陷在梯度平台的死角里。
+  const srm27_minco_core::EsdfQueryResult here = esdf.query(position.x(), position.y());
+  last_used_circular_search_ = !(
+    here.gradient_valid && here.gradient.allFinite() &&
+    here.gradient.norm() >= recovery_config.gradient_epsilon);
+  *best_angle = angle;
+
+  if (visualize_) {
+    visualizeEscape(pose, static_cast<float>(clearance), angle);
+  }
+  return true;
+}
+
+bool BackUpFreeSpace::buildGridSnapshot(
+  const nav2_msgs::msg::Costmap & costmap, srm27_minco_core::GridSnapshot * snapshot) const
+{
+  if (snapshot == nullptr) {
+    return false;
+  }
+  const int size_x = static_cast<int>(costmap.metadata.size_x);
+  const int size_y = static_cast<int>(costmap.metadata.size_y);
+  const double resolution = costmap.metadata.resolution;
+  if (size_x <= 0 || size_y <= 0 || !(resolution > 0.0)) {
+    return false;
+  }
+  const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
+  if (costmap.data.size() != count) {
+    return false;
+  }
+
+  // 与 `CostmapAdapter::snapshot` 同一套语义：只有原始占用与未知进距离场，
+  // 膨胀代价 1..252 一律视为自由 —— 机器人半径已经在净空阈值里单独计入，
+  // 重复计入会让有效通道凭空变窄（会把本来能过的窄通道判成"无处可逃"）。
+  std::vector<srm27_minco_core::CellState> cells(count, srm27_minco_core::CellState::kFree);
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::uint8_t cost = costmap.data[i];
+    if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
+      cells[i] = srm27_minco_core::CellState::kOccupied;
+    } else if (cost == nav2_costmap_2d::NO_INFORMATION) {
+      cells[i] = srm27_minco_core::CellState::kUnknown;
+    }
+  }
+
+  return snapshot->reset(
+    costmap.metadata.origin.position.x, costmap.metadata.origin.position.y, resolution, size_x,
+    size_y, std::move(cells), /*map_version=*/0u, clock_->now().seconds());
+}
+
+void BackUpFreeSpace::visualizeEscape(
+  geometry_msgs::msg::Pose2D pose, float clearance, float best_angle)
+{
+  if (!marker_pub_) {
+    return;
+  }
+  visualization_msgs::msg::MarkerArray markers;
+
+  visualization_msgs::msg::Marker clearance_marker;
+  clearance_marker.header.frame_id = global_frame_;
+  clearance_marker.header.stamp = clock_->now();
+  clearance_marker.ns = "escape_clearance";
+  clearance_marker.id = 0;
+  clearance_marker.type = visualization_msgs::msg::Marker::SPHERE;
+  clearance_marker.action = visualization_msgs::msg::Marker::ADD;
+  clearance_marker.pose.position.x = pose.x;
+  clearance_marker.pose.position.y = pose.y;
+  clearance_marker.pose.position.z = 0.0;
+  clearance_marker.pose.orientation.w = 1.0;
+  const float drawn = (std::isfinite(clearance) && clearance > 0.0f)
+                        ? std::min(clearance, 2.0f)
+                        : 0.05f;
+  clearance_marker.scale.x = 2.0f * drawn;
+  clearance_marker.scale.y = 2.0f * drawn;
+  clearance_marker.scale.z = 0.05;
+  clearance_marker.color.r = 1.0f;
+  clearance_marker.color.g = 1.0f;
+  clearance_marker.color.b = 0.0f;
+  clearance_marker.color.a = 0.35f;
+  markers.markers.push_back(clearance_marker);
+
+  visualization_msgs::msg::Marker arrow;
+  arrow.header.frame_id = global_frame_;
+  arrow.header.stamp = clearance_marker.header.stamp;
+  arrow.ns = "escape_direction";
+  arrow.id = 1;
+  arrow.type = visualization_msgs::msg::Marker::ARROW;
+  arrow.action = visualization_msgs::msg::Marker::ADD;
+  arrow.scale.x = 0.06;
+  arrow.scale.y = 0.12;
+  arrow.scale.z = 0.12;
+  arrow.color.r = 0.0f;
+  arrow.color.g = 0.6f;
+  arrow.color.b = 1.0f;
+  arrow.color.a = 1.0f;
+  geometry_msgs::msg::Point start;
+  start.x = pose.x;
+  start.y = pose.y;
+  start.z = 0.0;
+  geometry_msgs::msg::Point end = start;
+  const float reach = static_cast<float>(max_radius_);
+  end.x += reach * std::cos(best_angle);
+  end.y += reach * std::sin(best_angle);
+  arrow.points.push_back(start);
+  arrow.points.push_back(end);
+  markers.markers.push_back(arrow);
+
+  marker_pub_->publish(markers);
 }
 
 float BackUpFreeSpace::findBestDirection(

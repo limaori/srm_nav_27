@@ -7,27 +7,6 @@
 由于 NAV2 humble 发行版出于避免破坏原有接口的原因，依然使用 Twist 类型（不含时间戳），humble 往后的版本才使用 TwistStamped，导致无法直接实现 cmd_vel 与 odometry 的时间戳对齐。因此，本功能包暂时订阅 local_plan 话题（由局部路径规划器发布），以获取时间戳，将它的时间戳视为 cmd_vel 的时间戳，以间接实现时间戳对齐。
 Related issue: [Switch from Twist to TwistStamped for cmd_vel #1594](https://github.com/ros-navigation/navigation2/issues/1594)
 
-## 两种模式（`transform_mode`）
-
-2026-10 的 wz 控制迁移（见 `docs/wz控制迁移导航与fakeyaw仿真实施方案.md`）把本节点
-的职责收敛成"动态 fakeyaw TF + 速度坐标转换"，并引入显式模式参数：
-
-* `transform_mode=legacy`（**默认**，与上面的历史描述一致）：`odom` 与 `local_plan` 近似
-  时间同步后再转换；`cmd_spin`（及 `init_spin_speed`）会**叠加**到输出的 `angular.z` 上；
-  导航控制器不活跃时输入速度直通（供手柄等已处于车体系的输入使用）。
-  实车链路 `config/real/nav2_params_srm*.yaml` 与旧仿真链路都走这一条。
-* `transform_mode=nav_se2`（wz 控制迁移模式）：**导航拥有 `wz`**。
-  * 不再做任何自转叠加 —— 收到非零 `cmd_spin` 只告警、只计数（`non_zero_spin_count`），
-    避免"导航 wz + cmd_spin"的双重叠加；
-  * 每条输入都用**最新一条里程计**的 yaw 转换一次（`v_base = R(-psi) * v_fake`，
-    `wz` 原样透传），不做 `local_plan` 同步；里程计订阅是 KEEP_LAST=1 的普通订阅；
-  * TF 在里程计回调里用**消息时间戳**发布（`base_link -> base_link_fake`，yaw = -psi，平移为零）；
-  * 里程计缺失 / 超过 `odom_timeout` / yaw 非有限时，输出零速并停止更新 TF，同时计数；
-  * 诊断（`diagnostics`）给出 `yaw_deg` / `odom_age` / `zero_output_count` /
-    `stale_odom_count` / `nonfinite_yaw_count` / `wz_error_max` / `wz_error_mean` 等计数。
-
-两种模式都不发布 `odom -> base_link`（那由定位或真值里程计单独拥有）。
-
 ## Published Topics
 
 * `tf` (`tf2_msgs/msg/TFMessage`) - 与机器人可移动关节相对应的变换
@@ -49,12 +28,4 @@ Related issue: [Switch from Twist to TwistStamped for cmd_vel #1594](https://git
 * `cmd_spin_topic` (`string`, default: "cmd_spin") - 控制底盘固定旋转速度的话题
 * `input_cmd_vel_topic` (`string`, default: "") - 输入速度指令的话题
 * `output_cmd_vel_topic` (`string`, default: "") - 输出速度指令的话题。将原本基于 `fake_robot_base_frame` 的速度变换到 `robot_base_frame` 后发布
-* `init_spin_speed` (`double`, default: 0.0) - 若没有接收 `cmd_spin_topic`，则使用该值作为固定旋转速度（仅 `legacy` 模式）
-* `transform_mode` (`string`, default: "legacy") - `legacy` 或 `nav_se2`，见上一节
-* `odom_timeout` (`double`, default: 0.25) - `nav_se2` 模式下的里程计最大年龄（s），超过则输出零速
-* `diagnostics_period` (`double`, default: 0.5) - `nav_se2` 模式下的诊断发布周期（s）
-
-## Subscribed Topics (`nav_se2` 模式)
-
-* `diagnostics` (`diagnostic_msgs/msg/DiagnosticArray`) - **发布**：转换计数与有效性
-* `nav_se2` 下 `local_plan_topic` 不再被订阅；`cmd_spin_topic` 只用于告警计数
+* `init_spin_speed` (`double`, default: 0.0) - 若没有接收 `cmd_spin_topic`，则使用该值作为固定旋转速度
