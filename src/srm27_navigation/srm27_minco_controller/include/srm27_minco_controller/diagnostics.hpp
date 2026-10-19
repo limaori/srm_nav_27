@@ -78,12 +78,33 @@ struct ControllerDiagnostics
   // 命令归属与停止
   std::string yaw_mode{"xy_only"};
   std::string command_owner{"navigation"};
+  /// \brief 速度命令所在的坐标系（`command_frame` 参数，方案 §4.1.3）。
+  std::string command_frame{"base_link"};
   double command_age{0.0};
   double applied_speed_scale{1.0};
   std::string stop_reason{"none"};
   double stop_request_time{0.0};
   double output_zero_time{0.0};
   double actual_stop_time{0.0};
+
+  // 航向控制（2026 wz 控制迁移，方案 §4.1.2）
+  /// \brief 本周期 yaw 参考（rad，odom 系），来自路径切线（`se2` 模式）。
+  double yaw_reference{0.0};
+  /// \brief MPC 求解器未经限幅给出的角速度请求（rad/s）。
+  double mpc_requested_wz{0.0};
+  /// \brief 实际写入命令的角速度（rad/s）；停止时恒为 0。
+  double applied_wz{0.0};
+  /// \brief `wz` 被限幅的原因：none / angular_speed_limit / yaw_policy_zero_angular_limit。
+  std::string wz_clamp_reason{"none"};
+  /// \brief 被拒绝的独立自转请求次数（非 SPIN 模式下传入 `setSpinRequest` 的次数）。
+  ///
+  /// 非零即说明"有独立自转想混进 yaw 参考"，迁移链上必须为 0（方案 §4.1.2）。
+  std::uint64_t rejected_spin_request_count{0};
+
+  /// \brief 当前自转请求（rad/s）；仅 SPIN 模式进线（阶段二小陀螺），其余模式恒为 0。
+  double spin_request{0.0};
+  /// \brief 自转请求是否新鲜（超时未更新按撤回处理；SPIN 模式下 false 即停转）。
+  bool spin_request_fresh{false};
 
   // 终点收敛（2026-10-09 实车终点振荡诊断）
   /// \brief 当前位姿到路径末点的距离（m）。
