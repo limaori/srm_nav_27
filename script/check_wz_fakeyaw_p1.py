@@ -241,16 +241,15 @@ def main():
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
-    # mux 的参数直接给全（不经过 launch 的限幅合并）：这里只验证 wz 所有权与链路。
+    # mux 的参数直接给全（不经过 launch 的限幅合并）：这里只验证速度链与 wz 透传。
+    # 2026-10-19 独立自转链删除后 mux 只剩导航输入，没有 wz_control_mode/rotation_topic。
     mux_process = subprocess.Popen(
         [
             "ros2", "run", "srm27_chassis_control", "cmd_mux",
             *common,
             "-r", "__node:=p1_srm_cmd_mux",
             "-p", "use_sim_time:=false",
-            "-p", "wz_control_mode:=nav_se2",
             "-p", "nav_topic:=cmd_vel_nav_body",
-            "-p", "rotation_topic:=rotation_velocity",
             "-p", "output_topic:=cmd_vel_sim",
             "-p", "vx_max:=5.0", "-p", "vy_max:=5.0", "-p", "v_max:=6.0", "-p", "wz_max:=4.0",
             "-p", "nav_timeout:=0.3", "-p", "publish_rate:=200.0",
@@ -272,8 +271,8 @@ def main():
 
         仿真的 srm_velocity_system 直接设 chassis link 的速度、四个轮子是被动关节，
         实际自转与组合运动的执行力并不可靠（本次实测：同一指令 0.6 rad/s 的平均转率
-        在 0.17~1.22 倍之间跳、偶尔反号；对照实验证明**旧链路
-        （rotation_velocity → mux legacy）完全一样**，所以这不是 wz 迁移引入的问题）。
+        在 0.17~1.22 倍之间跳、偶尔反号；对照实验证明这与 wz 由谁产生无关，
+        是底盘执行力本身的问题）。
         底盘执行力属于方案 §5 P4 的辨识内容，这里只记录。
         """
         print(("  [记录]     " if condition else "  [记录-偏差] ") + message)

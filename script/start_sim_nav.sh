@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================
-# SRM 仿真 NAV 导航 + 独立自转测试 (一键启动)
+# SRM 仿真 NAV 导航 (一键启动)
 #
 #   标签页 1: SRM Gazebo 仿真 (世界 + SRM 圆柱底盘 + 雷达 + 速度执行)
-#   标签页 2: 速度合成 + Nav2 导航栈 + RViz (含独立自转测试发送器)
-#   标签页 3: 手柄自转 (可选, 默认关闭; 需要手柄, 输出 remap 到 rotation_cmd)
+#   标签页 2: 速度出口 + Nav2 导航栈 + RViz
 #
-# 速度链路有两种模式 (见 docs/wz控制迁移导航与fakeyaw仿真实施方案.md):
+# 速度链路 (见 docs/wz控制迁移导航与fakeyaw仿真实施方案.md):
 #
-#   [默认] 迁移链 fakeyaw + 导航拥有 wz (--no-fakeyaw / --wz-source rotation 退回旧链):
-#     MINCO/Nav2(base_link_fake) ─cmd_vel_nav_fake─► fake_vel_transform
-#        ─cmd_vel_nav_body─► srm_cmd_mux(nav_se2) ─cmd_vel_sim─► 速度适配器
-#     底盘真实 yaw 由导航的 wz 积分得到; 独立自转链路被拒绝。
-#     小陀螺(持续自转)用 --yaw-mode spin + script/spin_control.sh。
+#   MINCO/Nav2(base_link_fake) ─cmd_vel_nav_fake─► fake_vel_transform
+#      ─cmd_vel_nav_body─► srm_cmd_mux ─cmd_vel_sim─► 速度适配器
 #
-#   [旧链] 旧基线 (--wz-source rotation): 导航只产生 vx/vy, wz 由独立自转链路给出
-#     Nav2 controller ─cmd_vel_nav─┐
-#                                  ├─ srm_cmd_mux(legacy) ─cmd_vel_sim─► 速度适配器
-#     rotation_test_sender ─ rotation_controller ─ rotation_velocity ┘
+#   **wz 由上位机(导航栈)拥有**: 底盘真实 yaw 由导航输出的 wz 积分得到。
+#   2026-10-19 独立自转链 (rotation_test_sender / rotation_controller /
+#   rotation_velocity) 已删除, 不存在第二路 wz 来源, 也没有 --wz-source/
+#   --no-fakeyaw/--rotation-* 这些开关。
+#   小陀螺(持续自转)用 --yaw-mode spin + script/spin_control.sh: 请求直接进 MINCO,
+#   wz 仍由导航输出 (不再经 rotation_controller)。
 #
-# 速度限幅 (控制器 / 平滑器 / mux / 恢复行为 / 自转) 的**唯一来源**:
+# 速度限幅 (控制器 / 平滑器 / mux / 恢复行为) 的**唯一来源**:
 #   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
 #   launch 启动时把它合并进 nav2_params_srm*.yaml 与 srm_chassis_control.yaml,
 #   参数文件里不再写这些键 (两处都写且值不同 -> 启动直接报错)。
@@ -48,48 +46,32 @@
 #   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认), 不自转
 #   ./script/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
 #   ./script/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
-#   ./script/start_sim_nav.sh --controller minco               # 局部控制器换 MINCO+MPC (自动挑 minco 参数文件)
-#   ./script/start_sim_nav.sh --controller omni                # 显式回到全向 PID 控制器 (历史默认)
-#   ./script/start_sim_nav.sh --no-run                         # Gazebo 保持暂停, 手动点播放
-#   ./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
-#   ./script/start_sim_nav.sh --rotation-mode periodic \
-#       --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
-#   ./script/start_sim_nav.sh --no-rviz --no-rotation          # 只跑仿真 + 导航
+#   ./script/start_sim_nav.sh                                  # 默认: MINCO + fakeyaw (导航拥有 wz)
+#   ./script/start_sim_nav.sh --yaw-mode spin                   # 小陀螺 (脚本手动控制转速)
+#   ./script/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
+#   ./script/start_sim_nav.sh --no-rviz                         # 只跑仿真 + 导航
 #   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
-#       --map /abs/prior.yaml --no-rotation                    # 用 GICP 初始重定位
+#       --map /abs/prior.yaml                                   # 用 GICP 初始重定位
 #   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
-#       --init-pose "0,0,0,0,0,0.5236"                         # 手动给 map->odom 初值
-#   ./script/start_sim_nav.sh                    # 默认 = 迁移链 (导航拥有 wz, MINCO se2)
-#   ./script/start_sim_nav.sh --yaw-mode spin    # 迁移链 + 小陀螺 (手动控制转速)
-#   ./script/start_sim_nav.sh --no-fakeyaw       # 旧链路 (wz 来自独立自转链)
-#   ./script/start_sim_nav.sh -c omni            # 旧链路 + Omni PID 局部控制器
-#   ./script/start_sim_nav.sh --wz-source rotation -w srm_empty  # 同上 (等价写法)
-#   ./script/start_sim_nav.sh --fakeyaw --no-run               # 迁移链路 + Gazebo 暂停
-#   DRY_RUN=1 ./script/start_sim_nav.sh                        # 只打印将执行的命令
+#       --init-pose "0,0,0,0,0,0.5236"                          # 手动给 map->odom 初值
+#   DRY_RUN=1 ./script/start_sim_nav.sh                         # 只打印将执行的命令
 #
 # 参数:
 #   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
 #   -m, --map     <名字|绝对路径>  地图名(自动补 .yaml)或 YAML 绝对路径
-#   -p, --params  <绝对路径>  Nav2 参数文件; 不给时由 --controller 与 --wz-source 共同决定:
-#                             迁移链 (默认, wz 归导航) -> nav2_params_srm_fakeyaw.yaml
-#                                      (MincoMpcController + se2 + base_link_fake, 限幅由
-#                                       speed_limits.yaml 合并)
-#                             旧链 (--no-fakeyaw / --wz-source rotation)
-#                                    -> nav2_params_srm_minco.yaml (MincoMpc + xy_only,
-#                                       command_frame=base_link)
-#                             显式 -c omni -> nav2_params_srm.yaml (Omni PID 基线)
-#   -c, --controller <auto|omni|minco>
+#   -p, --params  <绝对路径>  Nav2 参数文件; 不给时固定用
+#                             config/simulation/nav2_params_srm_fakeyaw.yaml
+#                             (MincoMpcController + se2 + base_link_fake, 限幅由
+#                              speed_limits.yaml 合并)。必须是 MINCO 那一套 ——
+#                             Omni/旧链参数文件在本入口已经不可用。
+#   -c, --controller <auto|minco>
 #                            局部控制器 = 用哪份 Nav2 参数文件 (与 start_real_nav.sh 同名同义):
-#                              minco -> config/simulation/nav2_params_srm_minco.yaml
-#                                       (FollowPath = srm27_minco_controller::MincoMpcController)
-#                              omni  -> config/simulation/nav2_params_srm.yaml
-#                                       (FollowPath = srm27_omni_pid_controller::OmniPidPursuitController)
+#                              minco -> MINCO+MPC (FollowPath = srm27_minco_controller::MincoMpcController)
 #                              auto  -> 默认值: 按参数文件里 FollowPath 的插件判定。
-#                            注意: 只给 -p 时按 auto 判定 (老命令
-#                            `-p .../nav2_params_srm_minco.yaml` 照样工作, 并且会认出是 MINCO);
-#                            -c 与 -p 同时给出时以 -p 加载, 但会校验两者不矛盾: 选错直接报错,
-#                            不让"名字是 MINCO、跑的是 Omni"溜过去。
-#       --minco / --omni     等价于 --controller minco / --controller omni
+#                            注意: 只给 -p 时按 auto 判定; -c 与 -p 同时给出时以 -p 加载,
+#                            但会校验两者不矛盾: 选错直接报错, 不让"名字是 MINCO、跑的是 Omni"溜过去。
+#       --minco             等价于 --controller minco
+#                            (--omni / -c omni 已随独立自转链一起删除, 见下)
 #       --gicp / --no-gicp       是否用 GICP 初始重定位 (默认关闭 = 原来的静态地图模式)
 #       --prior-pcd <绝对路径>   先验点云 PCD (--gicp 时必填)
 #       --prior-pcd-manifest <绝对路径>
@@ -99,35 +81,23 @@
 #       --init-pose "<x,y,z,roll,pitch,yaw>"
 #                                map->odom 初值, 等价于 nav2 参数的 init_pose;
 #                                给了就以它为准 (不再从 manifest 推导)
-#       --wz-source <nav|rotation>  wz 归谁所有 (默认 nav = 迁移链; rotation = 旧基线)
-#       --fakeyaw / --no-fakeyaw    是否启用 fake_vel_transform 迁移链路
-#                                   (默认启用; --no-fakeyaw 退回旧链)
-#       --yaw-mode <auto|se2|spin|xy_only>  MINCO 航向策略 (默认 auto=按链路推导:
-#                                   迁移链 se2 / 旧链 xy_only)。spin = 阶段二小陀螺:
-#                                   自转请求经 rotation_cmd -> MINCO 进线, 判停自动换
-#                                   OmniStoppedGoalChecker, 转速用 script/spin_control.sh
+#       --yaw-mode <auto|se2|spin>  MINCO 航向策略 (默认 auto=se2, 导航拥有 wz)。
+#                                   spin = 小陀螺: 自转请求经 rotation_cmd 直接进
+#                                   MINCO, 判停自动换 OmniStoppedGoalChecker,
+#                                   转速用 script/spin_control.sh
+#       (--wz-source / --fakeyaw / --no-fakeyaw / --yaw-mode xy_only 已删除:
+#        独立自转链于 2026-10-19 删除, wz 只由导航产生, 没有旧链可退回)
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
 #                                 --no-run 则保持暂停等你点播放)
 #       --smoother / --no-smoother velocity_smoother 是否串联 (默认串联)
-#       --rotation-mode <stop|constant|periodic>   自转模式 (默认 stop)
-#       --rotation-speed <rad/s>  恒速模式角速度
-#       --rotation-offset <rad/s> 周期模式平均角速度
-#       --rotation-amplitude <rad/s> 周期模式变化幅度
-#       --rotation-period <s>     周期
-#       --rotation-phase <rad>    初相位
-#       --rotation-wave <sine|square> 周期波形
-#       --rotation / --no-rotation 是否启动自转测试发送器 (默认启动, stop 模式)
-#       --teleop / --no-teleop    手柄自转标签页 (默认关闭)
 #   -h, --help                显示本帮助
 #
 # 环境变量:
 #   WORLD MAP MAP_NAME PARAMS_FILE CONTROLLER USE_RVIZ USE_GUI RUN_IMMEDIATELY
 #   USE_GICP PRIOR_PCD_FILE PRIOR_PCD_MANIFEST INIT_POSE GICP_RUN_ID
-#   USE_VELOCITY_SMOOTHER ROTATION_MODE ROTATION_SPEED ROTATION_OFFSET
-#   ROTATION_AMPLITUDE ROTATION_PERIOD ROTATION_PHASE ROTATION_SINE_WAVE
-#   START_ROTATION_SENDER ENABLE_TELEOP WZ_SOURCE USE_FAKEYAW YAW_MODE
+#   USE_VELOCITY_SMOOTHER YAW_MODE
 #   OPEN_MODE(tab|window|direct) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
@@ -144,8 +114,8 @@
 #     src/srm27_navigation/srm27_nav_bringup/map/simulation/ 与工作空间根目录 maps/
 #     (支持 maps/<名字>.yaml 与 maps/<名字>/<名字>.yaml) 下解析, 找不到会列出全部可用地图。
 #   - 每个标签页都会先 source 工作空间的 install/setup.bash。
-#   - 控制清单：导航速度 cmd_vel_nav、自转请求 rotation_cmd、自转输出
-#     rotation_velocity、合成命令 cmd_vel_sim; 诊断在 /<ns>/diagnostics。
+#   - 控制清单：导航速度 cmd_vel_nav_fake → cmd_vel_nav_body、执行命令 cmd_vel_sim、
+#     小陀螺请求 rotation_cmd; 诊断在 /<ns>/diagnostics。
 # =============================================================
 
 set -euo pipefail
@@ -167,30 +137,8 @@ USE_GUI="${USE_GUI:-true}"
 # 想保持旧的"暂停等点播放"行为: --no-run 或 RUN_IMMEDIATELY=false。
 RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-true}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
-ENABLE_TELEOP="${ENABLE_TELEOP:-0}"
-DRY_RUN="${DRY_RUN:-0}"
-
-# wz 控制迁移开关 (方案 §4.4):
-#   默认 = 迁移链路: WZ_SOURCE=nav (导航拥有 wz) + USE_FAKEYAW=1 (fake_vel_transform)。
-#   旧基线 (--wz-source rotation 或 --no-fakeyaw): 导航只给 vx/vy, wz 来自独立自转链路。
-WZ_SOURCE="${WZ_SOURCE:-nav}"
-USE_FAKEYAW="${USE_FAKEYAW:-0}"
-#: 用户是否显式给过 --wz-source（用于判断 --fakeyaw/--no-fakeyaw 是否与之矛盾）。
-WZ_SOURCE_GIVEN=0
-#: 用户是否显式给过 --fakeyaw / --no-fakeyaw（区分默认值与显式降级）。
-USE_FAKEYAW_GIVEN=0
-#: MINCO 航向策略: auto=按链路推导 (迁移链 se2 / 旧链路 xy_only);
-#: spin=外部自转请求进线 (阶段二小陀螺, 配合 script/spin_control.sh)。
+#: MINCO 航向策略: auto=se2 (导航拥有 wz); spin=小陀螺 (外部自转请求进线)。
 YAW_MODE="${YAW_MODE:-auto}"
-START_ROTATION_SENDER="${START_ROTATION_SENDER:-1}"
-ROTATION_MODE="${ROTATION_MODE:-stop}"
-ROTATION_SPEED="${ROTATION_SPEED:-0.0}"
-ROTATION_OFFSET="${ROTATION_OFFSET:-0.0}"
-ROTATION_AMPLITUDE="${ROTATION_AMPLITUDE:-0.0}"
-ROTATION_PERIOD="${ROTATION_PERIOD:-4.0}"
-ROTATION_PHASE="${ROTATION_PHASE:-0.0}"
-ROTATION_SINE_WAVE="${ROTATION_SINE_WAVE:-true}"
-
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
@@ -226,10 +174,12 @@ while [ $# -gt 0 ]; do
     -w|--world)   WORLD_FROM_USER="${2:?--world 需要一个世界名}"; shift 2 ;;
     -m|--map)     MAP_FILE="${2:?--map 需要地图名或绝对路径}"; shift 2 ;;
     -p|--params)  PARAMS_FILE="${2:?--params 需要绝对路径}"; PARAMS_FILE_GIVEN=1; shift 2 ;;
-    -c|--controller) CONTROLLER="${2:?--controller 需要 auto|omni|minco}"
+    -c|--controller) CONTROLLER="${2:?--controller 需要 auto|minco}"
                      CONTROLLER_CLI_GIVEN=1; shift 2 ;;
     --minco)      CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
-    --omni)       CONTROLLER="omni";  CONTROLLER_CLI_GIVEN=1; shift ;;
+    --omni)       echo "[错误] --omni 已删除: 独立自转链删除后 Omni 参数文件(base_link/旧链)" >&2
+                  echo "       无法在仿真链上工作, 唯一链路是 MINCO + fakeyaw (--minco 或默认)。" >&2
+                  exit 2 ;;
     --gicp)       USE_GICP="1"; shift ;;
     --no-gicp)    USE_GICP="0"; shift ;;
     --prior-pcd)          PRIOR_PCD_FILE="${2:?--prior-pcd 需要绝对路径}"; shift 2 ;;
@@ -243,86 +193,25 @@ while [ $# -gt 0 ]; do
     --no-run)     RUN_IMMEDIATELY="false"; shift ;;
     --smoother)   USE_VELOCITY_SMOOTHER="True"; shift ;;
     --no-smoother) USE_VELOCITY_SMOOTHER="False"; shift ;;
-    --rotation-mode)      ROTATION_MODE="${2:?--rotation-mode 需要 stop|constant|periodic}"; shift 2 ;;
-    --rotation-speed)     ROTATION_SPEED="${2:?--rotation-speed 需要 rad/s}"; shift 2 ;;
-    --rotation-offset)    ROTATION_OFFSET="${2:?--rotation-offset 需要 rad/s}"; shift 2 ;;
-    --rotation-amplitude) ROTATION_AMPLITUDE="${2:?--rotation-amplitude 需要 rad/s}"; shift 2 ;;
-    --rotation-period)    ROTATION_PERIOD="${2:?--rotation-period 需要秒}"; shift 2 ;;
-    --rotation-phase)     ROTATION_PHASE="${2:?--rotation-phase 需要弧度}"; shift 2 ;;
-    --rotation-wave)      case "${2:?--rotation-wave 需要 sine|square}" in
-                            sine)   ROTATION_SINE_WAVE="true" ;;
-                            square) ROTATION_SINE_WAVE="false" ;;
-                            *) echo "[错误] --rotation-wave 只支持 sine 或 square" >&2; exit 2 ;;
-                          esac
-                          shift 2 ;;
-    --rotation)     START_ROTATION_SENDER="1"; shift ;;
-    --no-rotation)  START_ROTATION_SENDER="0"; shift ;;
-    --wz-source)  WZ_SOURCE="${2:?--wz-source 需要 nav|rotation}"; WZ_SOURCE_GIVEN="1"; shift 2 ;;
-    --fakeyaw)    USE_FAKEYAW="1"; USE_FAKEYAW_GIVEN="1"; shift ;;
-    --no-fakeyaw) USE_FAKEYAW="0"; USE_FAKEYAW_GIVEN="1"; shift ;;
-    --yaw-mode)   YAW_MODE="${2:?--yaw-mode 需要 auto|se2|spin|xy_only}"; shift 2 ;;
-    --teleop)     ENABLE_TELEOP="1"; shift ;;
-    --no-teleop)  ENABLE_TELEOP="0"; shift ;;
+    --yaw-mode)   YAW_MODE="${2:?--yaw-mode 需要 auto|se2|spin}"; shift 2 ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
 
-# ---------- wz 控制迁移开关 ----------
-# 两个开关是同一件事的两种写法，互相蕴含：
-#   --wz-source nav   <=> 导航拥有 wz <=> 需要 fake_vel_transform 迁移链路
-# 只有"显式给矛盾组合"才报错（--fakeyaw --wz-source rotation / --no-fakeyaw --wz-source nav）。
-case "$(printf '%s' "$WZ_SOURCE" | tr '[:upper:]' '[:lower:]')" in
-  nav)      WZ_SOURCE="nav" ;;
-  rotation) WZ_SOURCE="rotation" ;;
-  *) echo "[错误] --wz-source 只支持 nav / rotation" >&2; exit 2 ;;
-esac
+# ---------- 航向策略 ----------
+# 唯一链路: wz 由导航(上位机)拥有。yaw_mode=auto 与 se2 等价；spin = 小陀螺，
+# 外部自转请求经 rotation_cmd 直接进 MINCO（独立自转链已删除，没有中间节点，
+# 也没有 rotation_velocity）。
 case "$YAW_MODE" in
-  auto|se2|spin|xy_only) ;;
-  *) echo "[错误] --yaw-mode 只支持 auto / se2 / spin / xy_only" >&2; exit 2 ;;
-esac
-# Omni PID 控制器没有迁移链路: 它的参数文件是 base_link / 旧链 (导航只给 vx/vy), 而
-# fakeyaw 链路的 command_frame / yaw_policy 都是 MINCO 的参数。所以显式 -c omni 时按旧链
-# 处理 (自转仍由独立自转链给出); 若同时显式要迁移链, 直接报错, 不让"半条迁移链"跑起来。
-if [ "$CONTROLLER" = "omni" ]; then
-  if { [ "$WZ_SOURCE_GIVEN" = "1" ] && [ "$WZ_SOURCE" = "nav" ]; } \
-     || { [ "$USE_FAKEYAW_GIVEN" = "1" ] && [ "$USE_FAKEYAW" = "1" ]; }; then
-    echo "[错误] -c omni 与迁移链路 (--fakeyaw / --wz-source nav) 不能同时用:" >&2
-    echo "       fakeyaw 链路的 command_frame / yaw_policy 是 MINCO 的参数, Omni PID 那份" >&2
-    echo "       参数文件是 base_link / 旧链。想跑迁移链就去掉 -c omni; 想跑 Omni 就" >&2
-    echo "       用 --no-fakeyaw / --wz-source rotation。" >&2
+  auto|se2|spin) ;;
+  xy_only)
+    echo "[错误] --yaw-mode xy_only 属于已删除的旧链路（导航不控自转）。" >&2
+    echo "       独立自转链已删除, wz 只由导航产生: 请用 auto/se2（车头跟切线）或 spin。" >&2
     exit 2
-  fi
-  WZ_SOURCE="rotation"
-  USE_FAKEYAW="0"
-fi
-# 默认已切到迁移链; 只有显式 --no-fakeyaw 且未给 --wz-source 时才降级回旧链路。
-if [ "$USE_FAKEYAW" = "0" ] && [ "$USE_FAKEYAW_GIVEN" = "1" ] && [ "$WZ_SOURCE_GIVEN" = "0" ]; then
-  WZ_SOURCE="rotation"
-fi
-if [ "$USE_FAKEYAW" = "1" ] && [ "$WZ_SOURCE_GIVEN" = "1" ] && [ "$WZ_SOURCE" = "rotation" ]; then
-  echo "[错误] --fakeyaw 与 --wz-source rotation 矛盾: fakeyaw 迁移链路的前提就是" >&2
-  echo "       导航拥有 wz; 否则导航会输出 wz、而 mux 又把它丢弃 (两处都不生效)。" >&2
-  exit 2
-fi
-if [ "$USE_FAKEYAW" = "0" ] && [ "$WZ_SOURCE_GIVEN" = "1" ] && [ "$WZ_SOURCE" = "nav" ]; then
-  echo "[错误] --no-fakeyaw 与 --wz-source nav 矛盾: 导航拥有 wz 必须经" >&2
-  echo "       fake_vel_transform 把速度从 fake 系转到真实车体系。" >&2
-  exit 2
-fi
-if [ "$USE_FAKEYAW" = "1" ] || [ "$WZ_SOURCE" = "nav" ]; then
-  WZ_SOURCE="nav"
-  USE_FAKEYAW="1"
-  # 迁移链路上独立自转输入会被 mux 拒绝 (nav_se2): 关掉自转测试发送器与手柄自转。
-  # 小陀螺用 --yaw-mode spin + script/spin_control.sh（请求经 MINCO 进线）。
-  START_ROTATION_SENDER="0"
-  ENABLE_TELEOP=0
-fi
-if [ "$YAW_MODE" = "spin" ] && [ "$WZ_SOURCE" != "nav" ]; then
-  echo "[错误] --yaw-mode spin 只在迁移链上有效: 旧链路的 mux(legacy) 会丢弃导航 wz," >&2
-  echo "       自转请求进不了 MINCO。请去掉 --no-fakeyaw / 改用 --wz-source nav。" >&2
-  exit 2
-fi
+    ;;
+  *) echo "[错误] --yaw-mode 只支持 auto / se2 / spin" >&2; exit 2 ;;
+esac
 # ---------- 环境检查 ----------
 if [ ! -f "$WS_DIR/install/setup.bash" ]; then
   echo "[错误] 未找到 $WS_DIR/install/setup.bash" >&2
@@ -393,51 +282,32 @@ fi
 # 两个目录同名时以包内 map/simulation/ 优先, 保证仿真默认地图不被意外顶掉。
 MAPS_DIR="$WS_DIR/maps"
 
-# 两份仿真 Nav2 参数文件: Omni (历史默认) 与 MINCO+MPC。优先源码目录 (symlink-install 下与
-# install 一致), 退化到 install。选中哪份由 --controller 决定, 只给 -p 则按文件内容判定。
-OMNI_PARAMS_DEFAULT="$PKG_SRC/config/simulation/nav2_params_srm.yaml"
-if [ ! -f "$OMNI_PARAMS_DEFAULT" ]; then
-  OMNI_PARAMS_DEFAULT="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm.yaml"
-fi
-MINCO_PARAMS_DEFAULT="$PKG_SRC/config/simulation/nav2_params_srm_minco.yaml"
-if [ ! -f "$MINCO_PARAMS_DEFAULT" ]; then
-  MINCO_PARAMS_DEFAULT="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml"
-fi
+# 默认 Nav2 参数文件: 唯一链路 = MINCO + fakeyaw。优先源码目录 (symlink-install 下与
+# install 一致), 退化到 install。只给 -p 时按参数文件内容判定控制器。
+PARAMS_DEFAULT_NAME="nav2_params_srm_fakeyaw.yaml"
 MINCO_PLUGIN_NAME="srm27_minco_controller::MincoMpcController"
 
-# 只给了 -p、没显式选控制器: 交给下面的 auto 判定, 免得"-p 指到 Omni 文件"被当成
-# "选了 minco 却加载 Omni 文件"拦下来 (与 start_real_nav.sh 同一套规则)。
+# 只给了 -p、没显式选控制器: 交给下面的 auto 判定 (与 start_real_nav.sh 同一套规则)。
 if [ "$CONTROLLER_CLI_GIVEN" = "0" ] && [ "$PARAMS_FILE_GIVEN" = "1" ]; then
   CONTROLLER="auto"
 fi
 
 case "$CONTROLLER" in
-  auto|omni|minco) ;;
-  *) echo "[错误] --controller 只支持 auto / omni / minco, 收到: $CONTROLLER" >&2; exit 2 ;;
+  auto|minco) ;;
+  omni)
+    echo "[错误] -c omni 已删除: 独立自转链删除后 Omni 参数文件(base_link/旧链)无法在仿真链上" >&2
+    echo "       工作 (它的角速度不归导航)。唯一链路是 MINCO + fakeyaw: 用默认或 -c minco。" >&2
+    echo "       需要 Omni 基线做对照只能回 main 分支。" >&2
+    exit 2
+    ;;
+  *) echo "[错误] --controller 只支持 auto / minco, 收到: $CONTROLLER" >&2; exit 2 ;;
 esac
 
 if [ -z "$PARAMS_FILE" ]; then
-  # 迁移链路默认用 fakeyaw 那份配置 (base_link_fake + se2 + StoppedGoalChecker);
-  # 旧基线 (wz 来自自转链) 默认用 minco 变体 (MincoMpcController + xy_only +
-  # OmniStoppedGoalChecker, command_frame=base_link) —— 控制器与实车对齐,
-  # 速度限幅仍由 speed_limits.yaml 合并 (按插件内容自动判 minco 变体)。
-  # 显式 -c omni 时用旧的 Omni PID 基线 (nav2_params_srm.yaml)。
-  case "$CONTROLLER" in
-    omni)
-      PARAMS_FILE="$OMNI_PARAMS_DEFAULT"
-      ;;
-    minco|auto)
-      if [ "$WZ_SOURCE" = "nav" ]; then
-        PARAMS_DEFAULT_NAME="nav2_params_srm_fakeyaw.yaml"
-      else
-        PARAMS_DEFAULT_NAME="nav2_params_srm_minco.yaml"
-      fi
-      PARAMS_FILE="$PKG_SRC/config/simulation/$PARAMS_DEFAULT_NAME"
-      if [ ! -f "$PARAMS_FILE" ]; then
-        PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/$PARAMS_DEFAULT_NAME"
-      fi
-      ;;
-  esac
+  PARAMS_FILE="$PKG_SRC/config/simulation/$PARAMS_DEFAULT_NAME"
+  if [ ! -f "$PARAMS_FILE" ]; then
+    PARAMS_FILE="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup/config/simulation/$PARAMS_DEFAULT_NAME"
+  fi
 fi
 
 # Gazebo 世界与 SRM 初始位姿由 srm27_gazebo_simulator/config/srm_sim.yaml 给出。
@@ -566,32 +436,17 @@ if [ "$CONTROLLER" = "auto" ]; then
   fi
 fi
 
-# 显式选 minco 但文件里没有 MINCO 插件 -> 直接失败, 不让"名字是 MINCO、跑的是 Omni"溜过去。
-if [ "$CONTROLLER" = "minco" ] && ! grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
-  echo "[错误] --controller minco, 但参数文件里没有 $MINCO_PLUGIN_NAME:" >&2
+# 唯一链路要求 MINCO 插件 + fakeyaw 参数文件: 两者缺一就直接失败, 不跑"半条链"。
+if ! grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+  echo "[错误] 参数文件里没有 $MINCO_PLUGIN_NAME:" >&2
   echo "[错误]   $PARAMS_FILE" >&2
-  echo "[提示] MINCO 仿真参数文件: $MINCO_PARAMS_DEFAULT" >&2
+  echo "[提示] 唯一链路是 MINCO + fakeyaw: 用 -p .../nav2_params_srm_fakeyaw.yaml" >&2
+  echo "       (不给 -p 时默认就是它)。Omni/旧链参数文件已随独立自转链一起删除。" >&2
   exit 1
 fi
-
-# 反向也拦一下: 显式选 omni 却加载了 MINCO 那份, 表现同样是"选的与实际跑的不一致"。
-if [ "$CONTROLLER" = "omni" ] && grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
-  echo "[错误] --controller omni, 但参数文件里是 $MINCO_PLUGIN_NAME:" >&2
-  echo "[错误]   $PARAMS_FILE" >&2
-  echo "[提示] Omni 仿真参数文件: $OMNI_PARAMS_DEFAULT" >&2
-  echo "[提示] 想跑 MINCO 就用 --controller minco (不给 -p 时会自动选对文件)。" >&2
-  exit 1
-fi
-
-# 只给 -p（或 CONTROLLER=auto）判定成 Omni 时, 参数文件就是 base_link/旧链那一份:
-# 此时若仍要求迁移链路 (fakeyaw + 导航拥有 wz), 会把 fake 系的命令发给只认 base_link
-# 的 Omni —— 明确报错, 让用户选一边。
-if [ "$CONTROLLER" = "omni" ] && [ "$WZ_SOURCE" = "nav" ]; then
-  echo "[错误] 参数文件是 Omni PID 那份 ($PARAMS_FILE), 但它走的是旧链 (base_link)," >&2
-  echo "       而当前要求 wz 迁移链路 (fakeyaw / base_link_fake)。两者不能混用:" >&2
-  echo "       迁移链路请用 MINCO 那份参数文件 (不给 -p 时按 --wz-source 自动选;" >&2
-  echo "       默认就是 nav2_params_srm_fakeyaw.yaml), 想跑 Omni 请加 --no-fakeyaw" >&2
-  echo "       (或 --wz-source rotation)。" >&2
+if ! grep -q "base_link_fake" "$PARAMS_FILE"; then
+  echo "[错误] 参数文件不是 fakeyaw 变体 (找不到 base_link_fake): $PARAMS_FILE" >&2
+  echo "[提示] wz 由导航拥有, 导航参考系必须是 base_link_fake; 用默认参数文件即可。" >&2
   exit 1
 fi
 
@@ -614,7 +469,6 @@ norm_switch() {
 }
 USE_GUI="$(norm_switch "$USE_GUI")"
 RUN_IMMEDIATELY="$(norm_switch "$RUN_IMMEDIATELY")"
-ROTATION_SINE_WAVE="$(norm_switch "$ROTATION_SINE_WAVE")"
 
 # ---------- 初始重定位 (GICP) 前置解析 ----------
 USE_GICP="$(norm_switch "${USE_GICP:-0}")"
@@ -749,39 +603,15 @@ if [ -n "$WORLD_FROM_USER" ] && [ -n "$GZ_WORLD" ] && [ "$GZ_WORLD" != "$WORLD" 
   echo "[提示] 世界由 srm_sim.yaml 的 '$GZ_WORLD' 覆盖为 '$WORLD'。"
 fi
 
-case "$ROTATION_MODE" in
-  stop|constant|periodic) ;;
-  *) echo "[错误] --rotation-mode 只支持 stop / constant / periodic" >&2; exit 2 ;;
-esac
-
-if [ "$WZ_SOURCE" = "nav" ]; then
-  USE_FAKEYAW_ARG="True"
-  WZ_SOURCE_ARG="nav"
-  COMMAND_FRAME_ARG="base_link_fake"
-else
-  USE_FAKEYAW_ARG="False"
-  WZ_SOURCE_ARG="rotation"
-  COMMAND_FRAME_ARG="base_link"
-fi
-
-if [ "$START_ROTATION_SENDER" = "0" ] || [ "$START_ROTATION_SENDER" = "false" ] || [ "$START_ROTATION_SENDER" = "no" ]; then
-  START_ROTATION_SENDER="False"
-else
-  START_ROTATION_SENDER="True"
-fi
-
-if [ "$ENABLE_TELEOP" = "0" ] || [ "$ENABLE_TELEOP" = "false" ] || [ "$ENABLE_TELEOP" = "no" ]; then
-  ENABLE_TELEOP=0
-else
-  ENABLE_TELEOP=1
-fi
+# 唯一链路: fakeyaw 迁移 (导航拥有 wz), 命令系 base_link_fake。
+USE_FAKEYAW_ARG="True"
+COMMAND_FRAME_ARG="base_link_fake"
 
 # ---------- 进程检测 / 清理 ----------
 # 方括号包住首字符, 避免 pgrep 匹配到自身命令行。
 GAZEBO_PATTERN='(^|/)(gzserver|gzclient|gazebo)([[:space:]]|$)|[i]gn[[:space:]]+gazebo|[g]z[[:space:]]+sim|[r]os2[[:space:]]+launch[[:space:]]+srm27_gazebo_simulator'
 GAZEBO_RESIDUAL_PATTERN='[/]ros_gz_bridge/parameter_bridge[[:space:]]+/clock@rosgraph_msgs/msg/Clock\[gz.msgs.Clock|[s]rm_velocity_adapter|[r]obot_state_publisher.*__ns:=/red_standard_robot1'
 NAV_PATTERN='[r]os2[[:space:]]+launch[[:space:]]+srm27_nav_bringup[[:space:]]+(nav_srm_simulation_launch|nav_simulation_launch)\.py'
-TELEOP_PATTERN='[s]rm27_teleop_twist_joy_node'
 
 GAZEBO_LOCK_FILE="${SRM27_GAZEBO_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/srm27_sentry_gazebo.lock}"
 
@@ -909,29 +739,14 @@ else
 fi
 printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
 printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
-printf 'wz 归属   : %s%s\n' "$WZ_SOURCE" \
-  "$([ "$USE_FAKEYAW" = "1" ] && echo '  (fake_vel_transform 迁移链路: 导航拥有 wz, 底盘 yaw 由 wz 积分)' || echo '  (旧基线: wz 来自独立自转链路)')"
-if [ "$WZ_SOURCE" = "nav" ]; then
-  printf '速度链    : Nav2[cmd_vel_nav_fake] -> fake_vel_transform[cmd_vel_nav_body] -> srm_cmd_mux(nav_se2) -> cmd_vel_sim -> Gazebo\n'
-  printf 'TF owner  : odom->base_link = 定位/真值里程计;  base_link->base_link_fake = fake_vel_transform\n'
-else
-  printf '速度链    : Nav2[cmd_vel_nav] + rotation_velocity -> srm_cmd_mux(legacy) -> cmd_vel_sim -> Gazebo\n'
-  printf 'TF owner  : odom->base_link = 定位/真值里程计 (无 fake 系)\n'
-fi
-printf '自转测试  : 发送器 %s  模式 %s' "$START_ROTATION_SENDER" "$ROTATION_MODE"
-case "$ROTATION_MODE" in
-  constant) printf '  角速度 %s rad/s' "$ROTATION_SPEED" ;;
-  periodic) printf '  offset %s + amplitude %s, period %s s, phase %s rad, %s' \
-      "$ROTATION_OFFSET" "$ROTATION_AMPLITUDE" "$ROTATION_PERIOD" "$ROTATION_PHASE" \
-      "$([ "$ROTATION_SINE_WAVE" = "true" ] && echo 正弦 || echo 方波)" ;;
-esac
-printf '\n航向策略  : %s' "$YAW_MODE"
+printf 'wz 归属   : 导航(上位机)  (fake_vel_transform 链路: 底盘 yaw 由导航 wz 积分; 独立自转链已删除)\n'
+printf '速度链    : Nav2[cmd_vel_nav_fake] -> fake_vel_transform[cmd_vel_nav_body] -> srm_cmd_mux -> cmd_vel_sim -> Gazebo\n'
+printf 'TF owner  : odom->base_link = 定位/真值里程计;  base_link->base_link_fake = fake_vel_transform\n'
+printf '航向策略  : %s' "$YAW_MODE"
 case "$YAW_MODE" in
-  auto)    [ "$WZ_SOURCE" = "nav" ] && echo '  (推导: se2, 导航拥有 wz)' \
-               || echo '  (推导: xy_only, MPC 不控自转)' ;;
-  se2)     echo '  (导航拥有 wz: 车头跟路径切线)' ;;
-  spin)    echo '  (小陀螺: script/spin_control.sh on <rad/s> / off / status)' ;;
-  xy_only) echo '  (MPC 不控自转)' ;;
+  auto) echo '  (推导: se2, 导航拥有 wz)' ;;
+  se2)  echo '  (导航拥有 wz: 车头跟路径切线)' ;;
+  spin) echo '  (小陀螺: script/spin_control.sh on <rad/s> / off / status)' ;;
 esac
 printf '\n终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
 echo
@@ -994,20 +809,10 @@ PYEOF
   PARAMS_FILE_Q="$(printf '%q' "$GICP_PARAMS_FILE")"
   echo "[提示] GICP 参数副本: $GICP_PARAMS_FILE"
 fi
-# 定位方式由 NAV_EXTRA_ARGS 统一给出 (main: use_pcd_localization / use_lio_odometry /
-# prior_pcd_file); 本迁移新增的三个开关跟在它后面, 与定位方式正交。
-NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} wz_control_mode:=${WZ_SOURCE_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} start_rotation_sender:=${START_ROTATION_SENDER} rotation_mode:=${ROTATION_MODE} rotation_speed:=${ROTATION_SPEED} rotation_offset:=${ROTATION_OFFSET} rotation_amplitude:=${ROTATION_AMPLITUDE} rotation_period:=${ROTATION_PERIOD} rotation_phase:=${ROTATION_PHASE} rotation_sine_wave:=${ROTATION_SINE_WAVE} yaw_mode:=${YAW_MODE}"
-start_once "SRM27 导航 + 速度合成 + RViz" "$NAV_PATTERN" "$NAV_CMD"
-
-if [ "$ENABLE_TELEOP" = "1" ]; then
-  echo "[3/3] 启动手柄自转 (输出 remap 到 rotation_cmd)..."
-  start_once \
-    "SRM27 手柄自转" \
-    "$TELEOP_PATTERN" \
-    "ros2 run srm27_teleop_twist_joy srm27_teleop_twist_joy_node --ros-args -r __ns:=/${ROBOT_NS} -r cmd_vel:=rotation_cmd -p use_sim_time:=true"
-else
-  echo "[3/3] 跳过手柄自转 (--no-teleop)。自转请用 --rotation-mode 选择模式。"
-fi
+# 定位方式由 NAV_EXTRA_ARGS 统一给出 (use_pcd_localization / use_lio_odometry /
+# prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE}"
+start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 cat <<EOF
 
@@ -1016,13 +821,10 @@ cat <<EOF
   - Gazebo $( [ "$RUN_IMMEDIATELY" = "true" ] && echo "已直接开始运行(gz sim -r), 不用点播放。" || echo "以暂停启动(--no-run), 需要点播放后仿真才推进。" )
   - Gazebo 里车出现后, 在 RViz 用 "2D Goal Pose" / "Nav2 Goal" 下发目标点。
 
-切换自转模式 (无需重启导航, 仅旧基线; 迁移链路请用导航目标点):
-  ros2 service call /${ROBOT_NS}/rotation_test_sender/disable std_srvs/srv/Trigger
-  ros2 param set /${ROBOT_NS}/rotation_test_sender rotation_mode periodic
-  ros2 param set /${ROBOT_NS}/rotation_test_sender offset 1.0
-  ros2 param set /${ROBOT_NS}/rotation_test_sender amplitude 0.5
-  ros2 param set /${ROBOT_NS}/rotation_test_sender period 4.0
-  ros2 service call /${ROBOT_NS}/rotation_test_sender/enable std_srvs/srv/Trigger
+小陀螺 (需以 --yaw-mode spin 启动; 请求经 rotation_cmd 直接进 MINCO, wz 仍由导航输出):
+  ./script/spin_control.sh on 2.0      # 恒速自转 2.0 rad/s
+  ./script/spin_control.sh status      # 查看请求/实际转速
+  ./script/spin_control.sh off         # 撤回请求 (停转)
 
 急停 (清零并保持零速):
   ros2 service call /${ROBOT_NS}/srm_cmd_mux/stop_all std_srvs/srv/Trigger
@@ -1032,13 +834,13 @@ cat <<EOF
   ./script/kill_gzb.sh && ./script/kill_rviz.sh
 EOF
 
-if [ "$WZ_SOURCE" = "nav" ]; then
-  cat <<EOF
+cat <<EOF
 
 速度链路检查 (新终端):
   cd '$WS_DIR' && source install/setup.bash
   ros2 topic echo /${ROBOT_NS}/cmd_vel_nav_fake --once    # 导航请求 (fake 系, 含 wz)
   ros2 topic echo /${ROBOT_NS}/cmd_vel_nav_body --once    # fake 转换后 (车体系, wz 应逐条相同)
+  ros2 topic echo /${ROBOT_NS}/rotation_cmd --once         # 小陀螺请求 (仅 spin 模式有数据)
   ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # mux 最终输出 (含导航 wz)
   ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
   ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
@@ -1054,20 +856,6 @@ if [ "$WZ_SOURCE" = "nav" ]; then
 P0 自检 (不需要 Gazebo):
   python3 script/check_wz_fakeyaw_chain.py
 EOF
-else
-  cat <<EOF
-
-速度链路检查 (新终端):
-  cd '$WS_DIR' && source install/setup.bash
-  ros2 topic echo /${ROBOT_NS}/cmd_vel_nav --once         # 导航平移速度 (angular.z 应为 0)
-  ros2 topic echo /${ROBOT_NS}/rotation_velocity --once   # 独立自转速度
-  ros2 topic echo /${ROBOT_NS}/cmd_vel_sim --once         # 合成后的最终执行命令
-  ros2 topic hz /${ROBOT_NS}/cmd_vel_sim                  # 应为 200 Hz 左右
-  ros2 topic echo /${ROBOT_NS}/odometry --once            # 真值里程计 (含实际 yaw/wz)
-  ros2 run tf2_ros tf2_echo map base_link                 # 完整 TF 链: map->odom->base_link
-  ros2 topic echo /${ROBOT_NS}/diagnostics --once         # 合成与超时状态
-EOF
-fi
 
 # 只有真的跑 MINCO 才打印这段自检: 换控制器最容易出的错是"以为换了, 其实参数文件没选对"。
 if [ "$CONTROLLER" = "minco" ]; then
@@ -1085,7 +873,9 @@ MINCO 自检 (仿真, 按顺序确认):
   3) 诊断健康 (判"卡在哪"的第一手证据, 失败路径也会发布):
        ros2 topic echo /${ROBOT_NS}/FollowPath/diagnostics --once
        关注: planning_result=success、minimum_clearance>0、missed_deadline_count 不持续增长。
-  4) 阶段一 MPC 没有自转权限: /${ROBOT_NS}/cmd_vel_nav 的 angular.z 应恒为 0 (自转仍由自转链路负责)。
+  4) MPC 拥有自转权限 (wz 归导航): /${ROBOT_NS}/cmd_vel_nav_fake 的 angular.z 在弯道应为非零,
+     且与 cmd_vel_nav_body / cmd_vel_sim 的 angular.z 逐条相同 (fake 转换只转平移)。
+     yaw_policy.mode 若不是 se2/spin, 这里会恒为 0 —— 那说明航向权限没开。
 
 MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
   a) 参数真的生效 (configure 期读一次; 改完 yaml 必须重启导航栈):
@@ -1112,7 +902,7 @@ MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
   e) 想先看链路通不通, 把"更容易判卡死"调出来:
        ⚠ **必须改 yaml 后重启导航栈, 不能用 ros2 param set。**
        MincoMpcController 只在 configure 期 (loadParameters) 读一次参数, 且**没有注册
-       onSetParameters 回调** (与 rotation_test_sender 不同, 那个有回调所以能热改)。
+       onSetParameters 回调** (参数只在 configure 期读一次)。
        对 controller_server 用 ros2 param set 会"成功返回但毫无效果"—— 这是最费时间的一种坑。
        做法: 改 config/simulation/nav2_params_srm_minco.yaml 里
          FollowPath.recovery.fail_threshold: 2      # 更容易进脱困

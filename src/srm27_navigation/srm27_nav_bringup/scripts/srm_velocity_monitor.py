@@ -22,7 +22,8 @@
   * 合成后的执行命令 cmd_vel_sim       （cmd_vx / cmd_vy / cmd_wz）
   * 实际运动速度     odometry.twist    （act_vx / act_vy / act_wz）与位姿（x / y / yaw）
 
-同时统计导航输入中**非零 angular.z 的次数**，作为"导航误发 wz"的话题级诊断
+同时统计导航输入中**非零 angular.z 的次数**：2026-10-19 起 wz 归导航所有，出现非零
+是正常现象；恒为 0 反而说明航向策略没给角速度权限（见 yaw_policy.mode）
 （方案 §9 的风险项之一）。
 
 用法：
@@ -81,14 +82,14 @@ class VelocityMonitor(Node):
         )
         self.create_subscription(Twist, "cmd_vel_nav", self._on_nav, qos)
         self.create_subscription(Twist, "cmd_vel_sim", self._on_cmd, qos)
-        self.create_subscription(Twist, "rotation_velocity", self._on_rotation, qos)
+        self.create_subscription(Twist, "rotation_cmd", self._on_spin_request, qos)
         self.create_subscription(
             Odometry, self.actual_topic, self._on_odom, qos
         )
 
         self.nav = None
         self.cmd = None
-        self.rotation = None
+        self.spin_request = None
         self.odom = None
         self.rows = []
         self.marks = []
@@ -120,8 +121,10 @@ class VelocityMonitor(Node):
         self.cmd = msg
         self.cmd_count += 1
 
-    def _on_rotation(self, msg):
-        self.rotation = msg
+    def _on_spin_request(self, msg):
+        # 小陀螺（--yaw-mode spin）的上位机自转请求；独立自转链已删除，
+        # 这条请求直接进 MINCO 的 spin_request，不再有 rotation_velocity。
+        self.spin_request = msg
 
     def _on_odom(self, msg):
         self.odom = msg
@@ -141,7 +144,7 @@ class VelocityMonitor(Node):
             "nav_vx": self.nav.linear.x if self.nav else "",
             "nav_vy": self.nav.linear.y if self.nav else "",
             "nav_wz": self.nav.angular.z if self.nav else "",
-            "rot_wz": self.rotation.angular.z if self.rotation else "",
+            "spin_req_wz": self.spin_request.angular.z if self.spin_request else "",
             "cmd_vx": self.cmd.linear.x if self.cmd else "",
             "cmd_vy": self.cmd.linear.y if self.cmd else "",
             "cmd_wz": self.cmd.angular.z if self.cmd else "",
@@ -176,14 +179,17 @@ class VelocityMonitor(Node):
         else:
             lines.append(f"cmd_vel_nav 消息数  : {self.nav_count}")
             lines.append(f"cmd_vel_sim 消息数  : {self.cmd_count}")
+        # 导航拥有 wz（独立自转链已删除）：非零 wz 是正常现象，恒为 0 才说明控制器
+        # 没拿到角速度权限（例如 yaw_policy 仍是 xy_only）。
         lines.append(
             f"导航输入中非零 wz   : {self.nav_wz_nonzero} 次"
-            + ("（符合 wz=0 约定）" if self.nav_wz_nonzero == 0 else "（异常，应恒为 0）")
+            + ("（导航拥有 wz，非零正常；一次都没有请查 yaw_policy.mode）"
+               if self.nav_wz_nonzero == 0 else "（导航拥有 wz，正常）")
         )
 
         for name, label in (
             ("cmd_wz", "cmd_vel_sim.wz"),
-            ("rot_wz", "rotation_velocity.wz"),
+            ("spin_req_wz", "rotation_cmd.wz(自转请求)"),
             ("act_wz", "实际 wz"),
         ):
             values = self._column(name)

@@ -79,8 +79,6 @@ CHASSIS_MIGRATED_KEYS = [
     "srm_cmd_mux.vy_max",
     "srm_cmd_mux.v_max",
     "srm_cmd_mux.wz_max",
-    "rotation_controller.wz_max",
-    "rotation_controller.max_angular_accel",
 ]
 
 
@@ -189,7 +187,7 @@ def test_migrated_keys_are_gone_from_params_files():
         _assert(not leftovers, f"{params.name} 仍写着已迁移的限幅键: {leftovers}")
 
 
-def test_chassis_config_gets_mux_and_rotation_limits_from_overlay():
+def test_chassis_config_gets_mux_limits_from_overlay():
     overlay = CONFIG_DIR / "simulation" / speed.OVERLAY_FILENAME
     result = speed.merge_params_files(str(CHASSIS_PARAMS), str(overlay))
     base = speed.load_yaml(str(CHASSIS_PARAMS))
@@ -203,9 +201,14 @@ def test_chassis_config_gets_mux_and_rotation_limits_from_overlay():
             speed.lookup(result.merged, key) is not None,
             f"底盘配置合并后缺少 {key}",
         )
+    # 独立自转链（rotation_controller）已于 2026-10-19 删除：底盘合并只应剩下 mux 段。
     _assert(
-        "srm_cmd_mux" in result.sections and "rotation_controller" in result.sections,
-        f"底盘合并缺少 mux/自转段: {sorted(result.sections)}",
+        "srm_cmd_mux" in result.sections,
+        f"底盘合并缺少 mux 段: {sorted(result.sections)}",
+    )
+    _assert(
+        "rotation_controller" not in result.sections,
+        "底盘合并里仍有 rotation_controller 段（该节点已删除）",
     )
 
 

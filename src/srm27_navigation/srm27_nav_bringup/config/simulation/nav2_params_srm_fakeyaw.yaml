@@ -6,9 +6,12 @@
 # 【2026-10-19 合流说明】main 分支的脱困/异常处理更新已经同步进本文件（等价于"照抄
 # nav2_params_srm_minco.yaml，只保留下面这些 fakeyaw 专属差异"）：
 #   * 已同步：FollowPath.recovery.*（脱困判定/逃逸/成功阈值）、behavior_server 的
-#     escape_direction_mode + esdf_*（BackUpFreeSpace 走 ESDF 梯度）、costmap
-#     robot_radius 0.33（规划器禁行带 0.30 < 控制器硬净空 0.38 的不变量）、
+#     escape_direction_mode + esdf_*（BackUpFreeSpace 走 ESDF 梯度）、
 #     minco.optimization_clearance_margin 0.1、minco.w_obstacle 500。
+#   * **故意不同**：两份 costmap 的 robot_radius 取 0.40（main 是 0.33），
+#     即"控制器硬净空 0.38 + 0.02"——本链要保证规划器不生成为贴边路径；
+#     代价是 0.40 > 0.38，起点格子可能被判障碍（见 recovery 段 ★ 说明）；
+#     两份 costmap 的 inflation_radius 取 0.5（main 是 global 0.7 / local 0.1）。
 #   * 仍保持 fakeyaw 专属（不要从 minco 那份照抄）：robot_base_frame=base_link_fake
 #     （bt_navigator / global_costmap / local_costmap / behavior_server 四处）、
 #     FollowPath.command_frame/fake_base_frame=base_link_fake、yaw_policy.mode=se2、
@@ -20,7 +23,7 @@
 #       MINCO（base_link_fake 系，输出 vx/vy/wz）
 #         └─ cmd_vel_nav_fake ─► fake_vel_transform（发 base_link -> base_link_fake TF，
 #                                并把平移速度一次性转到真实 base_link 系；wz 原样透传）
-#             └─ cmd_vel_nav_body ─► srm_cmd_mux(wz_control_mode=nav_se2) ─► cmd_vel_sim
+#             └─ cmd_vel_nav_body ─► srm_cmd_mux ─► cmd_vel_sim
 #
 #     Nav2 的输出话题是 `cmd_vel_nav_fake`，mux 的输入是 `cmd_vel_nav_body` ——
 #     两者必须与 launch 参数 `cmd_vel_nav_topic` / mux `nav_topic` 一一对应，
@@ -53,11 +56,11 @@
 #   ./script/start_sim_nav.sh --fakeyaw --wz-source nav -w srm_empty
 # 或：
 #   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
-#     params_file:=<本文件绝对路径> use_fakeyaw_transform:=True wz_control_mode:=nav
+#     params_file:=<本文件绝对路径> use_fakeyaw_transform:=True
 #
-# 回退（方案 §7）：用 nav2_params_srm_minco.yaml + use_fakeyaw_transform:=False +
-# wz_control_mode:=rotation + command_frame:=base_link，mux 回到
-# legacy_independent_rotation（wz 只来自 rotation_velocity）。
+# 回退：**没有旧链路可回退**了。2026-10-19 独立自转链（rotation_controller /
+# rotation_test_sender / rotation_velocity）已删除，`wz` 只由导航（上位机）产生，
+# mux 也没有 wz_control_mode 开关。要回到"wz 不为导航所有"的老行为，只能用 main 分支。
 
 ign_sim_pointcloud_tool:
   ros__parameters:
@@ -581,17 +584,19 @@ controller_server:
         # se2 = 迁移模式（方案 §4.1.1）：MPC 拥有角速度权限，航向参考只来自路径切线
         # （不引入任何「独立自转请求」），到点后冻结航向参考；回退用 mode: xy_only。
         # 小陀螺（阶段二）由 start_sim_nav.sh --yaw-mode spin 把 mode 改写为 spin：
-        # 自转请求经 rotation_cmd -> rotation_velocity -> setSpinRequest 进线。
+        # 自转请求经 rotation_cmd -> MINCO setSpinRequest 直接进线（独立自转链已删除）。
         mode: se2                                       # 导航拥有 wz：MPC 输出角速度
         stop_rotation_on_goal: True                     # 到点后停止自转参考
         narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
 
       # 自转请求进线（阶段二小陀螺）：SPIN 模式下每一拍喂给航向策略；其余模式
-      # 只缓存不进线。话题接旧链路自转速度链的输出（已含 wz_max / 加速度限幅）。
+      # 只缓存不进线（并计入 rejected_spin_request_count）。
+      # 2026-10-19：独立自转链已删除，请求由上位机直接发到本话题（geometry_msgs/Twist
+      # 的 angular.z），不再经过 rotation_controller → rotation_velocity。
       # 手动控制: script/spin_control.sh on <rad/s> / off / status。
       spin_request:
-        topic: rotation_velocity                        # 请求话题（相对命名空间）
+        topic: rotation_cmd                             # 请求话题（相对命名空间）
         timeout: 0.25                                   # 新鲜窗口（秒）；超时按撤回处理（停转）
 
       safety:                                           # 几何与安全
@@ -621,27 +626,29 @@ controller_server:
       # ★ 核心不变量（2026-10-16 由 srm_empty + 227_1011 实测日志反推得出）：
       #      stuck_clearance >= 代价地图量化禁行带
       #   右边 = floor(costmap robot_radius / resolution) * resolution。
-      #   本文件 robot_radius 0.33 / resolution 0.05 -> 禁行带 0.30 m。
+      #   本文件 robot_radius 0.40 / resolution 0.05 -> 禁行带 0.40 m（量化后正好 0.40）。
       #
       #   为什么必须这样：规划器（theta_star）把"代价 ≤ 252"当可走，而膨胀层把 inscribed
-      #   半径（= robot_radius 量化后 0.30 m）以内写成 253。于是
-      #     * 车心净空 >= 0.30 m 时规划器**允许**从这里起步（能出路径）；
+      #   半径（= robot_radius 量化后 0.40 m）以内写成 253。于是
+      #     * 车心净空 >= 0.40 m 时规划器**允许**从这里起步（能出路径）；
       #     * 而 MINCO 硬校验要求净空 = safety.robot_radius + clearance_margin = 0.38 m。
-      #   净空落在 [stuck_clearance, 0.38) 这个带里的车：本地重规划**必然失败**
-      #   （带起点过不了 0.38 校验），可原实现 stuck_clearance 只有 0.25 ——
-      #   判不出"卡死"，脱困永远不接管，车就僵在那里，只能等建轨宽限到期抛给行为树的
-      #   BackUpFreeSpace 兜底。实测复现：2026-10-16 23:51 那次跑，行为树 backup 跑了
-      #   11 次、控制器内部脱困 0 次。
-      #
-      #   所以卡死阈值必须**盖住整个死区**：取 0.40 >= 0.38（硬校验）> 0.30（禁行带）。
+      #   1）本文件取 robot_radius 0.40（= 0.38 + 0.02 余量）：路径不会贴到硬净空边界，
+      #      代价是 0.40 > 0.38 —— 车真被顶到 0.38~0.40 之间时，规划器会把车自己那一格
+      #      判成障碍，报 "Either of the start or goal pose are an obstacle!"，走行为树
+      #      recovery（main 分支 2026-10-14 在 srm_empty + 227_1011 的 C 型通道复现过 4 次，
+      #      那边因此把 robot_radius 改成 0.33）。本链有意接受这个代价，若现场出现上述报错，
+      #      第一个该试的就是把两份 costmap 的 robot_radius 改回 0.33。
+      #   2）卡死阈值必须盖住 [stuck_clearance, 0.38) 这段死区：净空落在这里的车本地重规划
+      #      必然失败（带起点过不了 0.38 校验），原实现 stuck_clearance 只有 0.25 ——
+      #      判不出"卡死"，脱困永远不接管，车就僵在那里，只能等建轨宽限到期抛给行为树的
+      #      BackUpFreeSpace 兜底（实测复现：2026-10-16 23:51 那次跑，行为树 backup 跑了
+      #      11 次、控制器内部脱困 0 次）。所以取 stuck_clearance 0.40 >= 0.38。
       #   escaped_clearance 随之抬到 0.50，保持"成功阈值 - 卡死阈值 >= 0.10"的间隔 ——
       #   注意 configure() 只在不足时把 escaped 抬到 stuck + 0.15，所以这里必须显式给 0.50，
       #   否则会被自动抬成 0.55 而偏离本文件的意图。
       #
-      # ⚠ 不要为了"让脱困更容易触发"把 costmap robot_radius 抬到 0.40：那会让禁行带
-      #   （0.40）**大于**控制器硬校验（0.38），规划器把车自己那一格判成障碍，
-      #   报 "Either of the start or goal pose are an obstacle!" 直接走行为树 recovery。
-      #   文件头 2026-10-14 条目记录的就是这个坑。
+      # ⚠ 想"让脱困更容易触发"不要去抬 costmap robot_radius（0.40 已经是 0.38 + 0.02，
+      #   再往上抬只会把 1）里那条"起点被判障碍"的坑挖深）；要调就调 stuck_clearance。
       # ⚠ 脱困能力有物理上限：escape_speed × window_sec = 0.5 × 3.0 ≈ 1.5 m
       #   （还要扣掉底盘加速度斜坡）。超出这个位移必然超时，随后由建轨宽限与
       #   行为树的 BackUpFreeSpace 兜底。
@@ -673,7 +680,7 @@ local_costmap:
       width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
       height: 8                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
-      robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）；必须 < 控制器硬净空 0.38，原因见 nav2_params_srm_minco.yaml 文件头 2026-10-14 条目
+      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器硬净空 0.38 + 0.02 余量（⚠ 0.40 > 0.38 的坑见下方 recovery 段 ★ 1）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
@@ -719,7 +726,7 @@ global_costmap:
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
       robot_base_frame: base_link_fake              # 机器人坐标系（fakeyaw：朝向稳定）
-      robot_radius: 0.33                                   # 机器人圆形碰撞半径（米）；必须 < 控制器硬净空 0.38，原因见 nav2_params_srm_minco.yaml 文件头 2026-10-14 条目
+      robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器硬净空 0.38 + 0.02 余量（⚠ 0.40 > 0.38 的坑见下方 recovery 段 ★ 1）
       resolution: 0.05                                    # 地图分辨率（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:

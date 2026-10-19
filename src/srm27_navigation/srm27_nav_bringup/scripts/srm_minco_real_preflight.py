@@ -756,8 +756,10 @@ def check_yaw_ownership(cfg, report):
             "阶段一 yaw 所有权: 导航不产生自转",
             "yaw_policy.mode = xy_only -> MPC 的角速度上下界与参考都为 0, "
             "输出 angular.z 恒为 0。\n"
-            "哨兵自转必须由独立链路提供; 实车当前没有 rotation_controller/cmd_spin 发布者, "
-            "自转只能来自下位机或行为树 (srm27_behavior 的 PublishSpinSpeed)。",
+            "注意: 仿真的独立自转链 (rotation_controller / rotation_velocity) 已于 "
+            "2026-10-19 删除, wz 只由上位机(导航)产生; 实车若仍是 xy_only, 自转只能来自 "
+            "下位机或行为树 (srm27_behavior 的 PublishSpinSpeed), 需要切到 se2/spin 才能"
+            "由导航输出 wz。",
         )
 
 

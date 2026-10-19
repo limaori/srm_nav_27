@@ -273,21 +273,23 @@ use_robot_state_pub:=True
 `teleop_twist_joy_node` 部分。
 
 > [!IMPORTANT]
-> SRM 仿真速度链路（`cmd_vel_nav` → `srm_cmd_mux` → `cmd_vel_sim` → SRM 速度插件）目前只由
-> 导航平移与独立自转两路输入合成，手柄并未接入；`script/start_sim_nav.sh --teleop` 会把
-> 手柄输出的角速度 remap 到 `rotation_cmd`，即"手柄控制自转"。
+> SRM 仿真速度链路是 `cmd_vel_nav_fake` → `fake_vel_transform` → `cmd_vel_nav_body` →
+> `srm_cmd_mux` → `cmd_vel_sim` → SRM 速度插件。**`wz` 由导航（上位机）产生**：
+> 2026-10-19 起独立自转链（`rotation_test_sender` / `rotation_controller` /
+> `rotation_velocity`）已删除，不存在第二路自转输入，`--teleop` / `--rotation-*`
+> 这些开关也随之移除。手柄手动速度请用实车链路或单独调试节点。
 
-## 2.6 独立自转测试
+## 2.6 小陀螺（手动自转）
 
-自转由独立链路给出，不由 Nav2 控制器产生：
+自转不再有独立链路，两条途径都由导航输出 `wz`：
 
-```text
-rotation_test_sender → rotation_cmd → rotation_controller → rotation_velocity → srm_cmd_mux
-```
+* `--yaw-mode se2`（默认）：车头跟路径切线，角速度完全由 MINCO/MPC 决定。
+* `--yaw-mode spin`：小陀螺驻车自转 —— `script/spin_control.sh on <rad/s>` 把请求发到
+  `rotation_cmd`，MINCO 的 `spin_request` 直接进线（0.25 s 超时即停转），
+  `wz` 仍由导航输出。`off` / `status` 用于停止与查看。
 
-`rotation_mode` 支持 `stop` / `constant` / `periodic`；`periodic` 下 `offset` 为平均角速度、
-`amplitude` 为非负变化幅度、`period` 为周期、`sine_wave` 选择正弦或方波。波形时间取仿真时间，
-从"启用"或"波形参数改变"时开始计算。实现与实测细节见
-[SRM 仿真与自转控制实现(ai)](../../docs/SRM仿真与自转控制实现(ai).md)。
+历史实现（独立自转链、波形自转测试）见
+[SRM 仿真与自转控制实现(ai)](../../docs/SRM仿真与自转控制实现(ai).md)（该文档记录的是
+2026-10-19 之前的结构）。
 
 ![teleop_twist_joy.gif](https://raw.githubusercontent.com/LihanChen2004/picx-images-hosting/master/teleop_twist_joy.5j4aav3v3p.gif)

@@ -17,9 +17,9 @@
 
 这一层错了的表现是"车不动"或"重复旋转"，而且从日志上很难直接看出来，所以把三件事测住：
 
-1. **默认值跟随参数文件**：用 fakeyaw 那份配置启动时，`use_fakeyaw_transform` /
-   `wz_control_mode` / `command_frame` / `cmd_vel_nav_topic` 必须自动切到迁移链路；
-   用旧基线配置启动时必须保持旧行为（否则旧链路会被静默改掉）。
+1. **唯一链路**：本入口恒走 fakeyaw 迁移链（`use_fakeyaw_transform=True`、
+   `command_frame=base_link_fake`、`cmd_vel_nav_topic=cmd_vel_nav_fake`）；独立自转链
+   已于 2026-10-19 删除，`use_fakeyaw_transform=False` 必须直接报错而不是退回旧行为。
 2. **一致性核对真的会拒绝**：参数文件里的 `FollowPath.command_frame` 与 launch 的
    `command_frame` 不一致时必须直接报错，而不是让"转一次还是转两次"变成隐含约定。
 3. **节点接线正确**：Nav2 的速度出口 == fake_vel_transform 的输入 == fakeyaw 配置里的
@@ -157,8 +157,6 @@ def test_fakeyaw_config_turns_the_whole_chain_on():
 
     _assert(context.launch_configurations["use_fakeyaw_transform"] == "True",
             f"fakeyaw 配置应默认启用迁移链路: {context.launch_configurations}")
-    _assert(context.launch_configurations["wz_control_mode"] == "nav",
-            "fakeyaw 配置应默认 wz 归导航所有")
     _assert(context.launch_configurations["command_frame"] == "base_link_fake",
             "fakeyaw 配置的命令系必须是 base_link_fake")
     _assert(context.launch_configurations["cmd_vel_nav_topic"] == "cmd_vel_nav_fake",
@@ -171,9 +169,8 @@ def test_fakeyaw_config_turns_the_whole_chain_on():
     chassis = _chassis_include_arguments(includes, context)
     _assert(chassis["nav_topic"] == "cmd_vel_nav_body",
             f"mux 的 nav_topic 必须是 fake 转换器的输出: {chassis}")
-    _assert(chassis["wz_control_mode"] == "nav_se2", f"mux 必须是 nav_se2: {chassis}")
-    _assert(chassis["start_rotation_sender"] == "False",
-            f"迁移链上必须关掉独立自转发送器: {chassis}")
+    _assert("wz_control_mode" not in chassis and "start_rotation_sender" not in chassis,
+            f"独立自转链已删除，mux 不该再有 wz_control_mode/自转发送器参数: {chassis}")
 
     messages = "\n".join(_run_speed_chain_check(functions, context))
     _assert("base_link_fake" in messages and "cmd_vel_nav_body" in messages,
@@ -219,24 +216,19 @@ def test_params_file_topics_match_the_launch_wiring():
                 f"{node}.robot_base_frame 必须是 base_link_fake")
 
 
-def test_baseline_config_keeps_the_old_chain():
+def test_old_chain_config_is_rejected():
+    """独立自转链已删除：非 fakeyaw 的配置不能再启动（没有合法链路可走）。"""
     module = _load_launch_module()
     for params in (BASELINE_PARAMS, MINCO_PARAMS):
-        _, context, includes, functions = _make_context(module, {"params_file": str(params)})
-        _assert(context.launch_configurations["use_fakeyaw_transform"] == "False",
-                f"{params.name} 不该默认打开迁移链路")
-        _assert(context.launch_configurations["wz_control_mode"] == "rotation",
-                f"{params.name} 的 wz 应仍来自独立自转链路")
-        _assert(context.launch_configurations["command_frame"] == "base_link",
-                f"{params.name} 的命令系应是真实车体系")
-        _assert(context.launch_configurations["cmd_vel_nav_topic"] == "cmd_vel_nav",
-                f"{params.name} 的输出话题应保持 cmd_vel_nav")
-        chassis = _chassis_include_arguments(includes, context)
-        _assert(chassis["nav_topic"] == "cmd_vel_nav", f"旧链路 mux 输入不对: {chassis}")
-        _assert(chassis["wz_control_mode"] == "legacy_independent_rotation",
-                f"旧链路 mux 模式不对: {chassis}")
-        messages = "\n".join(_run_speed_chain_check(functions, context))
-        _assert("legacy" in messages, f"旧链路日志应说明 wz 来源: {messages}")
+        _, context, _, functions = _make_context(
+            module, {"params_file": str(params), "use_fakeyaw_transform": "False"}
+        )
+        try:
+            _run_speed_chain_check(functions, context)
+        except RuntimeError as error:
+            _assert("独立自转链" in str(error), f"报错应说明自转链已删除: {error}")
+        else:
+            raise AssertionError(f"{params.name} + use_fakeyaw_transform=False 没有被拦下来")
 
 
 def test_inconsistent_command_frame_is_rejected():
@@ -252,27 +244,16 @@ def test_inconsistent_command_frame_is_rejected():
     else:
         raise AssertionError("不一致的 command_frame 没有被拦下来")
 
-    # 反向：没有 fake 转换节点却要求 base_link_fake 命令。
-    _, context, _, functions = _make_context(module, {"params_file": str(BASELINE_PARAMS)})
-    context.launch_configurations["command_frame"] = "base_link_fake"
-    try:
-        _run_speed_chain_check(functions, context)
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("没有 fake 转换节点时的 base_link_fake 没有被拦下来")
-
-
-def test_bad_wz_control_mode_is_rejected():
-    module = _load_launch_module()
-    _, context, _, functions = _make_context(module, {"params_file": str(FAKEYAW_PARAMS)})
-    context.launch_configurations["wz_control_mode"] = "guess_from_sign"
+    # 反向：关掉 fakeyaw（= 没有 fake 转换节点）时也必须被拦下来。
+    _, context, _, functions = _make_context(
+        module, {"params_file": str(FAKEYAW_PARAMS), "use_fakeyaw_transform": "False"}
+    )
     try:
         _run_speed_chain_check(functions, context)
     except RuntimeError as error:
-        _assert("wz_control_mode" in str(error), str(error))
+        _assert("fakeyaw" in str(error), f"报错信息应指明 fakeyaw: {error}")
     else:
-        raise AssertionError("非法的 wz_control_mode 没有被拦下来")
+        raise AssertionError("关掉 fakeyaw 后没有被拦下来")
 
 
 def _run_all():

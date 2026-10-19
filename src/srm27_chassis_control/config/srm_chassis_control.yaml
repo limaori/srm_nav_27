@@ -1,71 +1,32 @@
 # SRM 底盘控制链路配置。
 #
-# 本文件只描述 srm_cmd_mux / rotation_controller / rotation_test_sender 三个节点。
-# 本文件里没有速度限幅：mux 与自转链的限幅（vx_max/vy_max/v_max/wz_max、
-# rotation_controller 的 wz_max/max_angular_accel）统一写在
-#   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
-# 的 srm_cmd_mux / rotation_controller 段，由 launch/nav_srm_simulation_launch.py
-# 在启动时合并进来（唯一来源，避免"改一处漏一处"）。
-# 直接单独 launch 本包的 launch 文件（不经过导航入口）时不会合并，届时
-# cmd_mux 会退回节点里的保守默认值 0.5 m/s——只适合单独调试自转/mux，不要用来跑导航。
+# 本文件只描述 srm_cmd_mux（仿真链的速度出口）。
 #
-# wz 所有权（方案 §4.3）：`srm_cmd_mux.wz_control_mode` 决定最终 wz 的来源 ——
-# `legacy_independent_rotation`（旧链路，wz 来自 rotation_velocity）或
-# `nav_se2`（导航拥有 wz，rotation 输入被拒绝）。导航入口会按 fakeyaw 开关重写它。
+# 2026-10-19：独立自转链（rotation_controller / rotation_test_sender /
+# rotation_velocity）已删除 —— `wz` 只由上位机（导航栈）产生，mux 不再有第二路自转
+# 输入，也没有 wz_control_mode 开关。想手动控制自转（小陀螺）请走导航侧：
+#   --yaw-mode spin + script/spin_control.sh（请求进 MINCO，wz 仍由导航输出）。
+#
+# 本文件里没有速度限幅：mux 的限幅（vx_max/vy_max/v_max/wz_max）统一写在
+#   src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml
+# 的 srm_cmd_mux 段，由 launch/nav_srm_simulation_launch.py 在启动时合并进来
+# （唯一来源，避免"改一处漏一处"）。
+# 直接单独 launch 本包的 launch 文件（不经过导航入口）时不会合并，届时 cmd_mux 会退回
+# 节点里的保守默认值 0.5 m/s——只适合单独调试 mux，不要用来跑导航。
 
 srm_cmd_mux:
   ros__parameters:
     use_sim_time: True
-    # wz 的所有权模式（方案 §4.3）。**不允许**用"wz 是否为零"猜所有权：
-    #   legacy_independent_rotation: 平移与 wz 都按旧链路（导航只给平移，wz 来自
-    #     rotation_velocity）；导航输入的 angular.z 会被丢弃并计数。
-    #   nav_se2: 导航拥有 wz（平移与 wz 都来自导航；fakeyaw 迁移链上 nav_topic 应指向
-    #     cmd_vel_nav_body）。此时 rotation_velocity 输入被**拒绝**（只告警 + 计数），
-    #     绝不存在 nav_wz + rotation_wz 的相加路径。
-    # 由 launch/nav_srm_simulation_launch.py 按 use_fakeyaw_transform / wz_control_mode 重写。
-    wz_control_mode: "legacy_independent_rotation"
-    # 输入
-    nav_topic: "cmd_vel_nav"              # 导航速度（车体系）；legacy 下 wz 被丢弃
-    rotation_topic: "rotation_velocity"   # 独立自转速度（只取 angular.z）
+    # 输入：导航速度（车体系），angular.z 就是最终执行的 wz。
+    # fakeyaw 迁移链上由导航入口重写为 cmd_vel_nav_body（fake_vel_transform 的输出）。
+    nav_topic: "cmd_vel_nav"
     # 输出：mux 是 cmd_vel_sim 的唯一发布者
     output_topic: "cmd_vel_sim"
-    publish_rate: 200.0                   # 合成频率（Hz）
-    # 超时清零
+    publish_rate: 200.0                   # 输出频率（Hz）
+    # 超时清零：导航输入超时则平移与 wz 一起清零（不存在"导航没了但还在自转"的状态）
     nav_timeout: 0.3                      # 导航输入超时（s）
-    rotation_timeout: 0.1                 # 自转输入超时（s）
     # 限幅：见文件头——vx_max / vy_max / v_max / wz_max 在 speed_limits.yaml 里。
     # 本 mux 只存在于仿真链路：实车导航链是 smoother → fake_vel_transform →
     # cmd_vel_chassis → 串口（srm27_nav_protocol），并不经过本 mux。
     # 注意 mux 的限幅参数**没有**动态回调，改 speed_limits.yaml 后必须重启节点。
     diagnostics_period: 0.5               # 诊断发布周期（s）
-
-rotation_controller:
-  ros__parameters:
-    use_sim_time: True
-    input_topic: "rotation_cmd"
-    output_topic: "rotation_velocity"
-    publish_rate: 200.0
-    request_timeout: 0.5                  # 自转请求超时（s）
-    # 自转限幅（wz_max / max_angular_accel）同样在 speed_limits.yaml 的
-    # rotation_controller 段；自转不经导航链路，只有那一处能限住它。
-    diagnostics_period: 0.5
-
-rotation_test_sender:
-  ros__parameters:
-    use_sim_time: True
-    output_topic: "rotation_cmd"
-    publish_rate: 200.0
-    enabled: True
-    # stop | constant | periodic
-    rotation_mode: "stop"
-    # 恒速模式的有符号角速度（rad/s）
-    angular_speed: 0.0
-    # 周期模式：平均角速度与非负变化幅度（rad/s）
-    offset: 0.0
-    amplitude: 0.0
-    # 周期（s）与初相位（rad）
-    period: 4.0
-    phase: 0.0
-    # true 为正弦，false 为方波
-    sine_wave: True
-    diagnostics_period: 0.5

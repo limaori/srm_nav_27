@@ -6,6 +6,24 @@
 实施日期：2026-10-11（P0/P1 实测在 `/home/srm/srm_nav_27test` 完成）；
 2026-10-12 与 main 合并后落到 `/home/srm/srm_nav_27` 分支 `test/仿真小陀螺导航`（见 §8）。
 
+> ## ⚠ 2026-10-19 后续变更（先读这段）
+>
+> 需求定调为"**本质上让上位机控制 wz**"，因此下文的**独立自转链已整体删除**，
+> 本文档中凡是出现 `rotation_test_sender` / `rotation_controller` /
+> `rotation_velocity` / `wz_control_mode` / `legacy_independent_rotation` /
+> `--wz-source` / `--no-fakeyaw` / `--rotation-*` / `--teleop` 的地方都已成为历史：
+>
+> | 项 | 变更后 |
+> |---|---|
+> | wz 来源 | **只有导航**（fakeyaw 链：`cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_sim`） |
+> | `rotation_controller` / `rotation_test_sender` | 节点与源文件删除；`srm_chassis_control` 只剩 `cmd_mux` 一个可执行 |
+> | `rotation_velocity` 话题 | 删除；`srm_cmd_mux` 只有导航输入，`wz_control_mode`/`rotation_topic`/`rotation_timeout` 参数删除 |
+> | 小陀螺（`--yaw-mode spin`） | 请求由 `script/spin_control.sh` 直接发 `rotation_cmd` → MINCO `spin_request.topic`（不再有中间节点）；原 `wz_max=2.0` 限幅改由脚本本地钳位（`SPIN_MAX_WZ`） |
+> | `speed_limits.yaml` | 删掉 `rotation_controller` 段；自转/小陀螺的角速度上限由 `srm_cmd_mux.wz_max` 兜底 |
+> | `start_sim_nav.sh` | 唯一链路；`-c/--omni`、`--wz-source`、`--fakeyaw/--no-fakeyaw`、`--rotation-*`、`--teleop` 全部删除（用了直接报错） |
+> | 仿真 costmap `robot_radius`（fakeyaw 那份） | 0.40（= 控制器硬净空 0.38 + 0.02），与 main 的 0.33 有意不同 |
+> | 验证 | `test_velocity_mix`(12) / `test_twist_watchdog`(4) / `test_speed_limits`(12) / `test_fakeyaw_launch_wiring`(4) 全过；工作空间 46/46 包构建通过 |
+
 ---
 
 ## 1. 结论速览
