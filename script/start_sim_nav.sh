@@ -48,6 +48,7 @@
 #   ./script/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
 #   ./script/start_sim_nav.sh                                  # 默认: MINCO + fakeyaw (导航拥有 wz)
 #   ./script/start_sim_nav.sh --yaw-mode spin                   # 小陀螺 (脚本手动控制转速)
+#   ./script/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
 #   ./script/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
 #   ./script/start_sim_nav.sh --no-rviz                         # 只跑仿真 + 导航
 #   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
@@ -87,6 +88,12 @@
 #                                   转速用 script/spin_control.sh
 #       (--wz-source / --fakeyaw / --no-fakeyaw / --yaw-mode xy_only 已删除:
 #        独立自转链于 2026-10-19 删除, wz 只由导航产生, 没有旧链可退回)
+#       --verify-spin       一步验证小陀螺导航: 强制无头 (--no-rviz --no-gui, direct 模式),
+#                           启动后自动发自转请求 + 导航目标, 断言
+#                           "wz 归导航 / fake->body 逐条透传 / 边转边走 / 到点成功 / 撤回即停",
+#                           最后清理并返回退出码 (0 = 全通过, 1 = 有用例失败, 3 = 启动超时)。
+#                           可用环境变量: VERIFY_SPIN_WZ(2.0) VERIFY_GOAL_DIST(1.5)
+#                           VERIFY_KEEP(1 = 不清理) VERIFY_READY_TIMEOUT(180) VERIFY_GOAL_TIMEOUT(180)
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
@@ -98,6 +105,7 @@
 #   WORLD MAP MAP_NAME PARAMS_FILE CONTROLLER USE_RVIZ USE_GUI RUN_IMMEDIATELY
 #   USE_GICP PRIOR_PCD_FILE PRIOR_PCD_MANIFEST INIT_POSE GICP_RUN_ID
 #   USE_VELOCITY_SMOOTHER YAW_MODE
+#   VERIFY_SPIN_WZ VERIFY_GOAL_DIST VERIFY_KEEP VERIFY_READY_TIMEOUT VERIFY_GOAL_TIMEOUT
 #   OPEN_MODE(tab|window|direct) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
@@ -137,6 +145,15 @@ USE_GUI="${USE_GUI:-true}"
 # 想保持旧的"暂停等点播放"行为: --no-run 或 RUN_IMMEDIATELY=false。
 RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-true}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
+DRY_RUN="${DRY_RUN:-0}"                      # 1 = 只打印将执行的命令, 不真的启动
+# 一步验证小陀螺导航 (--verify-spin): 无头起栈 -> 发自转请求 -> 发导航目标 ->
+# 断言 wz 链路与"边转边走" -> 清理。参数用环境变量覆盖。
+VERIFY_SPIN="${VERIFY_SPIN:-0}"              # 1 = 跑完验证流程 (由 --verify-spin 置位)
+VERIFY_SPIN_WZ="${VERIFY_SPIN_WZ:-2.0}"      # 自转请求 rad/s
+VERIFY_GOAL_DIST="${VERIFY_GOAL_DIST:-1.5}"  # 首选导航目标距离 (米), 不可达会自动换候选
+VERIFY_READY_TIMEOUT="${VERIFY_READY_TIMEOUT:-180}"
+VERIFY_GOAL_TIMEOUT="${VERIFY_GOAL_TIMEOUT:-180}"
+VERIFY_KEEP="${VERIFY_KEEP:-0}"              # 1 = 验证完不清理, 留着看 RViz/调试
 #: MINCO 航向策略: auto=se2 (导航拥有 wz); spin=小陀螺 (外部自转请求进线)。
 YAW_MODE="${YAW_MODE:-auto}"
 MAP_NAME="${MAP_NAME:-}"
@@ -145,8 +162,7 @@ PARAMS_FILE="${PARAMS_FILE:-}"
 PARAMS_FILE_GIVEN=0
 
 # 局部控制器 (决定用哪份 Nav2 参数文件): auto 按参数文件里的 FollowPath 插件判定,
-# omni / minco 显式指定。默认 auto: 不给 -p 时按下面的规则选 (迁移链 fakeyaw 一份 /
-# 旧链 minco 一份 / 显式 -c omni 则是 Omni 那份)。
+# minco 显式指定。默认 auto, 缺省参数文件就是 fakeyaw 那份。
 CONTROLLER="${CONTROLLER:-auto}"
 CONTROLLER_CLI_GIVEN=0
 
@@ -194,10 +210,18 @@ while [ $# -gt 0 ]; do
     --smoother)   USE_VELOCITY_SMOOTHER="True"; shift ;;
     --no-smoother) USE_VELOCITY_SMOOTHER="False"; shift ;;
     --yaw-mode)   YAW_MODE="${2:?--yaw-mode 需要 auto|se2|spin}"; shift 2 ;;
+    --verify-spin) VERIFY_SPIN=1; YAW_MODE="spin"; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+# --verify-spin 必须无头 + 无终端 (direct)：验证过程不需要 GUI，也不能依赖终端窗口。
+if [ "$VERIFY_SPIN" = "1" ]; then
+  OPEN_MODE="direct"
+  USE_RVIZ="False"
+  USE_GUI="false"
+fi
 
 # ---------- 航向策略 ----------
 # 唯一链路: wz 由导航(上位机)拥有。yaw_mode=auto 与 se2 等价；spin = 小陀螺，
@@ -212,6 +236,10 @@ case "$YAW_MODE" in
     ;;
   *) echo "[错误] --yaw-mode 只支持 auto / se2 / spin" >&2; exit 2 ;;
 esac
+if [ "$VERIFY_SPIN" = "1" ] && [ "$YAW_MODE" != "spin" ]; then
+  echo "[错误] --verify-spin 需要 --yaw-mode spin（小陀螺验证），当前是 $YAW_MODE" >&2
+  exit 2
+fi
 # ---------- 环境检查 ----------
 if [ ! -f "$WS_DIR/install/setup.bash" ]; then
   echo "[错误] 未找到 $WS_DIR/install/setup.bash" >&2
@@ -748,6 +776,11 @@ case "$YAW_MODE" in
   se2)  echo '  (导航拥有 wz: 车头跟路径切线)' ;;
   spin) echo '  (小陀螺: script/spin_control.sh on <rad/s> / off / status)' ;;
 esac
+if [ "$VERIFY_SPIN" = "1" ]; then
+  printf '验证模式  : --verify-spin (自转 %s rad/s, 目标 %s m, 跑完%s)\n' \
+      "$VERIFY_SPIN_WZ" "$VERIFY_GOAL_DIST" \
+      "$([ "$VERIFY_KEEP" = "1" ] && echo '保留栈' || echo '自动清理')"
+fi
 printf '\n终端模式  : %s (%s)\n' "$OPEN_MODE" "$TERMINAL"
 echo
 
@@ -813,6 +846,11 @@ fi
 # prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
 NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE}"
 start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
+
+if [ "$VERIFY_SPIN" = "1" ]; then
+  BANNER_DONE=1
+fi
+if [ "${BANNER_DONE:-0}" = "0" ]; then
 
 cat <<EOF
 
@@ -916,6 +954,402 @@ MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
        -> ClearEntireCostmap x2 + BackUpFreeSpace (现在也走 ESDF 梯度选方向),
        后者日志在 behavior_server 终端, 关键字 "backing up ... towards free space".
 EOF
+fi
+
+fi  # if [ "${BANNER_DONE:-0}" = "0" ] —— --verify-spin 不打印交互提示
+
+# =============================================================
+# 一步验证小陀螺导航（--verify-spin）
+#
+# 启动后自动：等栈就绪 -> 上位机发自转请求 -> 用 ComputePathToPose 探测可达目标 ->
+# 下发 NavigateToPose -> 断言「wz 归导航 / fake->body 逐条透传 / 边转边走 / 到点成功 /
+# 撤回即停」-> 清理。退出码: 0 = 全通过, 1 = 有用例失败, 3 = 启动超时。
+# 只验证不清理: VERIFY_KEEP=1 ./script/start_sim_nav.sh --verify-spin
+# =============================================================
+if [ "$VERIFY_SPIN" = "1" ] && [ "$DRY_RUN" = "1" ]; then
+  echo "[dry-run] --verify-spin 需要真实启动 Stack，dry-run 下跳过断言。"
+  VERIFY_SPIN=0
+fi
+if [ "$VERIFY_SPIN" = "1" ]; then
+  vlog() { printf '%s\n' "$*"; }
+
+  topic_has_data() {
+    local topic="$1" window="${2:-2}"
+    timeout "$((window + 4))" ros2 topic echo --once "$topic" >/dev/null 2>&1
+  }
+
+  action_ready() {
+    timeout 10 ros2 action list 2>/dev/null | grep -q "/${ROBOT_NS}/navigate_to_pose"
+  }
+
+  wait_ready() {
+    local what="$1" deadline
+    shift
+    deadline=$(( $(date +%s) + VERIFY_READY_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      if "$@" >/dev/null 2>&1; then
+        vlog "      ✓ $what"
+        return 0
+      fi
+      sleep 3
+    done
+    vlog "      ✗ 等待超时（${VERIFY_READY_TIMEOUT}s）：$what"
+    return 3
+  }
+
+  verify_cleanup() {
+    vlog "[清理] 撤回自转请求 + 结束导航栈与仿真..."
+    timeout 5 ros2 topic pub --once "/${ROBOT_NS}/rotation_cmd" geometry_msgs/msg/Twist \
+      "{angular: {z: 0.0}}" >/dev/null 2>&1 || true
+    timeout 40 "$SCRIPT_DIR/kill_nav.sh" >/dev/null 2>&1 || true
+    timeout 40 "$SCRIPT_DIR/kill_gzb.sh" >/dev/null 2>&1 || true
+  }
+
+  echo
+  echo "[验证] 等待栈就绪（最长 ${VERIFY_READY_TIMEOUT}s）..."
+  if ! wait_ready "/clock 在发布（Gazebo 在跑）" topic_has_data /clock 2 \
+     || ! wait_ready "cmd_vel_sim 在发布（mux 在跑）" topic_has_data "/${ROBOT_NS}/cmd_vel_sim" 2 \
+     || ! wait_ready "navigate_to_pose action 可用（Nav2 已激活）" action_ready; then
+    verify_cleanup
+    exit 3
+  fi
+
+  echo "[验证] 发自转请求 + 下发导航目标，开始断言（最长 ${VERIFY_GOAL_TIMEOUT}s）..."
+  set +e
+  python3 - "$ROBOT_NS" "$VERIFY_SPIN_WZ" "$VERIFY_GOAL_DIST" "$VERIFY_GOAL_TIMEOUT" <<'PYCHECK'
+import math
+import sys
+import threading
+import time
+
+import rclpy
+from geometry_msgs.msg import Twist
+from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav_msgs.msg import Odometry
+from rclpy.action import ActionClient
+from rclpy.node import Node
+
+NS, SPIN_WZ, GOAL_DIST, GOAL_TIMEOUT = (
+    sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+)
+
+
+def topic(name):
+    return f"/{NS}/{name}"
+
+
+failures = []
+
+
+def check(ok, message, detail=""):
+    tail = "  " + detail if detail else ""
+    print(("[PASS] " if ok else "[FAIL] ") + "  " + message + tail)
+    if not ok:
+        failures.append(message)
+
+
+def note(message):
+    print("  [观察] " + message)
+
+
+def yaw_of(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def wrap(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+class Sampler(Node):
+    """采样速度链三层 + 里程计（只在导航目标激活期间采）。"""
+
+    def __init__(self):
+        super().__init__("verify_spin_nav")
+        self.lock = threading.Lock()
+        self.samples = {"fake": [], "body": [], "sim": [], "odom_wz": []}
+        self.odom_pose = None
+        for name, attr in (
+            ("cmd_vel_nav_fake", "fake"),
+            ("cmd_vel_nav_body", "body"),
+            ("cmd_vel_sim", "sim"),
+        ):
+            self.create_subscription(
+                Twist, topic(name), lambda msg, a=attr: self._on_twist(a, msg), 20
+            )
+        self.create_subscription(Odometry, topic("odometry"), self._on_odom, 20)
+
+    def reset_window(self):
+        with self.lock:
+            self.samples = {"fake": [], "body": [], "sim": [], "odom_wz": []}
+
+    def _on_twist(self, attr, msg):
+        with self.lock:
+            self.samples[attr].append((msg.linear.x, msg.linear.y, msg.angular.z))
+
+    def _on_odom(self, msg):
+        with self.lock:
+            self.samples["odom_wz"].append(msg.twist.twist.angular.z)
+            p = msg.pose.pose
+            self.odom_pose = (p.position.x, p.position.y, yaw_of(p.orientation))
+
+    def mean(self, key):
+        with self.lock:
+            data = list(self.samples[key])
+        if not data:
+            return None
+        if key == "odom_wz":
+            return sum(data) / len(data)
+        return tuple(sum(v[i] for v in data) / len(data) for i in range(3))
+
+    def median_nonzero(self, key):
+        """非零样本的中位数（带符号）。
+
+        均值会被"目标刚发出去、控制器还没开始输出"的零值样本稀释，短行程尤其明显；
+        中位数对这类空档不敏感，用来判断"导航是否持续输出该量级"。
+        """
+        with self.lock:
+            data = list(self.samples[key])
+        if not data:
+            return None
+        if key == "odom_wz":
+            values = [v for v in data if abs(v) > 0.05]
+        else:
+            values = [v[2] for v in data if abs(v[2]) > 0.05]
+        if not values:
+            return 0.0
+        values.sort()
+        mid = len(values) // 2
+        return values[mid] if len(values) % 2 else 0.5 * (values[mid - 1] + values[mid])
+
+    def counts(self):
+        with self.lock:
+            return {k: len(v) for k, v in self.samples.items()}
+
+    def pose(self):
+        with self.lock:
+            return self.odom_pose
+
+
+rclpy.init()
+node = Sampler()
+spin_pub = node.create_publisher(Twist, topic("rotation_cmd"), 10)
+stop_spin = threading.Event()
+
+
+def spin_loop():
+    msg = Twist()
+    msg.angular.z = SPIN_WZ
+    while not stop_spin.is_set():
+        spin_pub.publish(msg)
+        time.sleep(0.05)
+
+
+print("  提示: 控制器只在有导航目标时发布 cmd_vel_*（wz 归导航），")
+print("        所以先探测可达目标、发目标，再在目标激活期间采速度链断言。")
+threading.Thread(target=spin_loop, daemon=True).start()
+time.sleep(0.5)
+
+pose = node.pose()
+deadline = time.time() + 3.0
+while pose is None and time.time() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.1)
+    pose = node.pose()
+if pose is None:
+    check(False, "能读到里程计位姿", "没有 /odometry")
+    node.destroy_node()
+    rclpy.shutdown()
+    sys.exit(1)
+
+x0, y0, yaw0 = pose
+print("  起点 (map=odom 系): (%.2f, %.2f, yaw %+.2f)" % (x0, y0, yaw0))
+
+client = ActionClient(node, NavigateToPose, topic("navigate_to_pose"))
+if not client.wait_for_server(timeout_sec=15.0):
+    check(False, "NavigateToPose action server 可用", "15 s 内没等到")
+    node.destroy_node()
+    rclpy.shutdown()
+    sys.exit(1)
+
+
+def path_reachable(gx_try, gy_try):
+    """用 ComputePathToPose 探测可达性：拿到非空路径才算可走。
+
+    直接发 NavigateToPose 再"看车有没有动"不可靠 —— 规划失败时行为树会做
+    BackUpFreeSpace 恢复（车会后退 ~0.4 m），看起来像"动了"。
+    """
+    planner = ActionClient(node, ComputePathToPose, topic("compute_path_to_pose"))
+    if not planner.wait_for_server(timeout_sec=10.0):
+        return None
+    probe = ComputePathToPose.Goal()
+    probe.goal.header.frame_id = "map"
+    probe.goal.header.stamp = node.get_clock().now().to_msg()
+    probe.goal.pose.position.x = gx_try
+    probe.goal.pose.position.y = gy_try
+    probe.goal.pose.orientation.w = 1.0
+    probe.use_start = False
+    future = planner.send_goal_async(probe)
+    rclpy.spin_until_future_complete(node, future, timeout_sec=8.0)
+    handle_probe = future.result() if future.done() else None
+    if handle_probe is None or not handle_probe.accepted:
+        return False
+    result_future = handle_probe.get_result_async()
+    t_end = time.time() + 10.0
+    while time.time() < t_end and not result_future.done():
+        rclpy.spin_once(node, timeout_sec=0.05)
+    if not result_future.done():
+        return False
+    result = result_future.result()
+    if result.status != 4:
+        return False
+    return len(result.result.path.poses) > 1
+
+
+# 静态地图里"前方 N 米"未必可通行（如 227_1011 出生点前方 2.5 m 就有障碍），
+# 所以按候选清单探测，用第一个真能规划的目标。
+probe_plan = [(GOAL_DIST, 0.0), (1.5, 0.0), (2.5, 0.0), (0.8, 0.0), (0.8, 180.0),
+              (1.5, 180.0), (0.8, 90.0), (0.8, -90.0), (1.2, 45.0), (1.2, -45.0)]
+candidates = []
+for dist_try, deg in probe_plan:
+    ang = yaw0 + math.radians(deg)
+    candidates.append((x0 + dist_try * math.cos(ang), y0 + dist_try * math.sin(ang), dist_try))
+
+gx = gy = 0.0
+chosen_dist = 0.0
+for cx, cy, cdist in candidates:
+    ok_path = path_reachable(cx, cy)
+    if ok_path is None:
+        check(False, "compute_path_to_pose action 可用", "10 s 内没等到 planner")
+        break
+    print("    探测目标 (%.2f, %.2f) 距离 %.2f m -> %s"
+          % (cx, cy, cdist, "可通行" if ok_path else "不可达"))
+    if ok_path:
+        gx, gy, chosen_dist = cx, cy, cdist
+        break
+
+check(chosen_dist > 0.0, "该地图/出生点至少有一个可达目标", "试了 %d 个候选" % len(candidates))
+
+handle = None
+status = None
+yaw_travel = 0.0
+last_yaw = yaw0
+min_dist = chosen_dist if chosen_dist > 0.0 else GOAL_DIST
+motion_seconds = 0.0
+if chosen_dist > 0.0:
+    goal = NavigateToPose.Goal()
+    goal.pose.header.frame_id = "map"
+    goal.pose.header.stamp = node.get_clock().now().to_msg()
+    goal.pose.pose.position.x = gx
+    goal.pose.pose.position.y = gy
+    goal.pose.pose.orientation.w = 1.0
+    print("    下发 NavigateToPose -> (%.2f, %.2f)，距离 %.2f m" % (gx, gy, chosen_dist))
+    node.reset_window()
+    send_future = client.send_goal_async(goal)
+    rclpy.spin_until_future_complete(node, send_future, timeout_sec=10.0)
+    handle = send_future.result() if send_future.done() else None
+    accepted = bool(handle is not None and handle.accepted)
+    check(accepted, "导航目标被接受", "accepted=%s" % accepted)
+    if accepted:
+        result_future = handle.get_result_async()
+        t_start = time.time()
+        t_end = t_start + GOAL_TIMEOUT
+        while time.time() < t_end and not result_future.done():
+            rclpy.spin_once(node, timeout_sec=0.05)
+            p = node.pose()
+            if p is not None:
+                dyaw = abs(wrap(p[2] - last_yaw))
+                if dyaw < 1.0:
+                    yaw_travel += dyaw
+                last_yaw = p[2]
+                min_dist = min(min_dist, math.hypot(gx - p[0], gy - p[1]))
+        motion_seconds = time.time() - t_start
+        if result_future.done():
+            status = result_future.result().status
+
+counts = node.counts()
+fake = node.mean("fake")
+body = node.mean("body")
+sim = node.mean("sim")
+odom_wz = node.mean("odom_wz")
+final = node.pose()
+dist = math.hypot(gx - final[0], gy - final[1]) if final else float("nan")
+print("  采样条数: %s" % counts)
+print("  终态: 距目标 %.2f m（过程中最近 %.2f m），累计转角 %.2fπ，用时 %.1f s，action status=%s"
+      % (dist, min_dist, yaw_travel / math.pi, motion_seconds, status))
+
+if not fake or not body or not sim:
+    check(False, "速度链三层都有数据（导航在输出）", str(counts))
+else:
+    fwz = node.median_nonzero("fake")
+    bwz = node.median_nonzero("body")
+    swz = node.median_nonzero("sim")
+    print("  wz 统计（非零样本中位数 / 全窗口均值）: fake %+.3f / %+.3f, "
+          "body %+.3f / %+.3f, sim %+.3f / %+.3f"
+          % (fwz, fake[2], bwz, body[2], swz, sim[2]))
+    tol = max(0.30 * abs(SPIN_WZ), 0.25)
+    check(abs(fwz - SPIN_WZ) <= tol,
+          "导航输出 wz 跟随上位机自转请求（wz 归导航）",
+          "fake_wz(中位)=%+.3f 请求=%+.3f" % (fwz, SPIN_WZ))
+    check(abs(bwz - fwz) <= 0.10 * abs(SPIN_WZ) + 0.05,
+          "fake -> body 的 wz 逐条透传（不叠加、不衰减）", "body_wz(中位)=%+.3f" % bwz)
+    check(abs(swz - bwz) <= 0.10 * abs(SPIN_WZ) + 0.05,
+          "mux 输出 wz = body（未触发 wz_max 限幅）", "sim_wz(中位)=%+.3f" % swz)
+    check(abs(fake[0]) > 0.05 or abs(fake[1]) > 0.05,
+          "平移也在动（不是纯原地自转）", "fake_v=(%+.3f, %+.3f)" % (fake[0], fake[1]))
+
+odom_med = node.median_nonzero("odom_wz")
+if odom_med is None:
+    check(False, "里程计有角速度", "odom.twist.angular.z 没采到")
+else:
+    check(odom_med * SPIN_WZ > 0.0, "里程计实际转向与请求同号",
+          "odom_wz(中位)=%+.3f" % odom_med)
+    ratio = abs(odom_med) / abs(SPIN_WZ) if SPIN_WZ else 0.0
+    note("底盘自转执行比例 ≈ %.2f×（仿真底盘不可靠，仅记录）" % ratio)
+
+check(status == 4, "导航到点成功（action SUCCEEDED）", "status=%s" % status)
+check(dist < max(0.6, 0.45 * chosen_dist) if chosen_dist > 0 else False,
+      "终点位置误差在容差内", "%.2f m" % dist)
+expected_yaw = abs(SPIN_WZ) * max(motion_seconds, 0.1)
+check(yaw_travel > max(0.15 * expected_yaw, 0.30),
+      "导航途中持续自转（位姿 yaw 持续累计）",
+      "%.2f rad vs 请求推算 %.2f rad" % (yaw_travel, expected_yaw))
+
+stop_spin.set()
+time.sleep(0.6)
+node.reset_window()
+deadline = time.time() + 2.0
+while time.time() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.05)
+tail = node.mean("odom_wz")
+if tail is not None:
+    check(abs(tail) < 0.3, "撤回请求后车停转（MINCO 0.25 s 超时）", "尾段 odom_wz=%+.3f" % tail)
+
+print()
+if failures:
+    print("结论: FAIL（%d 项）" % len(failures))
+    for item in failures:
+        print("  - " + item)
+else:
+    print("结论: PASS（wz 归导航、链路逐条透传、边转边走、到点成功、撤回即停）")
+
+node.destroy_node()
+rclpy.shutdown()
+sys.exit(1 if failures else 0)
+PYCHECK
+  CHECK_RC=$?
+  set -e
+
+  echo
+  if [ "$CHECK_RC" -eq 0 ]; then
+    echo "[验证] 结果: PASS ✅"
+  else
+    echo "[验证] 结果: FAIL ❌（看上面 [FAIL] 项与 .sim_run/ 日志）"
+  fi
+  if [ "$VERIFY_KEEP" = "1" ]; then
+    echo "[验证] VERIFY_KEEP=1：仿真与导航栈继续运行；手动清理: ./script/kill_nav.sh && ./script/kill_gzb.sh"
+  else
+    verify_cleanup
+  fi
+  exit "$CHECK_RC"
 fi
 
 # ---------- direct 模式：脚本作为宿主托管全部子进程 ----------
