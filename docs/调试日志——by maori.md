@@ -374,7 +374,9 @@ TF 是一棵相对位姿的树，每条边 = 一个刚体变换；两帧之间�
 
 `odom→base_link` 由 `sensor_scan_generation` 发：LIO 的雷达位姿 × 雷达安装外参 → 平面化。
 
-`base_link` 下的 livox_frame / livox_imu / livox_scan / wheel_1..4 全是 `robot_state_publisher` 发的静态外参。
+`base_link` 下的 livox_frame / livox_imu / livox_scan / gimbal_yaw / wheel_*（现名 wheel_front_left 等）全是 `robot_state_publisher` 发的静态外参。
+
+> 2026-10 更新：车体模型已收敛为唯一一份 `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`，实车建图/导航/独立调试/仿真全部读它；雷达外参随之改为 CAD 实测的 `0.12081 -0.056721 0.346388 / rpy(30°,0,63°)`。
 
 ##### 小陀螺fake底盘维护
 

@@ -17,7 +17,7 @@
 # 本车 TF 链（与 real_mapping_launch.py 一致）:
 #   map -> odom -> base_link -> livox_frame -> livox_imu
 #                            -> livox_scan
-#                            -> wheel_1..4        (均由 real_robot_state_publisher_launch.py 发布)
+#                            -> wheel_front_left/rear_left/front_right/rear_right (same publisher)
 #   odom -> base_link 由 sensor_scan_generation 发布；map -> odom 由 slam_toolbox 或
 #   small_gicp 发布，二者互斥（slam:=True / use_pcd_localization:=True）。
 #
@@ -109,12 +109,12 @@ point_lio:
       plane_thr: 0.1
       match_s: 81.0
       ivox_grid_resolution: 0.5                         # SRM
-      # 由 real_mapping_launch.py 按 lidar_rpy = (-0.06981317007977318, 0.0, -1.5707963267948966) 算出:
+      # 由 real_mapping_launch.py 按 lidar_rpy = (0.523598776, 0.0, 1.099557429) 算出:
       #   gravity = 9.81 * [sin(pitch), -cos(pitch)sin(roll), -cos(pitch)cos(roll)]
       # 量纲与 point_lio 基线一致（基线为 [0,0,-9.810]），不是单位向量。
       # 改动雷达安装角时必须同步重算这两个值。
-      gravity: [ 0.0, 0.6843110074298693, -9.786103333048876 ]
-      gravity_init: [ 0.0, 0.6843110074298693, -9.786103333048876 ]
+      gravity: [ 0.0, -4.905000003412736, -8.495709209154999 ]
+      gravity_init: [ 0.0, -4.905000003412736, -8.495709209154999 ]
       extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
       extrinsic_R: [ 1.0, 0.0, 0.0,
                      0.0, 1.0, 0.0,

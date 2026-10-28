@@ -31,7 +31,7 @@ srm27_robot_description/
 
 - `config/srm27_sentry_geometry.yaml` 是 URDF、SDF 和启动脚本的共同数据源，改尺寸或安装位姿只改这一份。
 - 当前实车 launch（`real_robot_state_publisher_launch.py` / `real_mapping_launch.py`）仍然加载
-  `srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro`；`urdf/srm27_sentry.urdf.xacro` 是描述包内
+  `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`（2026-10 起为唯一模型，实车/仿真共用；当时的 `srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro` 已删除）
   与几何 YAML 数值同步的公共版本，供后续实车链路统一切换，目前没有 launch 引用它。
 - 当前几何：底盘半径 `0.27 m`、高 `0.20 m`、质量 `8.2 kg`；四轮半径 `0.075 m`、宽 `0.04 m`、
   轮心 `(±0.18, ±0.18, 0.075)`；雷达帧 `front_mid360`，安装位姿

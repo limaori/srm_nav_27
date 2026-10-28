@@ -1,54 +1,89 @@
 # SRM 哨兵机器人几何与外参的唯一定义（仿真与实车共用）。
 #
-# 本文件是 URDF、SDF 和启动脚本共同读取的单一数据源；修改尺寸或安装位姿
-# 只需改这里，不要再分别改 urdf/ 与 sdf/ 下的文件。
+# 两条链路的分工（"只有一个模型"是这样落地的）：
+#   · 本文件 = **数值**来源：SDF 由 model_builder.build_sdf() 依据它生成，
+#     URDF 由 model_builder.build_urdf() 把这些数值灌进
+#     urdf/srm27_sentry.urdf.xacro 再展开。
+#   · urdf/srm27_sentry.urdf.xacro = **结构**来源：实车建图/导航/独立调试/viz
+#     全部直接读它；它的默认值就是 CAD 实测值，与本文件必须逐项一致。
+#   · 两者的一致性靠"改尺寸两处一起改"来维持（本文件的数值 ↔ xacro 的默认值）；
+#     仿真侧灌值时会覆盖 xacro 的参数，所以漂移只会在"实车链路 vs 仿真链路"之间
+#     显现，改完请对着两边的数值抽查一次。
 #
 # 坐标系约定（全仓库统一）：
-#   x 前、y 左、z 上；base_link 与实际底盘刚性固定，随底盘自转。
-#
-# 来源：srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro（SRM 实车模型副本）。
-# 这些数值是当前简化模型的参数，不视作已经标定的整车动力学参数。
+#   x 前、y 左、z 上；base_link 与实际底盘刚性固定，随底盘自转，**原点在地面**
+#   （轮底 = 0）。CAD 装配体里 base_link 离地 0.1009 m，本文件按"地面 = 0"换算过：
+#     本文件的 z = CAD 稿 base_link 系的 z + 0.1009
+#   想看 CAD 原稿的坐标系（base_footprint 根、base_link 离地 0.1009），用
+#     xacro urdf/srm27_sentry.urdf.xacro root_frame:=base_footprint
+#   （导航链路不要这么用，理由见 xacro 文件头）。
+# 质量与惯量仍是简化模型的取值，不视作已标定的整车动力学参数。
 
 robot:
   name: srm_sentry
   base_link: base_link
 
 chassis:
-  radius: 0.27
-  length: 0.20
+  # CAD 实测：车体 546 x 550 mm，圆柱半径 0.2743、高 0.2353，圆柱中心离地 0.1504
+  radius: 0.2743
+  length: 0.2353
   # 圆柱几何中心相对 base_link 原点的高度。base_link 原点在地面高度。
-  center_z: 0.15
-  mass: 8.2
+  center_z: 0.1504
+  mass: 8.7
+  # 显示颜色（RGBA），与 urdf/srm27_sentry.urdf.xacro 的 chassis_grey 一致。
+  color: [0.75, 0.77, 0.80, 1.0]
 
 wheel:
-  radius: 0.075
-  width: 0.04
-  mass: 0.5
-  # 轮子与地面的摩擦系数；轮子绕 y 轴自由转动，避免固定轮接触卡住底盘。
+  # CAD 实测：轮半径 0.07697、宽 0.04576，轮心离地 0.076936 → 轮底 ≈ 地面
+  radius: 0.07697
+  width: 0.04576
+  mass: 0.26
+  # 显示颜色，与 xacro 的 wheel_black 一致。
+  color: [0.08, 0.08, 0.10, 1.0]
+  # 轮子与地面的摩擦系数；轮子是 revolute（绕 CAD 的对角轮轴自由转动），
+  # 避免固定轮接触卡住底盘。轮轴的轴向与 URDF 完全一致，见 model_builder 的
+  # WHEEL_MOUNTING。
   mu: 0.2
   joint_effort: 1.0e+10
   joint_velocity: 1.0e+10
-  # 轮心相对 base_link 的位置（x 前、y 左）。四个轮子绕 y 轴转动。
+  # 轮心相对 base_link 的位置（x 前、y 左），CAD 实测的对角（X 型）布局。
+  # 注意：仿真里轮子由 srm_velocity_system 插件直接驱动底盘，轮子只承担
+  # 显示与摩擦外形，因此这里仍统一绕 y 轴转，没有按实际对角轮轴建轴。
   positions:
-    front_left: [0.18, 0.18, 0.075]
-    front_right: [0.18, -0.18, 0.075]
-    rear_left: [-0.18, 0.18, 0.075]
-    rear_right: [-0.18, -0.18, 0.075]
+    front_left: [0.166688, 0.166553, 0.076936]
+    front_right: [0.166688, -0.166553, 0.076936]
+    rear_left: [-0.166688, 0.166553, 0.076936]
+    rear_right: [-0.166688, -0.166553, 0.076936]
 
 lidar:
   # 帧名保持 front_mid360，与现有 ros_gz_bridge、点云处理与定位链路一致。
   link_name: front_mid360
-  # 相对 base_link 的安装位姿。
-  xyz: [0.15, -0.15, 0.22]
-  rpy: [-0.06981317007977318, 0.0, -1.5707963267948966]
-  # URDF 使用包内 mesh 副本；SDF 使用 srm27_gazebo_simulator 提供的 model:// 资源。
+  # 相对 base_link 的安装位姿（CAD 实测）：偏前右 133.5 mm、离地 346.4 mm，
+  # roll 30° / yaw 63°。⚠ 这个 roll 会直接变成仿真雷达的倾斜角和 Point-LIO 的
+  # gravity 方向；若实车雷达其实是平装的，改这一行，并同步改 urdf/ 那份 xacro 的
+  # lidar_roll 默认值与 nav2 参数里的 gravity（四处必须同一个数，否则测试会失败）。
+  xyz: [0.12081, -0.056721, 0.346388]
+  rpy: [0.523598776, 0.0, 1.099557429]
+  # 外观：黑球 + 灰色支架圆柱（示意版），与 urdf/ 那份 xacro 完全一致。
+  # mode 只影响 **SDF**（Gazebo 里显示什么）；URDF 侧固定用 CAD 示意外观，
+  # 因为"所有链路共用同一份 URDF"后它只有一套外观。
+  visual:
+    mode: "sphere"                       # sphere | mesh（仅 SDF 生效）
+    radius: 0.014                        # 黑球半径
+    color: [0.0, 0.0, 0.0, 1.0]          # lidar_dot
+    # 安装支架（对应 STEP 里那块雷达安装板）：沿雷达自身 -z 伸出，
+    # 长度取"雷达中心 → 底盘顶面"= 0.346388 - 0.26805，设 0 则不画。
+    bracket_radius: 0.018
+    bracket_length: 0.0783
+    bracket_color: [0.72, 0.70, 0.78, 1.0]   # bracket_grey
+  # mesh 模式下使用的资源（URDF 用包内副本，SDF 用 gazebo 包提供的 model:// 资源）。
   mesh_urdf: package://srm27_robot_description/meshes/mid360.stl
   mesh_urdf_scale: 0.001
   mesh_urdf_origin_xyz: [0.025, -0.0265, -0.025]
   mesh_urdf_origin_rpy: [1.5707963267948966, 0.0, 3.141592653589793]
   mesh_sdf: model://mid360/meshes/mid360.dae
   mesh_sdf_origin_rpy: [0.0, 0.0, 3.141592653589793]
-  mass: 0.005
+  mass: 0.25
   update_rate: 20
   samples: 1875
   horizontal_min_angle: 0.0
@@ -65,8 +100,21 @@ imu:
   sensor_name: chassis_imu
   update_rate: 200
 
+# 云台示意圆柱（半透明黄），与实车链路 xacro 里的 gimbal_yaw 外观一致。
+# 仿真里它**只有 visual、没有 collision、也没有关节/传感器**：不影响动力学与导航，
+# 纯属让两条链路看起来是同一台车。设 enabled: false 就不画。
+yaw_envelope:
+  enabled: true
+  link_name: gimbal_yaw
+  radius: 0.150
+  length: 0.110
+  # 底面对齐底盘顶面（chassis.center_z + chassis.length/2 = 0.26805），
+  # 由 model_builder 自动算，不必在这里写高度。
+  color: [0.95, 0.80, 0.25, 1.0]
+  transparency: 0.55
+
 # 导航碰撞检查用的整车外接包络半径。
-# 圆柱半径 0.27 m 不是整车最大边界：轮组外廓（0.18+0.075 对角 ≈ 0.25）、
-# 雷达偏置安装（0.15, -0.15）和传感器外形都需要覆盖。
+# CAD 实测的最大水平外廓是底盘圆柱 0.2743 m（轮组外廓 0.2356+0.0458/2 ≈ 0.2585，
+# 更小）；这里仍保留 0.33 作为偏保守的取值，与 nav2 参数里的 robot_radius 一致。
 collision:
   envelope_radius: 0.33

@@ -1,46 +1,53 @@
-# 把 SRM 自建栈的实车模型搬进 srm27_nav_bringup。
+# Copyright 2026 SRM
 #
-# 用途:
-#   在 srm27 导航栈里发布 SRM 实车模型（base_link / livox_frame / livox_imu /
-#   livox_scan），与当前 SRM 仿真模型的坐标系保持一致。
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# 模型构建逻辑与 real_mapping_launch.py 完全一致（那是实车建图验证过的版本）:
-#   1) 用本包内的 urdf/sentry_robot_cylinder.xacro（SRM 实车模型的本地副本，不再
-#      依赖任何外部工作区），并把 lidar_xyz / lidar_rpy 作为 xacro 的外参映射注入
-#      （雷达安装位姿只在这里定义一次）；
-#   2) mesh 直接指向 srm27_robot_description 包内的 mid360.stl 副本；若仍是历史遗留的
-#      package://pb_rm_simulation/meshes/... 前缀，加载时改写成描述包内的同路径资源
-#      （pb_rm_simulation 不在本工作空间）；
-#   3) 追加两个 link 与固定关节:
-#        livox_imu  : 挂在 livox_frame 下，偏移取 -mapping.extrinsic_T
-#        livox_scan : 挂在 base_link 下，偏移取 lidar_xyz（二维投影用的水平系）
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-# 与 real_mapping_launch.py 的区别:
-#   这里只启动 robot_state_publisher，不启动雷达驱动 / Point-LIO / loam_interface /
-#   sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox —— 这些由 srm27
-#   导航栈（nav2_stack_launch.py）负责，避免与导航入口重复启动同一批节点。
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# 实车车体 TF 发布入口（SRM 新模型）。
+#
+# 车体模型只有一份：srm27_robot_description/urdf/srm27_sentry.urdf.xacro
+# （几何取自 SRM全向轮哨兵.STEP 的 CAD 实测，实车/仿真共用）。本文件用
+# scripts/srm_robot_description.build_description() 现场展开它，得到
+# base_link / livox_frame / livox_imu / livox_scan / wheel_* / gimbal_yaw 的静态 TF。
+#
+# 与 real_mapping_launch.py 的关系:
+#   描述构建用的是**同一个函数**（同一份模型、同一组外参），区别只在于本文件
+#   只启动 robot_state_publisher，不启动雷达驱动 / Point-LIO / loam_interface /
+#   sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox —— 那些由
+#   srm27 导航栈（nav2_stack_launch.py）负责，避免与导航入口重复启动同一批节点。
 #
 # 用法:
 #   ros2 launch srm27_nav_bringup real_robot_state_publisher_launch.py
 
 import json
-import math
+import sys
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
-import xacro
-import yaml
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 
+# 描述构建模块与预检脚本装在同一个目录（见 CMakeLists 的 install(FILES ...)）。
+sys.path.insert(
+    0, str(Path(get_package_prefix("srm27_nav_bringup")) / "lib" / "srm27_nav_bringup")
+)
+
+from srm_robot_description import build_description  # noqa: E402
+
 
 def launch_setup(context):
-    bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
-    robot_file = bringup_dir / "urdf/sentry_robot_cylinder.xacro"
     params_file = LaunchConfiguration("params_file").perform(context)
     lidar_config = LaunchConfiguration("lidar_config").perform(context)
 
@@ -54,59 +61,11 @@ def launch_setup(context):
                 "Set driver extrinsics to zero; use lidar_xyz/lidar_rpy for mounting"
             )
 
-    lidar_xyz = LaunchConfiguration("lidar_xyz").perform(context)
-    lidar_rpy = LaunchConfiguration("lidar_rpy").perform(context)
-    position = [float(value) for value in lidar_xyz.split()]
-    rotation = [float(value) for value in lidar_rpy.split()]
-    if len(position) != 3 or len(rotation) != 3:
-        raise ValueError("lidar_xyz and lidar_rpy must each contain three numbers")
-    if not all(math.isfinite(value) for value in position + rotation):
-        raise ValueError("LiDAR mounting parameters must be finite")
-
-    # livox_imu 相对 livox_frame 的偏移由 Point-LIO 的 extrinsic_T 决定，
-    # 从参数文件读取，保证与里程计使用的外参是同一个来源。
-    with open(params_file, encoding="utf-8") as params_stream:
-        nav_params = yaml.safe_load(params_stream)
-    imu_translation = nav_params["point_lio"]["ros__parameters"]["mapping"][
-        "extrinsic_T"
-    ]
-    if len(imu_translation) != 3 or not all(
-        math.isfinite(value) for value in imu_translation
-    ):
-        raise ValueError("extrinsic_T must contain three finite numbers")
-    if nav_params["point_lio"]["ros__parameters"]["mapping"]["extrinsic_R"] != [
-        1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0
-    ]:
-        raise ValueError("This MID360 model requires identity LiDAR-to-IMU rotation")
-
-    robot_xml = xacro.process_file(
-        str(robot_file), mappings={"xyz": lidar_xyz, "rpy": lidar_rpy}
-    ).toxml()
-    robot = ET.fromstring(robot_xml)
-
-    # mesh 解析: xacro 已指向 srm27_robot_description 包内的副本;
-    # 若还有历史遗留的 pb_rm_simulation 前缀, 一并改写为描述包内的同路径资源。
-    description_dir = Path(get_package_share_directory("srm27_robot_description"))
-    for mesh in robot.iter("mesh"):
-        filename = mesh.attrib["filename"]
-        prefix = "package://pb_rm_simulation/"
-        if filename.startswith(prefix):
-            relative = filename.removeprefix(prefix)
-            if not (description_dir / relative).is_file():
-                raise FileNotFoundError(description_dir / relative)
-            mesh.set("filename", f"package://srm27_robot_description/{relative}")
-
-    for child, parent, translation in [
-        ("livox_imu", "livox_frame", [-value for value in imu_translation]),
-        ("livox_scan", "base_link", position),
-    ]:
-        ET.SubElement(robot, "link", name=child)
-        joint = ET.SubElement(robot, "joint", name=child + "_joint", type="fixed")
-        ET.SubElement(joint, "parent", link=parent)
-        ET.SubElement(joint, "child", link=child)
-        ET.SubElement(
-            joint, "origin", xyz=" ".join(map(str, translation)), rpy="0 0 0"
-        )
+    robot_xml = build_description(
+        params_file,
+        LaunchConfiguration("lidar_xyz").perform(context),
+        LaunchConfiguration("lidar_rpy").perform(context),
+    )
 
     use_sim_time = ParameterValue(
         LaunchConfiguration("use_sim_time"), value_type=bool
@@ -121,7 +80,7 @@ def launch_setup(context):
             output="screen",
             parameters=[
                 clock_params,
-                {"robot_description": ET.tostring(robot, encoding="unicode")},
+                {"robot_description": robot_xml},
             ],
         ),
     ]
@@ -140,11 +99,15 @@ def generate_launch_description():
             str(bringup_dir / "config/real/mid360_user_config.json"),
             "MID360 network config with zero driver extrinsics",
         ),
-        ("lidar_xyz", "0.15 -0.15 0.22", "LiDAR origin in base_link, in metres"),
+        (
+            "lidar_xyz",
+            "0.12081 -0.056721 0.346388",
+            "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
+        ),
         (
             "lidar_rpy",
-            "-0.06981317007977318 0.0 -1.5707963267948966",
-            "LiDAR mounting roll pitch yaw, in radians",
+            "0.523598776 0.0 1.099557429",
+            "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
         ),
         ("use_sim_time", "False", "Use the simulation clock if True"),
     ]

@@ -128,7 +128,7 @@ srm_nav_27/
 
 | 包 | 职责 |
 | --- | --- |
-| `srm27_robot_description` | SRM 几何与外参的**唯一定义**（`config/srm27_sentry_geometry.yaml`）；由同一份 YAML 生成 URDF 与 Gazebo SDF，并带有与之一致的公共 xacro（`urdf/srm27_sentry.urdf.xacro`）；实车链路目前仍用 `srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro` |
+| `srm27_robot_description` | SRM 几何与外参的**唯一定义**：`config/srm27_sentry_geometry.yaml`（数值来源，供 SDF 生成）+ `urdf/srm27_sentry.urdf.xacro`（**唯一 URDF**，实车建图/导航/独立调试/仿真显示/viz 全部读这一份）。两者数值一致性由测试强制保证 |
 | `srm27_chassis_control` | 速度合成与独立自转：`srm_cmd_mux`（导航平移 + 独立自转，`cmd_vel_sim` 的唯一发布者）、`rotation_controller`、`rotation_test_sender`，含纯逻辑 gtest |
 | `srm27_gazebo_simulator` | SRM 仿真入口 `srm_sim.launch.py`、自有 Gazebo 速度插件 `srm_velocity_system`、速度适配器 `srm_velocity_adapter`、空场世界 `worlds/srm_empty.sdf`，以及 `resource/` 下的比赛场地、GUI 配置和 MID-360 模型 |
 | `pcd2pgm` | `.pcd` 转 `.pgm` 栅格图 |
@@ -238,12 +238,16 @@ Nav2 controller ─ cmd_vel_nav ─┐
 ```text
 map ──► odom ──► base_link ──┬─► livox_frame ──► livox_imu
                              ├─► livox_scan
-                             └─► wheel_1 .. wheel_4
+                             ├─► gimbal_yaw
+                             └─► wheel_front_left / rear_left / front_right / rear_right
 ```
 
-- `odom → base_link`：`sensor_scan_generation` 发布
+- `odom → base_link`：`sensor_scan_generation` 发布（`planarize`：z=0、roll=pitch=0，只留 yaw）
 - `map → odom`：由定位方式决定，见 §5.3（四种方式互斥）
-- `base_link → *`：`real_robot_state_publisher_launch.py` 发布（雷达安装外参 + 轮组）
+- `base_link → *`：`robot_state_publisher` 发布的静态外参，模型来自**唯一**的
+  `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`，由
+  `srm27_nav_bringup/scripts/srm_robot_description.py` 展开（建图/导航/独立调试三条
+  入口用的是同一个函数，TF 必然一致）
 
 **仿真**（SRM 生成模型，`config/simulation/nav2_params_srm.yaml`）
 
@@ -302,7 +306,7 @@ map ──► odom ──► base_link ──┬─► front_mid360
 | `nav_multi_simulation_launch.py` | 入口 | 多机仿真导航 |
 | `real_mapping_launch.py` | 入口 | 实车 MID360 建图 |
 | `real_robot_state_publisher_launch.py` | 入口 | 实车整车 TF（SRM 模型 + 雷达外参） |
-| `standalone_robot_state_publisher_launch.py` | 入口 | 独立调试用备用 TF（读 `urdf/srm_robot.urdf`） |
+| `standalone_robot_state_publisher_launch.py` | 入口 | 独立调试用备用 TF（同一份唯一 URDF，与建图/导航完全一致） |
 | `nav2_stack_launch.py` | 内部 | Nav2 主栈，按 `slam` 参数二选一拉起建图或定位，并透传速度出口参数 |
 | `nav2_slam_launch.py` | 内部 | `slam:=True` 分支（slam_toolbox + map_saver + Point-LIO） |
 | `localization_launch.py` | 内部 | `slam:=False` 分支（静态 TF / small_gicp 重定位 / 纯 LIO） |
@@ -747,9 +751,7 @@ map/real/  pcd/real/          实车栅格图与先验点云
 map/simulation/  pcd/simulation/  仿真栅格图与先验点云
 rviz/                 mapping.rviz / nav2_default_view.rviz
 behavior_trees/       Nav2 行为树 XML
-urdf/                 srm_robot.urdf                    独立调试用备用模型
-                      sentry_robot_cylinder.xacro       SRM 实车车体模型（实车入口使用）
-meshes/               mid360.stl                        实车模型的雷达 mesh
+meshes/               mid360.stl                        历史遗留的雷达 mesh（当前模型不用）
 ```
 
 本次新增包各自带自己的配置，跨包只通过话题与服务交互：
@@ -765,7 +767,24 @@ src/srm27_gazebo_simulator/resource/                           比赛场地、MI
 
 实车参数有两份，用途写在文件名里：**`nav2_params_srm.yaml` 是 SRM 车实际使用的那份**，`nav2_params_upstream.yaml` 仅作上游对照，两者的 frame 体系不兼容。仿真参数同样是两份：**`nav2_params_srm.yaml` 是当前使用的那份**（`robot_base_frame: base_link`），`nav2_params.yaml` 是旧步兵链路对照版。
 
-实车车体模型已随包提供（`urdf/sentry_robot_cylinder.xacro` + `meshes/mid360.stl`），实车入口**不再依赖外部工作区**。xacro 的雷达 mesh 现在直接指向 `package://srm27_robot_description/meshes/mid360.stl`；`real_mapping_launch.py` 与 `real_robot_state_publisher_launch.py` 仍会把历史遗留的 `package://pb_rm_simulation/` 前缀改写为描述包内的同路径资源。**仿真模型（SDF）与实车模型（xacro）的几何数值必须与 `srm27_robot_description/config/srm27_sentry_geometry.yaml` 保持一致。**
+车体模型**只有一份**：`src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro`（几何取自 `SRM全向轮哨兵.STEP` 的 CAD 实测）。实车建图、实车导航、独立调试、仿真显示、`viz/` 看模型，全部读它，只有坐标系契约参数不同：
+
+| 用途 | 关键参数 | 说明 |
+| --- | --- | --- |
+| 实车（建图/导航/独立调试） | `root_frame:=base_link`、`wheel_joint_type:=fixed`、`gimbal_joint_type:=fixed`、`lidar_link_name:=livox_frame` | 原点在地面；实车没有 `/joint_states` 发布者，关节必须 fixed |
+| 仿真显示（`model_builder.build_urdf()`） | `wheel_joint_type:=continuous`、`lidar_link_name:=front_mid360` | 轮子是连续关节，关节名与 Gazebo SDF 一致 |
+| 看 CAD 原稿（`viz/` 的 `cad_view:=true`） | `root_frame:=base_footprint`、continuous + revolute | base_link 离地 0.1009 m，与 CAD 装配体一致 |
+
+Gazebo 的 SDF 仍由 `model_builder.build_sdf()` 从 `config/srm27_sentry_geometry.yaml` 生成（需要插件/传感器/摩擦等 SDF 专属内容），几何数值同样来自那份 YAML。
+
+**改尺寸必须两处一起改**（`urdf/srm27_sentry.urdf.xacro` 的默认值与 `config/srm27_sentry_geometry.yaml`）。仓库里不再有自动化用例把关，改完自己跑一遍这条自查：
+
+```bash
+# 把两份模型的关节数值并排打出来，肉眼比一下即可
+xacro src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro \
+  | grep -E "<origin xyz|wheel_.*_joint" | head -20
+python3 -c "import yaml;d=yaml.safe_load(open('src/srm27_robot_description/config/srm27_sentry_geometry.yaml'));print(d['chassis'], d['wheel']['positions'], d['lidar']['xyz'], d['lidar']['rpy'])"
+```
 
 ---
 

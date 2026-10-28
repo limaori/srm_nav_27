@@ -698,7 +698,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
     --params src/srm27_navigation/srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml \
     --expect-minco
 # 预检自身的回归测试（17 用例，含“实车配置必须零阻塞”这条守门员用例）
-python3 src/srm27_navigation/srm27_nav_bringup/test/test_minco_real_preflight.py
+python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.py   # 2026-10: test/ 目录已删除，直接跑脚本即可
 # 单元测试（终点急停 15 用例 + 到点判定 10 用例；本项目用 gtest，不是 pytest）
 source install/setup.bash
 colcon test --packages-select srm27_minco_core srm27_minco_controller srm27_nav_plugins

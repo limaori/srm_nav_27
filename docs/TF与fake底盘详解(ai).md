@@ -62,9 +62,20 @@ map ──┬─ static_transform_publisher_map2odom   (默认 / --lio：写死)
                                                 │
                                                 ├─ livox_frame ── livox_imu   ┐
                                                 ├─ livox_scan                 ├ robot_state_publisher
-                                                ├─ wheel_1..4                 ┘ (全静态)
-                                                └─ base_link_fake             (fake_vel_transform)
+                                                ├─ gimbal_yaw                 ├ (全静态, 唯一 URDF)
+                                                ├─ wheel_front_left           │
+                                                ├─ wheel_rear_left            │
+                                                ├─ wheel_front_right          │
+                                                └─ wheel_rear_right           ┘
 ```
+
+> [!NOTE]
+> **2026-10 更新（新 CAD 模型 + 全链路单源）**：实车/仿真现在共用唯一模型
+> `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`。
+> 上面这棵树里 `wheel_1..4` 已改名为 `wheel_front_left / wheel_rear_left /
+> wheel_front_right / wheel_rear_right`，新增固定的 `gimbal_yaw`，雷达外参也从
+> `0.15 -0.15 0.22 / rpy(-4°,0,-90°)` 换成 CAD 实测的
+> `0.12081 -0.056721 0.346388 / rpy(30°,0,63°)`；`base_link_fake` 早已从 SRM 链路删除。
 
 | 边 | 谁发布 | 依据 | 什么时候 |
 |---|---|---|---|
@@ -73,11 +84,11 @@ map ──┬─ static_transform_publisher_map2odom   (默认 / --lio：写死)
 | `map → odom` | `small_gicp_relocalization` | `srm_nav2_params.yaml:235-250` | `--reloc` |
 | `odom → base_link` | `sensor_scan_generation`：拿 LIO 的雷达位姿 → 乘雷达安装外参换成底盘 → 平面化(z=0, roll=0, pitch=0) → 抖动抑制 | `sensor_scan_generation.cpp:140-146`；参数 `srm_nav2_params.yaml:136-142` | LIO 模式 |
 | `odom → livox_imu`（只发话题 `lidar_odometry`，不发 TF） | `loam_interface`，把 Point-LIO 的 `camera_init` 原点平移到 `base_link` | `loam_interface.cpp:115-162` | 同上 |
-| `base_link → livox_frame` | `robot_state_publisher`，URDF 由 SRM xacro + `lidar_xyz/lidar_rpy` 现场拼出：xyz 0.15 −0.15 0.22、rpy −4° 0 −90° | `srm_robot_state_publisher_launch.py:98-126`，启动于 `start_real_nav.sh:438` | 静态 `/tf_static` |
-| `livox_frame → livox_imu` | 同上，偏移 = −`point_lio.mapping.extrinsic_T` = (0.011, 0.02329, −0.04412) | `srm_nav2_params.yaml:105` | 静态 |
-| `base_link → livox_scan` | 同上，偏移 = `lidar_xyz`（二维投影用的水平系） | 同上 | 静态 |
-| `base_link → wheel_1..4` | 同上，xacro 里是 **fixed** joint（±0.18, ±0.18, 0.075） | SRM `sentry_robot_cylinder.xacro` | 静态 |
-| `base_link → base_link_fake` | `fake_vel_transform`（yaw = −当前底盘朝向） | `fake_vel_transform.cpp:137-147` | 50Hz |
+| `base_link → livox_frame` | `robot_state_publisher`，URDF = 唯一模型 xacro + `lidar_xyz/lidar_rpy`：xyz 0.12081 −0.056721 0.346388、rpy 30° 0 63°（CAD 实测） | `real_robot_state_publisher_launch.py`（`scripts/srm_robot_description.py`） | 静态 `/tf_static` |
+| `livox_frame → livox_imu` | 同上，偏移 = −`point_lio.mapping.extrinsic_T` = (0.011, 0.02329, −0.04412)（姿态随雷达一起倾斜 30°） | `srm_nav2_params.yaml` 的 `extrinsic_T` | 静态 |
+| `base_link → livox_scan` | 同上，偏移 = `lidar_xyz`（二维投影用的**水平**系，高度与雷达相同） | 同上 | 静态 |
+| `base_link → gimbal_yaw` | 同上，**fixed**（(0, 0, 0.26805)）；实车没人发云台 `/joint_states` | `urdf/srm27_sentry.urdf.xacro` | 静态 |
+| `base_link → wheel_*` | 同上，**fixed** joint（±0.166688, ±0.166553, 0.076936） | 同上 | 静态 |
 
 `odom → base_link` 具体在算什么（一步步）：
 

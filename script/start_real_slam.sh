@@ -60,8 +60,8 @@
 #       --bag-out-dir <绝对路径> 录包输出目录, 默认 <工作空间>/log_diag/mapping_bag_<名字|时间戳>
 #   -p, --params <绝对路径>     建图参数, 默认 config/real/mapping_params.yaml
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
-#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.15 -0.15 0.22)
-#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 -0.06981317007977318 0 -1.5707963267948966)
+#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.12081 -0.056721 0.346388)
+#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 0.523598776 0 1.099557429 = roll 30°/yaw 63°)
 #       --no-lidar              不起雷达驱动 (回放 rosbag 时用, 配合 --use-sim-time)
 #       --use-sim-time          使用 /clock (回放 bag 时用, 默认 False)
 #       --save-pcd              让 Point-LIO 退出时落盘累积点云 (见下文说明)
@@ -145,8 +145,8 @@ SAVE_PCD="${SAVE_PCD:-0}"
 
 PARAMS_FILE="${PARAMS_FILE:-}"
 LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
-LIDAR_XYZ="${LIDAR_XYZ:-0.15 -0.15 0.22}"
-LIDAR_RPY="${LIDAR_RPY:--0.06981317007977318 0.0 -1.5707963267948966}"
+LIDAR_XYZ="${LIDAR_XYZ:-0.12081 -0.056721 0.346388}"
+LIDAR_RPY="${LIDAR_RPY:-0.523598776 0.0 1.099557429}"
 
 SAVE_MAP_NAME="${SAVE_MAP_NAME:-}"
 MAP_OUT_DIR="${MAP_OUT_DIR:-}"
