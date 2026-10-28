@@ -150,6 +150,7 @@ def generate_launch_description():
             configured_params,
             {"use_sim_time": use_sim_time},
             {"prior_pcd.enable": False},
+            # 建图模式下始终落盘: 退出时写到 point_lio 的 ROOT_DIR/PCD/scans.pcd
             {"pcd_save.pcd_save_en": True},
         ],
         arguments=["--ros-args", "--log-level", log_level],

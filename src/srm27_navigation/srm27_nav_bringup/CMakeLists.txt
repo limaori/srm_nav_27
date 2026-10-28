@@ -16,26 +16,19 @@ install(PROGRAMS
 # 必须装在脚本同目录（launch 通过 get_package_prefix(...)/lib/<包名> 导入）。
 install(FILES
   scripts/srm_nav_pose_math.py
+  scripts/srm_robot_description.py
   scripts/srm_speed_limits.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
-find_package(ament_lint_auto REQUIRED)
-  list(APPEND AMENT_LINT_AUTO_EXCLUDE
-    ament_cmake_uncrustify
-    ament_cmake_cpplint
-    ament_cmake_flake8
-  )
-  ament_lint_auto_find_test_dependencies()
-
-  # 几何回归测试用普通 Python 入口而不是 pytest：本机 pytest11 插件与
-  # launch_testing/较新 pluggy 不兼容，会在收集阶段直接失败（与
-  # srm27_robot_description 的 test_model_builder 保持一致的做法）。
+  # 只保留本分支（小陀螺 / fakeyaw 链路）自己的回归测试。
+  # 其余测试已随 main 的 b2d6fc2 一并删除，因此这里不再跑 ament_lint_auto。
+  # 用普通 Python 入口而不是 pytest：本机 pytest11 插件与 launch_testing/
+  # 较新 pluggy 不兼容，会在收集阶段直接失败。
   find_program(SRM27_PYTHON3_EXECUTABLE NAMES python3 REQUIRED)
   find_package(ament_cmake_test REQUIRED)
-  foreach(test_name test_pose_math test_ground_truth_odometry_pose test_minco_real_preflight
-                    test_speed_limits test_fakeyaw_launch_wiring)
+  foreach(test_name test_fakeyaw_launch_wiring test_speed_limits)
     ament_add_test(${test_name}
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO
       COMMAND ${SRM27_PYTHON3_EXECUTABLE}
@@ -53,7 +46,6 @@ ament_auto_package(
   meshes
   pcd
   config
-  urdf
   behavior_trees
   rviz
 )

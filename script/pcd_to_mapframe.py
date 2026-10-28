@@ -5,8 +5,11 @@
 ------------
 Point-LIO 落盘的 scans.pcd (以及 script/build_pcd_from_bag.sh 产出的 maps/pcd/<名字>.pcd)
 是以 **camera_init** (建图起点雷达系) 表达的; 而 Nav2 的地图系是 pgm 栅格图的坐标系,
-两者相差一个**固定的平面旋转**——雷达相对 base_link 装了 -90°(见 launch 的 lidar_rpy),
-实测 227_1011 差 -90.00°。直接把这个点云喂给 --reloc, 车会被定位到差 90° 的姿态上,
+两者相差一个**固定的平面旋转**——雷达相对 base_link 的 yaw 不是 0(见 launch 的
+lidar_rpy)。CAD 实测的安装角是 yaw = 1.099557429 rad = 63°(旧外参是 -90°),
+所以换模型后这个偏移量必须重新由数据求出(本脚本本来就是搜索出来的, 不写死):
+实测旧配置 227_1011 差 -90.00°。直接把这个点云喂给 --reloc, 车会被定位到差一个
+yaw 的姿态上,
 **而 GICP 自己不会报错**(见 config/real/nav2_params_srm.yaml 里 small_gicp_relocalization
 那段的"情况一/情况二"警告)。
 
@@ -280,8 +283,8 @@ def write_pcd_tmp(path: str, arr: np.ndarray, fields: list, note_lines: list) ->
 
 def mounting_hint() -> str:
     """把 launch 里的挂载外参算成平面量, 供与实测值对照。"""
-    xyz = (0.15, -0.15, 0.22)
-    rpy = (-0.06981317007977318, 0.0, -1.5707963267948966)
+    xyz = (0.12081, -0.056721, 0.346388)
+    rpy = (0.523598776, 0.0, 1.099557429)
     cr, sr = math.cos(rpy[0]), math.sin(rpy[0])
     cp, sp = math.cos(rpy[1]), math.sin(rpy[1])
     cy, sy = math.cos(rpy[2]), math.sin(rpy[2])

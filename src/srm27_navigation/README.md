@@ -72,8 +72,8 @@ https://github.com/user-attachments/assets/ae4c19a0-4c73-46a0-95bd-909734da2a42
     ├── nav_simulation_launch.py                 # 已弃用：转发到 nav_srm_simulation_launch.py
     ├── nav_multi_simulation_launch.py           # 多机仿真导航入口
     ├── real_mapping_launch.py                   # 实车 MID360 建图入口
-    ├── real_robot_state_publisher_launch.py     # 实车整车 TF（SRM 模型 + 雷达外参）
-    ├── standalone_robot_state_publisher_launch.py  # 独立调试用备用 TF（读 urdf/srm_robot.urdf）
+    ├── real_robot_state_publisher_launch.py     # 实车整车 TF（唯一 URDF + 雷达外参）
+    ├── standalone_robot_state_publisher_launch.py  # 独立调试用备用 TF（同一份唯一 URDF）
     ├── nav2_stack_launch.py                     # 内部: Nav2 主栈，按 slam 参数二选一
     ├── nav2_slam_launch.py                      # 内部: slam:=True 分支
     ├── localization_launch.py                   # 内部: slam:=False 分支（AMCL / small_gicp）
@@ -86,13 +86,14 @@ https://github.com/user-attachments/assets/ae4c19a0-4c73-46a0-95bd-909734da2a42
     `config/real/nav2_params_upstream.yaml`（上游原版对照）；建图参数与 RViz 配置为
     `config/real/mapping_params.yaml`、`rviz/mapping.rviz`。
 
-    车体模型随包提供，实车入口**不依赖任何外部工作区**：`urdf/sentry_robot_cylinder.xacro`
-    是 SRM 实车模型的本地副本（`urdf/srm_robot.urdf` 仅作独立调试备用）。
-    xacro 内的雷达 mesh 已指向 `srm27_robot_description` 包内的副本
-    （`package://srm27_robot_description/meshes/mid360.stl`），不再引用不在本工作空间的
-    `package://pb_rm_simulation/`；历史遗留下述前缀仍会被 launch 改写，
-    `real_mapping_launch.py` 与 `real_robot_state_publisher_launch.py` 加载时会把它改写为
-    `package://srm27_nav_bringup/meshes/mid360.stl`，文件缺失时直接报错退出。
+    车体模型**不在本包**：唯一模型是
+    `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`（几何取自 CAD 实测）。
+    本包的 `scripts/srm_robot_description.py` 负责把它按实车契约展开
+    （`base_link` 原点在地面、轮子与云台 fixed、雷达帧 `livox_frame`，并追加
+    `livox_imu` / `livox_scan`），`real_mapping_launch.py`、
+    `real_robot_state_publisher_launch.py`、`standalone_robot_state_publisher_launch.py`
+    三个入口都调用同一个函数，因此三条链路发布的静态 TF 必然一致。
+    导入方式与 `srm_nav_pose_math.py` 相同（装在 `lib/srm27_nav_bringup`）。
 
 ## 2. Quick Start
 

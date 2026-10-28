@@ -84,22 +84,27 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        wheel_1:
+        gimbal_yaw:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        wheel_2:
+        wheel_front_left:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        wheel_3:
+        wheel_front_right:
           Alpha: 1
           Show Axes: false
           Show Trail: false
           Value: true
-        wheel_4:
+        wheel_rear_left:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wheel_rear_right:
           Alpha: 1
           Show Axes: false
           Show Trail: false

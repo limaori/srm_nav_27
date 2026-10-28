@@ -891,7 +891,7 @@ D400/D415，`model_builder.py`、`navigation_launch.py` 等既有文件同样报
 | 到点判定依赖角速度：`nav2_controller::StoppedGoalChecker` 把 `|wz| <= rot_stopped_velocity` 与平动停稳写在同一组 AND 条件里，配置层无法只关一条；而导航既不产生也不控制 `wz`（自转归下位机），自转中的哨兵会永远判不了到点 | 新增插件 | 自建 `srm27_nav_plugins::OmniStoppedGoalChecker`：位置 + 航向 + **平动**停稳，角速度完全不参与；配置删掉 `rot_stopped_velocity` / `stateful` |
 
 新增测试：`test_terminal_stop.cpp`（10 用例）、`test_omni_stopped_goal_checker.cpp`（10 用例，含 pluginlib 按名字加载）、
-预检回归 `test_minco_real_preflight.py`（18 用例）。本次全量：**255 个功能用例全部通过**（4 个包）。
+预检回归 `test_minco_real_preflight.py`（18 用例，2026-10 已随 test/ 目录删除）。本次全量：**255 个功能用例全部通过**（4 个包）。
 详细说明与验收判据见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md) §4.6–§4.9。
 
 ## 7. 未完成项与后续阶段

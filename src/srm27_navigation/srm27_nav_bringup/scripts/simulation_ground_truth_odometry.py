@@ -66,8 +66,8 @@ def load_lidar_extrinsic():
     """
     fallback = {
         "link_name": "front_mid360",
-        "xyz": [0.15, -0.15, 0.22],
-        "rpy": [-0.06981317007977318, 0.0, -1.5707963267948966],
+        "xyz": [0.12081, -0.056721, 0.346388],
+        "rpy": [0.523598776, 0.0, 1.099557429],
     }
     try:
         from srm27_robot_description import load_geometry

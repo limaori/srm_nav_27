@@ -1,4 +1,5 @@
 // #include <so3_math.h>
+#include <chrono>
 #include <malloc.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
@@ -316,6 +317,35 @@ int main(int argc, char ** argv)
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(nh);
 
+  // ---- 时间跳变保护 -------------------------------------------------------
+  // Gazebo 暂停/恢复、rosbag 回放跳段、数据断流都会让相邻两帧的时间差突然变成
+  // 几十秒。Point-LIO 的状态传播是按 dt 积分的，一次这么大的 dt 会把位置推到
+  // 几公里外且再也拉不回来（实测：一次建图 58% 的点被甩到 2000 m 之外、最远
+  // 15 km，地面法向歪 32°，整张图"飘飞"）。
+  // 正常 200 Hz IMU = 5 ms、20 Hz 雷达 = 50 ms，远小于下面的阈值，平时行为不变；
+  // 只有时间戳跳变时才生效，把 dt 钳到安全上限并告警。
+  constexpr double kMaxImuDt = 0.10;    // 单条 IMU 积分的 dt 上限（秒）
+  constexpr double kMaxFrameDt = 0.20;  // 一帧雷达对应的 dt 上限（秒）
+  auto clamp_dt = [](double dt, double limit, const char * where) -> double {
+      if (!std::isfinite(dt) || dt <= 0.0) {
+        return 0.0;
+      }
+      if (dt > limit) {
+        // 用 steady_clock 节流: 不能依赖仿真时钟, 暂停时它自己就是停的
+        static std::chrono::steady_clock::time_point last_warn{};
+        const auto now = std::chrono::steady_clock::now();
+        if (last_warn.time_since_epoch().count() == 0 ||
+            std::chrono::duration<double>(now - last_warn).count() > 2.0) {
+          last_warn = now;
+          RCLCPP_WARN(
+            LOGGER, "检测到时间跳变 %.3f s（%s），已钳位到 %.3f s 以防止状态发散；"
+            "若是暂停/恢复造成的，建议 Ctrl-C 重启建图栈", dt, where, limit);
+        }
+        return limit;
+      }
+      return dt;
+    };
+
   readParameters(nh);
   std::cout << "lidar_type: " << lidar_type << '\n';
   ivox_ = std::make_shared<IVoxType>(ivox_options_);
@@ -625,12 +655,16 @@ int main(int argc, char ** argv)
                   imu_next.linear_acceleration.z;
 
                 /*** covariance update ***/
-                double dt = get_time_sec(imu_next.header.stamp) - time_predict_last_const;
+                double dt = clamp_dt(
+                  get_time_sec(imu_next.header.stamp) - time_predict_last_const,
+                  kMaxImuDt, "imu(kf_output)");
                 kf_output.predict(dt, Q_output, input_in, true, false);
                 time_predict_last_const = get_time_sec(imu_next.header.stamp);  // big problem
 
                 {
-                  double dt_cov = get_time_sec(imu_next.header.stamp) - time_update_last;
+                  double dt_cov = clamp_dt(
+                    get_time_sec(imu_next.header.stamp) - time_update_last,
+                    kMaxImuDt, "imu_cov(kf_output)");
 
                   if (dt_cov > 0.0) {
                     time_update_last = get_time_sec(imu_next.header.stamp);
@@ -655,10 +689,12 @@ int main(int argc, char ** argv)
               break;
             }
 
-            double dt = time_current - time_predict_last_const;
+            double dt = clamp_dt(
+              time_current - time_predict_last_const, kMaxFrameDt, "scan(kf_output)");
             double propag_state_start = omp_get_wtime();
             if (!prop_at_freq_of_imu) {
-              double dt_cov = time_current - time_update_last;
+              double dt_cov = clamp_dt(
+                time_current - time_update_last, kMaxFrameDt, "scan_cov(kf_output)");
               if (dt_cov > 0.0) {
                 kf_output.predict(dt_cov, Q_output, input_in, false, true);
                 time_update_last = time_current;
@@ -745,9 +781,11 @@ int main(int argc, char ** argv)
               time_current = get_time_sec(imu_next.header.stamp);
 
               if (!is_first_frame) {
-                double dt = time_current - time_predict_last_const;
+                double dt = clamp_dt(
+                  time_current - time_predict_last_const, kMaxFrameDt, "scan_first(kf_output)");
                 {
-                  double dt_cov = time_current - time_update_last;
+                  double dt_cov = clamp_dt(
+                    time_current - time_update_last, kMaxFrameDt, "scan_first_cov(kf_output)");
                   if (dt_cov > 0.0) {
                     kf_output.predict(dt_cov, Q_output, input_in, false, true);
                     time_update_last = time_current;
@@ -815,9 +853,13 @@ int main(int argc, char ** argv)
               input_in.acc << imu_last.linear_acceleration.x, imu_last.linear_acceleration.y,
                 imu_last.linear_acceleration.z;
               input_in.acc = input_in.acc * G_m_s2 / acc_norm;
-              double dt = get_time_sec(imu_last.header.stamp) - t_last;
+              double dt = clamp_dt(
+                get_time_sec(imu_last.header.stamp) - t_last,
+                kMaxImuDt, "imu(kf_input)");
 
-              double dt_cov = get_time_sec(imu_last.header.stamp) - time_update_last;
+              double dt_cov = clamp_dt(
+                get_time_sec(imu_last.header.stamp) - time_update_last,
+                kMaxImuDt, "imu_cov(kf_input)");
               if (dt_cov > 0.0) {
                 kf_input.predict(dt_cov, Q_input, input_in, false, true);
                 time_update_last = get_time_sec(imu_last.header.stamp);  //time_current;
@@ -834,12 +876,14 @@ int main(int argc, char ** argv)
             if (flg_reset) {
               break;
             }
-            double dt = time_current - t_last;
+            double dt = clamp_dt(
+              time_current - t_last, kMaxFrameDt, "scan(kf_input)");
             t_last = time_current;
             double propag_start = omp_get_wtime();
 
             if (!prop_at_freq_of_imu) {
-              double dt_cov = time_current - time_update_last;
+              double dt_cov = clamp_dt(
+                time_current - time_update_last, kMaxFrameDt, "scan_cov(kf_input)");
               if (dt_cov > 0.0) {
                 kf_input.predict(dt_cov, Q_input, input_in, false, true);
                 time_update_last = time_current;

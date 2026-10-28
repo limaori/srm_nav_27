@@ -12,37 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: This startup file is only used when the navigation module is standalone.
+# 独立调试用：只发车体 TF（robot_state_publisher），不碰雷达/LIO/导航节点。
+#
+# 车体模型与实车链路**同一份**：srm27_robot_description/urdf/srm27_sentry.urdf.xacro，
+# 由 scripts/srm_robot_description.build_description() 展开（base_link 原点在地面、
+# 轮子与云台 fixed、雷达帧 livox_frame），并追加 livox_imu / livox_scan。
+# 也就是说这里发布出来的 TF 与 real_mapping_launch.py / 导航栈完全一致，
+# 不会再出现"调试时的模型和跑车时的模型不是同一台车"。
 
-# NOTE: This startup file is only used when the navigation module is standalone
-# It is used to launch the robot state publisher and joint state publisher.
-# But in a complete robot system, this part should be completed by an independent robot startup module
-
+import sys
 from pathlib import Path
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (
+    get_package_prefix,
+    get_package_share_directory,
+)
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    OpaqueFunction,
+)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace, SetRemap
 
+sys.path.insert(
+    0, str(Path(get_package_prefix("srm27_nav_bringup")) / "lib" / "srm27_nav_bringup")
+)
 
-def generate_launch_description():
+from srm_robot_description import build_description  # noqa: E402
+
+
+def launch_setup(context):
+    bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
+    params_file = LaunchConfiguration("params_file").perform(context)
     namespace = LaunchConfiguration("namespace")
     use_sim_time = LaunchConfiguration("use_sim_time")
-    bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
-    robot_description = (bringup_dir / "urdf" / "srm_robot.urdf").read_text()
 
-    # Declare the launch arguments
-    declare_namespace_cmd = DeclareLaunchArgument(
-        "namespace",
-        default_value="",
-        description="Top-level namespace",
-    )
-
-    declare_use_sim_time_cmd = DeclareLaunchArgument(
-        "use_sim_time",
-        default_value="false",
-        description="Use simulation (Gazebo) clock if true",
+    robot_description = build_description(
+        params_file,
+        LaunchConfiguration("lidar_xyz").perform(context),
+        LaunchConfiguration("lidar_rpy").perform(context),
     )
 
     bringup_cmd_group = GroupAction(
@@ -63,15 +74,46 @@ def generate_launch_description():
             ),
         ]
     )
+    return [bringup_cmd_group]
 
-    # Create the launch description and populate
-    ld = LaunchDescription()
 
-    # Declare the launch options
-    ld.add_action(declare_namespace_cmd)
-    ld.add_action(declare_use_sim_time_cmd)
-
-    # Add the actions to launch all nodes
-    ld.add_action(bringup_cmd_group)
-
-    return ld
+def generate_launch_description():
+    bringup_dir = Path(get_package_share_directory("srm27_nav_bringup"))
+    arguments = [
+        (
+            "namespace",
+            "",
+            "Top-level namespace",
+        ),
+        (
+            "use_sim_time",
+            "false",
+            "Use simulation (Gazebo) clock if true",
+        ),
+        (
+            "params_file",
+            str(bringup_dir / "config/real/nav2_params_srm.yaml"),
+            "Params file providing point_lio mapping extrinsic_T",
+        ),
+        (
+            "lidar_xyz",
+            "0.12081 -0.056721 0.346388",
+            "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
+        ),
+        (
+            "lidar_rpy",
+            "0.523598776 0.0 1.099557429",
+            "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+        ),
+    ]
+    return LaunchDescription(
+        [
+            *[
+                DeclareLaunchArgument(
+                    name, default_value=default, description=description
+                )
+                for name, default, description in arguments
+            ],
+            OpaqueFunction(function=launch_setup),
+        ]
+    )

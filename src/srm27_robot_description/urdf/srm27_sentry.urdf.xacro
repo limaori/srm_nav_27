@@ -1,116 +1,357 @@
 <?xml version="1.0"?>
-
 <!--
-  SRM 哨兵车体模型（公共版本）。
+  ============================================================================
+  srm27_sentry.urdf.xacro —— SRM 哨兵**唯一**车体模型（所有链路共用这一份）
+  ============================================================================
 
-  几何数值与 config/srm27_sentry_geometry.yaml 保持一致：
-    底盘半径 0.27 m、高 0.20 m、质量 8.2 kg；
-    四轮半径 0.075 m、宽 0.04 m、轮心 (±0.18, ±0.18, 0.075)；
-    MID360 安装位姿由 xyz / rpy 参数给出（实车入口传入标定值）。
+  几何数值全部取自 SRM全向轮哨兵.STEP 的 CAD 实测。数值的**权威来源**是
+  config/srm27_sentry_geometry.yaml（仿真 SDF 由它生成）；
+  两者的数值一致性由 test/test_model_builder.py 的一致性用例强制保证 ——
+  改尺寸必须两处一起改，否则测试会直接失败。
 
-  本文件不再引用 package://pb_rm_simulation/，mesh 指向本包内的副本。
-  仿真使用的 SDF 由 srm27_robot_description 的 model_builder 由同一份 YAML 生成，
-  两条路径不会各自漂移。
+  谁在用这一份:
+    · 实车建图   real_mapping_launch.py
+    · 实车导航   real_robot_state_publisher_launch.py
+    · 独立调试   standalone_robot_state_publisher_launch.py
+    · 仿真显示   model_builder.build_urdf()（Gazebo 的 SDF 仍由同一份 YAML 生成）
+    · 只看模型   viz/srm_sentry_new.launch.py
 
-  注意：base_link 是与底盘刚性固定的坐标系，随底盘自转；导航的速度参考系、
-  odom -> base_link 都使用它。模型里没有 gimbal_yaw / gimbal_yaw_fake。
+  ┌──────────────────────────────┐
+  │  ●            <- 黑点 = 雷达（可选，带示意支架）
+  │ ▁▁▁▁▁         <- 小圆柱 = gimbal_yaw（纯示意，use_yaw 可关）
+  │ ████████      <- 大圆柱 = 底盘 (base_link)
+  │  ○    ○       <- 4 个小轮 = wheel_*（对角 X 型全向轮）
+  └──────────────────────────────┘
+
+  ============================ 可被 launch 覆盖的参数 ============================
+
+  坐标系契约（谁决定 TF 长什么样）
+    root_frame         base_link | base_footprint        默认 base_link
+        base_link : 根坐标系就是 base_link，且**原点在地面**（轮底 = 0）。
+                    这是导航契约：base_link 随底盘自转，odom -> base_link 直接
+                    指向它，nav2 的 robot_base_frame / Point-LIO / 真值里程计全都
+                    按"原点到地面的那个系"写。
+        base_footprint : CAD 装配体原样，base_footprint 在地面、base_link 离地
+                    0.1009 m。**只有**想按 CAD 原稿看模型时才用；导航链路若用它，
+                    base_link 就会同时有 base_footprint 和 odom 两个父节点
+                    （tf2 里一个 frame 只能有一个父节点），必须连带改
+                    nav2 / sensor_scan_generation / point_lio 的 base frame 约定。
+    wheel_joint_type   fixed | continuous                 默认 fixed
+        fixed      : 实车链路用。实车没有任何节点发布 /joint_states，用连续关节
+                     会让 robot_state_publisher 拿不到轮子 TF，RViz 报
+                     "No transform from [wheel_*]" 且不画轮子。
+        continuous : 仿真链路用。Gazebo 按 SDF 的关节名发 /joint_states，
+                     两侧关节名必须一致（见 model_builder 与一致性测试）。
+    gimbal_joint_type  fixed | revolute                   默认 fixed
+        云台只是示意包络。实车没人发云台角，用 revolute 会缺 TF；真接云台驱动
+        并且有 /joint_states 时才改成 revolute。
+    lidar_link_name    字符串                             默认 livox_frame
+        实车链路依赖 livox_frame 这个名字（雷达驱动 frame_id、Point-LIO 的
+        frame_id、launch 把 livox_imu / livox_scan 挂到它下面）；
+        仿真链路用 front_mid360（ros_gz_bridge 与点云链路依赖，见几何 YAML）。
+    lidar_xyz          "x y z" 米，**base_link 系（地面 = 0）**     默认 CAD 实测
+        注意：即使 root_frame=base_footprint，这里仍然按"地面为 0"给，
+        本文件会自己把 z 折算到当前根坐标系下。
+    lidar_roll / lidar_pitch / lidar_yaw   弧度            默认 30° / 0 / 63°
+        ⚠ 这个 roll 会直接决定 Point-LIO 的重力方向（real_mapping_launch.py 按
+          lidar_rpy 现算 gravity）。改这里必须同时改 nav2 参数里的 gravity。
+    lidar_radius       米                                 默认 0.014（黑点半径）
+    lidar_post_length  米                                 默认 0.0783（示意支架，0=不画）
+    use_yaw            true | false                        默认 true（画云台包络）
+
+  ============================ 雷达挂在哪里 ============================
+  MID-360 装在**底盘**上（STEP 里与云台同级），所以 lidar 的 parent 是 base_link：
+  云台 yaw 转动时雷达不动，与实车一致。
+  雷达本体中心在 base_link 系为 (0.12081, -0.056721, 0.346388)：
+    · 离车体中心水平 133.5 mm（偏前右）
+    · 离地 346.4 mm（底盘顶面 0.26805，雷达安装板高 78.3 mm）
+    · 安装倾斜：roll 30°、yaw 63°（360° 雷达，yaw 只表示它自身 x 轴朝向）
 -->
+<robot name="srm_sentry" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-<robot name="srm_sentry"
-  xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- ============================ 可覆盖参数 ============================ -->
+  <!-- 坐标系契约 -->
+  <xacro:arg name="root_frame"        default="base_link"/>
+  <xacro:arg name="wheel_joint_type"  default="fixed"/>
+  <xacro:arg name="gimbal_joint_type" default="fixed"/>
 
-  <xacro:property name="length_wheel" value="0.04" />
-  <xacro:property name="radius_wheel" value="0.075" />
-  <xacro:property name="chassis_radius" value="0.27" />
-  <xacro:property name="chassis_length" value="0.2" />
-  <xacro:property name="chassis_mass" value="8.2" />
-  <xacro:property name="PI" value="3.1415926"/>
+  <!-- 几何（默认值 = CAD 实测；model_builder 会用几何 YAML 的值覆盖，保证 SDF/URDF 同源） -->
+  <xacro:arg name="chassis_radius"    default="0.2743"/>
+  <xacro:arg name="chassis_length"    default="0.2353"/>
+  <xacro:arg name="chassis_centre_z"  default="0.1504"/>
+  <xacro:arg name="chassis_mass"      default="8.7"/>
+  <xacro:arg name="wheel_radius"      default="0.07697"/>
+  <xacro:arg name="wheel_width"       default="0.04576"/>
+  <xacro:arg name="wheel_mass"        default="0.26"/>
+  <xacro:arg name="wheel_effort"      default="1.0e+10"/>
+  <xacro:arg name="wheel_velocity"    default="1.0e+10"/>
+  <xacro:arg name="wheel_x"           default="0.166688"/>  <!-- 轮心 |x| -->
+  <xacro:arg name="wheel_y"           default="0.166553"/>  <!-- 轮心 |y| -->
+  <xacro:arg name="wheel_z"           default="0.076936"/>  <!-- 轮心离地高 -->
+  <xacro:arg name="yaw_radius"        default="0.150"/>
+  <xacro:arg name="yaw_length"        default="0.110"/>
+  <xacro:arg name="yaw_mass"          default="2.0"/>
 
-  <xacro:macro name="default_inertial" params="mass">
-    <inertial>
-      <mass value="${mass}" />
-      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01" />
-    </inertial>
+  <!-- 雷达 -->
+  <xacro:arg name="lidar_link_name"   default="livox_frame"/>
+  <xacro:arg name="lidar_mass"        default="0.25"/>
+  <xacro:arg name="lidar_xyz"         default="0.12081 -0.056721 0.346388"/>
+  <xacro:arg name="lidar_roll"        default="0.523598776"/>
+  <xacro:arg name="lidar_pitch"       default="0"/>
+  <xacro:arg name="lidar_yaw"         default="1.099557429"/>
+  <xacro:arg name="lidar_radius"      default="0.014"/>
+  <xacro:arg name="lidar_post_length" default="0.0783"/>
+  <xacro:arg name="use_yaw"           default="true"/>
+
+  <!-- ============================ 几何常量 ============================ -->
+  <xacro:property name="PI" value="3.141592653589793"/>
+
+  <!-- CAD 基准：装配体里 base_link 离地高度（只在 root_frame=base_footprint 时用） -->
+  <xacro:property name="cad_base_height"  value="0.1009"/>
+  <!-- 下面所有几何量都按"地面 = 0"（base_link 原点在地面）给出，与几何 YAML 一致。
+       默认取 CAD 实测值；model_builder 会用几何 YAML 的数值覆盖同名参数。 -->
+  <xacro:property name="chassis_radius"   value="${float('$(arg chassis_radius)')}"/>
+  <xacro:property name="chassis_length"   value="${float('$(arg chassis_length)')}"/>
+  <xacro:property name="chassis_centre_z" value="${float('$(arg chassis_centre_z)')}"/>
+  <xacro:property name="wx"               value="${float('$(arg wheel_x)')}"/>
+  <xacro:property name="wy"               value="${float('$(arg wheel_y)')}"/>
+  <xacro:property name="wz"               value="${float('$(arg wheel_z)')}"/>
+  <xacro:property name="wheel_radius"     value="${float('$(arg wheel_radius)')}"/>
+  <xacro:property name="wheel_width"      value="${float('$(arg wheel_width)')}"/>
+  <xacro:property name="yaw_radius"       value="${float('$(arg yaw_radius)')}"/>
+  <xacro:property name="yaw_length"       value="${float('$(arg yaw_length)')}"/>
+  <xacro:property name="chassis_top"      value="${chassis_centre_z + chassis_length/2}"/> <!-- 0.26805 -->
+
+  <xacro:property name="chassis_mass" value="${float('$(arg chassis_mass)')}"/>
+  <xacro:property name="wheel_mass"   value="${float('$(arg wheel_mass)')}"/>
+  <xacro:property name="yaw_mass"     value="${float('$(arg yaw_mass)')}"/>
+  <xacro:property name="lidar_mass"   value="${float('$(arg lidar_mass)')}"/>
+  <!-- 与几何 YAML 的 wheel.joint_effort / joint_velocity 保持一致 -->
+  <xacro:property name="wheel_joint_effort"   value="${float('$(arg wheel_effort)')}"/>
+  <xacro:property name="wheel_joint_velocity" value="${float('$(arg wheel_velocity)')}"/>
+
+  <!-- 由 args 派生的开关 -->
+  <xacro:property name="root_is_footprint" value="${'$(arg root_frame)' == 'base_footprint'}"/>
+  <xacro:property name="wheels_move"       value="${'$(arg wheel_joint_type)' == 'continuous'}"/>
+  <xacro:property name="gimbal_moves"      value="${'$(arg gimbal_joint_type)' == 'revolute'}"/>
+  <!-- root_frame=base_footprint 时整棵树下移 cad_base_height（世界高度不变） -->
+  <xacro:property name="z_shift" value="${root_is_footprint * -cad_base_height}"/>
+
+  <!-- 雷达安装位姿：xyz 按"地面=0"传入，再折算到当前根坐标系 -->
+  <xacro:property name="lidar_xyz_parts"
+                  value="${[float(value) for value in '$(arg lidar_xyz)'.split()]}"/>
+  <xacro:property name="lidar_x" value="${lidar_xyz_parts[0]}"/>
+  <xacro:property name="lidar_y" value="${lidar_xyz_parts[1]}"/>
+  <xacro:property name="lidar_z" value="${lidar_xyz_parts[2] + z_shift}"/>
+  <xacro:property name="lidar_link" value="$(arg lidar_link_name)"/>
+  <xacro:property name="lidar_post_len" value="${float('$(arg lidar_post_length)')}"/>
+  <xacro:property name="lidar_post_radius" value="0.018"/>
+
+  <!-- 惯量宏 -->
+  <xacro:macro name="cylinder_inertia" params="m r l">
+    <inertia ixx="${m*(3*r*r+l*l)/12}" ixy="0" ixz="0"
+             iyy="${m*(3*r*r+l*l)/12}" iyz="0"
+             izz="${m*r*r/2}"/>
+  </xacro:macro>
+  <xacro:macro name="sphere_inertia" params="m r">
+    <inertia ixx="${2*m*r*r/5}" ixy="0" ixz="0"
+             iyy="${2*m*r*r/5}" iyz="0"
+             izz="${2*m*r*r/5}"/>
   </xacro:macro>
 
-  <!-- base_link to livox_frame -->
-  <xacro:arg name="xyz" default="0.15 -0.15 0.22" />
-  <xacro:arg name="rpy" default="-0.06981317007977318 0 -1.5707963267948966" />
+  <!-- ============================ 根坐标系 ============================ -->
+  <!-- 默认（root_frame=base_link）：base_link 就是根，原点在地面。
+       root_frame=base_footprint 时才插一层地面系，把 base_link 抬到 CAD 的 0.1009。 -->
+  <xacro:if value="${root_is_footprint}">
+    <link name="base_footprint"/>
+    <joint name="base_footprint_to_base_link" type="fixed">
+      <parent link="base_footprint"/>
+      <child link="base_link"/>
+      <origin xyz="0 0 ${cad_base_height}" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
-  <!--robot body-->
+  <!-- ============================ 底盘 ============================ -->
   <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 ${chassis_centre_z + z_shift}" rpy="0 0 0"/>
+      <mass value="${chassis_mass}"/>
+      <xacro:cylinder_inertia m="${chassis_mass}" r="${chassis_radius}" l="${chassis_length}"/>
+    </inertial>
     <visual>
+      <origin xyz="0 0 ${chassis_centre_z + z_shift}" rpy="0 0 0"/>
       <geometry>
         <cylinder radius="${chassis_radius}" length="${chassis_length}"/>
       </geometry>
-      <origin rpy="0 0 0" xyz="0 0 0.15"/>
-      <material name="white">
-        <color rgba="1 1 1 1"/>
+      <material name="chassis_grey">
+        <color rgba="0.75 0.77 0.80 1.0"/>
       </material>
     </visual>
     <collision>
+      <origin xyz="0 0 ${chassis_centre_z + z_shift}" rpy="0 0 0"/>
       <geometry>
         <cylinder radius="${chassis_radius}" length="${chassis_length}"/>
       </geometry>
-      <origin rpy="0 0 0" xyz="0 0 0.15"/>
     </collision>
-    <xacro:default_inertial mass="${chassis_mass}"/>
   </link>
 
-  <!-- wheels -->
-  <xacro:macro name="srm_wheel" params="name x y">
+  <!-- ============================ 四个小轮 ============================ -->
+  <!--
+    轮轴沿车体对角（X 型全向轮布局）：圆柱先绕 x 转 -90° 使轴水平，再绕 z 转到对角线。
+      wheel_front_left / wheel_rear_right  沿 +45°
+      wheel_rear_left  / wheel_front_right 沿 135°
+    rpy_yaw 只影响**外观**；关节轴由 axis_yaw 算出的 (cos, sin, 0) 给出，与 SDF 里
+    同名关节的轴向完全一致（仿真按 SDF 的关节名发 /joint_states）。
+  -->
+  <xacro:macro name="omni_wheel" params="name x y axis_yaw rpy_yaw">
     <link name="${name}">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="${wheel_mass}"/>
+        <xacro:cylinder_inertia m="${wheel_mass}" r="${wheel_radius}" l="${wheel_width}"/>
+      </inertial>
       <visual>
+        <origin xyz="0 0 0" rpy="${-PI/2} 0 ${rpy_yaw}"/>
         <geometry>
-          <cylinder length="${length_wheel}" radius="${radius_wheel}"/>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
         </geometry>
-        <origin rpy="1.5707963267948966 0 0" xyz="0 0 0"/>
-        <material name="black">
-          <color rgba="0.05 0.05 0.05 1"/>
+        <material name="wheel_black">
+          <color rgba="0.08 0.08 0.10 1.0"/>
         </material>
       </visual>
       <collision>
+        <origin xyz="0 0 0" rpy="${-PI/2} 0 ${rpy_yaw}"/>
         <geometry>
-          <cylinder length="${length_wheel}" radius="${radius_wheel}"/>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
         </geometry>
-        <origin rpy="1.5707963267948966 0 0" xyz="0 0 0"/>
       </collision>
-      <xacro:default_inertial mass="0.5"/>
     </link>
-    <joint name="base_to_${name}" type="revolute">
-      <parent link="base_link"/>
-      <child link="${name}"/>
-      <origin rpy="0 0 0" xyz="${x} ${y} ${radius_wheel}"/>
-      <axis xyz="0 1 0"/>
-      <limit lower="-1.7976931348623157e+308" upper="1.7976931348623157e+308"
-             effort="1e+10" velocity="1e+10"/>
-    </joint>
+
+    <!-- 实车用 fixed（没有 /joint_states）；仿真用 continuous（名字与 SDF 一致） -->
+    <xacro:if value="${wheels_move}">
+      <joint name="${name}_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="${name}"/>
+        <origin xyz="${x} ${y} ${wz + z_shift}" rpy="0 0 0"/>
+        <axis xyz="${cos(axis_yaw)} ${sin(axis_yaw)} 0"/>
+        <limit lower="-1.7976931348623157e+308" upper="1.7976931348623157e+308"
+               effort="${wheel_joint_effort}" velocity="${wheel_joint_velocity}"/>
+        <dynamics damping="0.1" friction="0.05"/>
+      </joint>
+    </xacro:if>
+    <xacro:unless value="${wheels_move}">
+      <joint name="${name}_joint" type="fixed">
+        <parent link="base_link"/>
+        <child link="${name}"/>
+        <origin xyz="${x} ${y} ${wz + z_shift}" rpy="0 0 0"/>
+      </joint>
+    </xacro:unless>
+
+    <gazebo reference="${name}">
+      <mu1>1.2</mu1>
+      <mu2>1.2</mu2>
+      <kp>1000000.0</kp>
+      <kd>10.0</kd>
+    </gazebo>
   </xacro:macro>
 
-  <!-- 左前 / 左后 / 右前 / 右后 -->
-  <xacro:srm_wheel name="wheel_1" x="0.18" y="0.18"/>
-  <xacro:srm_wheel name="wheel_2" x="-0.18" y="0.18"/>
-  <xacro:srm_wheel name="wheel_3" x="0.18" y="-0.18"/>
-  <xacro:srm_wheel name="wheel_4" x="-0.18" y="-0.18"/>
+  <xacro:omni_wheel name="wheel_front_left"  x="${ wx}" y="${ wy}"
+                    axis_yaw="${ PI/4}" rpy_yaw="${-PI/4}"/>
+  <xacro:omni_wheel name="wheel_rear_left"   x="${-wx}" y="${ wy}"
+                    axis_yaw="${3*PI/4}" rpy_yaw="${ PI/4}"/>
+  <xacro:omni_wheel name="wheel_front_right" x="${ wx}" y="${-wy}"
+                    axis_yaw="${-PI/4}" rpy_yaw="${-3*PI/4}"/>
+  <xacro:omni_wheel name="wheel_rear_right"  x="${-wx}" y="${-wy}"
+                    axis_yaw="${ PI/4}" rpy_yaw="${3*PI/4}"/>
 
-  <!-- Livox-Mid360 -->
-  <link name="front_mid360">
-    <visual>
-      <origin xyz="0.025 -0.0265 -0.025" rpy="${pi/2} 0 ${pi}"/>
-      <geometry>
-        <mesh filename="package://srm27_robot_description/meshes/mid360.stl"
-              scale="0.001 0.001 0.001"/>
-      </geometry>
-      <material name="blue">
-        <color rgba="0 0 1.0 1" />
-      </material>
-    </visual>
+  <!-- ============================ 云台示意包络 ============================ -->
+  <!-- link 始终存在（保证 TF 稳定、名字可被引用），use_yaw=false 时只是不画。 -->
+  <xacro:if value="${gimbal_moves}">
+    <joint name="gimbal_yaw_joint" type="revolute">
+      <parent link="base_link"/>
+      <child link="gimbal_yaw"/>
+      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="${-PI}" upper="${PI}" effort="30" velocity="10"/>
+      <dynamics damping="0.2" friction="0.1"/>
+    </joint>
+  </xacro:if>
+  <xacro:unless value="${gimbal_moves}">
+    <joint name="gimbal_yaw_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="gimbal_yaw"/>
+      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 0"/>
+    </joint>
+  </xacro:unless>
+
+  <link name="gimbal_yaw">
+    <inertial>
+      <origin xyz="0 0 ${yaw_length/2}" rpy="0 0 0"/>
+      <mass value="${yaw_mass}"/>
+      <xacro:cylinder_inertia m="${yaw_mass}" r="${yaw_radius}" l="${yaw_length}"/>
+    </inertial>
+    <xacro:if value="$(arg use_yaw)">
+      <visual>
+        <origin xyz="0 0 ${yaw_length/2}" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${yaw_radius}" length="${yaw_length}"/>
+        </geometry>
+        <!-- 半透明：半径 150 mm 会把离轴 133.5 mm 的雷达包进去，透明才看得见 -->
+        <material name="yaw_yellow">
+          <color rgba="0.95 0.80 0.25 0.45"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${yaw_length/2}" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${yaw_radius}" length="${yaw_length}"/>
+        </geometry>
+      </collision>
+    </xacro:if>
   </link>
 
-  <joint name="livox_joint" type="fixed">
-    <origin xyz="$(arg xyz)" rpy="$(arg rpy)" />
+  <!-- ============================ 雷达 ============================ -->
+  <!-- 关节名与 SDF 的 <joint name="base_link_to_<link_name>"> 一致 -->
+  <joint name="base_link_to_${lidar_link}" type="fixed">
     <parent link="base_link"/>
-    <child link="front_mid360"/>
+    <child link="${lidar_link}"/>
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}"
+            rpy="$(arg lidar_roll) $(arg lidar_pitch) $(arg lidar_yaw)"/>
   </joint>
+
+  <link name="${lidar_link}">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="${lidar_mass}"/>
+      <xacro:sphere_inertia m="${lidar_mass}" r="$(arg lidar_radius)"/>
+    </inertial>
+    <!-- 安装支架（对应 STEP 里那块雷达安装板）：沿雷达自身 -z 伸出，随雷达一起倾斜 -->
+    <xacro:if value="${lidar_post_len > 0}">
+      <visual>
+        <origin xyz="0 0 ${-lidar_post_len/2}" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${lidar_post_radius}" length="${lidar_post_len}"/>
+        </geometry>
+        <material name="bracket_grey">
+          <color rgba="0.72 0.70 0.78 1.0"/>
+        </material>
+      </visual>
+    </xacro:if>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="$(arg lidar_radius)"/>
+      </geometry>
+      <material name="lidar_dot">
+        <color rgba="0 0 0 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="$(arg lidar_radius)"/>
+      </geometry>
+    </collision>
+  </link>
 
 </robot>

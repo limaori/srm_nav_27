@@ -95,6 +95,9 @@
 #                           可用环境变量: VERIFY_SPIN_WZ(2.0) VERIFY_GOAL_DIST(1.5)
 #                           VERIFY_KEEP(1 = 不清理) VERIFY_READY_TIMEOUT(180) VERIFY_GOAL_TIMEOUT(180)
 #       --rviz / --no-rviz        是否启动 RViz (默认启动)
+#       --rviz-config <路径>      用自定义 .rviz 配置 (默认包内 rviz/nav2_default_view.rviz)。
+#                                 例: --rviz-config viz/cloud_only.rviz —— 只看 3D 点云,
+#                                 不显示二维地图与代价地图
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
 #                                 --no-run 则保持暂停等你点播放)
@@ -156,6 +159,9 @@ VERIFY_GOAL_TIMEOUT="${VERIFY_GOAL_TIMEOUT:-180}"
 VERIFY_KEEP="${VERIFY_KEEP:-0}"              # 1 = 验证完不清理, 留着看 RViz/调试
 #: MINCO 航向策略: auto=se2 (导航拥有 wz); spin=小陀螺 (外部自转请求进线)。
 YAW_MODE="${YAW_MODE:-auto}"
+
+# 自定义 RViz 配置（留空 = 用包内 rviz/nav2_default_view.rviz；--rviz-config 覆盖）
+RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
@@ -203,6 +209,7 @@ while [ $# -gt 0 ]; do
     --init-pose)          INIT_POSE="${2:?--init-pose 需要 x,y,z,roll,pitch,yaw}"; shift 2 ;;
     --rviz)       USE_RVIZ="True"; shift ;;
     --no-rviz)    USE_RVIZ="False"; shift ;;
+    --rviz-config) RVIZ_CONFIG="${2:?--rviz-config 需要 .rviz 文件绝对路径}"; shift 2 ;;
     --gui)        USE_GUI="true"; shift ;;
     --no-gui)     USE_GUI="false"; shift ;;
     --run)        RUN_IMMEDIATELY="true"; shift ;;
@@ -842,9 +849,21 @@ PYEOF
   PARAMS_FILE_Q="$(printf '%q' "$GICP_PARAMS_FILE")"
   echo "[提示] GICP 参数副本: $GICP_PARAMS_FILE"
 fi
+# 自定义 RViz 配置 -> 传给 nav_srm_simulation_launch.py 的 rviz_config_file
+RVIZ_CONFIG_ARG=""
+if [ -n "$RVIZ_CONFIG" ]; then
+  if [ ! -f "$RVIZ_CONFIG" ]; then
+    echo "[错误] --rviz-config 指定的文件不存在: $RVIZ_CONFIG" >&2
+    exit 1
+  fi
+  # 转成绝对路径: nav 那个标签页内部会先 cd 到工作空间, 相对路径容易失配
+  RVIZ_CONFIG="$(readlink -f "$RVIZ_CONFIG")"
+  RVIZ_CONFIG_ARG=" rviz_config_file:=$(printf '%q' "$RVIZ_CONFIG")"
+fi
+
 # 定位方式由 NAV_EXTRA_ARGS 统一给出 (use_pcd_localization / use_lio_odometry /
 # prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
-NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE}"
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}${RVIZ_CONFIG_ARG} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE}"
 start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ "$VERIFY_SPIN" = "1" ]; then

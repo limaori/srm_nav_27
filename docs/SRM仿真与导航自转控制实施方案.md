@@ -140,7 +140,9 @@ srm27_gazebo_simulator/
 
 独立自转控制器和 mux 放在 `srm27_chassis_control`，仿真执行插件放在仿真包。
 
-模型以本仓库的 `srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro` 为 SRM 几何来源：底盘半径 0.27 m、高 0.2 m；轮半径 0.075 m、宽 0.04 m、中心位置 `(±0.18, ±0.18, 0.075)`。这些是当前简化模型的参数，不视作已经标定的整车动力学参数。清理该 xacro 中残留的 `package://pb_rm_simulation/` 引用，指向本地 SRM 描述包。新增公共 `srm27_robot_description` 管理尺寸、安装位姿、URDF 和 SDF 生成，避免仿真/实车两份模型独立修改。
+> 2026-10 更新：该 xacro 已删除，车体模型收敛为唯一一份 `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`（实车/仿真共用）。下面这段是当时的记录。
+
+模型以本仓库的 `srm27_nav_bringup/urdf/sentry_robot_cylinder.xacro`（已删除）为 SRM 几何来源：底盘半径 0.27 m、高 0.2 m；轮半径 0.075 m、宽 0.04 m、中心位置 `(±0.18, ±0.18, 0.075)`。这些是当前简化模型的参数，不视作已经标定的整车动力学参数。清理该 xacro 中残留的 `package://pb_rm_simulation/` 引用，指向本地 SRM 描述包。新增公共 `srm27_robot_description` 管理尺寸、安装位姿、URDF 和 SDF 生成，避免仿真/实车两份模型独立修改。
 
 旧步兵的装甲、射击、云台关节链和底盘控制器不进入新速度执行链路。首版只使用 SRM 圆柱底盘、轮组和雷达；现有雷达采集插件、ROS 点云桥接、点云处理和定位继续复用。
 

@@ -90,8 +90,8 @@
 #                               map->odom, **不需要先验 PCD**。默认 --reloc 要求地图有
 #                               maps/pcd/<地图名>_mapframe.pcd, 没有就用这个 (或 --lio)。
 #                               与 --reloc 同时给时以命令行里靠后的那个为准。
-#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.15 -0.15 0.22)
-#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 -0.06981317007977318 0 -1.5707963267948966)
+#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.12081 -0.056721 0.346388)
+#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 0.523598776 0 1.099557429 = roll 30°/yaw 63°)
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
 #       --namespace <ns>        命名空间 (默认空 = 根命名空间)
 #       --rviz / --no-rviz             是否启动 RViz (默认启动)
@@ -225,9 +225,9 @@ LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
 MAP_YAML=""
 PRIOR_PCD=""
 
-# SRM 实车雷达安装位姿 (与 real_robot_state_publisher_launch.py 默认值一致)
-LIDAR_XYZ="${LIDAR_XYZ:-0.15 -0.15 0.22}"
-LIDAR_RPY="${LIDAR_RPY:--0.06981317007977318 0.0 -1.5707963267948966}"
+# SRM 实车雷达安装位姿 (与 real_robot_state_publisher_launch.py 默认值一致; CAD 实测)
+LIDAR_XYZ="${LIDAR_XYZ:-0.12081 -0.056721 0.346388}"
+LIDAR_RPY="${LIDAR_RPY:-0.523598776 0.0 1.099557429}"
 # 起步位姿: map->odom 静态变换。仅 --lio / --static 模式下有意义,
 # 默认 0 0 0 = 认为 Point-LIO 的起点就在地图原点。
 # 若车停在别处, 必须改成"该点在 map 系下的位姿", 否则 RViz 里车不在真实位置,
