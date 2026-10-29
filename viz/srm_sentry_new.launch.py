@@ -16,6 +16,8 @@
   wheel_joint_type:=continuous   轮子改成连续关节（要配 joint_state_publisher）
   lidar_link_name:=front_mid360  用仿真链路的雷达帧名
   use_yaw:=false                 不画 yaw 半透明圆柱，雷达黑点看得更清
+  gimbal_fixed_yaw:=0.8          把云台（连同它上面的雷达）摆到 0.8 rad 看几何关系
+                                 （仅 gimbal_joint_type=fixed 时生效，不需要 /joint_states）
   lidar_xyz:="x y z"             临时改雷达位置（地面=0，米）
   lidar_roll:=0.0 等             临时改雷达姿态（弧度）
   例: ros2 launch viz/srm_sentry_new.launch.py use_yaw:=false
@@ -63,6 +65,7 @@ XACRO_ARGS = (
     "root_frame",
     "wheel_joint_type",
     "gimbal_joint_type",
+    "gimbal_fixed_yaw",
 )
 
 

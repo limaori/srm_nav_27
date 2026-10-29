@@ -49,9 +49,11 @@
         实车链路依赖 livox_frame 这个名字（雷达驱动 frame_id、Point-LIO 的
         frame_id、launch 把 livox_imu / livox_scan 挂到它下面）；
         仿真链路用 front_mid360（ros_gz_bridge 与点云链路依赖，见几何 YAML）。
-    lidar_xyz          "x y z" 米，**base_link 系（地面 = 0）**     默认 CAD 实测
+    lidar_xyz          "x y z" 米，**base_link 系（地面 = 0），云台零位下测得**
         注意：即使 root_frame=base_footprint，这里仍然按"地面为 0"给，
         本文件会自己把 z 折算到当前根坐标系下。
+        雷达的 parent 是 gimbal_yaw，所以实际 origin 会自动换算成"相对云台"的量
+        （z 减去底盘顶面 0.26805）。换云台也换不到这个数：它只跟云台零位有关。
     lidar_roll / lidar_pitch / lidar_yaw   弧度            默认 30° / 0 / 63°
         ⚠ 这个 roll 会直接决定 Point-LIO 的重力方向（real_mapping_launch.py 按
           lidar_rpy 现算 gravity）。改这里必须同时改 nav2 参数里的 gravity。
@@ -60,12 +62,22 @@
     use_yaw            true | false                        默认 true（画云台包络）
 
   ============================ 雷达挂在哪里 ============================
-  MID-360 装在**底盘**上（STEP 里与云台同级），所以 lidar 的 parent 是 base_link：
-  云台 yaw 转动时雷达不动，与实车一致。
-  雷达本体中心在 base_link 系为 (0.12081, -0.056721, 0.346388)：
+  MID-360 装在**云台**上（云台与底盘**同轴**，只有 yaw 一个自由度），所以 TF 是：
+
+      base_link ── gimbal_yaw（绕 z，同一轴线）── <lidar_link>（fixed，斜装）
+
+  云台一转，雷达跟着转；`sensor_scan_generation` 查 TF 时就会经 gimbal_yaw 把
+  云台角一并算进去（云台角由 /joint_states 提供，必须真实且高频）。
+
+  雷达本体中心在 base_link 系（**云台零位**，即上电车头朝前时）为
+  (0.12081, -0.056721, 0.346388)：
     · 离车体中心水平 133.5 mm（偏前右）
-    · 离地 346.4 mm（底盘顶面 0.26805，雷达安装板高 78.3 mm）
-    · 安装倾斜：roll 30°、yaw 63°（360° 雷达，yaw 只表示它自身 x 轴朝向）
+    · 离地 346.4 mm；相对云台基座面（= 底盘顶面 0.26805）**只有 78.3 mm**
+      —— 所以雷达实际是长在云台端面上的，不是插在底盘上的
+    · 安装倾斜：roll 30°、yaw 63°（零位下雷达自身 x 轴的朝向；360° 雷达无所谓）
+
+  调试用：`gimbal_fixed_yaw` 参数只在云台关节是 fixed 时生效，用它把云台"摆"到
+  某个角度看几何关系（例：gimbal_fixed_yaw:=0.8），不需要 /joint_states。
 -->
 <robot name="srm_sentry" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -102,6 +114,8 @@
   <xacro:arg name="lidar_radius"      default="0.014"/>
   <xacro:arg name="lidar_post_length" default="0.0783"/>
   <xacro:arg name="use_yaw"           default="true"/>
+  <!-- 仅 gimbal_joint_type=fixed 时生效：把云台摆到该角度（弧度），纯用于看几何 -->
+  <xacro:arg name="gimbal_fixed_yaw"  default="0"/>
 
   <!-- ============================ 几何常量 ============================ -->
   <xacro:property name="PI" value="3.141592653589793"/>
@@ -143,6 +157,9 @@
   <xacro:property name="lidar_x" value="${lidar_xyz_parts[0]}"/>
   <xacro:property name="lidar_y" value="${lidar_xyz_parts[1]}"/>
   <xacro:property name="lidar_z" value="${lidar_xyz_parts[2] + z_shift}"/>
+  <!-- 雷达相对云台基座面的高度（= 底盘顶面到雷达中心）。z_shift 在两边同时出现，
+       相减自动抵消，所以 root_frame=base_footprint 时也成立。 -->
+  <xacro:property name="lidar_z_rel" value="${lidar_xyz_parts[2] - chassis_top}"/>
   <xacro:property name="lidar_link" value="$(arg lidar_link_name)"/>
   <xacro:property name="lidar_post_len" value="${float('$(arg lidar_post_length)')}"/>
   <xacro:property name="lidar_post_radius" value="0.018"/>
@@ -280,7 +297,8 @@
     <joint name="gimbal_yaw_joint" type="fixed">
       <parent link="base_link"/>
       <child link="gimbal_yaw"/>
-      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 0"/>
+      <!-- rpy 只为调试：把云台摆到 gimbal_fixed_yaw（正式运行时保持 0） -->
+      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 ${float('$(arg gimbal_fixed_yaw)')}"/>
     </joint>
   </xacro:unless>
 
@@ -311,11 +329,13 @@
   </link>
 
   <!-- ============================ 雷达 ============================ -->
-  <!-- 关节名与 SDF 的 <joint name="base_link_to_<link_name>"> 一致 -->
-  <joint name="base_link_to_${lidar_link}" type="fixed">
-    <parent link="base_link"/>
+  <!-- 雷达长在云台上：parent 是 gimbal_yaw，origin 相对**云台基座面**给出
+       （z = 雷达离地 0.346388 − 底盘顶面 0.26805 = 0.078338）。
+       关节名与 SDF 的 <joint name="gimbal_yaw_to_<link_name>"> 一致。 -->
+  <joint name="gimbal_yaw_to_${lidar_link}" type="fixed">
+    <parent link="gimbal_yaw"/>
     <child link="${lidar_link}"/>
-    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}"
+    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z_rel}"
             rpy="$(arg lidar_roll) $(arg lidar_pitch) $(arg lidar_yaw)"/>
   </joint>
 

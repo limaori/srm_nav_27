@@ -49,7 +49,6 @@ sys.path.insert(
 from srm_robot_description import (  # noqa: E402
     build_description,
     gravity_from_mounting,
-    parse_triplet,
 )
 
 
@@ -64,13 +63,14 @@ def launch_setup(context):
                 "Set driver extrinsics to zero; use lidar_xyz/lidar_rpy for mounting"
             )
 
-    lidar_xyz = LaunchConfiguration("lidar_xyz").perform(context)
-    lidar_rpy = LaunchConfiguration("lidar_rpy").perform(context)
-    position = parse_triplet(lidar_xyz, "lidar_xyz")
-    parse_triplet(lidar_rpy, "lidar_rpy")
-
-    robot_xml = build_description(params_file, lidar_xyz, lidar_rpy)
-    gravity = gravity_from_mounting(lidar_rpy)
+    robot_xml, mounting = build_description(
+        params_file,
+        LaunchConfiguration("lidar_xyz").perform(context),
+        LaunchConfiguration("lidar_rpy").perform(context),
+    )
+    # 安装位姿与 gravity 都来自同一个来源（唯一模型），不会再出现"模型改了、重力没改"。
+    position = mounting["xyz"]
+    gravity = gravity_from_mounting(mounting["rpy"])
 
     use_sim_time = ParameterValue(
         LaunchConfiguration("use_sim_time"), value_type=bool
@@ -190,12 +190,12 @@ def generate_launch_description():
         ),
         (
             "lidar_xyz",
-            "0.12081 -0.056721 0.346388",
+            "",
             "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
         ),
         (
             "lidar_rpy",
-            "0.523598776 0.0 1.099557429",
+            "",
             "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
         ),
         (

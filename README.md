@@ -236,9 +236,8 @@ Nav2 controller ─ cmd_vel_nav ─┐
 **实车**（SRM 自建模型，`config/real/nav2_params_srm.yaml`）
 
 ```text
-map ──► odom ──► base_link ──┬─► livox_frame ──► livox_imu
+map ──► odom ──► base_link ──┬─► gimbal_yaw ──► livox_frame ──► livox_imu
                              ├─► livox_scan
-                             ├─► gimbal_yaw
                              └─► wheel_front_left / rear_left / front_right / rear_right
 ```
 
@@ -252,8 +251,7 @@ map ──► odom ──► base_link ──┬─► livox_frame ──► liv
 **仿真**（SRM 生成模型，`config/simulation/nav2_params_srm.yaml`）
 
 ```text
-map ──► odom ──► base_link ──┬─► front_mid360
-                             ├─► gimbal_yaw
+map ──► odom ──► base_link ──┬─► gimbal_yaw ──► front_mid360
                              └─► wheel_front_left / rear_left / front_right / rear_right
 ```
 

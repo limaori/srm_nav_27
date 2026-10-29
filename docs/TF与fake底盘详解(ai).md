@@ -60,9 +60,9 @@ map ──┬─ static_transform_publisher_map2odom   (默认 / --lio：写死)
         │
       odom ── sensor_scan_generation ──────→ base_link
                                                 │
-                                                ├─ livox_frame ── livox_imu   ┐
-                                                ├─ livox_scan                 ├ robot_state_publisher
-                                                ├─ gimbal_yaw                 ├ (全静态, 唯一 URDF)
+                                                ├─ gimbal_yaw ── livox_frame ── livox_imu  ┐
+                                                ├─ livox_scan                              ├ robot_state_publisher
+                                                │                                          ├ (全静态, 唯一 URDF)
                                                 ├─ wheel_front_left           │
                                                 ├─ wheel_rear_left            │
                                                 ├─ wheel_front_right          │
@@ -84,7 +84,7 @@ map ──┬─ static_transform_publisher_map2odom   (默认 / --lio：写死)
 | `map → odom` | `small_gicp_relocalization` | `srm_nav2_params.yaml:235-250` | `--reloc` |
 | `odom → base_link` | `sensor_scan_generation`：拿 LIO 的雷达位姿 → 乘雷达安装外参换成底盘 → 平面化(z=0, roll=0, pitch=0) → 抖动抑制 | `sensor_scan_generation.cpp:140-146`；参数 `srm_nav2_params.yaml:136-142` | LIO 模式 |
 | `odom → livox_imu`（只发话题 `lidar_odometry`，不发 TF） | `loam_interface`，把 Point-LIO 的 `camera_init` 原点平移到 `base_link` | `loam_interface.cpp:115-162` | 同上 |
-| `base_link → livox_frame` | `robot_state_publisher`，URDF = 唯一模型 xacro + `lidar_xyz/lidar_rpy`：xyz 0.12081 −0.056721 0.346388、rpy 30° 0 63°（CAD 实测） | `real_robot_state_publisher_launch.py`（`scripts/srm_robot_description.py`） | 静态 `/tf_static` |
+| `gimbal_yaw → livox_frame`（雷达装在云台上） | `robot_state_publisher`，URDF = 唯一模型 xacro：相对云台基座 xyz 0.12081 −0.056721 **0.078338**、rpy 30° 0 63°（CAD 实测，云台零位下量得） | `real_robot_state_publisher_launch.py`（`scripts/srm_robot_description.py`） | 静态 `/tf_static` |
 | `livox_frame → livox_imu` | 同上，偏移 = −`point_lio.mapping.extrinsic_T` = (0.011, 0.02329, −0.04412)（姿态随雷达一起倾斜 30°） | `srm_nav2_params.yaml` 的 `extrinsic_T` | 静态 |
 | `base_link → livox_scan` | 同上，偏移 = `lidar_xyz`（二维投影用的**水平**系，高度与雷达相同） | 同上 | 静态 |
 | `base_link → gimbal_yaw` | 同上，**fixed**（(0, 0, 0.26805)）；实车没人发云台 `/joint_states` | `urdf/srm27_sentry.urdf.xacro` | 静态 |

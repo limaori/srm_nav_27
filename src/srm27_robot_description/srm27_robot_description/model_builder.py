@@ -168,23 +168,30 @@ def _lidar_visual_sdf(lidar):
     return "\n".join(blocks)
 
 
+def yaw_link_name(config):
+    """云台 link 的名字（雷达挂在它下面，所以必须始终存在）。"""
+    return (config.get("yaw_envelope") or {}).get("link_name", "gimbal_yaw")
+
+
+def yaw_top_z(config, base_link):
+    """云台基座面高度 = 底盘顶面（云台与底盘同轴、端面贴合）。"""
+    chassis = config["chassis"]
+    del base_link
+    return float(chassis["center_z"]) + float(chassis["length"]) / 2.0
+
+
 def _yaw_visual_sdf(config, base_link):
-    """SDF 版云台示意圆柱：只有 visual，不建 collision、不加惯性。"""
+    """SDF 版云台：joint + link **始终生成**（雷达是它的子节点），
+    示意圆柱只在 yaw_envelope.enabled 时画，不建 collision、不加惯性。"""
     yaw = config.get("yaw_envelope") or {}
-    if not yaw.get("enabled"):
-        return ""
-    top_z = float(config["chassis"]["center_z"]) + float(config["chassis"]["length"]) / 2.0
-    length = float(yaw["length"])
-    name = yaw["link_name"]
+    top_z = yaw_top_z(config, base_link)
+    name = yaw_link_name(config)
     joint_name = f"{name}_joint"
-    return f"""
-    <joint name="{joint_name}" type="fixed">
-      <parent>{base_link}</parent>
-      <child>{name}</child>
-      <pose relative_to="{base_link}">0 0 {top_z!r} 0 0 0</pose>
-    </joint>
-    <link name="{name}">
-      <pose relative_to="{joint_name}">0 0 0 0 0 0</pose>
+    if not yaw.get("enabled"):
+        visual = ""
+    else:
+        length = float(yaw["length"])
+        visual = f"""
       <visual name="{name}_visual">
         <pose>0 0 {length / 2.0!r} 0 0 0</pose>
         <geometry>
@@ -194,7 +201,15 @@ def _yaw_visual_sdf(config, base_link):
           </cylinder>
         </geometry>
 {_sdf_material(yaw['color'], yaw.get('transparency'))}
-      </visual>
+      </visual>"""
+    return f"""
+    <joint name="{joint_name}" type="fixed">
+      <parent>{base_link}</parent>
+      <child>{name}</child>
+      <pose relative_to="{base_link}">0 0 {top_z!r} 0 0 0</pose>
+    </joint>
+    <link name="{name}">
+      <pose relative_to="{joint_name}">0 0 0 0 0 0</pose>{visual}
     </link>"""
 
 
@@ -288,6 +303,15 @@ def build_sdf(
     wheel_material = _sdf_material(wheel.get("color", [0.05, 0.05, 0.05, 1.0]))
     lidar_visual = _lidar_visual_sdf(lidar)
     yaw_visual = _yaw_visual_sdf(config, base_link)
+    # 雷达长在云台上：SDF 的关节父节点改成云台 link，pose 相对**云台基座面**给。
+    # 零位下与"相对 base_link"完全等价，云台一转传感器就跟着转。
+    yaw_link = yaw_link_name(config)
+    lidar_pose_rel_yaw = "{xyz} {rpy}".format(
+        xyz=format_vector(
+            [lidar["xyz"][0], lidar["xyz"][1], float(lidar["xyz"][2]) - yaw_top_z(config, base_link)]
+        ),
+        rpy=format_vector(lidar["rpy"]),
+    )
 
     wheel_blocks = []
     for name, position in wheel["positions"].items():
@@ -387,14 +411,15 @@ def build_sdf(
       </sensor>
     </link>
 {''.join(wheel_blocks)}
+{yaw_visual}
 
-    <joint name="{base_link}_to_{lidar['link_name']}" type="fixed">
-      <parent>{base_link}</parent>
+    <joint name="gimbal_yaw_to_{lidar['link_name']}" type="fixed">
+      <parent>{yaw_link}</parent>
       <child>{lidar['link_name']}</child>
-      <pose relative_to="{base_link}">{format_vector(lidar['xyz'])} {format_vector(lidar['rpy'])}</pose>
+      <pose relative_to="{yaw_link}">{lidar_pose_rel_yaw}</pose>
     </joint>
     <link name="{lidar['link_name']}">
-      <pose relative_to="{base_link}_to_{lidar['link_name']}">0 0 0 0 0 0</pose>
+      <pose relative_to="gimbal_yaw_to_{lidar['link_name']}">0 0 0 0 0 0</pose>
       <inertial>
         <mass>{lidar['mass']!r}</mass>
         {_sdf_inertia(lidar['mass'], lidar_inertia)}
@@ -438,7 +463,7 @@ def build_sdf(
         </noise>
       </sensor>
     </link>
-{yaw_visual}
+
     <plugin filename="ignition-gazebo-joint-state-publisher-system"
             name="ignition::gazebo::systems::JointStatePublisher"/>
     <plugin filename="{plugin_library}" name="{plugin_name}">

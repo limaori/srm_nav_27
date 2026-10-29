@@ -59,7 +59,7 @@
 #   二维投影系          -> livox_scan     (real_mapping_launch.py 追加的水平系)
 #
 # 本车 TF 链（与 real_mapping_launch.py 一致）:
-#   map -> odom -> base_link -> livox_frame -> livox_imu
+#   map -> odom -> base_link -> gimbal_yaw -> livox_frame -> livox_imu
 #                            -> livox_scan
 #                            -> wheel_front_left/rear_left/front_right/rear_right (same publisher)
 #   odom -> base_link 由 sensor_scan_generation 发布；map -> odom 由 slam_toolbox 或

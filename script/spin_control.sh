@@ -69,7 +69,8 @@ case "$cmd" in
     rate="${2:?用法: spin_control.sh on <rad/s>}"
     case "$rate" in ''|*[!0-9.eE+-]*) echo "[错误] 转速必须是数字 (rad/s): $rate" >&2; exit 2 ;; esac
     clamped="$(_clamp "$rate")"
-    if [ "$clamped" != "$rate" ]; then
+    # 数值比较，不能用字符串（"%s" 与 "%.6f" 形态不同，"2.0" 会一直被误判成超限）。
+    if ! awk -v a="$clamped" -v b="$rate" 'BEGIN{ exit (a == b) ? 0 : 1 }'; then
       echo "[提示] ${rate} rad/s 超出本地钳位 ±${MAX_WZ}，按 ${clamped} rad/s 下发。"
     fi
     _ws_setup
@@ -79,8 +80,22 @@ case "$cmd" in
       "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: ${clamped}}}" \
       >/dev/null 2>&1 &
     echo $! > "$PID_FILE"
+    subs="$(timeout 5 ros2 topic info "$CMD_TOPIC" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
     echo "[自转] 请求 ${clamped} rad/s 已发布 (PID $(cat "$PID_FILE"))，minco spin_request 应在 0.3 s 内变新鲜。"
-    echo "[提示] 停止: $0 off"
+    if [ -z "${subs:-}" ]; then
+      echo "[警告] 查不到 ${CMD_TOPIC} 的订阅者 —— 栈没起 / 域不同 / ros2 daemon 缓存旧信息。"
+    elif [ "$subs" = "0" ]; then
+      cat <<WARN
+[警告] ${CMD_TOPIC} 现在**没有任何订阅者**，请求发出去也没人听。常见原因：
+        · MINCO 的 spin_request.topic 不是 rotation_cmd（用 -c minco 或 -p …minco.yaml 时
+          会退回代码默认值 rotation_velocity）
+        · 命名空间不一致（本脚本 ROBOT_NS=${NS}）
+        · 栈和本终端不在同一个 ROS_DOMAIN_ID
+       逐条确认: $0 status
+WARN
+    else
+      echo "[提示] ${CMD_TOPIC} 订阅者 ${subs} 个（MINCO 在听）。停止: $0 off"
+    fi
     ;;
   off)
     _ws_setup
@@ -92,18 +107,61 @@ case "$cmd" in
     ;;
   status)
     _ws_setup
-    echo "== rotation_cmd (上位机自转请求) =="
-    timeout 3 ros2 topic echo "$CMD_TOPIC" --once 2>/dev/null | grep -A3 "^angular" || echo "  (无发布 —— 请求未发出)"
-    echo "== MINCO 进线状态 =="
-    timeout 3 ros2 topic echo "/${NS}/FollowPath/diagnostics" 2>/dev/null \
-      | grep -A1 -E "key: (yaw_mode|spin_request|spin_request_fresh|applied_wz)" \
-      | grep -E "key:|value:" | head -8 || echo "  (诊断未收到 —— 栈没起或 yaw_mode 不是 spin)"
-    echo "== 实际下发 (cmd_vel_sim) =="
-    timeout 3 ros2 topic echo "/${NS}/cmd_vel_sim" --once 2>/dev/null | grep -A3 "^angular" || echo "  (无数据)"
-    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
-      echo "== 发布进程: 活着 (PID $(cat "$PID_FILE")) =="
+    echo "===== 1) 模式与话题（决定请求会不会被消费） ====="
+    # nav2 节点在机器人命名空间下（/red_standard_robot1/controller_server）；根命名空间的
+    # 部署才用 /controller_server。两种都试，否则永远"读不到"。
+    ctrl_node=""
+    for candidate in "/${NS}/controller_server" "/controller_server"; do
+      if timeout 8 ros2 param get "$candidate" FollowPath.plugin >/dev/null 2>&1; then
+        ctrl_node="$candidate"; break
+      fi
+    done
+    if [ -n "$ctrl_node" ]; then
+      echo "  controller_server        = ${ctrl_node}"
+      mode="$(timeout 8 ros2 param get "$ctrl_node" FollowPath.yaw_policy.mode 2>/dev/null | sed 's/^String value is: //' || true)"
+      topic="$(timeout 8 ros2 param get "$ctrl_node" FollowPath.spin_request.topic 2>/dev/null | sed 's/^String value is: //' || true)"
     else
-      echo "== 发布进程: 不在 (请求已撤回) =="
+      echo "  controller_server        = <不在线>  ← Nav2 没起来，请求一定没人消费"
+      mode=""; topic=""
+    fi
+    wzmax="$(timeout 8 ros2 param get "/${NS}/srm_cmd_mux" wz_max 2>/dev/null | sed 's/^Double value is: //' || true)"
+    echo "  yaw_policy.mode        = ${mode:-<读不到>}   # 必须 spin"
+    echo "  spin_request.topic     = ${topic:-<读不到>}   # 必须 rotation_cmd"
+    echo "  srm_cmd_mux.wz_max     = ${wzmax:-<读不到>}"
+
+    echo "===== 2) 请求是否真的发出去了 ====="
+    echo -n "  话题订阅者: "
+    subs_info="$(timeout 5 ros2 topic info "$CMD_TOPIC" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
+    echo "${subs_info:-查不到}"
+    if [ "${subs_info:-0}" = "0" ]; then
+      echo "  ⚠ 没人在听。检查 MINCO 是不是在听旧话题名:"
+      for alt in rotation_velocity; do
+        alt_subs="$(timeout 5 ros2 topic info "/${NS}/${alt}" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
+        [ -n "${alt_subs:-}" ] && [ "${alt_subs:-0}" != "0" ] \
+          && echo "    /${NS}/${alt} 订阅者 ${alt_subs} 个 ← MINCO 在这里听着（spin_request.topic 没配成 rotation_cmd）"
+      done
+      echo "  也确认 Nav2 是否在跑: ros2 node list | grep -E 'controller_server|planner_server|bt_navigator'"
+    fi
+    timeout 3 ros2 topic echo "$CMD_TOPIC" --once 2>/dev/null | grep -A3 "^angular" || echo "  (无发布 —— 请求未发出，或 $0 on 的后台进程已死)"
+
+    echo "===== 3) MINCO 有没有消费（目标状态看这里） ====="
+    timeout 4 ros2 topic echo "/${NS}/FollowPath/diagnostics" --once 2>/dev/null \
+      | grep -A1 -E "key: (yaw_mode|spin_request|spin_request_fresh|applied_wz|rejected_spin_request_count|planning_result|stop_reason)" \
+      | grep -E "key:|value:" | paste - - | sed 's/key: //; s/[[:space:]]*value: /=/' | sed 's/^/  /' \
+      || echo "  (诊断未收到 —— 没目标时控制器不跑，或 yaw_mode 不是 spin)"
+
+    echo "===== 4) 三层速度（wz 应逐层相同、非零） ====="
+    for layer in cmd_vel_nav_fake cmd_vel_nav_body cmd_vel_sim; do
+      wz="$(timeout 3 ros2 topic echo "/${NS}/${layer}" --once 2>/dev/null \
+            | awk '/^angular:/{f=1} f&&/z:/{print $2; exit}' || true)"
+      echo "  ${layer}  wz = ${wz:-<无数据>}"
+    done
+
+    echo "===== 5) 发布进程 ====="
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+      echo "  活着 (PID $(cat "$PID_FILE"))"
+    else
+      echo "  不在（请求已撤回）"
     fi
     ;;
   *)

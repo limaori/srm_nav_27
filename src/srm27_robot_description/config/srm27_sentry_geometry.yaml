@@ -58,10 +58,18 @@ wheel:
 lidar:
   # 帧名保持 front_mid360，与现有 ros_gz_bridge、点云处理与定位链路一致。
   link_name: front_mid360
-  # 相对 base_link 的安装位姿（CAD 实测）：偏前右 133.5 mm、离地 346.4 mm，
-  # roll 30° / yaw 63°。⚠ 这个 roll 会直接变成仿真雷达的倾斜角和 Point-LIO 的
-  # gravity 方向；若实车雷达其实是平装的，改这一行，并同步改 urdf/ 那份 xacro 的
-  # lidar_roll 默认值与 nav2 参数里的 gravity（四处必须同一个数，否则测试会失败）。
+  # 相对 base_link 的安装位姿（CAD 实测，**云台零位**下测得）：偏前右 133.5 mm、
+  # 离地 346.4 mm、roll 30° / yaw 63°（yaw 是"上电车头朝前"时雷达自身 x 轴的朝向）。
+  #
+  # ⚠ 雷达实际装在**云台**上（云台与底盘同轴、只有 yaw）：URDF/SDF 里 lidar 的
+  #   parent 是 gimbal_yaw，origin 由 model_builder / xacro 自动换算成"相对云台基座面"
+  #   （z = 0.346388 − 0.26805 = 0.078338）。这里写的仍是"云台零位、base_link 系"的
+  #   绝对值，改云台角不会也不需要改这一行。
+  # ⚠ 这个 roll 会直接变成仿真雷达的倾斜角和 Point-LIO 的 gravity 方向；若实车雷达
+  #   其实是平装的，改这一行，并同步改 urdf/ 那份 xacro 的 lidar_roll 默认值与 nav2
+  #   参数里的 gravity。
+  # ⚠ 真值里程计（simulation_ground_truth_odometry）用它算 front_mid360 位姿，
+  #   那是"云台零位"成立的算法：云台一旦转起来，真值链路也要把云台角乘进去。
   xyz: [0.12081, -0.056721, 0.346388]
   rpy: [0.523598776, 0.0, 1.099557429]
   # 外观：黑球 + 灰色支架圆柱（示意版），与 urdf/ 那份 xacro 完全一致。
@@ -103,6 +111,9 @@ imu:
 # 云台示意圆柱（半透明黄），与实车链路 xacro 里的 gimbal_yaw 外观一致。
 # 仿真里它**只有 visual、没有 collision、也没有关节/传感器**：不影响动力学与导航，
 # 纯属让两条链路看起来是同一台车。设 enabled: false 就不画。
+# 云台（与底盘同轴，只有 yaw 一个自由度）。**雷达挂在它下面**，所以即使
+# enabled: false，gimbal_yaw 这个 link 与它的关节也一定会生成（否则雷达就没有父节点）；
+# enabled 只控制"画不画那根半透明黄圆柱"。
 yaw_envelope:
   enabled: true
   link_name: gimbal_yaw

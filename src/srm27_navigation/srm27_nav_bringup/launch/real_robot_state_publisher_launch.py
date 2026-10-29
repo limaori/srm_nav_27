@@ -61,7 +61,7 @@ def launch_setup(context):
                 "Set driver extrinsics to zero; use lidar_xyz/lidar_rpy for mounting"
             )
 
-    robot_xml = build_description(
+    robot_xml, mounting = build_description(
         params_file,
         LaunchConfiguration("lidar_xyz").perform(context),
         LaunchConfiguration("lidar_rpy").perform(context),
@@ -101,13 +101,13 @@ def generate_launch_description():
         ),
         (
             "lidar_xyz",
-            "0.12081 -0.056721 0.346388",
-            "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
+            "",
+            "LiDAR origin in base_link (empty = 用唯一模型里的值)",
         ),
         (
             "lidar_rpy",
-            "0.523598776 0.0 1.099557429",
-            "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+            "",
+            "LiDAR mounting rpy in radians (empty = 用唯一模型里的值)",
         ),
         ("use_sim_time", "False", "Use the simulation clock if True"),
     ]

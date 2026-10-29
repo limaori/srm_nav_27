@@ -37,7 +37,7 @@ from geometry_msgs.msg import Transform, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from tf2_ros import TransformBroadcaster
+from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
 
 # 同目录的纯几何模块（无 ROS 依赖，便于单元测试）。显式加入脚本所在目录，兼容
 # ``--symlink-install`` 且 Python 3.11+ 会把 ``sys.path[0]`` 解析成源码目录的情况。
@@ -96,11 +96,17 @@ class SimulationGroundTruthOdometry(Node):
         self.lidar_frame = self.declare_parameter(
             "lidar_frame", lidar_extrinsic["link_name"]
         ).value
-        # base_link -> 雷达外参位姿（几何 YAML 是唯一来源，避免这里再写一份硬编码）。
-        self.base_to_lidar = (
+        # base_link -> 雷达外参位姿。
+        # **优先用 TF**（robot_state_publisher 从唯一 URDF 发出，云台角一变它自动跟着变）；
+        # 几何 YAML 只作兜底：TF 还没起来时用同一批数值，保证启动第一帧不空转。
+        self.fallback_base_to_lidar = (
             tuple(lidar_extrinsic["xyz"]),
             rpy_to_quaternion(*lidar_extrinsic["rpy"]),
         )
+        self.base_to_lidar = self.fallback_base_to_lidar
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.tf_extrinsic_ok = False
         self.initial_pose = None
         self.zero_pose_since = None
         self.zero_pose_grace_ns = 2_000_000_000
@@ -239,7 +245,7 @@ class SimulationGroundTruthOdometry(Node):
         lidar_transform.header = transform.header
         lidar_transform.child_frame_id = self.lidar_frame
         lidar_transform.transform = self._compose(
-            transform.transform, self._pose_to_transform(self.base_to_lidar)
+            transform.transform, self._pose_to_transform(self._base_to_lidar())
         )
         lidar_odom = Odometry()
         lidar_odom.header = lidar_transform.header
@@ -249,6 +255,38 @@ class SimulationGroundTruthOdometry(Node):
         lidar_odom.pose.pose.position.z = lidar_transform.transform.translation.z
         lidar_odom.pose.pose.orientation = lidar_transform.transform.rotation
         self.lidar_odom_publisher.publish(lidar_odom)
+
+    def _base_to_lidar(self):
+        """当前 base_link -> 雷达的位姿（**相对量，含云台转角**）。
+
+        雷达装在云台上，所以这个位姿不是常量：云台一转它就变。因此每帧都查一次
+        TF（静态/动态都支持），而不是像以前那样缓存成固定外参。
+        TF 不可用时退回几何 YAML 的零位外参（启动初期/未起 robot_state_publisher）。
+        """
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.base_frame, self.lidar_frame, rclpy.time.Time()
+            ).transform
+        except TransformException as error:
+            if self.tf_extrinsic_ok:
+                self.get_logger().warn(
+                    f"TF {self.base_frame} -> {self.lidar_frame} 查询失败"
+                    f"（{error}），本帧退回几何 YAML 的零位外参",
+                    throttle_duration_sec=5.0,
+                )
+            self.tf_extrinsic_ok = False
+            return self.fallback_base_to_lidar
+        if not self.tf_extrinsic_ok:
+            self.get_logger().info(
+                f"base_link -> {self.lidar_frame} 改用 TF（跟随云台角）"
+            )
+            self.tf_extrinsic_ok = True
+        translation = transform.translation
+        rotation = transform.rotation
+        return (
+            (translation.x, translation.y, translation.z),
+            (rotation.x, rotation.y, rotation.z, rotation.w),
+        )
 
     def _suppress_jitter(self, pose):
         """静止时保持亚阈值抖动，同时不吞掉累积运动。
