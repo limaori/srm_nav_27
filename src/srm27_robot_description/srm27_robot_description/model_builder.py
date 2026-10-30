@@ -57,6 +57,23 @@ WHEEL_MOUNTING = {
     "rear_right": (math.pi / 4.0, 3.0 * math.pi / 4.0),
 }
 
+#: 旋转标记的形状（与 urdf/ 那份 xacro 的 ``rotation_marks`` 宏调用**逐项一致**，
+#: 改一处必须两处一起改）：侧壁竖条弧长 arc / 径向厚度 thick、顶面刻线宽 tick_w /
+#: 厚 tick_t、定位球半径 dot_r。单位米。
+ROTATION_MARK_STYLE = {
+    "chassis": {"arc": 0.055, "thick": 0.012, "tick_w": 0.030, "tick_t": 0.010, "dot_r": 0.016},
+    "gimbal": {"arc": 0.045, "thick": 0.010, "tick_w": 0.024, "tick_t": 0.008, "dot_r": 0.014},
+}
+
+#: 旋转标记颜色：底盘灰 → 红，云台半透明黄 → 蓝（与 xacro 的 rgba 一致）
+CHASSIS_MARK_COLOR = [0.90, 0.13, 0.10, 1.0]
+GIMBAL_MARK_COLOR = [0.05, 0.45, 1.0, 1.0]
+
+#: 顶面刻线的内端留白：底盘刻线要避开云台圆柱（yaw_radius + 这个量），
+#: 云台刻线从中心附近起步。与 xacro 里 tick_in 的写法一致。
+CHASSIS_TICK_INNER_GAP = 0.012
+GIMBAL_TICK_INNER = 0.020
+
 
 def urdf_model_path():
     """定位唯一 URDF 模型文件（安装后的 share 优先，源码树兜底）。"""
@@ -125,6 +142,54 @@ def _sdf_material(color, transparency=None):
     return text + "          </material>"
 
 
+def _rotation_marks_sdf(prefix, radius, length, base_z, style, color, tick_in, tick_out):
+    """旋转标记（SDF 版），与 xacro 的 ``rotation_marks`` 宏逐项对应。
+
+    底盘和云台都是绕 z 轴的**旋转体**：转到哪个角度看起来都一样，光圆柱在 RViz /
+    Gazebo 里转起来像没动。所以每个旋转体挂三块不对称的标记，全部朝 +x（车头）：
+
+      ① ``<prefix>_mark_stripe`` 侧壁竖条（抬高 thick/2，一半埋进圆柱）
+      ② ``<prefix>_mark_tick``   顶面径向刻线（俯视时的"时针"）
+      ③ ``<prefix>_mark_dot``    刻线末端定位球
+
+    ⚠ 三块都只是 visual，**不生成 collision**：Gazebo 的碰撞体与导航 footprint 不变。
+    """
+    radius = float(radius)
+    length = float(length)
+    base_z = float(base_z)
+    thick = float(style["thick"])
+    # 弧长 → 弦长：贴在外壁上的那条带子的横向宽度
+    chord = 2.0 * radius * math.sin(float(style["arc"]) / (2.0 * radius))
+    height = length - 0.008
+    tick_in = float(tick_in)
+    tick_out = float(tick_out)
+    tick_w = float(style["tick_w"])
+    tick_t = float(style["tick_t"])
+    dot_r = float(style["dot_r"])
+    material = _sdf_material(color)
+    return f"""      <visual name="{prefix}_mark_stripe">
+        <pose>{radius!r} 0 {base_z + length / 2.0!r} 0 0 0</pose>
+        <geometry>
+          <box><size>{thick!r} {chord!r} {height!r}</size></box>
+        </geometry>
+{material}
+      </visual>
+      <visual name="{prefix}_mark_tick">
+        <pose>{(tick_in + tick_out) / 2.0!r} 0 {base_z + length + tick_t / 2.0!r} 0 0 0</pose>
+        <geometry>
+          <box><size>{tick_out - tick_in!r} {tick_w!r} {tick_t!r}</size></box>
+        </geometry>
+{material}
+      </visual>
+      <visual name="{prefix}_mark_dot">
+        <pose>{tick_out - dot_r!r} 0 {base_z + length + dot_r / 2.0!r} 0 0 0</pose>
+        <geometry>
+          <sphere><radius>{dot_r!r}</radius></sphere>
+        </geometry>
+{material}
+      </visual>"""
+
+
 def _lidar_visual_sdf(lidar):
     """SDF 版雷达外观，与 _lidar_visual_urdf 保持同一套形状。"""
     spec = lidar.get("visual") or {}
@@ -191,17 +256,31 @@ def _yaw_visual_sdf(config, base_link):
         visual = ""
     else:
         length = float(yaw["length"])
+        radius = float(yaw["radius"])
+        # 旋转标记：云台单独转（实车云台角来自 /joint_states）时，蓝色标记相对
+        # 底盘的红色标记错开一个角度，"谁在转"一眼可见。同样只有 visual。
+        marks = _rotation_marks_sdf(
+            "gimbal",
+            radius,
+            length,
+            0.0,
+            ROTATION_MARK_STYLE["gimbal"],
+            GIMBAL_MARK_COLOR,
+            GIMBAL_TICK_INNER,
+            radius - 0.006,
+        )
         visual = f"""
       <visual name="{name}_visual">
         <pose>0 0 {length / 2.0!r} 0 0 0</pose>
         <geometry>
           <cylinder>
-            <radius>{float(yaw['radius'])!r}</radius>
+            <radius>{radius!r}</radius>
             <length>{length!r}</length>
           </cylinder>
         </geometry>
 {_sdf_material(yaw['color'], yaw.get('transparency'))}
-      </visual>"""
+      </visual>
+{marks}"""
     return f"""
     <joint name="{joint_name}" type="fixed">
       <parent>{base_link}</parent>
@@ -303,6 +382,18 @@ def build_sdf(
     wheel_material = _sdf_material(wheel.get("color", [0.05, 0.05, 0.05, 1.0]))
     lidar_visual = _lidar_visual_sdf(lidar)
     yaw_visual = _yaw_visual_sdf(config, base_link)
+    # 底盘的旋转标记（红）：刻线只画在云台外面的那圈顶面上，免得和云台圆柱打架。
+    yaw_radius = float((config.get("yaw_envelope") or {}).get("radius", 0.150))
+    chassis_marks = _rotation_marks_sdf(
+        "chassis",
+        chassis["radius"],
+        chassis["length"],
+        float(chassis["center_z"]) - float(chassis["length"]) / 2.0,
+        ROTATION_MARK_STYLE["chassis"],
+        CHASSIS_MARK_COLOR,
+        yaw_radius + CHASSIS_TICK_INNER_GAP,
+        float(chassis["radius"]) - 0.008,
+    )
     # 雷达长在云台上：SDF 的关节父节点改成云台 link，pose 相对**云台基座面**给。
     # 零位下与"相对 base_link"完全等价，云台一转传感器就跟着转。
     yaw_link = yaw_link_name(config)
@@ -404,6 +495,7 @@ def build_sdf(
           </cylinder>
         </geometry>
       </collision>
+{chassis_marks}
       <sensor name="{imu['sensor_name']}" type="imu">
         <ignition_frame_id>{base_link}</ignition_frame_id>
         <always_on>1</always_on>

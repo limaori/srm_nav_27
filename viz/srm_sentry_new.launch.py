@@ -16,6 +16,8 @@
   wheel_joint_type:=continuous   轮子改成连续关节（要配 joint_state_publisher）
   lidar_link_name:=front_mid360  用仿真链路的雷达帧名
   use_yaw:=false                 不画 yaw 半透明圆柱，雷达黑点看得更清
+  show_rotation_marks:=false     不画旋转标记（底盘/云台圆柱上的红蓝竖条 + 顶面指针），
+                                 默认开：圆柱是旋转体，没有标记就看不出谁在转
   gimbal_fixed_yaw:=0.8          把云台（连同它上面的雷达）摆到 0.8 rad 看几何关系
                                  （仅 gimbal_joint_type=fixed 时生效，不需要 /joint_states）
   lidar_xyz:="x y z"             临时改雷达位置（地面=0，米）
@@ -55,6 +57,7 @@ RVIZ_CONFIG = os.path.join(HERE, "srm_sentry_new.rviz")
 # 允许从命令行覆盖的 xacro 参数；空字符串表示"沿用 xacro 里的 default"
 XACRO_ARGS = (
     "use_yaw",
+    "show_rotation_marks",
     "lidar_xyz",
     "lidar_roll",
     "lidar_pitch",

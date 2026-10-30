@@ -31,6 +31,7 @@ chassis:
   center_z: 0.1504
   mass: 8.7
   # 显示颜色（RGBA），与 urdf/srm27_sentry.urdf.xacro 的 chassis_grey 一致。
+  # （底盘上那圈红色旋转标记不走这里，见文件末尾"旋转标记"）
   color: [0.75, 0.77, 0.80, 1.0]
 
 wheel:
@@ -123,6 +124,24 @@ yaw_envelope:
   # 由 model_builder 自动算，不必在这里写高度。
   color: [0.95, 0.80, 0.25, 1.0]
   transparency: 0.55
+
+# 旋转标记：底盘圆柱和云台圆柱都是绕 z 轴的**旋转体**——转到哪个角度长得都一样，
+# 光秃秃的圆柱在 RViz / Gazebo 里转起来看着一动不动，"底盘在转还是云台在转"根本看不出来。
+# 所以两个圆柱各挂三块**不对称**标记，全部朝 +x（车头）：
+#   ① 侧壁竖条（抬高 thick/2 贴在外壁上，侧面看它扫过 = 在转）
+#   ② 顶面径向刻线（俯视时的"时针"，指向哪里 = 转到哪个角）
+#   ③ 刻线末端定位球（缩得很小时也认得出来）
+# 底盘灰 → 红色标记，云台半透明黄 → 蓝色标记，两圈标记对齐 = 底盘与云台零位对齐。
+#
+# 这里**不写尺寸**：形状全部由 chassis.radius/length 与 yaw_envelope.radius/length
+# 派生，只把比例放在 model_builder.ROTATION_MARK_STYLE 里（与 urdf/ 那份 xacro 的
+# rotation_marks 宏调用逐项一致，改比例要两处一起改）。颜色同理：
+# model_builder.CHASSIS_MARK_COLOR / GIMBAL_MARK_COLOR ↔ xacro 里的 rgba。
+# ⚠ 三块标记只有 visual、没有 collision：Gazebo 的碰撞体与导航 footprint 都不变。
+# ⚠ 只有 URDF 侧才把它们拆成 chassis_mark / gimbal_mark 两条 display-only link
+#   （RViz2 每条 link 只认第一个 visual 的材质，混在底盘里会被涂成灰色）；
+#   本文件生成的 SDF 直接画在 base_link / gimbal_yaw 上，Gazebo 是按 visual 上材质的。
+# URDF 侧可以用 show_rotation_marks:=false 关掉；SDF 侧始终绘制。
 
 # 导航碰撞检查用的整车外接包络半径。
 # CAD 实测的最大水平外廓是底盘圆柱 0.2743 m（轮组外廓 0.2356+0.0458/2 ≈ 0.2585，

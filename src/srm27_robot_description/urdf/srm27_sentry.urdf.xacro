@@ -23,6 +23,24 @@
   │  ○    ○       <- 4 个小轮 = wheel_*（对角 X 型全向轮）
   └──────────────────────────────┘
 
+  ============================ 怎么看出"在不在转" ============================
+  上下两个圆柱都是**绕 z 轴的旋转体**——光秃秃的圆柱转起来，RViz/Gazebo 里看着
+  一动不动。所以两个圆柱都带一组**不对称旋转标记**（show_rotation_marks，默认开），
+  挂在两条 display-only link 上（chassis_mark / gimbal_mark，fixed，无惯性无碰撞）：
+
+    · *_mark_stripe  侧壁竖条 ：+x 方向一条亮色带（底盘红、云台蓝），
+                                抬高 5~6 mm 贴在外壁上 —— 侧面看它扫过 = 在转
+    · *_mark_tick    顶面刻线 ：沿 +x 的一根"时针"，俯视看最清楚
+    · *_mark_dot     顶面小球 ：刻线末端一颗定位球，缩得很小时也认得出来
+
+  三个标记全部朝 +x（车头）：两圈标记对齐 = 底盘与云台零位对齐；云台转了一定
+  跟底盘错开一个角度。尺寸全部由 chassis_radius/yaw_radius 派生，改半径自动跟着走。
+  ⚠ 标记只有 visual、没有 collision：不改导航 footprint，也不影响 Gazebo 动力学。
+  ⚠ 为什么另开一条 link：RViz2 的 RobotModel 对每条 link 只用**第一个 visual 的
+    材质**上色，混进 base_link 就被涂成底盘灰、红蓝全废（实测过）；Gazebo 是按
+    visual 上材质的，所以 model_builder 的 SDF 仍把标记画在原来的 link 上。
+  设 show_rotation_marks:=false 就退回原来的光圆柱（两条 link 一起消失）。
+
   ============================ 可被 launch 覆盖的参数 ============================
 
   坐标系契约（谁决定 TF 长什么样）
@@ -60,6 +78,7 @@
     lidar_radius       米                                 默认 0.014（黑点半径）
     lidar_post_length  米                                 默认 0.0783（示意支架，0=不画）
     use_yaw            true | false                        默认 true（画云台包络）
+    show_rotation_marks true | false                       默认 true（画旋转标记，见上）
 
   ============================ 雷达挂在哪里 ============================
   MID-360 装在**云台**上（云台与底盘**同轴**，只有 yaw 一个自由度），所以 TF 是：
@@ -114,6 +133,9 @@
   <xacro:arg name="lidar_radius"      default="0.014"/>
   <xacro:arg name="lidar_post_length" default="0.0783"/>
   <xacro:arg name="use_yaw"           default="true"/>
+  <!-- 底盘/云台圆柱上的不对称旋转标记（侧壁竖条 + 顶面刻线 + 顶面小球）。
+       两个圆柱都是旋转体，没有标记就看不出转没转，见文件头的说明。 -->
+  <xacro:arg name="show_rotation_marks" default="true"/>
   <!-- 仅 gimbal_joint_type=fixed 时生效：把云台摆到该角度（弧度），纯用于看几何 -->
   <xacro:arg name="gimbal_fixed_yaw"  default="0"/>
 
@@ -148,8 +170,16 @@
   <xacro:property name="root_is_footprint" value="${'$(arg root_frame)' == 'base_footprint'}"/>
   <xacro:property name="wheels_move"       value="${'$(arg wheel_joint_type)' == 'continuous'}"/>
   <xacro:property name="gimbal_moves"      value="${'$(arg gimbal_joint_type)' == 'revolute'}"/>
+  <!-- 画不画云台圆柱 / 旋转标记（容忍 true/True/1 这些写法） -->
+  <xacro:property name="yaw_visible"
+                  value="${'$(arg use_yaw)'.lower() in ('true', '1')}"/>
+  <xacro:property name="rotation_marks_on"
+                  value="${'$(arg show_rotation_marks)'.lower() in ('true', '1')}"/>
   <!-- root_frame=base_footprint 时整棵树下移 cad_base_height（世界高度不变） -->
   <xacro:property name="z_shift" value="${root_is_footprint * -cad_base_height}"/>
+  <!-- 底盘圆柱底面高度（当前根坐标系下）；旋转标记的侧壁竖条/顶面刻线都从它算起。
+       轮底 = 0，所以它 = chassis_centre_z - length/2（base_footprint 视图再加 z_shift） -->
+  <xacro:property name="chassis_base_z" value="${chassis_centre_z - chassis_length/2 + z_shift}"/>
 
   <!-- 雷达安装位姿：xyz 按"地面=0"传入，再折算到当前根坐标系 -->
   <xacro:property name="lidar_xyz_parts"
@@ -174,6 +204,74 @@
     <inertia ixx="${2*m*r*r/5}" ixy="0" ixz="0"
              iyy="${2*m*r*r/5}" iyz="0"
              izz="${2*m*r*r/5}"/>
+  </xacro:macro>
+
+  <!-- ======================= 旋转标记（"看得出在不在转"） ======================= -->
+  <!--
+    绕 z 轴自转的圆柱体，转到哪个角度看起来都一样 —— 静止的圆柱和 5 rad/s 转着的
+    圆柱在 RViz / Gazebo 里长得一模一样，底座和云台到底谁在转就看不出来了。
+    所以给每个旋转体挂一组**不对称**标记，全部朝 +x（车头）：
+
+      ① ${prefix}_mark_stripe  侧壁竖条，抬高 thick/2 贴在外壁上
+                                —— 侧面视角：亮色带扫过 = 在转
+      ② ${prefix}_mark_tick    顶面径向刻线（时针）
+                                —— 俯视视角：指向哪里 = 转到哪个角
+      ③ ${prefix}_mark_dot     刻线末端小球，缩得很小时也认得出来
+
+    参数全部由圆柱自身尺寸派生（弧长 arc 换成弦长、高度内缩 4 mm 免得和端面打架）。
+    ⚠ 三个都只有 visual、没有 collision：navigation footprint 与 Gazebo 动力学不变。
+    ⚠ 调用点是 chassis_mark / gimbal_mark 这两条 display-only link，**不要**塞回
+      base_link / gimbal_yaw：RViz2 每条 link 只认第一个 visual 的材质，塞回去就会被
+      染成底盘灰/云台黄，颜色对比全失效。
+    底盘的底色是灰的 → 用红；云台是半透明黄 → 用蓝，两种颜色互相对比，云台和底盘
+    各自转起来一眼就能分开。
+  -->
+  <xacro:macro name="rotation_marks"
+               params="prefix radius length base_z arc thick tick_in tick_out tick_w tick_t dot_r rgba">
+    <xacro:property name="mk_r"      value="${float(radius)}"/>
+    <xacro:property name="mk_l"      value="${float(length)}"/>
+    <xacro:property name="mk_z0"     value="${float(base_z)}"/>
+    <xacro:property name="mk_thick"  value="${float(thick)}"/>
+    <!-- 弧长 → 弦长：贴在外壁上的那条带子的横向宽度 -->
+    <xacro:property name="mk_chord"  value="${2.0 * mk_r * sin(float(arc) / (2.0 * mk_r))}"/>
+    <xacro:property name="mk_height" value="${mk_l - 0.008}"/>
+    <xacro:property name="mk_r_in"   value="${float(tick_in)}"/>
+    <xacro:property name="mk_r_out"  value="${float(tick_out)}"/>
+    <xacro:property name="mk_dot_r"  value="${float(dot_r)}"/>
+
+    <!-- ① 侧壁竖条：外壁上一块亮色凸台（一半埋进圆柱，一半露出来） -->
+    <visual name="${prefix}_mark_stripe">
+      <origin xyz="${mk_r} 0 ${mk_z0 + mk_l / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${mk_thick} ${mk_chord} ${mk_height}"/>
+      </geometry>
+      <material name="${prefix}_mark_color">
+        <color rgba="${rgba}"/>
+      </material>
+    </visual>
+
+    <!-- ② 顶面径向刻线：从 tick_in 指到 tick_out，像一根时针，只会出现在 +x 方向 -->
+    <visual name="${prefix}_mark_tick">
+      <origin xyz="${(mk_r_in + mk_r_out) / 2.0} 0 ${mk_z0 + mk_l + float(tick_t) / 2.0}"
+              rpy="0 0 0"/>
+      <geometry>
+        <box size="${mk_r_out - mk_r_in} ${float(tick_w)} ${float(tick_t)}"/>
+      </geometry>
+      <material name="${prefix}_mark_color">
+        <color rgba="${rgba}"/>
+      </material>
+    </visual>
+
+    <!-- ③ 刻线末端小球：坐在顶面上，缩得很小的时候就是那个"点" -->
+    <visual name="${prefix}_mark_dot">
+      <origin xyz="${mk_r_out - mk_dot_r} 0 ${mk_z0 + mk_l + mk_dot_r / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="${mk_dot_r}"/>
+      </geometry>
+      <material name="${prefix}_mark_color">
+        <color rgba="${rgba}"/>
+      </material>
+    </visual>
   </xacro:macro>
 
   <!-- ============================ 根坐标系 ============================ -->
@@ -210,7 +308,33 @@
         <cylinder radius="${chassis_radius}" length="${chassis_length}"/>
       </geometry>
     </collision>
+    <!-- 旋转标记不在这里，见下面单独的 chassis_mark link（RViz 的一条 link 只认一种材质） -->
   </link>
+
+  <!-- 旋转标记单独做成一个 **display-only link**（没有惯性、没有 collision，只挂在
+       base_link 上显示）。原因：RViz2 的 RobotModel 显示插件对每个 link 只会用**第一个
+       visual 的材质**给整条 link 上色 —— 把标记混在 base_link 里，它们会被涂成底盘的同
+       一种灰，红蓝对比就全废了；单独一条 link 才拿得到自己的颜色。
+       Gazebo（SDF）是按 visual 上材质的，所以 model_builder 生成 SDF 时不需要拆 link。
+       代价只是 TF 树里多一个固定的叶子 frame，和 livox_imu / livox_scan 一样。 -->
+  <xacro:if value="${rotation_marks_on}">
+    <link name="chassis_mark">
+      <xacro:rotation_marks prefix="chassis"
+                            radius="${chassis_radius}" length="${chassis_length}"
+                            base_z="${chassis_base_z}"
+                            arc="0.055" thick="0.012"
+                            tick_in="${yaw_radius + 0.012}"
+                            tick_out="${chassis_radius - 0.008}"
+                            tick_w="0.030" tick_t="0.010" dot_r="0.016"
+                            rgba="0.90 0.13 0.10 1.0"/>
+    </link>
+    <joint name="chassis_mark_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="chassis_mark"/>
+      <!-- 零偏移：标记的数就是按 base_link 系写的（含 root_frame=base_footprint 的 z_shift） -->
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
   <!-- ============================ 四个小轮 ============================ -->
   <!--
@@ -308,7 +432,7 @@
       <mass value="${yaw_mass}"/>
       <xacro:cylinder_inertia m="${yaw_mass}" r="${yaw_radius}" l="${yaw_length}"/>
     </inertial>
-    <xacro:if value="$(arg use_yaw)">
+    <xacro:if value="${yaw_visible}">
       <visual>
         <origin xyz="0 0 ${yaw_length/2}" rpy="0 0 0"/>
         <geometry>
@@ -325,8 +449,32 @@
           <cylinder radius="${yaw_radius}" length="${yaw_length}"/>
         </geometry>
       </collision>
+      <!-- 旋转标记不在这里，见下面单独的 gimbal_mark link（同 chassis_mark 的理由） -->
     </xacro:if>
   </link>
+
+  <!-- 云台的旋转标记（蓝色，与底盘的红色区分开），同样做成 display-only link，
+       挂在 gimbal_yaw 下面：云台单独转（云台角来自 /joint_states，只有
+       gimbal_joint_type=revolute 时才动）时，蓝标记会相对红标记错开一个角度，
+       "底盘在转还是云台在转"一眼就分得清。 -->
+  <xacro:if value="${yaw_visible and rotation_marks_on}">
+    <link name="gimbal_mark">
+      <xacro:rotation_marks prefix="gimbal"
+                            radius="${yaw_radius}" length="${yaw_length}"
+                            base_z="0"
+                            arc="0.045" thick="0.010"
+                            tick_in="0.020"
+                            tick_out="${yaw_radius - 0.006}"
+                            tick_w="0.024" tick_t="0.008" dot_r="0.014"
+                            rgba="0.05 0.45 1.0 1.0"/>
+    </link>
+    <joint name="gimbal_mark_joint" type="fixed">
+      <parent link="gimbal_yaw"/>
+      <child link="gimbal_mark"/>
+      <!-- 零偏移：标记的数就是按 gimbal_yaw 系写的（底面 = 云台基座面） -->
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
 
   <!-- ============================ 雷达 ============================ -->
   <!-- 雷达长在云台上：parent 是 gimbal_yaw，origin 相对**云台基座面**给出

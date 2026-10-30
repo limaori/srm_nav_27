@@ -247,6 +247,11 @@ map ──► odom ──► base_link ──┬─► gimbal_yaw ──► livo
   `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`，由
   `srm27_nav_bringup/scripts/srm_robot_description.py` 展开（建图/导航/独立调试三条
   入口用的是同一个函数，TF 必然一致）
+- `chassis_mark` / `gimbal_mark`：底盘与云台圆柱上的**纯显示**叶子 frame（无惯性、无
+  碰撞、不参与任何导航/定位计算）。两个圆柱都是绕 z 轴的旋转体，没有标记就看不出是
+  谁在转，所以各挂了一组红/蓝标记（侧壁竖条 + 顶面指针 + 定位球），且都朝 +x：标记
+  对齐 = 底盘与云台零位对齐，云台一转蓝标记就相对红标记错开。模型用
+  `show_rotation_marks:=false` 展开时这两条 link 不生成（仿真 SDF 不受影响）。
 
 **仿真**（SRM 生成模型，`config/simulation/nav2_params_srm.yaml`）
 
@@ -256,6 +261,9 @@ map ──► odom ──► base_link ──┬─► gimbal_yaw ──► fron
 ```
 
 - `base_link` 是与实际底盘刚性固定的坐标系，**随底盘自转**，仿真与实车都用它做导航速度参考系。
+- `chassis_mark` / `gimbal_mark`：与实车同一份 URDF 生成，同样是**纯显示**叶子 frame
+  （仿真用的 SDF 由 `model_builder.build_sdf()` 生成，Gazebo 是按 visual 上材质，所以
+  那三块标记直接画在 `base_link` / `gimbal_yaw` 上，不多出 link）。
 - 轮组与雷达帧名与实车**同一套**（都由唯一模型的 xacro 生成，仿真只是把雷达帧名换成
   `front_mid360`、轮子换成连续关节）；`gimbal_yaw` 是固定的示意包络，没有云台关节链。
 - 模型里**没有** `base_footprint`、`chassis`、`gimbal_yaw_fake` 这些中间坐标系：
