@@ -6,7 +6,7 @@
 
 | 工具 | 用途 | 状态 |
 | --- | --- | --- |
-| `plot_vxvywz.py` | 底盘 vx/vy/wz 波形：串口发送 + 下位机反馈，共 6 条曲线 | 可用（反馈侧接口预留） |
+| `plot_vxvywz.py` | 底盘 vx/vy/wz 波形：串口发送 + 下位机 0x0010 反馈，共 6 条曲线 | 可用（对接 `/chassis_speed`） |
 | `plot_lio_gt_yaw.py` | **LIO 算的车头朝向 vs Gazebo 真值**：yaw 曲线 + 误差 + x-y 轨迹 + 速度符号（共 5 个面板）；加 `--zlio` 再多 3 个面板看里程计前端换成 ZLIO 之后的效果 | 可用 |
 | `system_monitor.py` | 本机占用：CPU/内存/swap/温度/磁盘/网络 + **导航栈分组统计** + 最吃 CPU 的进程 | 可用 |
 
@@ -52,24 +52,35 @@
 > `debug_print_hex` 打开（注意它会影响定频心跳，见协议 §6.6），
 > 或者后续在这里加一个串口嗅探工具。
 
-### 1.2 红线（下位机反馈）为什么现在是空的
+### 1.2 红线（下位机反馈）从哪来
 
-《SRM 校内赛导航通信协议》里下→上只有 `0x0001`（比赛状态，11 B）和
-`0x000B`（机器人状态，13 B），**两个包里都没有 vx/vy/wz**，所以固件目前
-没有速度回传。工具把接口先留好：
+下位机按 `0x0010` 包回传底盘速度观测值（4 个 float32：`vx`/`vy`/`wz`/`yaw_deg`），
+`srm27_nav_protocol` 解出来发两个话题：
 
-- 默认订阅 `chassis_feedback`（相对名，随 `__ns` 走；`geometry_msgs/msg/Twist`）；
-- `--feedback-type odom` 可以改读 `nav_msgs/msg/Odometry` 的 `twist`；
-- 图上会显示"下位机反馈接口预留：等待 ..."，不影响蓝线。
+| 话题（默认） | 类型 | 内容 |
+| --- | --- | --- |
+| `chassis_speed` | `geometry_msgs/msg/TwistStamped` | `twist.linear.x/y` = vx/vy [m/s]，`twist.angular.z` = wz [rad/s] |
+| `chassis_yaw_deg` | `std_msgs/msg/Float32` | 下位机速度观测器的 yaw（**度**，不是弧度） |
 
-**固件加了这个包之后怎么接**（两种都不用改本脚本）：
+工具默认订阅 `chassis_speed`（相对名，随 `__ns` 走），`--feedback-type` 三选一：
+`twist_stamped`（默认）/ `twist` / `odom`。
 
-1. 在 `srm27_nav_protocol` 的接收 `switch (cmd_id)` 里解析新包，
-   组一个 `Twist` 发到 `chassis_feedback`（或 `~/chassis_feedback`，用绝对名传 `--feedback-topic`）；或
-2. 直接把新包转发成 `Odometry`，然后 `--feedback-type odom --feedback-topic <话题>`。
+两个要点：
 
-顺带提醒：接反馈时**别把发送值原样回传**，否则"指令 vs 实际"就没有对照意义了；
-回传底盘测出来的真实线速度/角速度才有用。
+1. `0x0010` 里填的是**底盘速度观测器的融合结果**，不是轮速正解，更不是"指令已被执行"
+   的回显——指令→底盘→观测本来就有延迟和尺度差，**红蓝两条线之间的差就是这个工具要看的东西**。
+2. 反馈超过 `cmd_timeout_sec` 没更新会按"过期"处理（红线断掉），不会平着无限延伸骗人。
+
+红线没有时按这个顺序查：
+
+```bash
+ros2 topic hz /chassis_speed          # 应该有 33 Hz 左右（10 ms 槽位轮转）
+ros2 topic echo /chassis_speed        # 全 0 = 下位机速度观测器没跑，不是 ROS 侧的问题
+grep publish_chassis_speed src/srm27_nav_protocol/config/srm27_nav_protocol.yaml
+```
+
+顺带：`srm27_nav_protocol` 会在 `0x0010` 中断 0.5 s 时打 WARN，日志里搜
+`底盘速度反馈 (0x0010) 中断` 就知道是链路断还是值不对。
 
 ### 1.3 用法
 
@@ -77,7 +88,7 @@
 source /opt/ros/humble/setup.bash
 source install/setup.bash            # 只用到标准消息时可以省
 
-# 默认：cmd_vel_chassis + chassis_feedback
+# 默认：cmd_vel_chassis + chassis_speed
 ./debug_tools/plot_vxvywz.py
 
 # 带命名空间（两种写法都认）
@@ -102,8 +113,8 @@ source install/setup.bash            # 只用到标准消息时可以省
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--send-topic` | `cmd_vel_chassis` | 串口节点的输入话题（相对名，跟随 `__ns`） |
-| `--feedback-topic` | `chassis_feedback` | 下位机反馈话题（相对名，随 `__ns`；当前是预留） |
-| `--feedback-type` | `twist` | `twist` = `geometry_msgs/Twist`；`odom` = `nav_msgs/Odometry` |
+| `--feedback-topic` | `chassis_speed` | 下位机反馈话题（相对名，随 `__ns`） |
+| `--feedback-type` | `twist_stamped` | `twist_stamped` = `geometry_msgs/TwistStamped`（0x0010 原生口径）；`twist` = `geometry_msgs/Twist`；`odom` = `nav_msgs/Odometry` |
 | `--config` | `src/srm27_nav_protocol/config/srm27_nav_protocol.yaml` | 读限幅/缩放/看门狗的来源 |
 | `--max-vx` `--max-vy` `--max-wz` | 读 yaml | 覆盖限幅值 |
 | `--linear-scale` `--angular-scale` | 读 yaml | 覆盖缩放系数 |
@@ -123,7 +134,7 @@ source install/setup.bash            # 只用到标准消息时可以省
   在按协议 §6.3 重发零速帧。这是"导航停了/控制器卡了"，不是车的故障。
 - **蓝线贴着 `±max_vx` 之类的水平线**：限幅生效，底部"限幅 N 次"会涨。
   注意限幅作用在缩放**之后**。
-- **蓝线有、红线没有**：要么固件还没做回传（当前情况），要么反馈话题接错了。
+- **蓝线有、红线没有**：下位机没回 `0x0010`，或者话题/命名空间接错了——按 §1.2 的三条命令依次查。
 - **红线在蓝线上一段后突然断掉**：反馈超过 `cmd_timeout_sec` 没更新，
   工具按"过期"处理（避免下位机断链后红色虚线平着无限延伸骗人）。
 - **红线和蓝线的差**就是这个通道真实的"跟随误差"——这也是这个工具最主要的用途。

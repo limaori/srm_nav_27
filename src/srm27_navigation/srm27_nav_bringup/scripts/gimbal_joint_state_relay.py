@@ -93,6 +93,8 @@ class GimbalJointStateRelay(Node):
 
         self.declare_parameter("input_topic", "gimbal_joint_angle")
         self.declare_parameter("input_type", "float32")
+        # constant: 不订阅任何话题，按固定角发布(暂位模式, 见文件头说明)
+        self.declare_parameter("constant_angle", 0.0)
         # 同一话题只能有一种消息类型：std_msgs/Float32 与 example_interfaces/Float32 是
         # 两个不同的类型，同时订阅会直接抛 RCLError（invalid allocator），节点当场退出。
         self.declare_parameter("float_msg_type", "std_msgs")
@@ -118,8 +120,8 @@ class GimbalJointStateRelay(Node):
             raise ValueError("publish_rate 必须是正数")
         if self.timeout_sec <= 0.0 or not math.isfinite(self.timeout_sec):
             raise ValueError("timeout_sec 必须是正数")
-        if self.input_type not in ("float32", "joint_state"):
-            raise ValueError("input_type 只支持 float32 / joint_state")
+        if self.input_type not in ("float32", "joint_state", "constant"):
+            raise ValueError("input_type 只支持 float32 / joint_state / constant")
         if self.float_msg_type not in ("std_msgs", "example_interfaces"):
             raise ValueError("float_msg_type 只支持 std_msgs / example_interfaces")
 
@@ -138,7 +140,15 @@ class GimbalJointStateRelay(Node):
         )
         self.publisher = self.create_publisher(JointState, str(self.get_parameter("output_topic").value), qos)
 
-        if self.input_type == "joint_state":
+        if self.input_type == "constant":
+            # 暂位模式: 没有云台角回传时也要让 base_link->gimbal_yaw 这条 TF 存在,
+            # 否则 robot_state_publisher 一个动态 TF 都不发, 整棵树断开。
+            angle = float(self.get_parameter("constant_angle").value)
+            if self.wrap_to_pi:
+                angle = math.atan2(math.sin(angle), math.cos(angle))
+            self.angle = angle + self.angle_offset
+            self.last_input_steady = _steady()
+        elif self.input_type == "joint_state":
             self.create_subscription(JointState, input_topic, self._joint_state_callback, qos)
         elif self.float_msg_type == "example_interfaces":
             if ExampleFloat32 is None:
@@ -197,7 +207,7 @@ class GimbalJointStateRelay(Node):
     def _publish(self):
         if self.angle is None:
             return
-        if _steady() - self.last_input_steady > self.timeout_sec:
+        if self.input_type != "constant" and _steady() - self.last_input_steady > self.timeout_sec:
             self.stale_count += 1
             self.angle = None  # 停止发布，等新数据；不要发 0 冒充"回零"
             self.get_logger().warn(

@@ -65,7 +65,8 @@ def launch_setup(context):
         params_file,
         LaunchConfiguration("lidar_xyz").perform(context),
         LaunchConfiguration("lidar_rpy").perform(context),
-        # 实车的云台是真关节：默认 revolute，让 TF 跟随 /joint_states 的云台角。
+        # 云台关节类型由调用方决定：默认 fixed（没人发 /joint_states 时这是唯一能
+        # 让 TF 树连通的选择）；接上 --gimbal-joint-topic 的中继后再传 revolute。
         gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
     )
 
@@ -113,9 +114,13 @@ def generate_launch_description():
         ),
         (
             "gimbal_joint_type",
-            "revolute",
-            "云台关节类型: revolute=真关节(跟随 /joint_states 的 gimbal_yaw_joint), "
-            "fixed=旧行为(云台固定在零位)。取不到关节状态时两者等价。",
+            "fixed",
+            "云台关节类型。默认 fixed: revolute 需要有人发 /joint_states 的 "
+            "gimbal_yaw_joint (nav 的 --gimbal-joint-topic 中继), 否则 "
+            "robot_state_publisher 一个动态 TF 都不发, base_link->gimbal_yaw 缺失, "
+            "livox_frame/livox_imu 整棵子树与 base_link 断开 —— 实测表现是 RViz "
+            "Global Status 报错、RobotModel/TF 全红、nav2 的 transform 全部失败。"
+            "云台角能回传后用 gimbal_joint_type:=revolute 切回来。",
         ),
         ("use_sim_time", "False", "Use the simulation clock if True"),
     ]

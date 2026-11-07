@@ -67,6 +67,13 @@ def launch_setup(context):
         params_file,
         LaunchConfiguration("lidar_xyz").perform(context),
         LaunchConfiguration("lidar_rpy").perform(context),
+        # 云台按**真关节**处理（默认 revolute，与仿真一致）。
+        # 关键前提：revolute 时 base_link -> gimbal_yaw 这条 TF **只来自 /joint_states**，
+        # 没有发布者的话 robot_state_publisher 一个动态 TF 都不发，livox_frame / livox_imu
+        # 整棵子树从 base_link 断开 —— 实测后果是 loam_interface 永远初始化不了、
+        # 没有 /registered_scan -> 没有 /scan -> 没有 map。所以下面一定会起
+        # gimbal_joint_state_relay：有回传话题就用真实角，没有就 constant 暂位 0 度。
+        gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
     )
     # 安装位姿与 gravity 都来自同一个来源（唯一模型），不会再出现"模型改了、重力没改"。
     position = mounting["xyz"]
@@ -75,6 +82,9 @@ def launch_setup(context):
     use_sim_time = ParameterValue(
         LaunchConfiguration("use_sim_time"), value_type=bool
     )
+    gimbal_joint_topic = LaunchConfiguration("gimbal_joint_topic").perform(context)
+    # 云台按真关节(与仿真一致)。没有回传角时用 constant 暂位 0 度, 见下方 relay 节点。
+    gimbal_input_type = "float32" if gimbal_joint_topic else "constant"
     clock_params = {"use_sim_time": use_sim_time}
     point_lio_defaults = str(
         Path(get_package_share_directory("point_lio")) / "config/mid360.yaml"
@@ -89,6 +99,18 @@ def launch_setup(context):
             parameters=[
                 clock_params,
                 {"robot_description": robot_xml},
+            ],
+        ),
+        Node(
+            package="srm27_nav_bringup",
+            executable="gimbal_joint_state_relay.py",
+            name="gimbal_joint_state_relay",
+            output="screen",
+            parameters=[
+                clock_params,
+                {"input_topic": gimbal_joint_topic},
+                {"input_type": gimbal_input_type},
+                {"constant_angle": 0.0},
             ],
         ),
         Node(
@@ -197,6 +219,19 @@ def generate_launch_description():
             "lidar_rpy",
             "",
             "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+        ),
+        (
+            "gimbal_joint_type",
+            "revolute",
+            "云台关节类型。建图默认 fixed：实车没有 /joint_states 发布者，"
+            "用 revolute 会让 base_link->gimbal_yaw 这条 TF 整个缺失，"
+            "雷达子树断开、loam_interface 永远初始化不了。"
+            "云台角能从下位机回传后再改回 revolute。",
+        ),
+        (
+            "gimbal_joint_topic",
+            "",
+            "云台关节角回传话题; 留空 = constant 暂位 0 度 (TF 与 fixed 等价)",
         ),
         (
             "start_lidar",

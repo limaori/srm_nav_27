@@ -38,11 +38,15 @@ def generate_launch_description():
         parameters=livox_ros2_params,
     )
 
+    # --display-config 里写死的 Fixed Frame 是 front_mid360; 一旦用 frame_id:= 换了
+    # 点云的 frame (例如实车链路用 livox_frame), 两者对不上就一个点都不画 —— RViz 只报
+    # "No transform from [livox_frame] to [front_mid360]"。这里把 Fixed Frame 也钉成
+    # 同一个 frame_id, 两个参数永远同步; 默认值 front_mid360 时行为与此前完全一致。
     livox_rviz = Node(
         package='rviz2',
         executable='rviz2',
         output='screen',
-        arguments=['--display-config', rviz_config],
+        arguments=['--display-config', rviz_config, '--fixed-frame', frame_id],
     )
 
     return LaunchDescription([

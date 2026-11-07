@@ -5,6 +5,7 @@
 - [哨兵导航 TF 与下位机数据接口](哨兵导航TF与下位机数据接口(ai).md): MID-360 安装与底盘自旋的四种组合、传感器分工及上下位机通信约定。(AI 生成)
 - [Simulation data flow](仿真数据流(ai).md): topics, frames and control paths in simulation (updated for the SRM chain). (AI 生成)
 - [仿真 LIO 前端替换 Z-LIO 实施方案](仿真LIO前端替换Z-LIO实施方案(ai).md): 让 `./script/start_sim_nav.sh --lio` 改用 z-localization 的 ZLIO 出 `odom→base_link` —— 四层职责与三条输出契约、`zlio_bridge`（`T_off` 静态修正 + 换代锚定）的数学定义、仿真专有对账（IMU 单位 / `velodyne_points` 时间字段 / 命名空间 / 话题撞名）、逐文件改动清单、P0~P4 阶段判据与三级回退。**不改** `sensor_scan_generation`、静态 `map→odom` 与 terrain 链路。(AI 生成)
+- [Z-Localization 剩余部分整体迁移问题分析](Z-Localization剩余部分整体迁移问题分析(ai).md): 把 z-localization 尚未迁入的 `backend` / `bringup` / `livox_ros_driver2` 全部搬过来会遇到什么 —— 构建级硬失败（同名包、GTSAM 4.2.x、`../../` 路径、GPL-2.0）、**不会报错的语义级冲突**（`map→odom` 三方争用、`odom` 同名不同义导致 `T_off` 被乘两次、云台让 `body_from_sensor` 变成时变量、重置双重补偿、`coordinated_reset` 必须翻转、话题/帧名契约错位）、地图与建图流水线成本，以及"只迁工具 / 只迁 backend / `legacy` 前端 PoC"三档路线。(AI 生成)
 - [GICP 初始重定位仿真验证方案](GICP初始重定位仿真验证方案.md): 地图与真值坐标对齐、固定数据与完整链路验证、初值误差/退化测试矩阵、启动命令、成功判据与验收指标。
 - [Controller comparison](局部规划器相关(ai).md): current controller and alternatives.
 - [MINCO + MPC 从零详解](MINCO与MPC局部规划控制器从零详解.md): 面向初学者，结合当前源码讲解 ESDF、MINCO 轨迹优化、MPC 跟踪、线程与速度链，附参数说明、仿真练习、排错方法和实现边界。

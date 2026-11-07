@@ -509,3 +509,9 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ./script/start_sim_nav.sh --gimbal-spin              # 云台 -1.0
 ./script/start_sim_nav.sh --chassis-spin 3 --gimbal-spin 0.5   # 自己给转速
 ```
+# 2026-11-8
+### 示波速度
+```bash
+./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed
+```
+

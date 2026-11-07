@@ -366,12 +366,15 @@ def generate_launch_description():
         }.items(),
     )
 
-    # 3) 云台关节角中继（可选）：实车云台由下位机驱动，只有拿到关节角才能把
-    #    云台转动从 base_link yaw 里剥掉。协议补齐回传字段后从这里接。
+    # 3) 云台关节角 -> /joint_states（**必须起**，见下）
+    #    实车现在与仿真一致：gimbal_joint_type=revolute，base_link->gimbal_yaw 这条 TF
+    #    只来自 /joint_states。没有发布者时 robot_state_publisher 一个动态 TF 都不发，
+    #    livox_frame/livox_imu 整棵子树从 base_link 断开 —— 实测表现是 RViz 全红、
+    #    loam_interface 永远初始化不了、nav2 transform 全失败。
+    #      · 给了 gimbal_joint_topic -> 用真实回传角（协议补齐后用这个）；
+    #      · 没给 -> constant 模式，暂位 0 度：TF 与 fixed 完全等价，但结构已就绪，
+    #        以后只传 gimbal_joint_topic 即可，不用再动模型/launch。
     gimbal_relay_cmd = Node(
-        condition=IfCondition(PythonExpression([
-            "'", gimbal_joint_topic, "' != ''",
-        ])),
         package="srm27_nav_bringup",
         executable="gimbal_joint_state_relay.py",
         name="gimbal_joint_state_relay",
@@ -380,6 +383,12 @@ def generate_launch_description():
         parameters=[
             {"use_sim_time": ParameterValue(use_sim_time, value_type=bool)},
             {"input_topic": gimbal_joint_topic},
+            {
+                "input_type": PythonExpression([
+                    "'float32' if '", gimbal_joint_topic, "' != '' else 'constant'",
+                ])
+            },
+            {"constant_angle": 0.0},
         ],
         remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
     )

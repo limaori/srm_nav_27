@@ -93,8 +93,8 @@ controller_server@minco:
   ros__parameters:
     FollowPath:
       limits:
-        max_linear_speed: 6.00          # 平移合速度上限（米/秒）；实际被串口 2.8 封顶
-        max_linear_accel: 10.00         # 平移合加速度上限（米/秒²）；同时是验证器的制动能力假设
+        max_linear_speed: 2.6          # 平移合速度上限（米/秒）；实际被串口 2.8 封顶
+        max_linear_accel: 7.0         # 平移合加速度上限（米/秒²）；同时是验证器的制动能力假设
         max_angular_speed: 5.00         # 角速度上限（弧度/秒）；xy_only 阶段实际权限为 0
         max_angular_accel: 4.50         # 角加速度上限（弧度/秒²）；同上
 
@@ -117,10 +117,10 @@ velocity_smoother@minco:
     # 需要导航拥有 wz 的是 fakeyaw 迁移链，它的 yaw 界在下面的 `@fakeyaw` 段里放开。
     # 另注意：平滑器按分量钳位，所以 x 给 5.0 时斜向合速度可达 √2×5.0；
     # 实车出口仍被串口 4.5 m/s 封顶。
-    max_velocity: [5.0, 5.0, 0.0]       # 最大速度[x,y,yaw]
-    min_velocity: [-5.0, -5.0, 0.0]     # 最小速度[x,y,yaw]
-    max_accel: [6.0, 6.0, 0.0]          # 最大加速度[x,y,yaw]
-    max_decel: [-6.0, -6.0, 0.0]        # 最大减速度[x,y,yaw]
+    max_velocity: [2.6, 2.6, 0.0]       # 最大速度[x,y,yaw]
+    min_velocity: [-2.6, -2.6, 0.0]     # 最小速度[x,y,yaw]
+    max_accel: [7.0, 7.0, 0.0]          # 最大加速度[x,y,yaw]
+    max_decel: [-7.0, -7.0, 0.0]        # 最大减速度[x,y,yaw]
 
 # -----------------------------------------------------------------------------
 # 迁移链（fakeyaw，`config/real/nav2_params_srm_minco_fakeyaw.yaml`）
@@ -132,12 +132,12 @@ velocity_smoother@fakeyaw:
     # （再往下 srm_cmd_mux 的 wz_max 与串口 max_wz 各有一道，见下）。
     # 2026-11-06 首次实车值取 1.5 rad/s：先把"wz 方向对不对、底盘跟不跟"验掉，
     # 再按标定结果抬高。⚠ 它在仿真里是 6.0（与 MINCO limits.max_angular_speed 同档）。
-    max_velocity: [5.0, 5.0, 1.5]
-    min_velocity: [-5.0, -5.0, -1.5]
+    max_velocity: [2.6, 2.6, 1.5]
+    min_velocity: [-2.6, -2.6, -1.5]
     # 角加速度与 MINCO 的 max_angular_accel(4.5) 同档；给小了会让自转起停变钝，
     # 给大了则会在串口层被 max_wz 削平，都会让"请求 2.0 实际多少"变得难判。
-    max_accel: [6.0, 6.0, 4.5]
-    max_decel: [-6.0, -6.0, -4.5]
+    max_accel: [7.0, 7.0, 4.5]
+    max_decel: [-7.0, -7.0, -4.5]
 
 # -----------------------------------------------------------------------------
 # 速度合成 mux（合并进 srm27_chassis_control/config/srm_chassis_control.yaml）
@@ -155,9 +155,9 @@ velocity_smoother@fakeyaw:
 # -----------------------------------------------------------------------------
 srm_cmd_mux:
   ros__parameters:
-    vx_max: 4.5                         # 前向速度上限（米/秒，按分量）
-    vy_max: 4.5                         # 左向速度上限（米/秒，按分量）
-    v_max: 4.5                          # 平移合速度上限（米/秒，按向量模长）
+    vx_max: 2.6                         # 前向速度上限（米/秒，按分量）
+    vy_max: 2.6                         # 左向速度上限（米/秒，按分量）
+    v_max: 2.6                          # 平移合速度上限（米/秒，按向量模长）
     wz_max: 1.5                         # 自转角速度上限（弧度/秒）—— 首跑闸，验过再抬
 
 # -----------------------------------------------------------------------------

@@ -146,8 +146,8 @@
 #                               cmd_vel_nav_body, 而串口节点订阅 cmd_vel_chassis —— 车不会动。
 #       --slam / --reloc / --lio / --static   定位方式, 四者互斥 (默认 --reloc)
 #       --no-reloc              等价于 --lio: LIO 里程计 + 静态 map->odom, 不需要先验 PCD。
-#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.12081 -0.056721 0.346388)
-#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 0.523598776 0 1.099557429 = roll 30°/yaw 63°)
+#       --lidar-xyz "X Y Z"     临时覆盖雷达安装位置, 米 (默认空 = 用 URDF 模型里的值)
+#       --lidar-rpy "R P Y"     临时覆盖雷达安装角, 弧度 (默认空 = 用 URDF 模型里的值)
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
 #       --namespace <ns>        命名空间 (默认空 = 根命名空间; 环境变量 ROBOT_NS 亦可)
 #   -n, --check                 只解析并打印将执行的命令 (等同 DRY_RUN=1)
@@ -347,9 +347,12 @@ SPEED_LIMITS_FILE="${SPEED_LIMITS_FILE:-}"
 MAP_YAML=""
 PRIOR_PCD=""
 
-# SRM 实车雷达安装位姿 (与 real_robot_state_publisher_launch.py 默认值一致; CAD 实测)
-LIDAR_XYZ="${LIDAR_XYZ:-0.12081 -0.056721 0.346388}"
-LIDAR_RPY="${LIDAR_RPY:-0.523598776 0.0 1.099557429}"
+# SRM 实车雷达安装位姿: **唯一来源是 URDF**。这里默认留空 = 不给 launch 传
+# lidar_xyz/lidar_rpy, real_robot_state_publisher_launch.py 就用模型里的值,
+# 与建图链路 (start_real_slam.sh) 完全一致, 换 URDF 不用改这两个脚本。
+# 只有现场临时改安装角才显式传; 用 ${VAR-} 而不是 ${VAR:-} 才能保留"显式空串"。
+LIDAR_XYZ="${LIDAR_XYZ-}"
+LIDAR_RPY="${LIDAR_RPY-}"
 # 起步位姿: map->odom 静态变换。仅 --lio / --static 模式下有意义,
 # 默认 0 0 0 = 认为 Point-LIO 的起点就在地图原点。
 # 若车停在别处, 必须改成"该点在 map 系下的位姿", 否则 RViz 里车不在真实位置,
@@ -593,8 +596,9 @@ while [ $# -gt 0 ]; do
     --no-reloc)       START_RELOC=0; NO_RELOC=1; MODE_GIVEN=1; shift ;;
     --lio|--lio-only) START_LIO=1; MODE_GIVEN=1; shift ;;
     --static)         START_STATIC=1; MODE_GIVEN=1; shift ;;
-    --lidar-xyz)      LIDAR_XYZ="${2:?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
-    --lidar-rpy)      LIDAR_RPY="${2:?--lidar-rpy 需要 \"R P Y\"}"; shift 2 ;;
+    # ${2?} 而不是 ${2:?}: 允许显式给空串, 含义是"这一项跟随 URDF 模型"。
+    --lidar-xyz)      LIDAR_XYZ="${2?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
+    --lidar-rpy)      LIDAR_RPY="${2?--lidar-rpy 需要 \"R P Y\"}"; shift 2 ;;
     --lidar-config)   LIDAR_CONFIG_FILE="${2:?--lidar-config 需要路径}"; shift 2 ;;
     --namespace)      NAMESPACE="${2:?--namespace 需要命名空间}"; shift 2 ;;
     --rviz)           USE_RVIZ=1; shift ;;
@@ -1070,8 +1074,8 @@ if bad:
   if [ -n "$EXTRINSIC_PROBLEM" ]; then
     echo "[错误] 雷达驱动配置不可用: $LIDAR_CONFIG_FILE" >&2
     echo "[错误] $EXTRINSIC_PROBLEM" >&2
-    echo "[错误] 驱动外参必须全零, 安装位姿由 --lidar-xyz / --lidar-rpy 承担," >&2
-    echo "[错误] 否则点云会被旋转两次。" >&2
+    echo "[错误] 驱动外参必须全零, 安装位姿默认由 URDF 模型承担," >&2
+    echo "[错误] (现场临时改才用 --lidar-xyz / --lidar-rpy), 否则点云会被旋转两次。" >&2
     exit 1
   fi
 else
@@ -1327,8 +1331,20 @@ RSP_CMD="ros2 launch srm27_nav_bringup real_robot_state_publisher_launch.py"
 RSP_CMD="$RSP_CMD use_sim_time:=False"
 RSP_CMD="$RSP_CMD params_file:=$(q "$PARAMS_FILE")"
 RSP_CMD="$RSP_CMD lidar_config:=$(q "$LIDAR_CONFIG_FILE")"
-RSP_CMD="$RSP_CMD lidar_xyz:=$(q "$LIDAR_XYZ")"
-RSP_CMD="$RSP_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
+# 外参为空 = 干脆不传这个参数, 让 launch 走模型里的值。
+# 不能改传空串: ros2 launch 会直接报 "malformed launch argument 'lidar_xyz:='"。
+if [ -n "$LIDAR_XYZ" ]; then
+  RSP_CMD="$RSP_CMD lidar_xyz:=$(q "$LIDAR_XYZ")"
+fi
+if [ -n "$LIDAR_RPY" ]; then
+  RSP_CMD="$RSP_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
+fi
+# 云台按**真关节**处理 (与仿真一致): gimbal_joint_type:=revolute。
+# 前提是 /joint_states 有发布者 —— nav_srm_real_launch.py 里的 gimbal_joint_state_relay
+# 一定会起: 给了 --gimbal-joint-topic 就用真实回传角, 没给就用 constant 模式暂位 0 度
+# (TF 与 fixed 等价, 但结构就绪, 协议补上回传字段后只需加这个参数)。
+# ⚠ 千万别在没有 relay 的情况下单独传 revolute —— 那会让整棵 TF 树断开。
+RSP_CMD="$RSP_CMD gimbal_joint_type:=revolute"
 
 # 3) 底盘串口: cmd_vel_chassis 的唯一消费者, 把速度写进串口发给 C 板。
 CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"
@@ -1368,7 +1384,12 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD use_chassis_mux:=$Z_MUX_ARG"
   NAV_CMD="$NAV_CMD mux_nav_topic:=cmd_vel_nav_body"
   NAV_CMD="$NAV_CMD mux_output_topic:=cmd_vel_chassis"
-  NAV_CMD="$NAV_CMD gimbal_joint_topic:=$(q "$GIMBAL_JOINT_TOPIC")"
+  # 空值绝对不能传: ros2 launch 会报 malformed launch argument 'gimbal_joint_topic:='
+  # 并直接退出 —— 表现是整个 nav2 栈一个节点都不起、launch.log 是 0 字节。
+  # 没接云台角回传时干脆不传这个参数, 让 launch 用自己的默认值 ('')。
+  if [ -n "$GIMBAL_JOINT_TOPIC" ]; then
+    NAV_CMD="$NAV_CMD gimbal_joint_topic:=$(q "$GIMBAL_JOINT_TOPIC")"
+  fi
   NAV_CMD="$NAV_CMD use_velocity_smoother:=$SMOOTHER_ARG"
   NAV_CMD="$NAV_CMD cmd_vel_nav_topic:=$CMD_VEL_NAV_TOPIC"
   NAV_CMD="$NAV_CMD yaw_mode:=$YAW_MODE"
@@ -1480,7 +1501,11 @@ fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then
   echo "  车体 TF     : real_robot_state_publisher_launch.py (SRM 模型)"
-  echo "  雷达安装    : xyz=[$LIDAR_XYZ]  rpy=[$LIDAR_RPY]"
+  if [ -z "$LIDAR_XYZ" ] && [ -z "$LIDAR_RPY" ]; then
+    echo "  雷达安装    : 跟随 URDF 模型 (不传 lidar_xyz/lidar_rpy; 核对: tf2_echo base_link livox_frame)"
+  else
+    echo "  雷达安装    : xyz=[$LIDAR_XYZ]  rpy=[$LIDAR_RPY]  (脚本覆盖模型)"
+  fi
 else
   echo "  车体 TF     : 不启动 (假定其他模块已发布 URDF/TF)"
 fi
@@ -1508,10 +1533,11 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
     echo "  底盘自转    : $CHASSIS_SPIN_WZ rad/s (Nav2 就绪后自动下发 rotation_cmd)"
     echo "                mux wz_max 会在这一层钳住 (首跑 1.5 rad/s, 见 speed_limits.yaml)"
   fi
+  echo "  云台关节    : revolute (与仿真一致), base_link->gimbal_yaw 来自 /joint_states"
   if [ -n "$GIMBAL_JOINT_TOPIC" ]; then
-    echo "  云台关节角  : $GIMBAL_JOINT_TOPIC → /joint_states (gimbal_yaw_joint)"
+    echo "                $GIMBAL_JOINT_TOPIC → /joint_states (真实回传角)"
   else
-    echo "  云台        : 假定固定 (无关节角回传)。若下位机在转云台，base_link yaw 会差一个云台角！"
+    echo "                暂位 0 度 (无回传)。云台真转时 base_link yaw 会差一个云台角, 必须接 --gimbal-joint-topic!"
   fi
   if [ "$GIMBAL_SPIN_CLI_GIVEN" = "1" ]; then
     if awk -v v="$GIMBAL_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then

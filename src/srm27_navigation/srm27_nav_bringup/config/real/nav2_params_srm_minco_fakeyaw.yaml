@@ -218,7 +218,7 @@ terrain_analysis_ext:
     clearingDis: 20.0
     useSorting: true
     quantileZ: 0.2
-    vehicleHeight: 1.0
+    vehicleHeight: 0.5
     voxelPointUpdateThre: 100
     voxelTimeUpdateThre: 2.0
     lowerBoundZ: -1.5
@@ -252,7 +252,7 @@ fake_vel_transform:
     # 空串 = 不订阅、不外推（行为与之前完全一致）。标定后把它填成 mux 的输出话题
     # （cmd_vel_chassis）并给出实测 delay，就能补上"指令生效时刻"的航向锯齿。
     chassis_cmd_vel_topic: ""
-    actuation_delay: 0.0
+    actuation_delay: 0.02
     wz_history_window: 1.0
     yaw_debug_topic: "yaw_debug"
     # nav_se2 模式下收到非零 cmd_spin 只告警、只计数（不再叠加自转）。
@@ -289,10 +289,10 @@ small_gicp_relocalization:
   ros__parameters:
     use_sim_time: False
     num_threads: 4
-    num_neighbors: 20
-    global_leaf_size: 0.1
-    registered_leaf_size: 0.05
-    max_dist_sq: 3.0
+    num_neighbors: 10
+    global_leaf_size: 0.3
+    registered_leaf_size: 0.2
+    max_dist_sq: 1.5
     map_frame: "map"
     odom_frame: "odom"
     base_frame: "base_link"
@@ -369,13 +369,13 @@ slam_toolbox:
     scan_queue_size: 10
     # slam_toolbox publishes map->odom; do not pair this with a static TF.
     transform_publish_period: 0.02
-    map_update_interval: 1.0                            # SRM
+    map_update_interval: 0.5                            # SRM
     resolution: 0.05                                    # SRM
-    min_laser_range: 0.5                                # SRM
-    max_laser_range: 20.0                               # SRM
-    minimum_time_interval: 0.1                          # SRM
-    transform_timeout: 0.5                              # SRM
-    tf_buffer_duration: 30.0                            # SRM
+    min_laser_range: 0.3                                # SRM
+    max_laser_range: 10.0                               # SRM
+    minimum_time_interval: 0.2                          # SRM
+    transform_timeout: 0.2                              # SRM
+    tf_buffer_duration: 10.0                            # SRM
     stack_size_to_use: 40000000
     enable_interactive_mode: true
 
@@ -389,7 +389,7 @@ slam_toolbox:
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
     loop_search_maximum_distance: 3.0
-    do_loop_closing: true                               # SRM
+    do_loop_closing: False                               # SRM
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
     loop_match_minimum_response_coarse: 0.35
@@ -526,7 +526,7 @@ controller_server:
       # terminal_reached_radius（0.20）。0.50 > 0.35 与 0.50 > 0.20 都满足。
       xy_goal_tolerance: 0.50                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
-      trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
+      trans_stopped_velocity: 0.1                      # 判定停稳的平移速度阈值（米/秒）
       # 角速度停稳阈值（弧度/秒）：与仿真同一档。给太大 -> 还在自转就判到点；
       # 给太小 -> 小陀螺（常驻自转）永不判到点。SPIN 模式下 launch 会把本检查器
       # 换回 srm27_nav_plugins::OmniStoppedGoalChecker（只看平移），见 nav_srm_real_launch.py。
@@ -581,7 +581,7 @@ controller_server:
       # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.10 s：实车 /odometry 由
       #   sensor_scan_generation 按雷达帧率输出（10 Hz，周期 0.10 s），门限等于周期
       #   会被判"状态过期"→ 零速输出。仿真 10.0（真值里程计 50 Hz）不适用。
-      state_timeout: 0.25                               # 状态允许的最大年龄（秒）
+      state_timeout: 0.5                               # 状态允许的最大年龄（秒）
       map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
       trajectory_max_age: 0.30                          # 轨迹允许的最大年龄（秒）
       build_grace_period: 1.0                           # 无可用轨迹时的零输出宽限（秒）
@@ -645,7 +645,7 @@ controller_server:
         # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.20：10 Hz 里程计下 0.20 s 会被
         #   频繁超过 → 沿用上一条有效值 → 控制器/目标检查器读到过期速度（本文上文 §4
         #   记录的"终点来回走"放大因素）。仿真用 0.20 是因为它的 odom 是 50 Hz。
-        max_sample_gap: 0.60
+        max_sample_gap: 0.4
         max_position_jump: 0.75                         # 位置跳变阈值（米），超过按定位重置
         max_yaw_jump: 1.20                              # 航向跳变阈值（弧度）
         velocity_filter_alpha: 0.35                     # 速度一阶低通系数（0 表示关闭）
@@ -679,7 +679,7 @@ controller_server:
         # 定位（LIO）在急加速时漂移，先把 w_jerk 调回 0.1~0.2。
         w_jerk: 0.0                                     # jerk 能量权重
         w_time: 25.0                                    # 总时长权重（越大越偏好短时间=越快）
-        w_obstacle: 100.0                               # 障碍软约束权重
+        w_obstacle: 500.0                               # 障碍软约束权重
         # 速度/加速度是**软约束**：权重相对时间项 w_time 太小的话，最优点会越过硬上限，
         # 而验证器按硬上限判定，于是每条候选轨迹都被丢弃（现场表现为反复 recovery、车不动）。
         # 实测（2 m 局部路径、v_max 0.5、a_max 0.3）：w_v=20/w_a=2 -> 0.614/0.637（双超）；
@@ -803,7 +803,7 @@ controller_server:
         # **仍需按实车辨识**：命令阶跃到 /odometry 速度起变化的时延中位数。
         # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.0：取 0 会退化为使用
         #   state_timeout(0.25)，比 0.10 更保守（短终点轨迹更容易被拒）。
-        reaction_latency: 0.10
+        reaction_latency: 0.0
 
       # 脱困（迁移自 navi_minco_bit 的 MincoPlanner.recovery_server.* + 其 FSM 里
       # 硬编码的 0.25/0.40 分诊与成功阈值）。语义与仿真那份完全一致，见
@@ -916,7 +916,7 @@ local_costmap:
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
-          obstacle_max_range: 8.0
+          obstacle_max_range: 5.0
           obstacle_min_range: 0.2
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -927,7 +927,7 @@ local_costmap:
         # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
         # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
         #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
-        inflation_radius: 0.7           # 障碍膨胀半径(m)
+        inflation_radius: 0.5           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 global_costmap:
@@ -976,7 +976,7 @@ global_costmap:
         # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
         # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
         #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
-        inflation_radius: 0.7           # 障碍膨胀半径(m)
+        inflation_radius: 0.5           # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入

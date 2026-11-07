@@ -5,7 +5,7 @@
 #
 # 一张图三行，每行一个通道 (vx / vy / wz)，每行两条曲线：
 #   ── 串口发送：真正写进 19 字节帧、发到下位机的那三个 float
-#   ┈┈ 下位机反馈：下位机回传的速度（当前固件还没实现，接口先留好）
+#   ┈┈ 下位机反馈：下位机 0x0010 包回传的底盘速度观测值（实测值，不是回显）
 # 三个通道共用一条时间轴，发送/反馈叠在同一子图里，方便直接看"指令 vs 实际"。
 #
 # -------------------------------------------------------------
@@ -25,18 +25,19 @@
 #   srm27_nav_protocol 的 debug_print_hex，或后续在 debug_tools 里加串口嗅探。
 #
 # 下位机反馈:
-#   《SRM 校内赛导航通信协议》里下→上只有 0x0001（比赛状态）和 0x000B（机器人状态），
-#   **都没有 vx/vy/wz**，所以固件目前没有速度回传。本工具把接口先留好：
-#     · 订阅 --feedback-topic（默认 chassis_feedback，geometry_msgs/Twist）
-#     · --feedback-type odom 可以直接改成读 nav_msgs/Odometry 的 twist
-#   等固件加了这个包、srm27_nav_protocol 把数据段解析成 Twist 发到这个话题之后，
-#   **本脚本一行都不用改**，红色虚线自己就出来了。
-#   在那之前图上会显示"接口预留：等待 ..."，不影响发送那三条曲线。
+#   下位机按 0x0010 包回传底盘速度（4 个 float32: vx, vy, wz, yaw_deg），
+#   srm27_nav_protocol 解出来发到 `chassis_speed`（geometry_msgs/TwistStamped：
+#   twist.linear.x/y = vx/vy，twist.angular.z = wz；yaw 另发 `chassis_yaw_deg`）。
+#   本工具订阅它，红色虚线就是**底盘自己观测到的**速度，和蓝线相减即跟随误差：
+#     · 默认 --feedback-type twist_stamped --feedback-topic chassis_speed
+#     · 上游若改发 geometry_msgs/Twist，用 --feedback-type twist
+#     · 若改发 nav_msgs/Odometry，用 --feedback-type odom（读 twist.twist）
+#   收不到时图上显示"等待 ..."，先按提示查 publish_chassis_speed 与串口链路。
 #
 # -------------------------------------------------------------
 # 用法
 # -------------------------------------------------------------
-#   ./debug_tools/plot_vxvywz.py                         # 默认 cmd_vel_chassis + chassis_feedback
+#   ./debug_tools/plot_vxvywz.py                         # 默认 cmd_vel_chassis + chassis_speed
 #   ./debug_tools/plot_vxvywz.py --ros-args -r __ns:=/red_standard_robot1   # 带命名空间时
 #   ./debug_tools/plot_vxvywz.py -r __ns:=/red_standard_robot1              # 简写也认
 #   ./debug_tools/plot_vxvywz.py --window 60             # 时间窗 60 s
@@ -53,8 +54,9 @@
 # 参数
 # -------------------------------------------------------------
 #   --send-topic <话题>       串口节点的输入，默认 cmd_vel_chassis（命名空间由 __ns 决定）
-#   --feedback-topic <话题>   下位机反馈速度话题，默认 chassis_feedback（相对名，随 __ns；接口预留）
-#   --feedback-type twist|odom  反馈消息类型：Twist 或 Odometry.twist，默认 twist
+#   --feedback-topic <话题>   下位机反馈速度话题，默认 chassis_speed（相对名，随 __ns）
+#   --feedback-type twist_stamped|twist|odom
+#                             反馈消息类型，默认 twist_stamped（=0x0010 的原生口径）
 #   --config <yaml>           srm27_nav_protocol 参数文件，默认自动定位到 src 下那份
 #   --max-vx/--max-vy/--max-wz      覆盖 yaml 里的限幅值（默认读 yaml）
 #   --linear-scale/--angular-scale  覆盖 yaml 里的缩放系数（默认读 yaml）
@@ -73,7 +75,7 @@
 # 图上怎么看
 # -------------------------------------------------------------
 #   · 蓝实线：下位机那一帧里实际收到的 vx/vy/wz
-#   · 红虚线：下位机回传的实测速度（暂无数据时为空白，并在图上标注"接口预留"）
+#   · 红虚线：下位机 0x0010 回传的实测速度（收不到时留空，并提示在等哪个话题）
 #   · 底部状态行：缩放系数、限幅值、看门狗超时、收包计数、限幅次数
 #   · 曲线掉到 0 且底部出现"看门狗归零"：说明上游 0.5 s 没发新指令，
 #     串口节点在按协议 §6.3 重发零速 —— 这本身就是常见故障，别当成车的问题
@@ -183,8 +185,8 @@ def load_protocol_config(path):
 @dataclass
 class Settings:
     send_topic: str = "cmd_vel_chassis"
-    feedback_topic: str = "chassis_feedback"
-    feedback_type: str = "twist"
+    feedback_topic: str = "chassis_speed"
+    feedback_type: str = "twist_stamped"
     window_sec: float = 20.0
     sample_hz: float = 50.0
     plot_hz: float = 20.0
@@ -343,13 +345,13 @@ class Recorder:
 
 
 # =============================================================
-# 数据源 1：ROS（订阅 cmd_vel_chassis + 预留的反馈话题）
+# 数据源 1：ROS（订阅 cmd_vel_chassis + 下位机反馈话题）
 # =============================================================
 class RosSource:
     """rclpy 侧：只收不发，绝不往 /cmd_vel_* 上写东西。"""
 
     def __init__(self, settings, recorder):
-        from geometry_msgs.msg import Twist
+        from geometry_msgs.msg import Twist, TwistStamped
         from nav_msgs.msg import Odometry
         from rclpy.node import Node
         from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -370,6 +372,7 @@ class RosSource:
         self._started = time.monotonic()
         self._no_cmd_warned = False
         self._first_cmd_logged = False
+        self._diag_timer = None
 
         self.node = Node("chassis_velocity_plot")
         # BEST_EFFORT：上游无论是 reliable 还是 best_effort 都兼容，
@@ -384,12 +387,19 @@ class RosSource:
         if settings.feedback_type == "odom":
             self.node.create_subscription(
                 Odometry, settings.feedback_topic, self._on_odom, qos)
+        elif settings.feedback_type == "twist_stamped":
+            self.node.create_subscription(
+                TwistStamped, settings.feedback_topic, self._on_feedback_stamped, qos)
         else:
             self.node.create_subscription(
                 Twist, settings.feedback_topic, self._on_feedback, qos)
 
         self._period = 1.0 / max(settings.sample_hz, 1.0)
         self.node.create_timer(self._period, self._sample)
+        # 5 s 后问一次"对端在不在"。话题名能查到、但 publisher 数为 0 是现场最容易
+        # 误判的情况：话题之所以存在，正是因为这个订阅自己把它挂上了（ros2 topic
+        # list 里看得见），于是"有话题、没频率"看起来像工具坏了，其实是节点没起。
+        self._diag_timer = self.node.create_timer(5.0, self._diagnose_endpoints)
 
         # 相对话题名在订阅那一刻已经按命名空间解析过了；把解析结果写回 settings，
         # 图标题和提示里显示的就是**真正在收**的那个话题，排查命名空间时少绕一圈。
@@ -399,6 +409,30 @@ class RosSource:
               f"反馈 = {settings.feedback_topic} ({settings.feedback_type})")
 
     # ------------------------------------------------------------------ 回调
+    def _diagnose_endpoints(self):
+        """启动 5 s 后查一次两条话题有没有 publisher，只在没有时说话。"""
+        if self._diag_timer is not None:
+            self.node.destroy_timer(self._diag_timer)
+            self._diag_timer = None
+        for label, topic in (("下位机反馈", self.settings.feedback_topic),
+                             ("发送指令", self.settings.send_topic)):
+            try:
+                endpoints = self.node.get_publishers_info_by_topic(topic)
+            except Exception:
+                endpoints = []
+            if endpoints:
+                continue
+            if label == "下位机反馈":
+                print(f"[提示] {topic} 上没有任何 publisher —— 底盘串口节点没在跑"
+                      f"（或跑在别的 ROS_DOMAIN_ID / 命名空间）。")
+                print("       话题在 ros2 topic list 里看得见，是因为本工具订阅了它，"
+                      "不代表有人在发。")
+                print("       起节点: ros2 launch srm27_nav_protocol "
+                      "srm27_nav_protocol.launch.py")
+            else:
+                print(f"[提示] {topic} 上没有任何 publisher —— 上游速度出口"
+                      f"（srm_cmd_mux）没起，蓝线会一直是 0。")
+
     def _on_cmd(self, msg):
         with self._lock:
             self._cmd = (msg.linear.x, msg.linear.y, msg.angular.z)
@@ -414,6 +448,14 @@ class RosSource:
     def _on_feedback(self, msg):
         with self._lock:
             self._feedback = (msg.linear.x, msg.linear.y, msg.angular.z)
+            self._feedback_stamp = time.monotonic()
+        self.recorder.bump("feedback_msgs")
+
+    def _on_feedback_stamped(self, msg):
+        # 0x0010 的原生口径：TwistStamped，速度在 msg.twist 里
+        twist = msg.twist
+        with self._lock:
+            self._feedback = (twist.linear.x, twist.linear.y, twist.angular.z)
             self._feedback_stamp = time.monotonic()
         self.recorder.bump("feedback_msgs")
 
@@ -705,8 +747,8 @@ class Plotter:
         )
         if not self._has_feedback:
             self.note.set_text(
-                f"下位机反馈接口预留：等待 {settings.feedback_topic}"
-                "（固件协议目前没有速度回传）"
+                f"等待下位机速度反馈 {settings.feedback_topic} ({settings.feedback_type})"
+                "：查 publish_chassis_speed、串口链路、命名空间"
             )
         else:
             self.note.set_text("")
@@ -740,8 +782,10 @@ def build_settings(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--send-topic", default="cmd_vel_chassis")
-    parser.add_argument("--feedback-topic", default="chassis_feedback")
-    parser.add_argument("--feedback-type", choices=("twist", "odom"), default="twist")
+    parser.add_argument("--feedback-topic", default="chassis_speed")
+    parser.add_argument("--feedback-type",
+                        choices=("twist_stamped", "twist", "odom"),
+                        default="twist_stamped")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--max-vx", type=float, default=None)
     parser.add_argument("--max-vy", type=float, default=None)
@@ -821,7 +865,7 @@ def describe_settings(settings):
         "=" * 66,
         f"  串口发送来源 : {settings.send_topic}  (复现 fillSpeedVector: 看门狗->缩放->限幅)",
         f"  下位机反馈   : {settings.feedback_topic}  ({settings.feedback_type})"
-        + ("  [演示数据]" if settings.demo else "  [接口预留，收到数据会自动画]"),
+        + ("  [演示数据]" if settings.demo else "  [0x0010 实测速度，收到就画]"),
         f"  出口口径     : 缩放 {scale[0]:g}/{scale[2]:g}"
         f"   限幅 {max_v[0]:g}/{max_v[1]:g}/{max_v[2]:g} m/s·rad/s"
         f"   看门狗 {settings.cmd_timeout:g} s",
@@ -865,7 +909,7 @@ def print_summary(recorder):
             text += (f"   反馈: 峰值 {_np.max(_np.abs(feedback)):+.3f} "
                      f"均值 {_np.mean(feedback):+.3f}")
         else:
-            text += "   反馈: 无数据（接口预留）"
+            text += "   反馈: 无数据（等 chassis_speed）"
         print(text)
 
 

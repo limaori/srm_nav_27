@@ -60,8 +60,8 @@
 #       --bag-out-dir <绝对路径> 录包输出目录, 默认 <工作空间>/log_diag/mapping_bag_<名字|时间戳>
 #   -p, --params <绝对路径>     建图参数, 默认 config/real/mapping_params.yaml
 #       --lidar-config <路径>   雷达驱动网络配置, 默认 config/real/mid360_user_config.json
-#       --lidar-xyz "X Y Z"     雷达在 base_link 下的安装位置 (默认 0.12081 -0.056721 0.346388)
-#       --lidar-rpy "R P Y"     雷达安装角, 弧度 (默认 0.523598776 0 1.099557429 = roll 30°/yaw 63°)
+#       --lidar-xyz "X Y Z"     临时覆盖雷达安装位置, 米 (默认空 = 用 URDF 模型里的值)
+#       --lidar-rpy "R P Y"     临时覆盖雷达安装角, 弧度 (默认空 = 用 URDF 模型里的值)
 #       --no-lidar              不起雷达驱动 (回放 rosbag 时用, 配合 --use-sim-time)
 #       --use-sim-time          使用 /clock (回放 bag 时用, 默认 False)
 #       --save-pcd              让 Point-LIO 退出时落盘累积点云 (见下文说明)
@@ -87,8 +87,12 @@
 #     想完全跳过这一步用 PREKILL=0。--save / --stop 分支不会触发这个清理。
 #   - 雷达驱动、车体 TF、Point-LIO、slam_toolbox 全在 real_mapping_launch.py 里,
 #     本脚本只负责"参数校验 + 补齐底盘/手柄 + 存图/停止", 不再重复起这些节点。
-#   - 雷达驱动外参必须为零 (安装位姿走 --lidar-xyz / --lidar-rpy),
-#     否则点云被驱动和 URDF 各转一次, 建图必然重影; launch 会直接拒绝, 本脚本提前报错。
+#   - 雷达安装位姿的**唯一来源是 URDF** (srm27_robot_description/urdf/srm27_sentry.urdf.xacro):
+#     脚本默认**不传** lidar_xyz/lidar_rpy, 链路直接用模型里的值, 所以换 URDF 不用改这里。
+#     启动摘要里会把模型算出来的 xyz/rpy/gravity 打出来, 换完模型第一眼就能核对。
+#     --lidar-xyz / --lidar-rpy 只在现场临时改安装角(模型来不及改)时用, 会覆盖模型。
+#   - 雷达驱动外参必须为零, 否则点云被驱动和 URDF 各转一次, 建图必然重影;
+#     launch 会直接拒绝, 本脚本提前报错。
 #   - 所有路径一律传绝对路径; 每个标签页都会先 source 工作空间的 install/setup.bash。
 #   - 存图的 PCD (--save-pcd) 落在 src/srm27_navigation/point_lio/PCD/scans.pcd,
 #     它是 Point-LIO 自己坐标系下的原始点云, **不是**地图坐标系下的先验点云,
@@ -145,8 +149,12 @@ SAVE_PCD="${SAVE_PCD:-0}"
 
 PARAMS_FILE="${PARAMS_FILE:-}"
 LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
-LIDAR_XYZ="${LIDAR_XYZ:-0.12081 -0.056721 0.346388}"
-LIDAR_RPY="${LIDAR_RPY:-0.523598776 0.0 1.099557429}"
+# 雷达安装位姿的**唯一来源是 URDF** (real_mapping_launch.py -> srm_robot_description.py)。
+# 这两个值默认留空 = 不给 launch 传 lidar_xyz/lidar_rpy, 链路就用模型里的默认值,
+# 所以换了 URDF 只需要改模型, 不用改脚本。只有现场临时改安装角才显式传。
+# 用 ${VAR-} 而不是 ${VAR:-}: 后者会把"显式给的空串"又吃回默认值。
+LIDAR_XYZ="${LIDAR_XYZ-}"
+LIDAR_RPY="${LIDAR_RPY-}"
 
 SAVE_MAP_NAME="${SAVE_MAP_NAME:-}"
 MAP_OUT_DIR="${MAP_OUT_DIR:-}"
@@ -256,6 +264,43 @@ list_maps() {
   fi
   echo
   echo "地图目录: $WS_DIR/maps  (布局: maps/<名字>/<名字>.{yaml,pgm,posegraph,data})"
+}
+
+# ---------- 模型外参 (只用于启动摘要) ----------
+# 把"雷达到底装在哪儿"从 URDF 里算出来。用的是 real_mapping_launch.py 里**同一个**
+# 入口 (srm_robot_description.build_description), 所以打印出来的就是链路真会用的
+# 外参与 Point-LIO 重力 —— 换完 URDF 之后, 第一时间在这里核对一眼。
+# 解析失败不影响启动: launch 起来时还会再算一次, 那时报的错更完整。
+resolve_model_mounting() {
+  ros2_run timeout 60 python3 - "$PARAMS_FILE" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+from ament_index_python.packages import get_package_prefix
+
+sys.path.insert(
+    0, str(Path(get_package_prefix("srm27_nav_bringup")) / "lib" / "srm27_nav_bringup")
+)
+from srm_robot_description import build_description, gravity_from_mounting
+
+
+def axis(values, digits):
+    """一行定长小数; 顺手把 -0.000000 这种毛刺显示成 0.000000。"""
+    zero_text = "0." + "0" * digits
+    texts = ["%.*f" % (digits, value) for value in values]
+    return " ".join(zero_text if text == "-" + zero_text else text for text in texts)
+
+
+_, mounting = build_description(sys.argv[1], "", "")
+print(
+    "xyz=[%s] rpy=[%s] gravity=[%s]"
+    % (
+        axis(mounting["xyz"], 6),
+        axis(mounting["rpy"], 6),
+        axis(gravity_from_mounting(mounting["rpy"]), 4),
+    )
+)
+PY
 }
 
 # ---------- 停止 ----------
@@ -583,8 +628,9 @@ while [ $# -gt 0 ]; do
     --bag-out-dir)   BAG_OUT_DIR="${2:?--bag-out-dir 需要绝对路径}"; shift 2 ;;
     -p|--params)     PARAMS_FILE="${2:?--params 需要绝对路径}"; shift 2 ;;
     --lidar-config)  LIDAR_CONFIG_FILE="${2:?--lidar-config 需要路径}"; shift 2 ;;
-    --lidar-xyz)     LIDAR_XYZ="${2:?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
-    --lidar-rpy)     LIDAR_RPY="${2:?--lidar-rpy 需要 \"R P Y\"}"; shift 2 ;;
+    # ${2?} 而不是 ${2:?}: 允许显式给空串, 含义是"这一项跟随 URDF 模型"。
+    --lidar-xyz)     LIDAR_XYZ="${2?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
+    --lidar-rpy)     LIDAR_RPY="${2?--lidar-rpy 需要 \"R P Y\"}"; shift 2 ;;
     --lidar)         START_LIDAR=1; shift ;;
     --no-lidar)      START_LIDAR=0; shift ;;
     --use-sim-time)  USE_SIM_TIME=1; shift ;;
@@ -748,8 +794,14 @@ CLOCK_ARG="$(bool_arg "$USE_SIM_TIME")"
 MAPPING_CMD="ros2 launch srm27_nav_bringup real_mapping_launch.py"
 MAPPING_CMD="$MAPPING_CMD params_file:=$(q "$PARAMS_FILE")"
 MAPPING_CMD="$MAPPING_CMD lidar_config:=$(q "$LIDAR_CONFIG_FILE")"
-MAPPING_CMD="$MAPPING_CMD lidar_xyz:=$(q "$LIDAR_XYZ")"
-MAPPING_CMD="$MAPPING_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
+# 外参为空 = 干脆不传这个参数, 让 launch 走模型里的值。
+# 不能改传空串: ros2 launch 会直接报 "malformed launch argument 'lidar_xyz:='"。
+if [ -n "$LIDAR_XYZ" ]; then
+  MAPPING_CMD="$MAPPING_CMD lidar_xyz:=$(q "$LIDAR_XYZ")"
+fi
+if [ -n "$LIDAR_RPY" ]; then
+  MAPPING_CMD="$MAPPING_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
+fi
 MAPPING_CMD="$MAPPING_CMD start_lidar:=$(bool_arg "$START_LIDAR")"
 MAPPING_CMD="$MAPPING_CMD use_sim_time:=$CLOCK_ARG"
 MAPPING_CMD="$MAPPING_CMD use_rviz:=$(bool_arg "$USE_RVIZ")"
@@ -795,12 +847,27 @@ if is_true "$RECORD_BAG"; then
 fi
 
 # ---------- 启动摘要 ----------
+# 雷达外参这一行的显示值: 默认跟随模型, 那就把模型里的实际数值算出来一起打;
+# 显式给了 --lidar-xyz / --lidar-rpy 就照实说是"脚本覆盖模型"。
+LIDAR_MOUNT_DESC="xyz=[$LIDAR_XYZ] rpy=[$LIDAR_RPY]  (脚本覆盖模型)"
+if [ -z "$LIDAR_XYZ" ] && [ -z "$LIDAR_RPY" ]; then
+  LIDAR_MOUNT_DESC="跟随 URDF 模型"
+  if [ -f "$WS_DIR/install/setup.bash" ] && command -v ros2 >/dev/null 2>&1; then
+    RESOLVED_MOUNT="$(resolve_model_mounting)"
+    if [ -n "$RESOLVED_MOUNT" ]; then
+      LIDAR_MOUNT_DESC="$LIDAR_MOUNT_DESC -> $RESOLVED_MOUNT"
+    else
+      LIDAR_MOUNT_DESC="$LIDAR_MOUNT_DESC (未解析成功, 启动后 tf2_echo base_link livox_frame 核对)"
+    fi
+  fi
+fi
+
 echo "================= SRM 实车 SLAM 建图 ================="
 echo "  工作空间    : $WS_DIR"
 echo "  建图参数    : $PARAMS_FILE"
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 echo "  雷达驱动    : $([ "$START_LIDAR" = "1" ] && echo "启动 (真实 MID360)" || echo "不启动 (假定有别的点云源)")"
-echo "  雷达安装    : xyz=[$LIDAR_XYZ]  rpy=[$LIDAR_RPY]"
+echo "  雷达安装    : $LIDAR_MOUNT_DESC"
 echo "  use_sim_time: $CLOCK_ARG    RViz: $(bool_arg "$USE_RVIZ")"
 echo "  底盘串口    : $([ "$USE_CHASSIS" = "1" ] && echo "启动 (cmd_vel_chassis -> 串口)" || echo "不启动")"
 echo "  手柄遥控    : $([ "$USE_JOY" = "1" ] && echo "启动 (设备 $JOY_DEV, 输出 cmd_vel_chassis)" || echo "不启动")"
@@ -953,5 +1020,6 @@ cat <<EOF
   ros2 topic hz /scan                                     # 二维扫描 (建图的输入)
   ros2 run tf2_ros tf2_echo map odom                      # 漂移看这里: z/roll/pitch 应稳定
   ros2 run tf2_ros tf2_echo odom base_link                # Point-LIO 里程计
+  ros2 run tf2_ros tf2_echo base_link livox_frame          # 雷达外参: 换过 URDF 就核对这一条
   ros2 topic echo /map --once --field info.width          # 地图是否在长
 EOF
