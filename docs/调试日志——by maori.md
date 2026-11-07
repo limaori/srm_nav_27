@@ -512,6 +512,7 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 # 2026-11-8
 ### 示波速度
 ```bash
-./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed
+./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed,要先起导航栈
+./debug_tools/plot_vxvywz.py --save                           # 自动存到user_test_log文件夹
 ```
 

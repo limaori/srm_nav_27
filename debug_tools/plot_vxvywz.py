@@ -42,9 +42,10 @@
 #   ./debug_tools/plot_vxvywz.py -r __ns:=/red_standard_robot1              # 简写也认
 #   ./debug_tools/plot_vxvywz.py --window 60             # 时间窗 60 s
 #   ./debug_tools/plot_vxvywz.py --csv /tmp/run.csv      # 同时录 CSV
-#   ./debug_tools/plot_vxvywz.py --duration 30 --save /tmp/run.png   # 跑 30 s 后存图退出
+#   ./debug_tools/plot_vxvywz.py --duration 30 --save    # 跑 30 s，图存进 user_test_log/
+#   ./debug_tools/plot_vxvywz.py --duration 30 --save /tmp/run.png   # 存到指定路径
 #   ./debug_tools/plot_vxvywz.py --demo                  # 不连 ROS，假数据看波形效果
-#   ./debug_tools/plot_vxvywz.py --headless --duration 10 --save /tmp/x.png  # 无显示器/ssh
+#   ./debug_tools/plot_vxvywz.py --headless --duration 10 --save     # 无显示器/ssh
 #
 # 运行前先 source 环境（只用到标准消息，source 基础环境即可）：
 #   source /opt/ros/humble/setup.bash
@@ -66,7 +67,9 @@
 #   --plot-hz <Hz>            界面刷新频率，默认 20
 #   --duration <秒>           运行时长，0 = 一直跑到关窗口 / Ctrl-C（默认 0）
 #   --csv <路径>              录制 CSV（t, wall, s_vx.., f_vx.., watchdog, clamped）
-#   --save <路径>             退出时保存一张 PNG
+#   --save [路径]             录制结束（关窗口 / Ctrl-C / --duration 到点）存一张 PNG：
+#                             不带路径 -> user_test_log/chassis_vxvywz_<YYYYmmdd_HHMM>.png
+#                             （同一分钟重复跑自动加 _2/_3，不覆盖）；给了路径就按路径存
 #   --demo                    合成假数据（不初始化 ROS），用于验证画图链路
 #   --headless                不弹窗（Agg 后端），配合 --duration/--save 用
 #   -h/--help                 显示本帮助
@@ -778,6 +781,32 @@ def print_help():
     print_header_help(__file__)
 
 
+def resolve_save_path(requested, demo=False):
+    """把 --save 解析成最终落点（录制结束/关窗口/Ctrl-C 时存这一张）。
+
+    · 没写 --save          -> ""（纯粹当实时示波器，不留文件）
+    · --save（不带路径）    -> <工程根>/user_test_log/chassis_vxvywz_<时间戳>.png
+    · --save /path/x.png   -> 原样使用（相对路径按当前目录）
+
+    时间戳格式与 plot_lio_gt_yaw.py 保持一致（%Y%m%d_%H%M），落在同一个
+    user_test_log/ 里方便一起翻；同一分钟内重复跑自动加 _2/_3，不覆盖旧图。
+    """
+    if requested is None:
+        return ""
+    if requested:
+        return str(Path(requested).expanduser())
+
+    out_dir = WORKSPACE_DIR / "user_test_log"
+    prefix = "chassis_vxvywz_demo" if demo else "chassis_vxvywz"
+    stamp = time.strftime("%Y%m%d_%H%M")
+    candidate = out_dir / f"{prefix}_{stamp}.png"
+    index = 2
+    while candidate.exists():
+        candidate = out_dir / f"{prefix}_{stamp}_{index}.png"
+        index += 1
+    return str(candidate)
+
+
 def build_settings(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-h", "--help", action="store_true")
@@ -798,7 +827,9 @@ def build_settings(argv):
     parser.add_argument("--plot-hz", type=float, default=20.0)
     parser.add_argument("--duration", type=float, default=0.0)
     parser.add_argument("--csv", default="")
-    parser.add_argument("--save", default="")
+    # --save 不带路径 = 自动落到 <工程根>/user_test_log/（同 plot_lio_gt_yaw.py 的约定），
+    # 带路径就按路径存。default=None 用来区分"没要存图"和"要存但没给路径"。
+    parser.add_argument("--save", nargs="?", const="", default=None)
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--headless", action="store_true")
 
@@ -847,7 +878,7 @@ def build_settings(argv):
         plot_hz=max(args.plot_hz, 1.0),
         duration=max(args.duration, 0.0),
         csv_path=args.csv,
-        save_path=args.save,
+        save_path=resolve_save_path(args.save, args.demo),
         demo=args.demo,
         headless=args.headless,
         protocol=protocol,

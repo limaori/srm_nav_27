@@ -99,14 +99,19 @@ source install/setup.bash            # 只用到标准消息时可以省
 ./debug_tools/plot_vxvywz.py --window 60 --csv /tmp/vxvywz.csv
 
 # 跑 30 s 自动退出并存图（不需要人守着关窗口）
-./debug_tools/plot_vxvywz.py --duration 30 --save /tmp/vxvywz.png
+./debug_tools/plot_vxvywz.py --duration 30 --save            # -> user_test_log/chassis_vxvywz_20261108_0120.png
+./debug_tools/plot_vxvywz.py --duration 30 --save /tmp/vxvywz.png   # 想指定路径就这么写
 
 # 没有显示器 / ssh 上去
-./debug_tools/plot_vxvywz.py --headless --duration 20 --save /tmp/vxvywz.png
+./debug_tools/plot_vxvywz.py --headless --duration 20 --save
 
-# 先验证画图链路本身（不连 ROS，用合成数据）
-./debug_tools/plot_vxvywz.py --demo --duration 10 --save /tmp/demo.png
+# 先验证画图链路本身（不连 ROS，用合成数据；文件名带 demo 前缀，不会和实测混在一起）
+./debug_tools/plot_vxvywz.py --demo --duration 10 --save
 ```
+
+`--save` 不带路径时统一落到 `<工程根>/user_test_log/`，和 `plot_lio_gt_yaw.py`
+（`user_test_log/lio_yaw_*.png`）放一处，事后一起翻；文件名带时间戳，同一分钟
+重复跑会自动加 `_2`/`_3`，不会覆盖上一次的图。终端会打印最终绝对路径。
 
 ### 1.4 参数
 
@@ -124,7 +129,7 @@ source install/setup.bash            # 只用到标准消息时可以省
 | `--plot-hz` | `20` | 界面刷新频率 |
 | `--duration` | `0` | 运行时长，0 = 一直跑到关窗口 / Ctrl-C |
 | `--csv` | 空 | 录 CSV：`t_elapsed,t_wall,s_vx..,f_vx..,watchdog,clamped` |
-| `--save` | 空 | 退出时存 PNG |
+| `--save [路径]` | 空 | 录制结束存 PNG；不带路径 → `user_test_log/chassis_vxvywz_<时间戳>.png` |
 | `--demo` | 关 | 合成假数据，不初始化 ROS |
 | `--headless` | 自动 | 没有 `DISPLAY` 时自动开启（Agg 后端） |
 
