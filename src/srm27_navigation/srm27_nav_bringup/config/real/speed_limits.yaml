@@ -72,8 +72,8 @@
 controller_server@omni:
   ros__parameters:
     FollowPath:
-      v_linear_max: 1.5                 # 平移线速度上限（米/秒），PID 输出的饱和值
-      v_linear_min: -1.5                # 平移线速度下限
+      v_linear_max: 0.4                # 平移线速度上限（米/秒），PID 输出的饱和值
+      v_linear_min: -0.4               # 平移线速度下限
       v_angular_max: 1.0                # 自转角速度上限（弧度/秒）；导航 wz 恒为 0
       v_angular_min: -1.0               # 自转角速度下限
 
@@ -93,9 +93,9 @@ controller_server@minco:
   ros__parameters:
     FollowPath:
       limits:
-        max_linear_speed: 2.6          # 平移合速度上限（米/秒）；实际被串口 2.8 封顶
+        max_linear_speed: 0.40         # 平移合速度上限（米/秒）；2026-11-08 统一降速，串口同档 0.40
         max_linear_accel: 7.0         # 平移合加速度上限（米/秒²）；同时是验证器的制动能力假设
-        max_angular_speed: 5.00         # 角速度上限（弧度/秒）；xy_only 阶段实际权限为 0
+        max_angular_speed: 1.00         # 角速度上限（弧度/秒）；2026-11-08 与串口 max_wz 同档
         max_angular_accel: 4.50         # 角加速度上限（弧度/秒²）；同上
 
 # -----------------------------------------------------------------------------
@@ -103,8 +103,8 @@ controller_server@minco:
 # -----------------------------------------------------------------------------
 velocity_smoother@omni:
   ros__parameters:
-    max_velocity: [1.5, 1.5, 0.0]       # 最大速度[x,y,yaw]，yaw 钳 0（导航 wz 恒 0）
-    min_velocity: [-1.5, -1.5, 0.0]     # 最小速度[x,y,yaw]
+    max_velocity: [0.4, 0.4, 0.0]       # 最大速度[x,y,yaw]，yaw 钳 0（导航 wz 恒 0）
+    min_velocity: [-0.4, -0.4, 0.0]     # 最小速度[x,y,yaw]
     max_accel: [3.0, 3.0, 0.0]          # 最大加速度[x,y,yaw]
     max_decel: [-3.0, -3.0, 0.0]        # 最大减速度[x,y,yaw]
 
@@ -116,9 +116,9 @@ velocity_smoother@minco:
     # 的安全闸（仿真没有这个风险，所以它在仿真里是 5.0）。
     # 需要导航拥有 wz 的是 fakeyaw 迁移链，它的 yaw 界在下面的 `@fakeyaw` 段里放开。
     # 另注意：平滑器按分量钳位，所以 x 给 5.0 时斜向合速度可达 √2×5.0；
-    # 实车出口仍被串口 4.5 m/s 封顶。
-    max_velocity: [2.6, 2.6, 0.0]       # 最大速度[x,y,yaw]
-    min_velocity: [-2.6, -2.6, 0.0]     # 最小速度[x,y,yaw]
+    # 实车出口仍被串口 0.40 m/s 封顶。
+    max_velocity: [0.4, 0.4, 0.0]       # 最大速度[x,y,yaw]
+    min_velocity: [-0.4, -0.4, 0.0]     # 最小速度[x,y,yaw]
     max_accel: [7.0, 7.0, 0.0]          # 最大加速度[x,y,yaw]
     max_decel: [-7.0, -7.0, 0.0]        # 最大减速度[x,y,yaw]
 
@@ -132,8 +132,8 @@ velocity_smoother@fakeyaw:
     # （再往下 srm_cmd_mux 的 wz_max 与串口 max_wz 各有一道，见下）。
     # 2026-11-06 首次实车值取 1.5 rad/s：先把"wz 方向对不对、底盘跟不跟"验掉，
     # 再按标定结果抬高。⚠ 它在仿真里是 6.0（与 MINCO limits.max_angular_speed 同档）。
-    max_velocity: [2.6, 2.6, 1.5]
-    min_velocity: [-2.6, -2.6, -1.5]
+    max_velocity: [0.4, 0.4, 1.0]
+    min_velocity: [-0.4, -0.4, -1.0]
     # 角加速度与 MINCO 的 max_angular_accel(4.5) 同档；给小了会让自转起停变钝，
     # 给大了则会在串口层被 max_wz 削平，都会让"请求 2.0 实际多少"变得难判。
     max_accel: [7.0, 7.0, 4.5]
@@ -155,10 +155,10 @@ velocity_smoother@fakeyaw:
 # -----------------------------------------------------------------------------
 srm_cmd_mux:
   ros__parameters:
-    vx_max: 2.6                         # 前向速度上限（米/秒，按分量）
-    vy_max: 2.6                         # 左向速度上限（米/秒，按分量）
-    v_max: 2.6                          # 平移合速度上限（米/秒，按向量模长）
-    wz_max: 1.5                         # 自转角速度上限（弧度/秒）—— 首跑闸，验过再抬
+    vx_max: 0.40                        # 前向速度上限（米/秒，按分量）
+    vy_max: 0.40                        # 左向速度上限（米/秒，按分量）
+    v_max: 0.40                         # 平移合速度上限（米/秒，按向量模长）
+    wz_max: 1.00                        # 自转角速度上限（弧度/秒）—— 2026-11-08 统一降速
 
 # -----------------------------------------------------------------------------
 # 恢复行为（behavior_server）：Spin 等的自转限幅，两份参数文件里原本都是这三个值。
