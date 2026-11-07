@@ -305,17 +305,53 @@ def test_old_chain_and_bad_frame_are_rejected():
         raise AssertionError("不一致的 command_frame 没有被拦下来")
 
 
-def test_gimbal_relay_is_optional():
-    """云台关节角中继只在显式给话题时启动（协议还没有这个字段）。"""
+def test_gimbal_relay_is_always_started_and_follows_the_topic_arg():
+    """云台关节角中继必须常驻，输入类型随 gimbal_joint_topic 切换。
+
+    revolute 关节的 `base_link -> gimbal_yaw` 这条 TF 只来自 `/joint_states`，
+    没有中继时 `robot_state_publisher` 一个动态 TF 都不发，整棵树断开。所以中继
+    不能"没话题就不起"：
+      · 给了话题 -> float32，用真实回传角（0x0010 第 4 字段，2026-11-08 起可用）；
+      · 没给     -> constant 暂位 0 度，TF 与 fixed 等价，结构保持不断。
+    """
     module = _load_launch_module()
-    _, _, _, nodes, _ = _make_context(module, {"params_file": str(FAKEYAW_PARAMS)})
+    _, context, _, nodes, _ = _make_context(
+        module,
+        {"params_file": str(FAKEYAW_PARAMS), "gimbal_joint_topic": "gimbal_joint_angle"},
+    )
     relay = [n for n in nodes
              if getattr(n, "_Node__node_executable", "") == "gimbal_joint_state_relay.py"]
     _assert(len(relay) == 1, f"应该有一个云台关节角中继节点: {len(relay)}")
-    # launch 的 Action 把 condition 存在 `_Action__condition`（Node 不覆盖它）。
-    condition = getattr(relay[0], "_Action__condition", None) or getattr(
-        relay[0], "_Node__condition", None)
-    _assert(condition is not None, "中继节点必须带条件（空话题时不启动）")
+
+    def _param(node, context, key):
+        # launch_ros 把参数字典归一化成 {(TextSubstitution,): value}，value 可能是
+        # tuple[Substitution] / ParameterValue / 字面量，这里统一取出可求值的东西。
+        for entry in getattr(node, "_Node__parameters"):
+            if not isinstance(entry, dict):
+                continue
+            for raw_key, raw_value in entry.items():
+                if _sub(context, raw_key) != key:
+                    continue
+                if hasattr(raw_value, "value"):  # ParameterValue
+                    return raw_value.value
+                return raw_value
+        return None
+
+    input_topic = _param(relay[0], context, "input_topic")
+    _assert(input_topic is not None, "中继必须声明 input_topic")
+    _assert(_sub(context, input_topic) == "gimbal_joint_angle",
+            f"input_topic 应跟随 gimbal_joint_topic，实得 {_sub(context, input_topic)}")
+
+    input_type = _param(relay[0], context, "input_type")
+    _assert(input_type is not None, "中继必须声明 input_type")
+    _assert(_sub(context, input_type) == "float32",
+            f"给了话题就该走 float32，实得 {_sub(context, input_type)}")
+
+    # 话题为空 -> constant 暂位（结构已就绪，TF 不断）
+    _, empty_context, _, _, _ = _make_context(
+        module, {"params_file": str(FAKEYAW_PARAMS), "gimbal_joint_topic": ""})
+    _assert(_sub(empty_context, input_type) == "constant",
+            f"话题为空时应退回 constant，实得 {_sub(empty_context, input_type)}")
 
 
 def _run_all():

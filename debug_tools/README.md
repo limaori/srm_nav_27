@@ -6,7 +6,7 @@
 
 | 工具 | 用途 | 状态 |
 | --- | --- | --- |
-| `plot_vxvywz.py` | 底盘 vx/vy/wz 波形：串口发送 + 下位机 0x0010 反馈，共 6 条曲线 | 可用（对接 `/chassis_speed`） |
+| `plot_vxvywz.py` | 底盘 vx/vy/wz 波形 + 云台偏角/关节角行（共 8 条曲线） | 可用（对接 `/chassis_speed`、`/chassis_to_gimbal_yaw_deg`、`/gimbal_joint_angle`） |
 | `plot_lio_gt_yaw.py` | **LIO 算的车头朝向 vs Gazebo 真值**：yaw 曲线 + 误差 + x-y 轨迹 + 速度符号（共 5 个面板）；加 `--zlio` 再多 3 个面板看里程计前端换成 ZLIO 之后的效果 | 可用 |
 | `system_monitor.py` | 本机占用：CPU/内存/swap/温度/磁盘/网络 + **导航栈分组统计** + 最吃 CPU 的进程 | 可用 |
 
@@ -23,14 +23,17 @@
 > 上图是 `--demo` 的合成数据：蓝实线 = 串口发送（19 字节帧内的值），
 > 红虚线 = 下位机反馈。演示数据里刻意加了跟随增益和约 0.15 s 的滞后，
 > 真实反馈接上之后两条线的差就是这一路的跟随误差。
+> 第 4 行是 2026-11-08 新加的云台偏角：绿实线 = 底盘相对云台（度），
+> 橙虚线 = 换算进 TF 的关节角（度），默认 `sign=-1` 时两条线镜像。
 
-一张图三行，每行一个通道；每行两条线：
+一张图四行：前三行每行一个速度通道；第四行是云台偏角/关节角。
 
-| 通道 | 蓝实线（串口发送） | 红虚线（下位机反馈） |
+| 行 | 曲线 | 说明 |
 | --- | --- | --- |
-| `vx` | 19 字节帧里 `speed_vector.vx` 的**实际数值** | 下位机回传的实测 vx |
-| `vy` | 同上，`vy` | 实测 vy |
-| `wz` | 同上，`wz` | 实测 wz |
+| `vx` | 蓝实线 `speed_vector.vx` / 红虚线实测 vx | 19 字节帧里实际发的值 vs 下位机回传 |
+| `vy` | 同上，`vy` | 同上 |
+| `wz` | 同上，`wz` | 同上 |
+| 云台偏角 | 绿实线 `chassis_to_gimbal_yaw`（度）/ 橙虚线 `gimbal_yaw_joint`（度） | 下位机原值 vs 真正接进 URDF/TF 的关节角，见 §1.3 |
 
 ### 1.1 蓝线是怎么来的（重要）
 
@@ -54,13 +57,14 @@
 
 ### 1.2 红线（下位机反馈）从哪来
 
-下位机按 `0x0010` 包回传底盘速度观测值（4 个 float32：`vx`/`vy`/`wz`/`yaw_deg`），
-`srm27_nav_protocol` 解出来发两个话题：
+下位机按 `0x0010` 包回传底盘速度观测值（4 个 float32：`vx`/`vy`/`wz`/`chassis_to_gimbal_yaw_deg`），
+`srm27_nav_protocol` 解出来发三条话题：
 
 | 话题（默认） | 类型 | 内容 |
 | --- | --- | --- |
-| `chassis_speed` | `geometry_msgs/msg/TwistStamped` | `twist.linear.x/y` = vx/vy [m/s]，`twist.angular.z` = wz [rad/s] |
-| `chassis_yaw_deg` | `std_msgs/msg/Float32` | 下位机速度观测器的 yaw（**度**，不是弧度） |
+| `chassis_speed` | `geometry_msgs/msg/TwistStamped` | `twist.linear.x/y` = vx/vy [m/s]（**底盘系**），`twist.angular.z` = wz [rad/s] |
+| `chassis_to_gimbal_yaw_deg` | `std_msgs/msg/Float32` | 底盘相对云台的偏角（**度**，(-180,180]，云台指向为 0） |
+| `gimbal_joint_angle` | `std_msgs/msg/Float32` | 同上换成 URDF `gimbal_yaw_joint` 的关节角（云台相对底盘，弧度，另带 `gimbal_joint_sign`） |
 
 工具默认订阅 `chassis_speed`（相对名，随 `__ns` 走），`--feedback-type` 三选一：
 `twist_stamped`（默认）/ `twist` / `odom`。
@@ -82,7 +86,29 @@ grep publish_chassis_speed src/srm27_nav_protocol/config/srm27_nav_protocol.yaml
 顺带：`srm27_nav_protocol` 会在 `0x0010` 中断 0.5 s 时打 WARN，日志里搜
 `底盘速度反馈 (0x0010) 中断` 就知道是链路断还是值不对。
 
-### 1.3 用法
+### 1.3 第四行：云台偏角 / 关节角（2026-11-08 新增）
+
+第 4 行的两条线都画成**度**，共用一条轴：
+
+| 曲线 | 话题（默认） | 含义 |
+| --- | --- | --- |
+| 绿实线 | `chassis_to_gimbal_yaw_deg` | 下位机 `0x0010` 第 4 个 float32 原值：**底盘相对云台**，(-180, 180]，以云台指向为 0 |
+| 橙虚线 | `gimbal_joint_angle` | 节点换算后、真正进 `/joint_states` 的 `gimbal_yaw_joint`：**云台相对底盘**，弧度；画图时乘 180/π 换回度 |
+
+怎么读：
+
+- 默认 `gimbal_joint_sign = -1`（两者互为相反数），所以两条线应**关于 0 镜像**：
+  手把底盘逆时针转、云台不动 → 绿线往正走、橙线往负走。两条线重合说明 sign 被改成了 +1。
+- 两条线在 ±180° 处同时翻一次再回来，是角度跨界的正常折叠（关节角被 wrap 到 (-π, π]），
+  不是故障；`sensor_scan_generation` 的 yaw 差动了 `atan2` 归一化，不会因此出速度尖峰。
+- 某一侧断流时那条线只断自己：超过 `--angle-timeout`（默认 0.5 s）没更新就留空，
+  不画平线冒充"角度没变"（图底会提示在等哪条）。
+- 两条线都空：节点版本旧（还没发这两条话题）、或话题名/命名空间不对。先跑
+  `ros2 topic hz /chassis_to_gimbal_yaw_deg` 和 `/gimbal_joint_angle`（都应 ≈33 Hz）。
+
+这一行是"云台不动、手转底盘，`base_link` 要跟着转"的**波形版证据**，配合 §1.6 的判读一起看。
+
+### 1.4 用法
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -109,31 +135,40 @@ source install/setup.bash            # 只用到标准消息时可以省
 ./debug_tools/plot_vxvywz.py --demo --duration 10 --save
 ```
 
-`--save` 不带路径时统一落到 `<工程根>/user_test_log/`，和 `plot_lio_gt_yaw.py`
-（`user_test_log/lio_yaw_*.png`）放一处，事后一起翻；文件名带时间戳，同一分钟
-重复跑会自动加 `_2`/`_3`，不会覆盖上一次的图。终端会打印最终绝对路径。
+`--save` 存的是**整段录制**（从启动到退出，横轴铺满全程），**不是**屏幕上当前显示的
+那个 `--window`：屏幕只留最近几十秒方便看形状，存图要能复盘整段。不带路径时统一落到
+`<工程根>/user_test_log/`，和 `plot_lio_gt_yaw.py`（`user_test_log/lio_yaw_*.png`）
+放一处，事后一起翻；文件名带时间戳，同一分钟重复跑会自动加 `_2`/`_3`，不会覆盖上一次的图。
+终端会打印最终绝对路径和 "整段 N s, M 个采样点"。
 
-### 1.4 参数
+历史默认全程保留（50 Hz 下 10 分钟约 3 万个采样点，内存无压力）；如果只想跑很久又
+只想看最近一段，用 `--history 600` 限制保留时长——注意这时存图也只剩这 600 s。
+
+### 1.5 参数
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--send-topic` | `cmd_vel_chassis` | 串口节点的输入话题（相对名，跟随 `__ns`） |
 | `--feedback-topic` | `chassis_speed` | 下位机反馈话题（相对名，随 `__ns`） |
 | `--feedback-type` | `twist_stamped` | `twist_stamped` = `geometry_msgs/TwistStamped`（0x0010 原生口径）；`twist` = `geometry_msgs/Twist`；`odom` = `nav_msgs/Odometry` |
+| `--angle-topic` | `chassis_to_gimbal_yaw_deg` | 第 4 行绿线：底盘相对云台（度） |
+| `--joint-topic` | `gimbal_joint_angle` | 第 4 行橙虚线：云台关节角（弧度，进 TF） |
+| `--angle-timeout` | `0.5` | 偏角/关节角多久没更新就断开那条线（秒） |
 | `--config` | `src/srm27_nav_protocol/config/srm27_nav_protocol.yaml` | 读限幅/缩放/看门狗的来源 |
 | `--max-vx` `--max-vy` `--max-wz` | 读 yaml | 覆盖限幅值 |
 | `--linear-scale` `--angular-scale` | 读 yaml | 覆盖缩放系数 |
 | `--cmd-timeout` | 读 yaml | 覆盖看门狗超时 |
-| `--window` | `20` | 波形时间窗（秒） |
+| `--window` | `20` | **屏幕**上的波形时间窗（秒）；不影响 `--save`（存图是整段） |
+| `--history` | `0` | 历史保留上限（秒），0 = 全程。存档/退出小结用保留的那段 |
 | `--sample-hz` | `50` | 采样记录频率（串口 100 Hz 发，50 Hz 足够看形状） |
 | `--plot-hz` | `20` | 界面刷新频率 |
 | `--duration` | `0` | 运行时长，0 = 一直跑到关窗口 / Ctrl-C |
-| `--csv` | 空 | 录 CSV：`t_elapsed,t_wall,s_vx..,f_vx..,watchdog,clamped` |
-| `--save [路径]` | 空 | 录制结束存 PNG；不带路径 → `user_test_log/chassis_vxvywz_<时间戳>.png` |
+| `--csv` | 空 | 录 CSV：`t_elapsed,t_wall,s_vx..,f_vx..,watchdog,clamped,a_chassis_to_gimbal_deg,a_joint_rad`（后两列 2026-11-08 追加在末尾，旧列顺序不变） |
+| `--save [路径]` | 空 | 录制结束存 **整段录制** 的 PNG；不带路径 → `user_test_log/chassis_vxvywz_<时间戳>.png` |
 | `--demo` | 关 | 合成假数据，不初始化 ROS |
 | `--headless` | 自动 | 没有 `DISPLAY` 时自动开启（Agg 后端） |
 
-### 1.5 图上怎么判读
+### 1.6 图上怎么判读
 
 - **蓝线掉到 0、底部"看门狗归零"计数 +1**：上游 0.5 s 没发新指令，串口节点
   在按协议 §6.3 重发零速帧。这是"导航停了/控制器卡了"，不是车的故障。
@@ -143,6 +178,8 @@ source install/setup.bash            # 只用到标准消息时可以省
 - **红线在蓝线上一段后突然断掉**：反馈超过 `cmd_timeout_sec` 没更新，
   工具按"过期"处理（避免下位机断链后红色虚线平着无限延伸骗人）。
 - **红线和蓝线的差**就是这个通道真实的"跟随误差"——这也是这个工具最主要的用途。
+- **第 4 行绿/橙两条线**：看它们是否关于 0 镜像（`sign=-1` 的预期），以及 ±180° 处
+  一起翻折后能否接上；某一侧断流只会断那一条。判读细节见 §1.3。
 
 ---
 

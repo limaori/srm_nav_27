@@ -19,7 +19,7 @@
 这一层错了的表现非常分散，而且都不会报错：
 * CRC 覆盖范围写错（漏掉 cmd_id）→ 偶发整帧被丢，看起来像"下位机没发"；
 * 按"第几个包"解析而不是按 cmd_id → 丢一个槽位之后**永久错位**；
-* 长度不自检 → 把 12 字节当成 16 字节读，vx/vy/wz/yaw 变成帧里别的字节；
+* 长度不自检 → 把 12 字节当成 16 字节读，vx/vy/wz/chassis_to_gimbal_yaw 变成帧里别的字节；
 * 小端当大端 → 速度变成 1e-38 或天文数字。
 
 本测试用**独立实现**的组帧/解析（`script/test_chassis_speed_feedback.py`，与 C++ 节点
@@ -131,7 +131,9 @@ def test_round_robin_with_skipped_slots():
         _assert(item is not None, f"第 {index} 帧解码失败")
         _assert(abs(item["vx"] - 0.01 * index) < 1e-6,
                 f"第 {index} 帧 vx 应为 {0.01 * index}，实得 {item['vx']}")
-        _assert(abs(item["yaw_deg"] - index) < 1e-6, f"第 {index} 帧 yaw 应连续，实得 {item['yaw_deg']}")
+        _assert(abs(item["chassis_to_gimbal_yaw_deg"] - index) < 1e-6,
+                f"第 {index} 帧 chassis_to_gimbal_yaw 应连续，"
+                f"实得 {item['chassis_to_gimbal_yaw_deg']}")
     _assert(parser.stats["crc8_fail"] == 0 and parser.stats["crc16_fail"] == 0,
             f"正常流不该有 CRC 失败: {parser.stats}")
 

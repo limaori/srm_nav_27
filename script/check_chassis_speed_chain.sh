@@ -7,7 +7,8 @@
 #   B. 下位机根本没发 0x0010：固件还是老版本，或波特率/接线不对
 #
 # 本脚本只隔离验证 A：用**伪串口**(pty) 按 33.3 Hz 喂合成的 0x0010 帧给
-# **真节点**，然后看 /chassis_speed 出不出 33 Hz。
+# **真节点**，然后看 /chassis_speed 出不出 33 Hz，顺带核对云台偏角两条话题
+# （/chassis_to_gimbal_yaw_deg 与 /gimbal_joint_angle）的值与符号。
 #   · 出 33 Hz  -> 上位机链路 OK，问题在串口/下位机（B），去查固件
 #   · 没出      -> 上位机自己有问题（A），脚本会把节点日志打出来
 #
@@ -100,7 +101,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ----------------------------------------------------------- 1. 伪串口
-say "1/3 起伪串口（合成 0x0010: vx=0.42 vy=0.05 wz=0.31 yaw=45°, 33.3 Hz）"
+say "1/4 起伪串口（合成 0x0010: vx=0.42 vy=0.05 wz=0.31 chassis_to_gimbal_yaw=45°, 33.3 Hz）"
 PYTHONUNBUFFERED=1 python3 -u "$PTY_TOOL" --pty \
   --vx 0.42 --vy 0.05 --wz 0.31 --yaw 45 --seconds 40 >"$PTY_LOG" 2>&1 &
 PTY_PID=$!
@@ -118,7 +119,7 @@ fi
 ok "伪串口: $PTY_DEV"
 
 # ----------------------------------------------------------- 2. 真节点
-say "2/3 用真节点接伪串口（ROS_DOMAIN_ID=$TEST_DOMAIN，不碰 /dev/ttyACM0）"
+say "2/4 用真节点接伪串口（ROS_DOMAIN_ID=$TEST_DOMAIN，不碰 /dev/ttyACM0）"
 ROS_DOMAIN_ID="$TEST_DOMAIN" ros2 run srm27_nav_protocol srm27_nav_protocol_node \
   --ros-args -r __node:=srm27_nav_protocol --params-file "$PARAM_FILE" \
   -p device_name:="$PTY_DEV" >"$NODE_LOG" 2>&1 &
@@ -148,7 +149,7 @@ fi
                          || warn "启动日志里没看到接收侧 0x0010（可能被关掉了）"
 
 # ----------------------------------------------------------- 3. 量频率
-say "3/3 量 /chassis_speed 频率（约 6 s）"
+say "3/4 量 /chassis_speed 频率（约 6 s）"
 HZ_LOG="$TMP_DIR/hz.log"
 ROS_DOMAIN_ID="$TEST_DOMAIN" timeout 8 ros2 topic hz /chassis_speed --window 20 \
   >"$HZ_LOG" 2>&1
@@ -165,6 +166,38 @@ if [[ -n "$RATE" ]]; then
   if grep -q "含 NaN/Inf" "$NODE_LOG"; then
     warn "节点报过「含 NaN/Inf」：下位机算出了非法值"
   fi
+
+  # ------------------------------------------------- 4. 云台偏角/关节角
+  say "4/4 核对云台关节角（合成 chassis_to_gimbal_yaw=45°，默认 sign=-1）"
+  DEG="$(ROS_DOMAIN_ID="$TEST_DOMAIN" timeout 6 \
+    ros2 topic echo /chassis_to_gimbal_yaw_deg --once --field data 2>/dev/null \
+    | head -1 | tr -d '\r' || true)"
+  JOINT="$(ROS_DOMAIN_ID="$TEST_DOMAIN" timeout 6 \
+    ros2 topic echo /gimbal_joint_angle --once --field data 2>/dev/null \
+    | head -1 | tr -d '\r' || true)"
+  SIGN="$(sed -n 's/^[[:space:]]*gimbal_joint_sign:[[:space:]]*//p' "$PARAM_FILE" \
+    | head -1 | tr -d ' \r')"
+  SIGN="${SIGN:--1.0}"
+  EXPECT_JOINT="$(awk -v s="$SIGN" 'BEGIN { printf "%.4f", s * 45 * 3.14159265358979 / 180 }')"
+
+  if [[ -z "$DEG" || -z "$JOINT" ]]; then
+    bad "云台偏角话题没发出来（度数='${DEG:-缺失}' 关节角='${JOINT:-缺失}'）"
+    echo
+    echo "结论: 【上位机链路有问题】/chassis_speed 正常，但云台关节角话题缺失。"
+    echo "      这两个话题是 base_link -> gimbal_yaw 的 TF 数据源，缺了导航会一直"
+    echo "      报 TF 查询失败。最常见原因：install/ 还是旧二进制。"
+    echo "        colcon build --packages-select srm27_nav_protocol"
+    exit 1
+  fi
+  ok "/chassis_to_gimbal_yaw_deg = $DEG  （期望 45）"
+  if awk -v v="$JOINT" -v e="$EXPECT_JOINT" \
+      'BEGIN { exit (v - e < 5e-3 && e - v < 5e-3) ? 0 : 1 }'; then
+    ok "/gimbal_joint_angle = $JOINT rad  （期望 $EXPECT_JOINT = sign $SIGN × 45 × π/180）"
+  else
+    warn "/gimbal_joint_angle = $JOINT rad，按 yaml 的 sign=$SIGN 期望 $EXPECT_JOINT rad"
+    warn "  差 2×45° 通常是 sign 接反；若 yaml 没改过，先看是不是旧二进制"
+  fi
+
   echo
   echo "结论: 【上位机链路正常】0x0010 一到位就能发出来，问题在串口或下位机那头。"
   echo "      下一步（真车、只读、不需要 ROS）:"

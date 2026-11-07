@@ -74,9 +74,12 @@ private:
   rclcpp::Publisher<rm_decision_interfaces::msg::Sefdefined>::SharedPtr sefdefined_pub_;            // 0x000B
   // 0x0010 底盘速度反馈（下位机速度观测器的融合结果）。
   // 速度用 TwistStamped（带 stamp + frame_id，便于和 /cmd_vel_chassis 对时/对账）；
-  // yaw 单独一条 Float32，保持下位机口径（度），不做隐式单位换算。
+  // 底盘相对云台的偏角单独一条 Float32，保持下位机口径（度），不做隐式单位换算；
+  // 再由它换算出 URDF gimbal_yaw_joint 的关节角（云台相对底盘、弧度）另发一条 Float32，
+  // 供 gimbal_joint_state_relay 转成 /joint_states（详见 cpp 里 publishChassisSpeed）。
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr chassis_speed_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr chassis_yaw_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr chassis_to_gimbal_yaw_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr gimbal_joint_pub_;
 
   // Subscribe
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
@@ -114,7 +117,14 @@ private:
   /******** 接收侧 0x0010 底盘速度反馈 ********/
   bool publish_chassis_speed_{true};
   std::string chassis_speed_topic_{"chassis_speed"};
-  std::string chassis_yaw_topic_{"chassis_yaw_deg"};
+  // 下位机原值：底盘相对云台的偏角（度），正常范围 (-180, 180]。
+  std::string chassis_to_gimbal_yaw_topic_{"chassis_to_gimbal_yaw_deg"};
+  // 换算后的 URDF gimbal_yaw_joint 关节角（云台相对底盘，rad）。这个才是接进 TF 的量。
+  std::string gimbal_joint_topic_{"gimbal_joint_angle"};
+  // 换算系数里的符号：joint_rad = gimbal_joint_sign * deg * π / 180。
+  // 下位机是"底盘相对云台"、URDF 是"云台相对底盘"，所以默认 -1.0（互为相反数）。
+  // 放到参数里是为了现场能用 --ros-args -p 翻转，不用重新编译。
+  double gimbal_joint_sign_{-1.0};
   std::string chassis_speed_frame_{"base_link"};
   // 超过这么久没收到 0x0010 就告警一次（收到后恢复也告警一次）。
   // 0x0010 约 33 Hz（10 ms 槽位轮转），0.5 s 相当于连丢 ~16 个槽位。

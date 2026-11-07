@@ -94,7 +94,7 @@
 #       --minco                 等价于 --controller minco
 #       --gicp / --no-gicp      先验点云重定位（= --reloc）/ 关掉它（= --no-reloc, LIO+静态图）
 #       --lio / --no-lio        LIO 出里程计 + 静态 map->odom / 关掉 LIO（实车=--static）
-#       --lio-frontend <point_lio|zlio>   里程计前端（默认 point_lio）
+#       --lio-frontend <point_lio|zlio>   里程计前端（**默认 zlio**；point_lio = 回退）
 #       --init-pose "<x,y,z,roll,pitch,yaw>"   map->odom 初值（实车只取 x/y/yaw）
 #       --prior-pcd-manifest <路径>   仿真专用, 实车只提示忽略
 #       --yaw-mode <auto|se2|spin>    MINCO 航向策略（实车另有 xy_only 对照档）
@@ -137,9 +137,13 @@
 #                               ⚠ 首跑请架起车辆或用 0.3 这种小转速先确认方向；
 #                               mux 的 wz_max 首跑限在 1.5 rad/s。
 #       --gimbal-joint-topic <话题>
-#                               云台关节角回传话题 (std_msgs/Float32 或 JointState)。给出时
-#                               起 gimbal_joint_state_relay 转成 /joint_states。协议补齐字段前
-#                               留空即可; 留空又让云台转 = base_link yaw 必错。
+#                               云台关节角回传话题 (std_msgs/Float32 或 JointState)。
+#                               gimbal_joint_state_relay 常驻 (TF 树需要)，给出话题时走
+#                               float32 模式转成 /joint_states；默认 gimbal_joint_angle
+#                               （srm27_nav_protocol 由 0x0010 第 4 个字段换算而来，
+#                               见 docs/导航通信协议-下位机接口说明.md）。
+#                               留空 = constant 暂位 0 度，此时底盘相对云台转 = base_link yaw 必错。
+#       --no-gimbal-joint-topic  等价于 --gimbal-joint-topic ""（退回暂位 0 度）。
 #       --zlio-config <路径>     ZLIO 算法配置, 默认 config/real/zlio_mid360.yaml
 #                               (--lio-frontend zlio 与 --reloc/--slam 互斥)
 #       --mux / --no-mux         是否串 srm_cmd_mux (默认串)。关掉时导航出口变成
@@ -284,11 +288,19 @@ WORLD_ARG="${WORLD:-}"
 # 自定义 RViz 配置（与 start_sim_nav.sh 同名）。
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 
-# 云台关节角回传话题 (空 = 不起中继/不假设云台在转)。实车协议还没这个字段。
-GIMBAL_JOINT_TOPIC="${GIMBAL_JOINT_TOPIC:-}"
+# 云台关节角回传话题：0x0010 第 4 个字段已改为 chassis_to_gimbal_yaw，
+# srm27_nav_protocol 会据此发出 gimbal_joint_angle（云台相对底盘、弧度）。
+# 默认直接接上 —— 不接的话 base_link 的 yaw 等于云台 yaw，底盘相对云台一转，
+# 速度方向就错一个关节角（导航正常转向时关节角一直在变，不是边角情况）。
+# 想退回"暂位 0 度"：--no-gimbal-joint-topic 或 GIMBAL_JOINT_TOPIC= 启动。
+# ⚠ 数据断了 relay 会在 timeout_sec(0.3 s) 后停发 /joint_states，TF 停在最后一帧。
+# 注意用 ${VAR-default} 而不是 ${VAR:-default}：后者会把"显式设为空"也当成未设置，
+# 那样 GIMBAL_JOINT_TOPIC= 就没法关掉回传了。
+GIMBAL_JOINT_TOPIC="${GIMBAL_JOINT_TOPIC-gimbal_joint_angle}"
 
 # 里程计前端 (point_lio / zlio) 与 ZLIO 算法配置。
-LIO_FRONTEND="${LIO_FRONTEND:-point_lio}"
+# **默认 zlio**（2026-11-08 切换，与 start_sim_nav.sh 一致）；point_lio = 回退选项。
+LIO_FRONTEND="${LIO_FRONTEND:-zlio}"
 LIO_FRONTEND_CLI_GIVEN=0
 ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 
@@ -636,6 +648,7 @@ while [ $# -gt 0 ]; do
                       fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_CLI_GIVEN=1; shift ;;
     --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"; shift 2 ;;
+    --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; shift ;;
     --lio-frontend)   LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"
                       LIO_FRONTEND_CLI_GIVEN=1; shift 2 ;;
     # --- 与 start_sim_nav.sh 对齐的参数面（同一条命令两边通用）---
@@ -774,11 +787,21 @@ fi
 # 前提是这张地图有先验点云 (maps/pcd/<地图名>_mapframe.pcd); 没有的话下面 resolve 会
 # 报错并告诉你缺哪份、怎么生成。想回到"静态 map->odom"用 --no-reloc 或 --lio。
 if [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -eq 0 ] && [ "$MODE_GIVEN" = "0" ]; then
-  RELOC_ON=1
-  START_RELOC=1
-  echo "[提示] 未指定定位方式, 默认按 --reloc 启动 (small_gicp 与先验 PCD 配准后发布 map->odom)。"
-  echo "[提示] 需要该地图的先验点云 maps/pcd/<地图名>_mapframe.pcd。"
-  echo "[提示] 不用重定位 (也就不需要 PCD): --no-reloc; 其他: --slam / --static, 见 --help。"
+  if [ "$LIO_FRONTEND" = "zlio" ]; then
+    # ZLIO 只接在纯 LIO 链上（与 --reloc/--slam 互斥），所以默认方式跟着前端走。
+    LIO_ON=1
+    START_LIO=1
+    NO_RELOC=1
+    echo "[提示] 未指定定位方式, 默认按 --lio 启动 (ZLIO 里程计 + 静态 map->odom)。"
+    echo "[提示] ZLIO 只接纯 LIO 链; 要用 GICP 重定位请: --lio-frontend point_lio --reloc。"
+    echo "[提示] 车必须停在 map 原点, 或用 --map-to-odom X Y YAW 给初值。"
+  else
+    RELOC_ON=1
+    START_RELOC=1
+    echo "[提示] 未指定定位方式, 默认按 --reloc 启动 (small_gicp 与先验 PCD 配准后发布 map->odom)。"
+    echo "[提示] 需要该地图的先验点云 maps/pcd/<地图名>_mapframe.pcd。"
+    echo "[提示] 不用重定位 (也就不需要 PCD): --no-reloc; 其他: --slam / --static, 见 --help。"
+  fi
 fi
 
 # --no-reloc 单独给 (没搭别的模式): 就是 LIO 里程计 + 静态 map->odom, map->odom 取
@@ -786,7 +809,7 @@ fi
 if is_true "$NO_RELOC" && [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -eq 0 ]; then
   LIO_ON=1
   START_LIO=1
-  echo "[提示] --no-reloc: Point-LIO 里程计 + 静态 map->odom (不需要先验 PCD;"
+  echo "[提示] --no-reloc: $LIO_FRONTEND 里程计 + 静态 map->odom (不需要先验 PCD;"
   echo "[提示]             map->odom 默认 0 0 0, 用 --map-to-odom X Y YAW 改)。"
 fi
 
@@ -987,14 +1010,19 @@ esac
 if [ "$LIO_FRONTEND" = "zlio" ]; then
   if [ "$RELOC_ON" = "1" ]; then
     echo "[错误] --lio-frontend zlio 与 --reloc 不兼容：ZLIO 只接在纯 LIO 链路上" >&2
-    echo "       （--reloc 用 small_gicp + point_lio）。请加 --no-reloc / --lio。" >&2
+    echo "       （--reloc 用 small_gicp + point_lio）。请加 --no-reloc / --lio, 或 --lio-frontend point_lio。" >&2
     exit 2
   fi
   if [ "$SLAM_ON" = "1" ]; then
     echo "[错误] --lio-frontend zlio 与 --slam 不兼容：建图链路不经过 localization_launch。" >&2
+    echo "       请加 --lio-frontend point_lio。" >&2
     exit 2
   fi
 fi
+case "$LIO_FRONTEND" in
+  zlio)      LIO_LABEL="ZLIO" ;;
+  *)         LIO_LABEL="Point-LIO" ;;
+esac
 if [ -z "$ZLIO_CONFIG" ]; then
   ZLIO_CONFIG="$PKG_DIR/config/real/zlio_mid360.yaml"
   if [ ! -f "$ZLIO_CONFIG" ]; then
@@ -1294,6 +1322,16 @@ if [ "$USE_CHASSIS" = "1" ]; then
   SERIAL_DEV="${SERIAL_DEV:-/dev/ttyACM0}"
   if [ ! -e "$SERIAL_DEV" ]; then
     echo "[警告] 底盘串口设备不存在: $SERIAL_DEV (插好下位机 USB 后再启动底盘标签页)" >&2
+    # 物理接口在云台板 USART1（2026-11-08 现场确认设备号仍是 /dev/ttyACM0，不用改）。
+    # 万一以后换转接板导致编号变化，这里只列出当前可用的候选，真正的值要改 yaml 的 device_name。
+    # set -e + pipefail 下, 匹配不到文件时 ls 返回非 0 会直接退出脚本, 必须兜底。
+    CANDS="$(ls /dev/serial/by-id/* /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | tr '\n' ' ' || true)"
+    if [ -n "$CANDS" ]; then
+      echo "[警告] 当前检测到的串口: $CANDS" >&2
+      echo "[警告] 若底盘/云台板就是其中一个, 把 yaml 的 device_name 改过去 (推荐 by-id 路径)" >&2
+    else
+      echo "[警告] 当前没有任何 ttyACM*/ttyUSB*, 先查 USB 线/供电/驱动 (dmesg | tail)" >&2
+    fi
   elif [ ! -r "$SERIAL_DEV" ] || [ ! -w "$SERIAL_DEV" ]; then
     echo "[警告] 无读写权限: $SERIAL_DEV" >&2
     echo "[警告] 处理: sudo usermod -aG dialout \$USER 后重新登录, 或临时 sudo chmod 666 $SERIAL_DEV" >&2
@@ -1449,7 +1487,7 @@ if [ "$SLAM_ON" = "1" ]; then
 elif [ "$RELOC_ON" = "1" ]; then
   MODE_DESC="先验 PCD 重定位 (small_gicp 发布 map->odom)"
 elif [ "$LIO_ON" = "1" ]; then
-  MODE_DESC="Point-LIO 里程计 + 静态 map->odom"
+  MODE_DESC="$LIO_LABEL 里程计 + 静态 map->odom"
 else
   MODE_DESC="静态地图, 无里程计来源"
 fi
@@ -1536,8 +1574,11 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   echo "  云台关节    : revolute (与仿真一致), base_link->gimbal_yaw 来自 /joint_states"
   if [ -n "$GIMBAL_JOINT_TOPIC" ]; then
     echo "                $GIMBAL_JOINT_TOPIC → /joint_states (真实回传角)"
+    echo "                首次上车核对: 云台不动、手转底盘, RViz 里 base_link 要跟着转;"
+    echo "                反了改 srm27_nav_protocol.yaml 的 gimbal_joint_sign (+1.0/-1.0)"
   else
-    echo "                暂位 0 度 (无回传)。云台真转时 base_link yaw 会差一个云台角, 必须接 --gimbal-joint-topic!"
+    echo "                暂位 0 度 (已显式关闭回传)。底盘相对云台转时 base_link yaw 会错,"
+    echo "                正常跑导航请去掉 --no-gimbal-joint-topic"
   fi
   if [ "$GIMBAL_SPIN_CLI_GIVEN" = "1" ]; then
     if awk -v v="$GIMBAL_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
@@ -1747,7 +1788,8 @@ cat <<'EOF'
   ros2 topic echo /cmd_vel_nav_body --once                   # fake 转换后 (车体系, wz 应逐条相同)
   ros2 topic echo /cmd_vel_chassis --once                    # mux 输出 = 底盘实际收到的速度
   ros2 topic echo /chassis_speed --once                       # 底盘**实际**速度反馈 (0x0010)
-  ros2 topic echo /chassis_yaw_deg --once                     # 底盘实际 yaw (度, 0x0010)
+  ros2 topic echo /chassis_to_gimbal_yaw_deg --once           # 底盘相对云台 (度, 0x0010 第 4 字段)
+  ros2 topic echo /gimbal_joint_angle --once                  # 同上换成 gimbal_yaw_joint 弧度 (-π, π]
   ros2 topic hz /cmd_vel_chassis                             # 应为 200 Hz 左右 (mux 合成频率)
   ros2 run tf2_ros tf2_echo base_link base_link_fake         # fakeyaw TF: yaw 应等于 -底盘 yaw
   ros2 topic echo /srm_cmd_mux/diagnostics --once            # mux 诊断 (钳位/超时计数)

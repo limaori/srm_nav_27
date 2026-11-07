@@ -23,9 +23,12 @@
 #   vx  m/s   底盘系 +x 向前
 #   vy  m/s   底盘系 +y 向左
 #   wz  rad/s 俯视逆时针为正
-#   yaw 度    下位机速度观测器给出的底盘 yaw（**度**）
+#   chassis_to_gimbal_yaw  度   底盘车头相对云台的偏角：云台指向为 0，范围 (-180,180]，
+#                               俯视逆时针为正，由云台 yaw 编码器解算，与 IMU/上电零位无关。
+#                               （2026-11-08 改的口径；它不是"底盘在世界系里的 yaw"）
 #   注意: 填充的是底盘速度观测器的融合结果 speed->fused，不是轮速正解；
 #         也不要拿它当"指令已被执行"的证据（指令→观测有延迟与尺度差）。
+#         上行 vx/vy 仍是**底盘系**：云台板只把底盘算好的速度转发，不做旋转。
 #
 # 用法:
 #   ./script/test_chassis_speed_feedback.py --self-test
@@ -39,15 +42,17 @@
 #   #   终端 B（N 换成上面打印的）:
 #   ros2 run srm27_nav_protocol srm27_nav_protocol_node --ros-args \\
 #       -p device_name:=/dev/pts/N
-#   ros2 topic echo /chassis_speed      # TwistStamped
-#   ros2 topic echo /chassis_yaw_deg    # Float32
+#   ros2 topic echo /chassis_speed                 # TwistStamped
+#   ros2 topic echo /chassis_to_gimbal_yaw_deg     # Float32 (度, 下位机原值)
+#   ros2 topic echo /gimbal_joint_angle            # Float32 (rad, gimbal_yaw_joint)
 #
 # 参数:
 #   -d, --device <路径>   串口设备（--device 模式必填）
 #   -b, --baud <波特率>   默认 115200（必须与下位机一致；设错的表现是"一个字节都收不到"）
 #       --pty             --pty 模式：造伪串口并周期发送合成帧
 #       --rate <Hz>       --pty 模式的发送频率，默认 33.3（与真实轮转频率一致）
-#       --vx/--vy/--wz/--yaw   --pty 模式合成的四个字段（m/s, m/s, rad/s, 度）
+#       --vx/--vy/--wz/--yaw   --pty 模式合成的四个字段（m/s, m/s, rad/s, 度）；
+#                           --yaw 合成的是 chassis_to_gimbal_yaw（底盘相对云台）
 #       --seq-mode <inc|fixed>  流水号模式（inc=逐帧自增，默认；fixed=恒 0，用于排查）
 #       --seconds <秒>    --pty 模式运行时长，默认 0=一直跑
 #       --count <N>       收到 N 帧后退出（--device / --pty 均可用；0=不限）
@@ -59,6 +64,7 @@
 # =============================================================
 
 import argparse
+import math
 import os
 import struct
 import sys
@@ -146,9 +152,9 @@ def build_frame(cmd_id, payload, seq=0):
     return body + struct.pack("<H", crc16(body))
 
 
-#: 0x0010 的数据段：vx, vy, wz, yaw(度)，四个小端 float32。
-def build_chassis_speed(vx, vy, wz, yaw_deg):
-    return struct.pack("<ffff", vx, vy, wz, yaw_deg)
+#: 0x0010 的数据段：vx, vy, wz, chassis_to_gimbal_yaw(度)，四个小端 float32。
+def build_chassis_speed(vx, vy, wz, chassis_to_gimbal_yaw_deg):
+    return struct.pack("<ffff", vx, vy, wz, chassis_to_gimbal_yaw_deg)
 
 
 PKT_GAME_STATUS = 0x0001
@@ -269,8 +275,11 @@ class FrameParser:
         """只解析 0x0010；其它包返回 None（本车裁判系统包恒为 0，解析无意义）。"""
         if len(payload) != LEN_CHASSIS_SPEED:
             return None
-        vx, vy, wz, yaw = struct.unpack("<ffff", payload)
-        return {"vx": vx, "vy": vy, "wz": wz, "yaw_deg": yaw}
+        vx, vy, wz, chassis_to_gimbal_yaw = struct.unpack("<ffff", payload)
+        return {
+            "vx": vx, "vy": vy, "wz": wz,
+            "chassis_to_gimbal_yaw_deg": chassis_to_gimbal_yaw,
+        }
 
 
 def run_device(args):
@@ -341,9 +350,9 @@ def run_device(args):
                          parser.stats["bad_length"], parser.stats["dropped_bytes"]))
                 if last_speed is not None:
                     print("        最新 0x0010: vx=%+.3f m/s vy=%+.3f m/s wz=%+.3f rad/s "
-                          "yaw=%+.2f deg"
+                          "chassis_to_gimbal_yaw=%+.2f deg"
                           % (last_speed["vx"], last_speed["vy"], last_speed["wz"],
-                             last_speed["yaw_deg"]))
+                             last_speed["chassis_to_gimbal_yaw_deg"]))
                 else:
                     print("        还没收到 0x0010 —— 检查下位机是否在发、波特率、TX/RX 是否接反。")
                 if args.seconds and elapsed >= args.seconds:
@@ -363,8 +372,12 @@ def print_last(speed, parser, got):
     if speed is None:
         print("[结果] 没有收到任何 0x0010 帧。")
         return
-    print("[结果] 共解出 0x0010 帧 %d 个；最新: vx=%+.3f vy=%+.3f wz=%+.3f yaw=%+.2f deg"
-          % (got, speed["vx"], speed["vy"], speed["wz"], speed["yaw_deg"]))
+    deg = speed["chassis_to_gimbal_yaw_deg"]
+    # 顺手给出 URDF gimbal_yaw_joint 的关节角（云台相对底盘 = 取反），方便和话题对照。
+    joint_rad = math.atan2(math.sin(-math.radians(deg)), math.cos(-math.radians(deg)))
+    print("[结果] 共解出 0x0010 帧 %d 个；最新: vx=%+.3f vy=%+.3f wz=%+.3f "
+          "chassis_to_gimbal_yaw=%+.2f deg (gimbal_yaw_joint=%+.4f rad)"
+          % (got, speed["vx"], speed["vy"], speed["wz"], deg, joint_rad))
     print("[统计] 总帧 %d, CRC8失败 %d, CRC16失败 %d, 丢弃字节 %d"
           % (parser.stats["frames"], parser.stats["crc8_fail"], parser.stats["crc16_fail"],
              parser.stats["dropped_bytes"]))
@@ -381,7 +394,8 @@ def run_pty(args):
     print("  ros2 run srm27_nav_protocol srm27_nav_protocol_node --ros-args -p device_name:=%s"
           % slave_name)
     print("  ros2 topic echo /chassis_speed     # TwistStamped")
-    print("  ros2 topic echo /chassis_yaw_deg   # Float32 (度)")
+    print("  ros2 topic echo /chassis_to_gimbal_yaw_deg   # Float32 (度)")
+    print("  ros2 topic echo /gimbal_joint_angle          # Float32 (rad)")
     print("Ctrl-C 退出。")
 
     seq = 0
@@ -429,7 +443,8 @@ def main(argv=None):
     parser.add_argument("--vx", type=float, default=0.4, help="--pty 合成的 vx (m/s)")
     parser.add_argument("--vy", type=float, default=-0.1, help="--pty 合成的 vy (m/s)")
     parser.add_argument("--wz", type=float, default=0.8, help="--pty 合成的 wz (rad/s)")
-    parser.add_argument("--yaw", type=float, default=45.0, help="--pty 合成的 yaw (度)")
+    parser.add_argument("--yaw", type=float, default=45.0,
+                        help="--pty 合成的 chassis_to_gimbal_yaw（底盘相对云台, 度）")
     parser.add_argument("--seq-mode", choices=("inc", "fixed"), default="inc",
                         help="流水号模式（inc=逐帧自增）")
     parser.add_argument("--seconds", type=float, default=0.0, help="运行时长（0=一直跑）")

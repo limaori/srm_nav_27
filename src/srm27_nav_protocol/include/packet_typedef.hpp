@@ -216,11 +216,15 @@ struct ReceiveSefdefinedData
 //
 // 语义（下位机口径，别自己重新解释）:
 //   * 底盘系: +x 向前, +y 向左, +z 向上, +wz 俯视逆时针为正；
-//   * vx / vy 单位 m/s，wz 单位 rad/s，**yaw 单位是度**（不是弧度）；
+//   * vx / vy 单位 m/s，wz 单位 rad/s；
+//   * 第 4 个字段是 **chassis_to_gimbal_yaw**（单位**度**，不是弧度），定义见字段注释：
+//     它描述的是"底盘车头相对云台"的偏角，**不是**底盘在世界系/上电零位系里的 yaw，
+//     与 IMU、上电零位都无关，由云台 yaw 电机编码器解算。
 //   * 这是**观测值**，不是"指令已执行"的回显：指令 → 底盘 → 观测存在延迟与尺度差，
 //     拿它当"下位机收到了我的速度"的证据会误判。它的用途是反馈/对账/标定。
 //   * 该包与 0x0001 / 0x000B 按 10 ms 槽位轮转（各约 33.3 Hz），按 cmd_id 分派，
 //     不能按"第几个包"解析；槽位被跳过的轮次该包直接丢失（不是重发）。
+//   * 上行 **vx/vy 仍是底盘系**：云台板只把底盘板算好的速度原样转发，不做旋转。
 constexpr uint16_t DATA_LENGTH_CHASSIS_SPEED = 16;
 
 struct ReceiveChassisSpeedData
@@ -230,10 +234,16 @@ struct ReceiveChassisSpeedData
 
   struct
   {
-    float vx;       // m/s, 底盘系 +x 向前
-    float vy;       // m/s, 底盘系 +y 向左
-    float wz;       // rad/s, 俯视逆时针为正
-    float yaw_deg;  // 度（下位机速度观测器给出的底盘 yaw）
+    float vx;  // m/s, 底盘系 +x 向前
+    float vy;  // m/s, 底盘系 +y 向左
+    float wz;  // rad/s, 俯视逆时针为正
+    // 底盘相对云台的偏角，单位**度**，范围 (-180, 180]，俯视逆时针为正。
+    // 定义：以**云台指向**为 0，底盘车头相对云台偏转了多少。
+    //   · 云台不动、底盘被推着逆时针转 45° → 从云台看车头在左边 → +45；
+    //   · 与 IMU、上电零位、世界系都无关，只来自云台 yaw 电机编码器；
+    //   · URDF 的 gimbal_yaw_joint 是反过来的"云台相对底盘"且用弧度，
+    //     所以 joint_rad = -chassis_to_gimbal_yaw_deg * π / 180（换算在 cpp 里做）。
+    float chassis_to_gimbal_yaw_deg;
   } __attribute__((packed)) data;
 
   uint16_t crc;

@@ -64,7 +64,9 @@
 #       --lidar-rpy "R P Y"     临时覆盖雷达安装角, 弧度 (默认空 = 用 URDF 模型里的值)
 #       --no-lidar              不起雷达驱动 (回放 rosbag 时用, 配合 --use-sim-time)
 #       --use-sim-time          使用 /clock (回放 bag 时用, 默认 False)
-#       --save-pcd              让 Point-LIO 退出时落盘累积点云 (见下文说明)
+#       --lio-frontend <point_lio|zlio>  里程计前端（**默认 zlio**）；
+#                               zlio = frontend/zlio_node + zlio_bridge（与导航链一致）
+#       --save-pcd              让 Point-LIO 退出时落盘累积点云（仅 point_lio 前端）
 #       --rviz / --no-rviz      是否启动 RViz (默认启动)
 #       --chassis / --no-chassis    是否启动底盘串口 (默认启动)
 #       --joy / --no-joy        是否启动手柄遥控 (默认关闭)
@@ -146,6 +148,9 @@ JOY_DEV="${JOY_DEV:-0}"
 START_LIDAR="${START_LIDAR:-1}"
 USE_SIM_TIME="${USE_SIM_TIME:-0}"
 SAVE_PCD="${SAVE_PCD:-0}"
+# 里程计/配准点云前端：zlio（默认，与 start_real_nav.sh 一致）或 point_lio（回退）。
+LIO_FRONTEND="${LIO_FRONTEND:-zlio}"
+ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 
 PARAMS_FILE="${PARAMS_FILE:-}"
 LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
@@ -635,6 +640,8 @@ while [ $# -gt 0 ]; do
     --no-lidar)      START_LIDAR=0; shift ;;
     --use-sim-time)  USE_SIM_TIME=1; shift ;;
     --save-pcd)      SAVE_PCD=1; shift ;;
+    --lio-frontend)  LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"; shift 2 ;;
+    --zlio-config)   ZLIO_CONFIG="${2:?--zlio-config 需要路径}"; shift 2 ;;
     --rviz)          USE_RVIZ=1; shift ;;
     --no-rviz)       USE_RVIZ=0; shift ;;
     --chassis)       USE_CHASSIS=1; shift ;;
@@ -714,6 +721,19 @@ if [ ! -f "$PARAMS_FILE" ]; then
   echo "[错误] 建图参数文件不存在: $PARAMS_FILE" >&2
   exit 1
 fi
+case "$LIO_FRONTEND" in
+  point_lio|zlio) ;;
+  *) echo "[错误] --lio-frontend 只支持 point_lio / zlio, 收到: $LIO_FRONTEND" >&2; exit 2 ;;
+esac
+if [ -z "$ZLIO_CONFIG" ]; then
+  ZLIO_CONFIG="$PKG_DIR/config/real/zlio_mid360.yaml"
+  [ -f "$ZLIO_CONFIG" ] || ZLIO_CONFIG="$PKG_SRC/config/real/zlio_mid360.yaml"
+fi
+if [ "$LIO_FRONTEND" = "zlio" ] && is_true "$SAVE_PCD"; then
+  echo "[警告] --save-pcd 只对 point_lio 前端有效；ZLIO 不落盘 PCD，本次忽略该选项。" >&2
+  SAVE_PCD=0
+fi
+
 if [ ! -f "$LIDAR_CONFIG_FILE" ]; then
   echo "[错误] 雷达驱动配置不存在: $LIDAR_CONFIG_FILE" >&2
   echo "[提示] 用 --lidar-config <路径> 指定。" >&2
@@ -802,6 +822,8 @@ fi
 if [ -n "$LIDAR_RPY" ]; then
   MAPPING_CMD="$MAPPING_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
 fi
+MAPPING_CMD="$MAPPING_CMD lio_frontend:=$LIO_FRONTEND"
+MAPPING_CMD="$MAPPING_CMD zlio_config:=$(q "$ZLIO_CONFIG")"
 MAPPING_CMD="$MAPPING_CMD start_lidar:=$(bool_arg "$START_LIDAR")"
 MAPPING_CMD="$MAPPING_CMD use_sim_time:=$CLOCK_ARG"
 MAPPING_CMD="$MAPPING_CMD use_rviz:=$(bool_arg "$USE_RVIZ")"
@@ -877,6 +899,11 @@ if is_true "$RECORD_BAG"; then
   echo "                $(if is_true "$BAG_DERIVED"; then echo "原始 + 派生话题, 约 480 MB/分钟"; else echo "原始话题, 约 240 MB/分钟"; fi)"
 else
   echo "  建图录包    : 关 (想要事后能重建 PCD 就加 --record-bag)"
+fi
+if [ "$LIO_FRONTEND" = "zlio" ]; then
+  echo "  里程计前端  : ZLIO (zlio_node + zlio_bridge; 与导航链一致)"
+else
+  echo "  里程计前端  : Point-LIO (+ loam_interface)"
 fi
 echo "  TF 发布者   : map->odom = slam_toolbox, odom->base_link = sensor_scan_generation"
 echo "======================================================"

@@ -78,6 +78,12 @@
 
 ### 3.3 下位机反馈（0x0010 底盘速度包，2026-11-06）
 
+> **后续变更（2026-11-08）**：`0x0010` 第 4 个字段改为 `chassis_to_gimbal_yaw`
+> （底盘相对云台，度），话题 `chassis_yaw_deg` 改名为 `chassis_to_gimbal_yaw_deg`，
+> 并新增 `/gimbal_joint_angle`（云台相对底盘，弧度）接进 `gimbal_yaw_joint`。
+> 本节表格是当时的记录，以 [导航通信协议 §4.2/§4.4](./导航通信协议-下位机接口说明.md)
+> 与 [哨兵导航TF与下位机数据接口 §5.4](./哨兵导航TF与下位机数据接口(ai).md) 为准。
+
 | 文件 | 改动 |
 | --- | --- |
 | `srm27_nav_protocol/include/packet_typedef.hpp` | `ID_CHASSIS_SPEED = 0x0010`、`ReceiveChassisSpeedData`（25 B，`static_assert` 钉死帧长与数据段偏移） |
@@ -188,18 +194,28 @@ profile 判定**看内容不看文件名**（`FollowPath.fake_base_frame` 或
 
 **反馈通道（2026-11-06 新增）**：下位机 `0x0010` 速度包现在被解析成
 `/chassis_speed`（`TwistStamped`：`linear.x=vx`、`linear.y=vy`、`angular.z=wz`）与
-`/chassis_yaw_deg`（`Float32`，度）。标定时**不需要再靠人眼看车**：
+`/chassis_to_gimbal_yaw_deg`（`Float32`，度；2026-11-08 前叫 `/chassis_yaw_deg`，
+且当时是"底盘 yaw"口径，**新口径是底盘相对云台，不能再拿 wz×t 去对**）。
+标定时**不需要再靠人眼看车**：
 
 ```bash
 ros2 topic echo /cmd_vel_chassis   # 指令 wz（mux 钳位后）
 ros2 topic echo /chassis_speed     # 实际 vx/vy/wz（底盘速度观测器的融合结果）
-ros2 topic echo /chassis_yaw_deg   # 实际 yaw（度）: 恒速自转 30 s 应变化 ≈ wz×30×57.3
+ros2 topic echo /chassis_to_gimbal_yaw_deg   # 底盘相对云台（度）；云台不动时底盘转过多少它变多少
+ros2 topic echo /gimbal_joint_angle          # 换算后的 gimbal_yaw_joint（rad，取反并 wrap）
 ```
 
 口径提醒：`0x0010` 填的是**融合结果** `speed->fused`（底盘系），不是轮速正解，
 也不是"指令已执行"的回显；指令→观测有延迟与尺度差，对账时要一起算。
 
-### 5.2 云台关节角没有回传（真正的缺口）
+### 5.2 云台关节角（2026-11-08 已补齐回传）
+
+> **更新**：本节下面记的是 2026-11-06 的"缺口"状态。2026-11-08 起下位机 `0x0010`
+> 的第 4 个 float32 就是 `chassis_to_gimbal_yaw`（底盘相对云台，度），上位机换算成
+> `/gimbal_joint_angle`（云台相对底盘，弧度）接进 `gimbal_yaw_joint`，
+> `start_real_nav.sh` 默认就带 `--gimbal-joint-topic gimbal_joint_angle`。
+> 当前口径、符号与风险以 [导航通信协议 §4.4](./导航通信协议-下位机接口说明.md) 和
+> [哨兵导航TF与下位机数据接口 §5.4](./哨兵导航TF与下位机数据接口%28ai%29.md) 为准。
 
 实车云台由下位机驱动自转，雷达装在云台上，于是
 
@@ -208,8 +224,8 @@ base_link yaw = 云台世界 yaw − 云台关节角
 ```
 
 `robot_state_publisher` 用 `gimbal_joint_type:=revolute` 时，`base_link -> gimbal_yaw`
-这条 TF 角**只来自 `/joint_states`**。而当前协议上→下只有 12 字节 `vx/vy/wz`、
-下→上只有比赛状态类数据，**没有关节角字段**，所以实车没有任何节点发布 `/joint_states`：
+这条 TF 角**只来自 `/joint_states`**。当时协议上→下只有 12 字节 `vx/vy/wz`、
+下→上只有比赛状态类数据，**没有关节角字段**，所以当时的实车没有任何节点发布 `/joint_states`：
 
 * 云台不转 → 关节角恒 0，`revolute` 与 `fixed` 等价，导航正常；
 * 云台在转 → `sensor_scan_generation` 会把云台转动当成底盘转动，`base_link` yaw 持续漂，
@@ -238,8 +254,11 @@ base_link yaw = 云台世界 yaw − 云台关节角
 3. 云台固定、只让底盘自转：`base_link` yaw 应真实变化；
 4. 两者同时转：`script/check_yaw_sources.py` 的"两源转角差"仍在容差内。
 
-**在协议补齐之前：请保持云台固定**（默认就是固定）。此时上 `--gimbal-joint-topic` 没有数据源，
-中继会按"输入超时"停止发布并告警 —— 这是刻意的（不发 0 冒充回零）。
+**协议侧已经补齐**（2026-11-08）：`0x0010` 第 4 个 float32 是 `chassis_to_gimbal_yaw`
+（底盘相对云台、度、(-180,180]），上位机取反换成弧度后发 `/gimbal_joint_angle`，
+`gimbal_joint_sign` 可现场翻转符号。**仍然要防超时**：数据断了 relay 会在
+`timeout_sec`（默认 0.3 s）后停止发布 `/joint_states`，TF 停在最后一帧——这是刻意的
+（不发 0 冒充回零），但是导航不会因此自己停，第一次上车要盯这条告警。
 
 ---
 
@@ -376,10 +395,10 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 | 起整条入口（`autostart=false`、无硬件） | 启动日志打印迁移链；`srm_cmd_mux` 拿到 `wz_max=1.5 / v_max=4.5 / nav_topic=cmd_vel_nav_body / output_topic=cmd_vel_chassis`；`fake_vel_transform` 进入 `nav_se2`、`odom_timeout=0.6`、外推关闭 |
 | 向 `/cmd_vel_nav_body` 发 `wz=3.0` | mux 日志：`导航 wz 被限幅到 1.500 rad/s`；停发 0.3 s 后：`超过 0.300 s 未收到导航速度，平移与 wz 均已清零` |
 | 云台中继 | 发 `/gimbal_joint_angle=0.7`（Float32）→ `/joint_states` 输出 `name=[gimbal_yaw_joint], position=[0.7]` |
-| 0x0010 反馈（pty 端到端） | 喂 `vx=0.4 / vy=-0.1 / wz=0.75 / yaw=45°` → `/chassis_speed` 解出同值且 `frame_id=base_link`，`/chassis_yaw_deg=45.0`；`data_length=12` 的伪帧被丢弃并告警 |
-| 0x0010 异常路径 | `NaN` 帧不发布（只计数）；停发 0.5 s 出现"中断超过"告警，恢复后再发出现"恢复"日志 |
+| 0x0010 反馈（pty 端到端） | 喂 `vx=0.4 / vy=-0.1 / wz=0.75 / chassis_to_gimbal_yaw=45°` → `/chassis_speed` 解出同值且 `frame_id=base_link`，`/chassis_to_gimbal_yaw_deg=45.0`，`/gimbal_joint_angle=-0.7854`（2026-11-08 复核）；`data_length=12` 的伪帧被丢弃并告警 |
+| 0x0010 异常路径 | `NaN` 帧三条话题都不发（只计数）；停发 0.5 s 出现"中断超过"告警，恢复后再发出现"恢复"日志 |
 | 协议回归 | `test_feedback_protocol` 8/8 通过（含"改 `cmd_id` 必须让 CRC16 失败"的反证、轮转中丢槽后仍逐帧正确） |
-| `test_fakeyaw_real_wiring` | 7/7 通过（默认链路、话题对接、参考系统一、ZLIO 接线、yaw_mode 注入、mux 出口校验、旧链拒绝、中继可选） |
+| `test_fakeyaw_real_wiring` | 7/7 通过（默认链路、话题对接、参考系统一、ZLIO 接线、yaw_mode 注入、mux 出口校验、旧链拒绝、中继常驻与输入类型切换） |
 | `test_speed_limits` | 15/15 通过（含 `@fakeyaw` 叠加、profile 按内容判定、mux 只在迁移链算一层） |
 | `test_fakeyaw_launch_wiring` / `test_lio_frontend_wiring` / `test_zlio_bridge_math` | 全部通过 |
 | `colcon test`（bringup + chassis_control） | 0 failures |
