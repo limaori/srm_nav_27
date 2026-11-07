@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  带平滑的单目标导航行为树（tdt_nav_kit 专用）。
+
+  与 srm27_nav_bringup 自带的 navigate_to_pose_w_replanning_and_recovery.xml
+  的唯一差别：在 ComputePathToPose 与 FollowPath 之间插入了 SmoothPath。
+
+  为什么必须有这个节点
+  --------------------
+  TDT 的 YAstar 输出的是**稀疏**路径（本图实测 11 点 / 段长 5.7 m），而
+  srm27_omni_pid_controller 的 transformGlobalPlan() 会按局部代价地图范围裁剪
+  路径，并把「距机器人超过 max_costmap_extent 的点」全部丢掉。稀疏路径裁剪后
+  往往只剩 1 个点（距机器人 0.03 m），getLookAheadPoint() 找不到前视点，
+  最终 cos/sin(theta) 全为噪声、速度趋零，表现为"车不动 + Failed to make progress"。
+
+  加上 SmoothPath 后，控制器拿到的是 0.78 m 间距的 101 点轨迹，前视点正常。
+
+  端口名按 Humble 的 nav2_tree_nodes.xml：
+    input : smoother_id / unsmoothed_path / max_smoothing_duration / check_for_collisions
+    output: smoothed_path / smoothing_duration / was_completed
+-->
+<root BTCPP_format="3"
+      main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode name="NavigateRecovery"
+                  number_of_retries="10">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="3.0">
+          <Sequence name="PlanAndSmooth">
+            <RecoveryNode name="ComputePathToPose"
+                          number_of_retries="1">
+              <ComputePathToPose goal="{goal}"
+                                 path="{path}"
+                                 planner_id="GridBased"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                                  service_name="global_costmap/clear_entirely_global_costmap"/>
+            </RecoveryNode>
+            <SmoothPath smoother_id="tdt_smoother"
+                        unsmoothed_path="{path}"
+                        smoothed_path="{smoothed_path}"
+                        max_smoothing_duration="1.0"
+                        check_for_collisions="true"/>
+          </Sequence>
+        </RateController>
+        <RecoveryNode name="FollowPath"
+                      number_of_retries="10">
+          <FollowPath path="{smoothed_path}"
+                      controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                              service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree"
+                                service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
+                                service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <BackUp backup_dist="1.0"
+                  backup_speed="0.2"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
