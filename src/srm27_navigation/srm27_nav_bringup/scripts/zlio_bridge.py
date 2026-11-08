@@ -104,6 +104,8 @@ best-effort 也能收到 reliable 发布者的数据，所以 reliable 是两边
 """
 
 import math
+import os
+import struct
 import sys
 
 import numpy as np
@@ -296,6 +298,15 @@ class ZlioBridge(Node):
         # 没有卡方/新息门限、没有离群点剔除，唯一的门是"一个面都没匹配到"
         # （filter.cpp:112 `if (observation.count == 0) return {}`）。
         # 所以"发散"在它的输出里和"正常"长得一模一样 —— 只能在 bridge 这一层把它显式暴露出来。
+        # ---- 累积点云落盘（等价于 Point-LIO 的 pcd_save，见模块 docstring 的"PCD 落盘"）----
+        # ZLIO 自己不落盘；这里把它已经转到 odom 系的 registered_scan 累积起来，
+        # 退出时按体素降采样写成 PCD（默认写到 point_lio/PCD/scans.pcd，与旧链路同路径、
+        # 同坐标系口径：都在建图起点系，转 map 系仍然用 script/pcd_to_mapframe.py）。
+        self.declare_parameter("pcd_save_en", False)
+        self.declare_parameter("pcd_save_path", "scans.pcd")
+        self.declare_parameter("pcd_voxel_leaf", 0.10)      # 米；0 = 不降采样
+        self.declare_parameter("pcd_merge_frames", 200)     # 每 N 帧合并一次体素，限制内存
+        self.declare_parameter("pcd_save_min_points", 1000)  # 少于这个数不落盘（八成是没数据）
         self.declare_parameter("matches_topic", "zlio_bridge/matches")
         self.declare_parameter("min_matches_warn", 30)
         self.declare_parameter("max_frame_jump_pos", 1.0)      # m/帧：20 Hz 下 = 20 m/s
@@ -326,6 +337,19 @@ class ZlioBridge(Node):
             self.get_parameter("reject_implausible_jump").value
         )
         events_topic = str(self.get_parameter("events_topic").value)
+
+        # ---- PCD 累积状态 ----
+        self.pcd_save_en = bool(self.get_parameter("pcd_save_en").value)
+        self.pcd_save_path = str(self.get_parameter("pcd_save_path").value)
+        self.pcd_voxel_leaf = float(self.get_parameter("pcd_voxel_leaf").value)
+        self.pcd_merge_frames = max(1, int(self.get_parameter("pcd_merge_frames").value))
+        self.pcd_save_min_points = int(self.get_parameter("pcd_save_min_points").value)
+        self._pcd_chunks = []
+        self._pcd_points = None
+        self._pcd_frames = 0
+        if self.pcd_save_en and np is None:
+            self.pcd_save_en = False
+            print("[zlio_bridge] 没有 numpy, pcd_save 关闭", file=sys.stderr)
 
         for name, value in (
             ("odom_frame", self.odom_frame),
@@ -676,6 +700,9 @@ class ZlioBridge(Node):
         # "Failed to find match for field 'intensity'" 把终端刷满（见该函数注释）。
         cloud = _with_intensity(cloud)
 
+        if self.pcd_save_en:
+            self._accumulate(cloud)
+
         self.odom_pub.publish(odometry)
         self.cloud_pub.publish(cloud)
         self.frames += 1
@@ -686,6 +713,88 @@ class ZlioBridge(Node):
                 + (f" (拦下 {self.rejected_jumps})" if self.rejected_jumps else "")
                 + f", odom←lidar t=({pose.t[0]:.3f}, {pose.t[1]:.3f}, {pose.t[2]:.3f})"
             )
+
+
+    # ------------------------------------------------------------------
+    # PCD 落盘（等价 Point-LIO 的 pcd_save）
+    # ------------------------------------------------------------------
+    def _accumulate(self, cloud):
+        xyz = _cloud_xyz(cloud)
+        if xyz is None or len(xyz) == 0:
+            return
+        self._pcd_chunks.append(xyz)
+        self._pcd_frames += 1
+        if len(self._pcd_chunks) >= self.pcd_merge_frames:
+            self._merge_chunks()
+
+    def _merge_chunks(self):
+        """把新到的帧并进累积体素，控制内存。"""
+        if not self._pcd_chunks:
+            return
+        arr = np.concatenate(self._pcd_chunks) if len(self._pcd_chunks) > 1 else self._pcd_chunks[0]
+        self._pcd_chunks = []
+        if self._pcd_points is not None and len(self._pcd_points):
+            arr = np.concatenate([self._pcd_points, arr])
+        if self.pcd_voxel_leaf > 0.0 and len(arr):
+            keys = np.round(arr / self.pcd_voxel_leaf).astype(np.int64)
+            _, idx = np.unique(keys, axis=0, return_index=True)
+            arr = arr[np.sort(idx)]
+        self._pcd_points = arr
+
+    def save_pcd_if_enabled(self):
+        if not self.pcd_save_en:
+            return
+        try:
+            self._merge_chunks()
+            pts = self._pcd_points
+            if pts is None or len(pts) < self.pcd_save_min_points:
+                self.get_logger().warn(
+                    "累积点云只有 %d 点（阈值 %d），不落盘"
+                    % (0 if pts is None else len(pts), self.pcd_save_min_points)
+                )
+                return
+            path = os.path.abspath(os.path.expanduser(self.pcd_save_path))
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "wb") as stream:
+                header = (
+                    "# .PCD v0.7 - Point Cloud Data file format\n"
+                    "VERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\n"
+                    "WIDTH %d\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS %d\nDATA binary\n"
+                    % (len(pts), len(pts))
+                )
+                stream.write(header.encode("ascii"))
+                stream.write(pts.astype(np.float32).tobytes())
+            self.get_logger().info(
+                "累积点云已落盘: %s (%d 点, %d 帧, 体素 %.2f m)"
+                % (path, len(pts), self._pcd_frames, self.pcd_voxel_leaf)
+            )
+        except Exception as ex:  # noqa: BLE001 - 落盘失败不能掩盖真正的退出原因
+            self.get_logger().error("累积点云落盘失败: %s" % ex)
+
+
+def _cloud_xyz(cloud):
+    """从 PointCloud2 里取出 (N,3) float32 的 xyz；字段缺失返回 None。"""
+    if np is None:
+        return None
+    offsets = {f.name: f.offset for f in cloud.fields}
+    if not {"x", "y", "z"} <= set(offsets):
+        return None
+    step = cloud.point_step
+    count = cloud.width * cloud.height
+    if step <= 0 or count <= 0:
+        return None
+    raw = np.frombuffer(cloud.data, dtype=np.uint8)
+    if raw.size < count * step:
+        count = raw.size // step
+        if count <= 0:
+            return None
+    arr = raw[: count * step].reshape(count, step)
+    out = np.empty((count, 3), dtype=np.float32)
+    for i, key in enumerate(("x", "y", "z")):
+        off = offsets[key]
+        out[:, i] = arr[:, off:off + 4].copy().view(np.float32).ravel()
+    finite = np.isfinite(out).all(axis=1)
+    return out[finite]
 
 
 def main(args=None):
@@ -701,6 +810,9 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        # Ctrl-C / SIGINT 走后正常落盘（与 Point-LIO 的 pcd_save 同一语义：
+        # kill -9 不会执行到这里，这一趟的累积点云就丢了）。
+        node.save_pcd_if_enabled()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

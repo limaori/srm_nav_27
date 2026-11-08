@@ -66,7 +66,8 @@
 #       --use-sim-time          使用 /clock (回放 bag 时用, 默认 False)
 #       --lio-frontend <point_lio|zlio>  里程计前端（**默认 zlio**）；
 #                               zlio = frontend/zlio_node + zlio_bridge（与导航链一致）
-#       --save-pcd              让 Point-LIO 退出时落盘累积点云（仅 point_lio 前端）
+#       --save-pcd              退出时落盘累积点云（point_lio 自己写，zlio 由 zlio_bridge 写）
+#       --save-pcd-path <路径>  自定义落盘路径，默认 src/srm27_navigation/point_lio/PCD/scans.pcd
 #       --rviz / --no-rviz      是否启动 RViz (默认启动)
 #       --chassis / --no-chassis    是否启动底盘串口 (默认启动)
 #       --joy / --no-joy        是否启动手柄遥控 (默认关闭)
@@ -96,9 +97,13 @@
 #   - 雷达驱动外参必须为零, 否则点云被驱动和 URDF 各转一次, 建图必然重影;
 #     launch 会直接拒绝, 本脚本提前报错。
 #   - 所有路径一律传绝对路径; 每个标签页都会先 source 工作空间的 install/setup.bash。
-#   - 存图的 PCD (--save-pcd) 落在 src/srm27_navigation/point_lio/PCD/scans.pcd,
-#     它是 Point-LIO 自己坐标系下的原始点云, **不是**地图坐标系下的先验点云,
-#     直接拿给 --reloc 用会错位; 需要先按 docs 里的流程转到地图坐标系。
+#   - 累积点云 (--save-pcd) 落在 src/srm27_navigation/point_lio/PCD/scans.pcd
+#     （--save-pcd-path 可改）。两个前端都支持：
+#       · point_lio: 由 point_lio 自己在正常退出时写（PCD/scans.pcd 是它的编译期路径）；
+#       · zlio     : 由 zlio_bridge 累积 registered_scan 写（体素 0.10 m 降采样）。
+#     两者都在**建图起点系**（Point-LIO camera_init / ZLIO 的 odom），
+#     **不是**地图坐标系下的先验点云，直接拿给 --reloc 用会错位；
+#     需要先 python3 script/pcd_to_mapframe.py ... 转到地图坐标系。
 #   - --record-bag 另起一个标签页跑 script/record_mapping_bag.sh, 录
 #     /livox/lidar(CustomMsg, 含逐点 offset_time) + /livox/imu + /tf + /tf_static,
 #     约 240 MB/分钟 (Mid-360 满速)。这是唯一能事后重建三维 PCD 的原始数据:
@@ -148,6 +153,8 @@ JOY_DEV="${JOY_DEV:-0}"
 START_LIDAR="${START_LIDAR:-1}"
 USE_SIM_TIME="${USE_SIM_TIME:-0}"
 SAVE_PCD="${SAVE_PCD:-0}"
+# 累积点云落盘路径（空 = 用 launch 的默认: point_lio/PCD/scans.pcd）
+PCD_SAVE_PATH_CLI="${PCD_SAVE_PATH_CLI:-}"
 # 里程计/配准点云前端：zlio（默认，与 start_real_nav.sh 一致）或 point_lio（回退）。
 LIO_FRONTEND="${LIO_FRONTEND:-zlio}"
 ZLIO_CONFIG="${ZLIO_CONFIG:-}"
@@ -409,7 +416,7 @@ stop_mapping() {
   fi
   echo "[停止] 完成。请确认终端里的标签页也已退出 (必要时手动 Ctrl-C)。"
   if is_true "$SAVE_PCD" && [ -f "$PCD_SAVE_PATH" ]; then
-    echo "[停止] Point-LIO 累积点云: $PCD_SAVE_PATH"
+    echo "[停止] 累积点云: $PCD_SAVE_PATH"
   fi
   # 录完必看的自检: 没有 metadata.yaml 的 bag 目录等于废数据, 别等回放时才发现。
   local bag_dir
@@ -640,6 +647,7 @@ while [ $# -gt 0 ]; do
     --no-lidar)      START_LIDAR=0; shift ;;
     --use-sim-time)  USE_SIM_TIME=1; shift ;;
     --save-pcd)      SAVE_PCD=1; shift ;;
+    --save-pcd-path) PCD_SAVE_PATH_CLI="${2:?--save-pcd-path 需要路径}"; shift 2 ;;
     --lio-frontend)  LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"; shift 2 ;;
     --zlio-config)   ZLIO_CONFIG="${2:?--zlio-config 需要路径}"; shift 2 ;;
     --rviz)          USE_RVIZ=1; shift ;;
@@ -729,11 +737,6 @@ if [ -z "$ZLIO_CONFIG" ]; then
   ZLIO_CONFIG="$PKG_DIR/config/real/zlio_mid360.yaml"
   [ -f "$ZLIO_CONFIG" ] || ZLIO_CONFIG="$PKG_SRC/config/real/zlio_mid360.yaml"
 fi
-if [ "$LIO_FRONTEND" = "zlio" ] && is_true "$SAVE_PCD"; then
-  echo "[警告] --save-pcd 只对 point_lio 前端有效；ZLIO 不落盘 PCD，本次忽略该选项。" >&2
-  SAVE_PCD=0
-fi
-
 if [ ! -f "$LIDAR_CONFIG_FILE" ]; then
   echo "[错误] 雷达驱动配置不存在: $LIDAR_CONFIG_FILE" >&2
   echo "[提示] 用 --lidar-config <路径> 指定。" >&2
@@ -823,6 +826,9 @@ if [ -n "$LIDAR_RPY" ]; then
   MAPPING_CMD="$MAPPING_CMD lidar_rpy:=$(q "$LIDAR_RPY")"
 fi
 MAPPING_CMD="$MAPPING_CMD lio_frontend:=$LIO_FRONTEND"
+if [ -n "$PCD_SAVE_PATH_CLI" ]; then
+  MAPPING_CMD="$MAPPING_CMD pcd_save_path:=$(q "$PCD_SAVE_PATH_CLI")"
+fi
 MAPPING_CMD="$MAPPING_CMD zlio_config:=$(q "$ZLIO_CONFIG")"
 MAPPING_CMD="$MAPPING_CMD start_lidar:=$(bool_arg "$START_LIDAR")"
 MAPPING_CMD="$MAPPING_CMD use_sim_time:=$CLOCK_ARG"
@@ -893,7 +899,7 @@ echo "  雷达安装    : $LIDAR_MOUNT_DESC"
 echo "  use_sim_time: $CLOCK_ARG    RViz: $(bool_arg "$USE_RVIZ")"
 echo "  底盘串口    : $([ "$USE_CHASSIS" = "1" ] && echo "启动 (cmd_vel_chassis -> 串口)" || echo "不启动")"
 echo "  手柄遥控    : $([ "$USE_JOY" = "1" ] && echo "启动 (设备 $JOY_DEV, 输出 cmd_vel_chassis)" || echo "不启动")"
-echo "  累积点云    : $([ "$SAVE_PCD" = "1" ] && echo "开 (退出时写 $PCD_SAVE_PATH)" || echo "关")"
+echo "  累积点云    : $([ "$SAVE_PCD" = "1" ] && echo "开 (退出时写 $PCD_SAVE_PATH; zlio 由 zlio_bridge 落盘)" || echo "关")"
 if is_true "$RECORD_BAG"; then
   echo "  建图录包    : 开 -> $BAG_DIR_DESC"
   echo "                $(if is_true "$BAG_DERIVED"; then echo "原始 + 派生话题, 约 480 MB/分钟"; else echo "原始话题, 约 240 MB/分钟"; fi)"

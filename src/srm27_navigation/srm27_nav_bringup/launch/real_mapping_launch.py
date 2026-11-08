@@ -83,6 +83,13 @@ def launch_setup(context):
     use_sim_time = ParameterValue(
         LaunchConfiguration("use_sim_time"), value_type=bool
     )
+    # 累积点云默认落到与 Point-LIO 同一个文件：下游 pcd_to_mapframe.py /
+    # build_pcd_from_bag.sh 都按这个路径找，换前端不该换路径。
+    default_pcd_path = str(
+        Path(get_package_share_directory("srm27_nav_bringup")).parents[4]
+        / "src/srm27_navigation/point_lio/PCD/scans.pcd"
+    )
+    pcd_save_path = LaunchConfiguration("pcd_save_path").perform(context) or default_pcd_path
     lio_frontend = LaunchConfiguration("lio_frontend").perform(context)
     zlio_config = LaunchConfiguration("zlio_config").perform(context)
     # 建图只换"谁产生里程计与配准点云"这一层：point_lio + loam_interface
@@ -200,6 +207,14 @@ def launch_setup(context):
                 clock_params,
                 # bridge 的默认 lidar_frame 是仿真的 front_mid360，实车必须覆盖。
                 {"odom_frame": "odom", "base_frame": "base_link", "lidar_frame": "livox_imu"},
+                # 累积点云落盘（等价 Point-LIO 的 pcd_save）：退出时按体素降采样写 PCD。
+                {
+                    "pcd_save_en": ParameterValue(
+                        LaunchConfiguration("save_pcd"), value_type=bool
+                    ),
+                    "pcd_save_path": pcd_save_path,
+                    "pcd_voxel_leaf": 0.10,
+                },
             ],
         ),
         Node(
@@ -304,9 +319,15 @@ def generate_launch_description():
         ("use_sim_time", "False", "Use the bag clock when replaying with --clock"),
         ("use_rviz", "True", "Start the mapping RViz view"),
         (
+            "pcd_save_path",
+            "",
+            "累积点云落盘路径（默认 <ws>/src/srm27_navigation/point_lio/PCD/scans.pcd，"
+            "与 Point-LIO 同路径；只在 save_pcd 为真时生效）",
+        ),
+        (
             "save_pcd",
             "False",
-            "Accumulate a Point-LIO PCD and save it on clean shutdown",
+            "在正常退出时落盘累积点云: point_lio 由它自己写, zlio 由 zlio_bridge 写",
         ),
     ]
     return LaunchDescription(
