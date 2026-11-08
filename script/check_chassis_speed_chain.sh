@@ -33,6 +33,14 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# ---------- 环境消毒 ----------
+# 海康 MVS 客户端会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH（老 libusb 缺符号，
+# 会让链接 PCL 的节点以 exit 127 静默退出）。本脚本起测试节点、调 ros2 CLI，
+# 环境保持一致更安全。只影响本脚本及其子进程。
+# 关掉: SRM_KEEP_MVS_LIB_PATH=1
+. "$SCRIPT_DIR/lib/srm_lib_path_guard.sh"
+
 TEST_DOMAIN=88
 KEEP_LOG=0
 

@@ -118,6 +118,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="${SRM27_WS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# ---------- 环境消毒 ----------
+# 海康 MVS 客户端会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH，那里那份老 libusb-1.0
+# 缺 libusb_set_option()，任何链接 PCL 的程序（建图用的 point_lio 最典型）一加载就以
+# exit 127 静默退出 —— 现场表现是"建图节点没起来、没有点云也没有里程计"。
+# 只改本脚本及其子进程（含它开的标签页），不碰用户当前终端。
+# 关掉: SRM_KEEP_MVS_LIB_PATH=1；额外剔除: SRM_LIB_PATH_STRIP_EXTRA=/p1,/p2
+. "$SCRIPT_DIR/lib/srm_lib_path_guard.sh"
+
 PKG_SRC="$WS_DIR/src/srm27_navigation/srm27_nav_bringup"
 PKG_INSTALL="$WS_DIR/install/srm27_nav_bringup/share/srm27_nav_bringup"
 # 优先用安装后的 share 目录 (launch 运行时 get_package_share_directory 返回的就是它),

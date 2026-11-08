@@ -1,0 +1,187 @@
+
+xwininfo: Window id: 0x770 (the root window) (has no name)
+
+  Root window id: 0x770 (the root window) (has no name)
+  Parent window id: 0x0 (none)
+     95 children:
+     0x220040f (has no name): ("ToDesk" "ToDesk")  24x32+1896+833  +1896+833
+        1 child:
+        0x2200410 (has no name): ()  1x1+-1+-1  +1895+832
+     0x40000a "gnome-shell": ("gnome-shell" "Gnome-shell")  1x1+-200+-200  +-200+-200
+        1 child:
+        0x40000b (has no name): ()  1x1+-1+-1  +-201+-201
+     0x48141ae "srm@srm-NUC12WSKi7: ~": ("gnome-terminal-server" "Gnome-terminal")  786x725+144+104  +144+104
+        1 child:
+        0x48141af (has no name): ()  1x1+-1+-1  +143+103
+     0x4e00004 "调试日志——by maori.md - srm_nav_27 - Visual Studio Code": ("code" "code")  1850x1053+70+27  +70+27
+        1 child:
+        0x5600007 (has no name): ()  1850x1053+0+0  +70+27
+     0x4c00017 "srm@srm-NUC12WSKi7:~/srm_nav_27$ ./scrip — DeepSeek Harness — Mozilla Firefox": ("Navigator" "firefox_firefox")  1850x1053+70+27  +70+27
+        2 children:
+        0x4c00010 (has no name): ()  1850x1053+0+0  +70+27
+        0x4c00018 (has no name): ()  1x1+-1+-1  +69+26
+     0x48027d6 "srm@srm-NUC12WSKi7: ~/srm_nav_27": ("gnome-terminal-server" "Gnome-terminal")  786x766+94+54  +94+54
+        1 child:
+        0x48027d7 (has no name): ()  1x1+-1+-1  +93+53
+     0x4004a2 (has no name): ()  1120x1003+530+50  +530+50
+        1 child:
+        0x5a00025 "Figure 1": ("matplotlib" "Matplotlib")  1100x948+10+45  +540+95
+           1 child:
+           0x5a00024 (has no name): ()  1100x948+0+0  +540+95
+              2 children:
+              0x5a00026 (has no name): ()  1100x48+0+900  +540+995
+                 11 children:
+                 0x5a00033 (has no name): ()  4x24+1087+12  +1627+1007
+                 0x5a00032 (has no name): ()  7x44+1091+2  +1631+997
+                 0x5a00031 (has no name): ()  30x30+196+9  +736+1004
+                 0x5a00030 (has no name): ()  1x24+191+12  +731+1007
+                 0x5a0002f (has no name): ()  30x30+157+9  +697+1004
+                 0x5a0002e (has no name): ()  28x28+129+10  +669+1005
+                 0x5a0002d (has no name): ()  28x28+101+10  +641+1005
+                 0x5a0002c (has no name): ()  1x24+96+12  +636+1007
+                 0x5a0002b (has no name): ()  30x30+62+9  +602+1004
+                 0x5a0002a (has no name): ()  30x30+32+9  +572+1004
+                 0x5a00029 (has no name): ()  30x30+2+9  +542+1004
+              0x5a00027 (has no name): ()  1100x900+0+0  +540+95
+     0x480159e "✳ Claude Code": ("gnome-terminal-server" "Gnome-terminal")  786x725+44+4  +44+4
+        1 child:
+        0x480159f (has no name): ()  1x1+-1+-1  +43+3
+     0x3000003 "@!0,0;BDHF": ("gjs" "Gjs")  1920x1080+0+0  +0+0
+        1 child:
+        0x3000004 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x6200001 (has no name): ()  1x1+0+0  +0+0
+        1 child:
+        0x6400002 (has no name): ()  1x1+0+0  +0+0
+     0x5e00008 "rviz2": ()  1x1+0+0  +0+0
+     0x6000001 "rviz2": ("rviz2" "Rviz2")  10x10+10+10  +10+10
+     0x5e00004 "Qt Selection Owner for rviz2": ()  3x3+0+0  +0+0
+     0x5c00007 (has no name): ()  1x1+0+0  +0+0
+     0x4c0016d "Firefox": ("firefox_firefox" "firefox_firefox")  1x1+0+0  +0+0
+        2 children:
+        0x4c00171 (has no name): ()  1x1+-1+-1  +-1+-1
+        0x4c0016e (has no name): ()  1x1+-1+-1  +-1+-1
+     0x3e03d47 "org.gnome.Nautilus": ("org.gnome.Nautilus" "Org.gnome.Nautilus")  256x211+709+576  +709+576
+        1 child:
+        0x3e03d48 (has no name): ()  1x1+-1+-1  +708+575
+     0x4c000a6 "Firefox": ()  10x10+-100+-100  +-100+-100
+     0x4c0009e "Firefox": ("firefox_firefox" "firefox_firefox")  1x1+0+0  +0+0
+        2 children:
+        0x4c000a2 (has no name): ()  1x1+-1+-1  +-1+-1
+        0x4c0009f (has no name): ()  1x1+-1+-1  +-1+-1
+     0x5000003 "code": ("code" "Code")  200x200+0+0  +0+0
+        1 child:
+        0x5000004 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x5a00007 (has no name): ()  1x1+0+0  +0+0
+     0x1800009 (has no name): ()  1x1+0+0  +0+0
+     0x5a00006 (has no name): ()  1x1+0+0  +0+0
+     0x1800007 (has no name): ()  1x1+0+0  +0+0
+     0x5a00002 (has no name): ()  1x1+0+0  +0+0
+     0x4e0000a (has no name): ()  1x1+0+0  +0+0
+     0x5000001 "code": ("code" "Code")  10x10+10+10  +10+10
+     0x4e00000 "Chromium clipboard": ()  10x10+-100+-100  +-100+-100
+     0x4c00001 "Firefox": ("firefox_firefox" "Firefox_firefox")  10x10+10+10  +10+10
+     0x460000d (has no name): ()  1x1+0+0  +0+0
+     0x4600009 (has no name): ()  1x1+0+0  +0+0
+     0x4600001 (has no name): ()  1x1+0+0  +0+0
+     0x4800006 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x4800002 "终端": ()  10x10+-100+-100  +-100+-100
+     0x4800001 "终端": ("gnome-terminal-server" "Gnome-terminal-server")  10x10+10+10  +10+10
+     0x4200001 "update-notifier": ("update-notifier" "Update-notifier")  10x10+10+10  +10+10
+     0x3e00bc4 "org.gnome.Nautilus": ("org.gnome.Nautilus" "Org.gnome.Nautilus")  269x434+327+382  +327+382
+        1 child:
+        0x3e00bc5 (has no name): ()  1x1+-1+-1  +326+381
+     0x3e001ea "org.gnome.Nautilus": ()  10x10+-100+-100  +-100+-100
+     0x3e00003 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x3e00001 "org.gnome.Nautilus": ("org.gnome.Nautilus" "Org.gnome.Nautilus")  10x10+10+10  +10+10
+     0x1e00003 (has no name): ("cc-switch" "Cc-switch")  1000x650+460+215  +460+215
+        1 child:
+        0x1e00004 (has no name): ()  1x1+-1+-1  +459+214
+     0x2200003 "ToDesk": ("ToDesk" "ToDesk")  952x616+484+233  +484+233
+        1 child:
+        0x2200004 (has no name): ()  1x1+-1+-1  +483+232
+     0x3800319 (has no name): ()  1920x1+0+1079  +0+1079
+     0x3800318 (has no name): ()  1920x1+0+0  +0+0
+     0x3800317 (has no name): ()  1x1080+1919+0  +1919+0
+     0x3800316 (has no name): ()  1x1080+0+0  +0+0
+     0x38002d0 "NoMachine Desktop Viewed": ("nxrunner.bin" "Nxrunner.bin")  267x72+0+0  +0+0
+     0x38002ba "nxrunner.bin": ("nxrunner.bin" "Nxrunner.bin")  960x432+0+0  +0+0
+     0x38002b5 "nxrunner.bin": ("nxrunner.bin" "Nxrunner.bin")  960x432+0+0  +0+0
+     0x380003e "NoMachine Whiteboard": ("nxrunner.bin" "Nxrunner.bin")  740x560+625+273  +625+273
+     0x380000d "NoMachine Transfer Tracking": ("nxrunner.bin" "Nxrunner.bin")  278x108+855+505  +855+505
+     0x3800007 (has no name): ()  1x1+0+0  +0+0
+     0x3600002 "snapd-desktop-integration": ("snapd-desktop-integration" "snapd-desktop-integration")  1x1+0+0  +0+0
+        1 child:
+        0x3600003 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x220003d (has no name): ()  1x1+-1+-1  +-1+-1
+     0x3400001 (has no name): ()  1x1+-10+-10  +-10+-10
+     0x2200038 "ToDesk": ("ToDesk" "ToDesk")  852x653+0+0  +0+0
+        1 child:
+        0x2200039 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x3000008 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x3000001 "gjs": ("gjs" "Gjs")  10x10+10+10  +10+10
+     0x2200034 (has no name): ("ToDesk" "ToDesk")  252x253+0+0  +0+0
+        1 child:
+        0x2200035 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x2e00001 "xdg-desktop-portal-gtk": ("xdg-desktop-portal-gtk" "Xdg-desktop-portal-gtk")  10x10+10+10  +10+10
+     0x40001d (has no name): ()  1x1+-1+-1  +-1+-1
+     0x2a00001 "rustdesk": ("rustdesk" "Rustdesk")  10x10+10+10  +10+10
+     0x1e00009 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x2800001 (has no name): ()  1x1+-10+-10  +-10+-10
+     0x2600001 (has no name): ()  1x1+-10+-10  +-10+-10
+     0x2400001 "WebKitWebProcess": ("WebKitWebProcess" "WebKitWebProcess")  10x10+10+10  +10+10
+     0x2200001 "ToDesk": ("ToDesk" "ToDesk")  10x10+10+10  +10+10
+     0x1e00001 "cc-switch": ("cc-switch" "Cc-switch")  10x10+10+10  +10+10
+     0xa00002 (has no name): ("" "")  1x1+-100+-100  +-100+-100
+        1 child:
+        0xa00003 (has no name): ()  1x1+-1+-1  +-101+-101
+     0x1c00001 "evolution-alarm-notify": ("evolution-alarm-notify" "Evolution-alarm-notify")  10x10+10+10  +10+10
+     0x1a00001 "ibus-extension-gtk3": ("ibus-extension-gtk3" "Ibus-extension-gtk3")  10x10+10+10  +10+10
+     0x1800003 "ibus-xim": ()  1x1+0+0  +0+0
+        1 child:
+        0x1800004 (has no name): ()  1x1+-1+-1  +-1+-1
+     0x1800001 "ibus-x11": ("ibus-x11" "Ibus-x11")  10x10+10+10  +10+10
+     0x1200002 (has no name): ()  10x10+0+0  +0+0
+     0x1600001 "gsd-power": ("gsd-power" "Gsd-power")  10x10+10+10  +10+10
+     0x1400001 "gsd-color": ("gsd-color" "Gsd-color")  10x10+10+10  +10+10
+     0x1000001 "gsd-media-keys": ("gsd-media-keys" "Gsd-media-keys")  10x10+10+10  +10+10
+     0x1200001 "gsd-xsettings": ("gsd-xsettings" "Gsd-xsettings")  10x10+10+10  +10+10
+     0xc00001 "gsd-keyboard": ("gsd-keyboard" "Gsd-keyboard")  10x10+10+10  +10+10
+     0xe00001 "gsd-wacom": ("gsd-wacom" "Gsd-wacom")  10x10+10+10  +10+10
+     0x400013 "gnome-shell": ()  10x10+-100+-100  +-100+-100
+     0x400011 (has no name): ()  1x1+-100+-100  +-100+-100
+     0x40000f (has no name): ()  1x1+-100+-100  +-100+-100
+     0x40000e (has no name): ()  1x1+-1+-1  +-1+-1
+     0x400008 (has no name): ()  1x1+-100+-100  +-100+-100
+     0x400007 (has no name): ()  1x1+-100+-100  +-100+-100
+     0x400006 "GNOME Shell": ()  1x1+-100+-100  +-100+-100
+     0x400001 "gnome-shell": ("gnome-shell" "Gnome-shell")  10x10+10+10  +10+10
+     0x20000a (has no name): ()  1x1+-100+-100  +-100+-100
+     0x400010 "mutter guard window": ()  1920x1080+0+0  +0+0
+     0x4c000d9 "sp_vision_25/readme.md at main · TongjiSuperPower/sp_vision_25 — Mozilla Firefox": ("Navigator" "firefox_firefox")  1850x1053+70+27  +70+27
+        2 children:
+        0x4c000d4 (has no name): ()  1850x1053+0+0  +70+27
+        0x4c000da (has no name): ()  1x1+-1+-1  +69+26
+     0x4009b6 (has no name): ()  1083x807+60+134  +60+134
+        1 child:
+        0x5e00106 "src/srm27_navigation/srm27_nav_bringup/rviz/nav2_default_view.rviz - RViz": ("rviz2" "rviz2")  1063x752+10+45  +70+179
+           2 children:
+           0x5e00109 "Qt NET_WM User Time Window": ()  1x1+-1+-1  +69+178
+           0x5e00013 "rviz2": ("rviz2" "rviz2")  490x644+548+70  +618+249
+              2 children:
+              0x5e00108 "Qt NET_WM User Time Window": ()  1x1+-1+-1  +617+248
+              0x6400004 (has no name): ()  490x644+0+0  +618+249
+     0x400800 (has no name): ()  900x580+535+275  +535+275
+        1 child:
+        0x5c00005 "NoMachine": ("nxplayer.bin" "Nxplayer.bin")  880x525+10+45  +545+320
+     0x3e00008 "主文件夹": ("org.gnome.Nautilus" "Org.gnome.Nautilus")  942x602+78+171  +78+171
+        1 child:
+        0x3e00009 (has no name): ()  1x1+-1+-1  +77+170
+     0x480000a "srm@srm-NUC12WSKi7: ~/WattToolkit": ("gnome-terminal-server" "Gnome-terminal")  786x766+968+171  +968+171
+        1 child:
+        0x480000b (has no name): ()  1x1+-1+-1  +967+170
+     0x400220 (has no name): ()  980x563+514+522  +514+522
+        1 child:
+        0x460001b "Watt Toolkit": ("Steam++" "Steam++")  960x508+10+45  +524+567
+           1 child:
+           0x460001c (has no name): ()  960x508+0+0  +524+567
+

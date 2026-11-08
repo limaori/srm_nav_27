@@ -110,6 +110,7 @@ protected:
       [this](nav_msgs::msg::Odometry::ConstSharedPtr _msg) {
         ++odometry_count_;
         last_odometry_child_frame_ = _msg->child_frame_id;
+        last_odometry_z_ = _msg->pose.pose.position.z;
       });
     tf_sub_ = driver_->create_subscription<tf2_msgs::msg::TFMessage>(
       "/tf", rclcpp::QoS(100).reliable(),
@@ -236,6 +237,7 @@ protected:
   std::atomic<int> odom_base_link_tf_count_{0};
   std::atomic<int> odom_gimbal_tf_count_{0};
   std::string last_odometry_child_frame_;
+  double last_odometry_z_{0.0};
 };
 
 /// \brief 缓存固定外参时：关节角 TF 缺失不影响 /odometry。
@@ -287,6 +289,10 @@ TEST_F(OdometryWithoutJointTfTest, RobotBaseTfModePublishesGimbalAndNeverBaseLin
   EXPECT_EQ(base_tf, 0)
     << "树反转后不能再发 odom->base_link：base_link 已经是 gimbal_yaw 的子节点，"
        "两个父节点会让整棵 TF 树失效";
+  // 树反转后机器人系是**云台**（在地面上方 0.26805 m，= URDF 的 chassis_top）。
+  // z 若被压平成 0，底盘（子节点 z=-0.268）会整块沉到地面以下 —— RViz 里一眼可见。
+  EXPECT_NEAR(last_odometry_z_, 0.26805, 1e-3)
+    << "odom->gimbal_yaw 的 z 必须是云台离地高度，不能压成 0（否则底盘沉到地下）";
 }
 
 }  // namespace

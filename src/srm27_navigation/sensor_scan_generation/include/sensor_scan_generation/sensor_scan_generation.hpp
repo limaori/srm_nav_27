@@ -74,6 +74,13 @@ private:
     const tf2::Transform & transform, const std::string & parent_frame,
     const std::string & child_frame, const rclcpp::Time & stamp);
 
+  /// \brief 解析 `robot_base_frame` 在地面以上的高度（树反转模式下用）。
+  ///
+  /// 取 `T(robot_base_frame <- base_frame)` 的 z 取负：`base_frame` 是原点在地面的底盘系，
+  /// 所以 `gimbal_yaw` 在它上面 → 该变换的 z 是负的"离地高度"。
+  /// 解析失败返回 false（调用方按 0 处理并告警一次，不阻塞输出）。
+  bool resolveRobotBaseHeight(const rclcpp::Time & stamp);
+
   std::string lidar_frame_;
   std::string base_frame_;
   std::string robot_base_frame_;
@@ -95,6 +102,15 @@ private:
   /// 断了只丢底盘这个显示分支，`/odometry` 与导航完全不受影响。
   /// 默认 false = 保持原行为（发 odom -> base_frame）。
   bool publish_robot_base_tf_{false};
+  /// \brief `robot_base_frame` 在 odom 里的**固定高度**（m）。
+  ///
+  /// `planarize()` 会把 z 压成 0 —— 那原本是对的：机器人系就是 `base_link`（原点在地面）。
+  /// 树反转后机器人系变成 `gimbal_yaw`（在地面**上方** 0.268 m），z 再压成 0 的话
+  /// `odom -> gimbal_yaw` 会把云台放到地面上，底盘（子节点，z=-0.268）整块沉到地面下。
+  /// 所以这个模式下把 z 固定成"云台相对地面的高度"，由 TF(`robot_base_frame <- base_frame`)
+  /// 在首帧解析一次（`base_frame` 原点在地面），不写死数值。
+  double robot_base_height_{0.0};
+  bool has_robot_base_height_{false};
   /// \brief 差分速度可用的最大采样间隔（s）。
   double max_sample_gap_{0.20};
   /// \brief 单次采样允许的最大平移跳变（m）。

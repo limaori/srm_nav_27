@@ -13,7 +13,7 @@
 **TF 树也反过来**（`gimbal_is_root:=true`：`odom -> gimbal_yaw -> 雷达`，底盘挂在云台末端），
 所以代价地图/BT 查 `odom -> gimbal_yaw_fake` 也不经过关节角；
 导航只出平移（`xy_only`），底盘 `wz` 改由**决策层** `rotation_cmd` 在 `srm_cmd_mux` 里合成；
-协议 `0x0010` 扩到 **20 字节**，回传**陀螺仪**转速（编码器转速由关节角求导得到）；
+协议 `0x0010` 扩到 **20 字节**，回传**陀螺仪**转速（编码器转速不回传，导航不用）；
 `fake_vel_transform` 的 yaw 外推改用**云台自己的转速**（默认 Mid-360 IMU，验证后切陀螺仪）。
 
 ---
@@ -80,7 +80,7 @@
 
 | 文件 | 改动 |
 | --- | --- |
-| `srm27_nav_protocol/include/packet_typedef.hpp` | `DATA_LENGTH_CHASSIS_SPEED: 16 -> 20`；新结构体加 `gimbal_yaw_rate_imu`（数据段偏移 16，`static_assert` 钉死 29 字节与字段偏移）；**新增旧帧结构体** `ReceiveChassisSpeedDataV1`（25 字节）。用旧结构体读新帧会补零 + 刷 stderr 警告，所以必须分开。**不加编码器转速字段**：它就是 `chassis_to_gimbal_yaw` 的变化率（2026-11-08 决定） |
+| `srm27_nav_protocol/include/packet_typedef.hpp` | `DATA_LENGTH_CHASSIS_SPEED: 16 -> 20`；新结构体加 `gimbal_yaw_rate_imu`（数据段偏移 16，`static_assert` 钉死 29 字节与字段偏移）；**新增旧帧结构体** `ReceiveChassisSpeedDataV1`（25 字节）。用旧结构体读新帧会补零 + 刷 stderr 警告，所以必须分开。**不加编码器转速字段**：它是云台相对底盘的转速，导航要的是相对地面（2026-11-08 决定） |
 | `srm27_nav_protocol/src/srm27_nav_protocol.cpp` | `0x0010` 按 `data_length` 分支：20=新帧（发 4 条话题）、16=旧帧（转速话题不发、节流告警一次、**不丢帧**）、其它=丢弃并计数；`publishChassisSpeed()` 改为按字段传值；新增 `gimbal_yaw_rate`（`TwistStamped`，与其它话题共用同一个 stamp）；NaN/Inf 整帧丢弃也会覆盖新字段 |
 | `src/srm27_nav_protocol/config/srm27_nav_protocol.yaml` | 新增 `gimbal_yaw_rate_topic`，并更新 `0x0010` 的字段/坐标系说明；`gimbal_joint_sign` 改 `+1.0` |
 | `script/test_chassis_speed_feedback.py` | 参考实现：`LEN_CHASSIS_SPEED=20` + `LEN_CHASSIS_SPEED_V1=16`；`build_chassis_speed()` 4 参=旧帧、5 参=新帧；`decode()` 两种都认（旧帧转速为 `None`）；`--pty` 默认发新帧（`--rate-imu`），`--legacy` 发旧帧；`--self-test` 同时校验新旧两种帧长 |
@@ -161,8 +161,8 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
    + `gimbal_joint_sign` 改 `+1.0`（详见 §2.9）。方案文档已同步更新。
 1. **§4.1.1 的 z 补偿**：方案只提到"`gimbal_yaw` 的 z 不在地面，要逐项检查代价地图/地形"。实测发现真正的机制是 **`loam_interface`/`zlio_bridge` 的开机快照把 odom 的 z 原点抬到了云台平面**（地面 z=-0.268），影响面比 `robot_base_frame` 的 z 大得多（`sensor_scan_generation` 的 `/odometry` z 恒被压平为 0）。因此改成**在源头补偿**（新增 `ground_frame`），而不是逐项改下游阈值 —— 下游参数与仿真保持完全一致。
 2. **mux 的 `spin_topic` 默认空 = 单输入**：方案写"默认 `rotation_cmd`"，但 mux 的配置文件是**仿真链与实车链共用的**，仿真里 `wz` 仍由 MINCO 输出。做法：节点代码默认 `rotation_cmd`，共享配置写空（= 单输入，仿真/回退行为不变），**实车入口 launch 显式传 `rotation_cmd`**。方案 §7 的"`spin_topic` 留空即单输入"正好就是这个开关。
-3. **协议只加**一路**转速（20 字节）**：编码器转速 = `chassis_to_gimbal_yaw` 的变化率，
-   由上位机求导即可（2026-11-08 决定，方案原稿写的是加两路 24 字节）。
+3. **协议只加**一路**转速（20 字节）**：只要陀螺仪转速（相对地面）；编码器转速是云台相对底盘，
+   导航不用（2026-11-08 决定，方案原稿写的是加两路 24 字节）。
 4. **`yaw_rate_source` 实车默认 `imu`（不是 `gimbal_rate`）**：方案 §4.4.2 的表把 `gimbal_rate` 标成"实车默认"，但 §4.4.3 说明协议字段落地前先用 Mid-360 IMU，且 §8.1 要求两个转速的**符号上车实测**。现在协议字段已实现，但符号未测，所以默认 `imu`（Mid-360 装在云台上，正方向由安装姿态唯一确定）；**§8.1 测完再切 `gimbal_rate`**，切之前先两路对照。
 5. **`rotation_cmd` 的消息类型是 `geometry_msgs/Twist`**（只读 `angular.z`）：方案 §8.2 写成 `std_msgs/Float32`，但现有 `script/spin_control.sh`、MINCO 的 `spin_request` 都用 `Twist`；为不破坏现有工具，统一用 `Twist`。
 6. **`--yaw-mode spin` 保留但按 `xy_only` 跑**：方案要求"`se2` 直接拒绝"，`spin` 没说。实车脚本把 `spin` 改写成 `xy_only` 并提示（请求走 mux）；直接 `ros2 launch ... yaw_mode:=spin` 仍会照原样注入 `spin`，用于 A/B 对照。
@@ -215,7 +215,7 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
 5. **落地跑点**：先云台不转、小陀螺关，再逐项打开；日志里 `validation_failed` 的"当前速度"不再 >0.42；
    不出现 `进入脱困`（或只在真贴障碍时出现）。
 6. **协议转速符号（§8.1）**：下位机发新固件后，底盘不动云台自转，比较 `gimbal_yaw_rate` 与
-   `/livox/imu` 换算后的 z 转速（同号、大小接近）；再让底盘小陀螺、云台稳向，比较编码器转速方向。
+   `/livox/imu` 换算后的 z 转速（同号、大小接近）；再让底盘小陀螺、云台稳向，陀螺仪转速应接近 0。
    测完把 `yaw_rate_source` 切到 `gimbal_rate`，两路对照一次再定默认。
 7. **云台零位（§8.3）**：按方案 §8.3 测 `gimbal_yaw` 的 x 轴与"云台朝正前方"是否一致（±3°）；
    超差就在 URDF 的 `gimbal_yaw_joint` 上加固定 yaw 偏移。

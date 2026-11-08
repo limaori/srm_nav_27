@@ -71,6 +71,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="${SRM27_WS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# ---------- 环境消毒 ----------
+# 海康 MVS 客户端会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH（老 libusb 缺符号，
+# 会让链接 PCL 的节点以 exit 127 静默退出）。录包本身不受影响，但录包通常伴随
+# 建图/导航栈一起起，环境保持一致更安全。只影响本脚本及其子进程。
+# 关掉: SRM_KEEP_MVS_LIB_PATH=1
+. "$SCRIPT_DIR/lib/srm_lib_path_guard.sh"
+
 # ---------- 可配置项 ----------
 BAG_MAP_NAME="${BAG_MAP_NAME:-}"
 BAG_OUT_DIR="${BAG_OUT_DIR:-}"

@@ -209,7 +209,18 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
     tf_odom_to_chassis = tf_odom_to_lidar * tf_lidar_to_chassis;
   }
 
-  const auto robot_base_transform = suppressJitter(planarize(tf_odom_to_robot_base), true);
+  auto robot_base_planar = planarize(tf_odom_to_robot_base);
+  if (publish_robot_base_tf_) {
+    // 树反转：机器人系是云台，它在地面上方 robot_base_height_ 处。
+    // 压平只该压 roll/pitch，z 必须保留（否则底盘整块沉到地面下）。
+    if (!has_robot_base_height_) {
+      has_robot_base_height_ = resolveRobotBaseHeight(pcd_msg->header.stamp);
+    }
+    robot_base_planar.setOrigin(tf2::Vector3(
+        robot_base_planar.getOrigin().x(), robot_base_planar.getOrigin().y(),
+        robot_base_height_));
+  }
+  const auto robot_base_transform = suppressJitter(robot_base_planar, true);
 
   if (publish_tf_) {
     if (publish_robot_base_tf_) {
@@ -261,6 +272,32 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
     pcl_ros::transformPointCloud(odom_frame, tf_odom_to_cloud, *pcd_msg, out);
   }
   pub_laser_cloud_->publish(out);
+}
+
+bool SensorScanGenerationNode::resolveRobotBaseHeight(const rclcpp::Time & stamp)
+{
+  if (base_frame_.empty() || base_frame_ == robot_base_frame_) {
+    // 没有"地面系"可参照（或两者相同）：保持 0，等价于旧行为。
+    robot_base_height_ = 0.0;
+    return true;
+  }
+  tf2::Transform tf_base_to_robot;
+  bool used_latest = false;
+  std::string error;
+  if (!getTransform(
+        robot_base_frame_, base_frame_, stamp, tf_base_to_robot, used_latest, error, 0.2)) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *this->get_clock(), 5000,
+      "暂时解析不了 %s 相对 %s 的高度（%s）：odom 的 z 先按 0 处理，不影响导航",
+      robot_base_frame_.c_str(), base_frame_.c_str(), error.c_str());
+    return false;
+  }
+  // T(robot_base <- base_frame).z 是负的"离地高度"（base_frame 原点在地面）。
+  robot_base_height_ = -tf_base_to_robot.getOrigin().z();
+  RCLCPP_INFO(
+    this->get_logger(), "%s 在地面上方 %.4f m（odom 的 z 按它发布，底盘不会再沉到地下）",
+    robot_base_frame_.c_str(), robot_base_height_);
+  return true;
 }
 
 bool SensorScanGenerationNode::getTransform(

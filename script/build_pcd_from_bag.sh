@@ -58,6 +58,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="${SRM27_WS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# ---------- 环境消毒 ----------
+# 海康 MVS 客户端会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH（老 libusb 缺符号，
+# 会让链接 PCL 的程序以 exit 127 静默退出）。本脚本会跑 PCL 相关的离线处理与
+# ros2 CLI，环境保持一致更安全。只影响本脚本及其子进程。
+# 关掉: SRM_KEEP_MVS_LIB_PATH=1
+. "$SCRIPT_DIR/lib/srm_lib_path_guard.sh"
+
 SETUP_FILE="$WS_DIR/install/setup.bash"
 BAG_DIR_DEFAULT_ROOT="$WS_DIR/log_diag"
 PCD_DIR_BUILD="$WS_DIR/src/srm27_navigation/point_lio/PCD"

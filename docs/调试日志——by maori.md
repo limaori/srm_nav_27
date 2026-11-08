@@ -515,4 +515,12 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed,要先起导航栈
 ./debug_tools/plot_vxvywz.py --save                           # 自动存到user_test_log文件夹
 ```
-
+### 启动实车
+```bash
+./script/start_real_nav.sh -m 227_1108 --controller minco --no-reloc
+```
+### 迁移完后启动实车(point-lio)
+```bash
+./script/start_real_nav.sh -m 227_1108 --controller minco --no-reloc \
+  --lio-frontend point_lio --no-gimbal-joint-topic
+```

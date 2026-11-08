@@ -52,6 +52,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="${SRM27_WS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# ---------- 环境消毒 ----------
+# 海康 MVS 客户端会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH（老 libusb 缺符号，
+# 会让链接 PCL 的节点以 exit 127 静默退出）。这里一并消毒，保证本脚本拉起的
+# python 任务与它调用的 ros2 CLI 环境干净。只影响本脚本及其子进程。
+# 关掉: SRM_KEEP_MVS_LIB_PATH=1
+. "$SCRIPT_DIR/lib/srm_lib_path_guard.sh"
+
 if [ ! -f "$WS_DIR/install/setup.bash" ]; then
   echo "[错误] 未找到 $WS_DIR/install/setup.bash" >&2
   echo "[提示] 先编译工作空间, 或用 SRM27_WS_DIR=/path/to/ws 指定。" >&2
