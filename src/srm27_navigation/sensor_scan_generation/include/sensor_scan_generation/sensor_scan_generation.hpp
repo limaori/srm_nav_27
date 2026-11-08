@@ -47,9 +47,14 @@ private:
   /// 精确时刻查询失败时先尝试最新可用变换（Gazebo 的传感器消息会略早于
   /// robot_state_publisher），并把该情况通过 `_used_latest` 明确暴露给调用方；
   /// 仍然失败则返回 false，调用方必须放弃本次输出，而不是发布一个错误的位姿。
+  ///
+  /// 2026-11-08（方案 §4.1.1）：`cache_robot_base_transform=true` 时
+  /// `lidar -> robot_base_frame` 只在第一帧查一次（固定外参）；`lidar -> base_frame`
+  /// 失败只影响 odom->base_link 的 TF，/odometry 照常按点云频率输出。
   bool getTransform(
     const std::string & target_frame, const std::string & source_frame, const rclcpp::Time & time,
-    tf2::Transform & transform, bool & used_latest, std::string & error);
+    tf2::Transform & transform, bool & used_latest, std::string & error,
+    double timeout_seconds = 0.5);
 
   void publishTransform(
     const tf2::Transform & transform, const std::string & parent_frame,
@@ -73,6 +78,23 @@ private:
   std::string base_frame_;
   std::string robot_base_frame_;
   bool publish_tf_;
+  /// \brief 是否缓存 `lidar -> robot_base_frame` 的固定外参（方案 §4.1.1）。
+  ///
+  /// 实车把 robot_base_frame 换成 gimbal_yaw 之后，这段变换是固定外参
+  /// （gimbal_yaw -> livox_frame -> livox_imu），开机查一次即可；同时允许
+  /// `lidar -> base_frame`（要经过关节角）查询失败时不拖垮 /odometry。
+  /// 默认 false = 保持仿真/旧链行为（每帧查两次，任一失败整帧跳过）。
+  bool cache_robot_base_transform_{false};
+  /// \brief `lidar -> robot_base_frame` 是否已经缓存过（只在 cache 打开时使用）。
+  bool robot_base_transform_cached_{false};
+  /// \brief 把 `odom -> robot_base_frame` 作为 TF 发布（2026-11-08，实车云台为根时用）。
+  ///
+  /// TF 树反转后（URDF `gimbal_is_root`）`base_link` 是 `gimbal_yaw` 的**子节点**，
+  /// 所以本节点必须直接发 `odom -> gimbal_yaw`；此时**不再**查询/发布 `base_frame` 的 TF
+  /// （否则 `base_link` 会有两个父节点，树直接坏掉）。关节角只出现在树的末端：
+  /// 断了只丢底盘这个显示分支，`/odometry` 与导航完全不受影响。
+  /// 默认 false = 保持原行为（发 odom -> base_frame）。
+  bool publish_robot_base_tf_{false};
   /// \brief 差分速度可用的最大采样间隔（s）。
   double max_sample_gap_{0.20};
   /// \brief 单次采样允许的最大平移跳变（m）。

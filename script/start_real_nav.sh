@@ -27,23 +27,27 @@
 #     controller_server ─► velocity_smoother ─cmd_vel_nav2_result─►
 #       fake_vel_transform（legacy）─cmd_vel_chassis─► srm27_nav_protocol ─► 串口
 #
-# 迁移链的四个要点（与仿真的 `start_sim_nav.sh --chassis-spin` 完全一致）:
-#   1) 导航参考系 = base_link_fake（与 odom 平行、朝向稳定），代价地图/行为树也用它；
-#   2) MINCO 的 command_frame = base_link_fake：平移的 R(-yaw) **只**在 fake_vel_transform
-#      里做一次。旧实车链路关掉 fake 的理由（"重复旋转"、"依赖 local_plan 同步"）是针对
-#      legacy 模式 + command_frame=base_link 的，nav_se2 链上不成立；
-#   3) wz 由导航拥有（yaw_policy.mode=se2；`--yaw-mode spin` 改成小陀螺），
-#      mux 是 cmd_vel_chassis 的唯一发布者，并带 stop_all/resume_all 急停服务；
-#   4) 速度限幅仍只有一处：config/real/speed_limits.yaml（`@fakeyaw` 段负责放开 smoother
-#      的 yaw 界，`srm_cmd_mux` 段给 mux 的 wz_max —— 首跑 1.5 rad/s，验过再抬）。
+# 迁移链的四个要点（2026-11-08 云台系改造后）:
+#   1) 导航参考系 = `gimbal_yaw`（真实，雷达定位直接给出）/ `gimbal_yaw_fake`（与 odom 平行、
+#      朝向稳定）。代价地图/行为树/MINCO 都用后者；`/odometry` 的位姿只依赖
+#      `livox_imu -> gimbal_yaw` 这段固定外参，不再经过关节角；
+#   2) MINCO 的 command_frame = gimbal_yaw_fake：平移的 R(-yaw) **只**在 fake_vel_transform
+#      里做一次。云台系下转出去的 vx/vy 就是"云台的前"，与下位机执行口径一致；
+#   3) 导航**只出平移**（yaw_policy.mode=xy_only）。底盘 wz 由**决策层**发 rotation_cmd，
+#      在 srm_cmd_mux 里合进输出（mux 是 cmd_vel_chassis 的唯一发布者，带
+#      stop_all/resume_all 急停服务）。se2（导航用 wz 追切线）在云台系下没有意义 ——
+#      导航的 yaw 是云台，而 wz 转的是底盘，脚本直接拒绝；
+#   4) 速度限幅仍只有一处：config/real/speed_limits.yaml（`@fakeyaw` 段把 smoother 的
+#      yaw 界钳 0，`srm_cmd_mux` 段给 mux 的 wz_max —— 决策层请求到这里被钳位）。
 #
 # ⚠ 首跑必读（wz 与云台）
-#   * C 板固件现在**执行 wz**（用户确认，2026-11-06）。但"符号/增益/死区"只有转起来才知道：
-#     首次务必架起车辆（轮子离地）或留人守物理急停，用 `--chassis-spin 0.3` 这种小速度先看方向。
-#   * 云台自转（仿真里的 `--gimbal-spin`）**实车暂不支持**：实车云台由下位机驱动，而当前协议
-#     （上→下 12 字节 vx/vy/wz、下→上只有比赛状态）**不回传云台关节角**。雷达在云台上，
-#     没有关节角时 `base_link` yaw 会差一个云台角 → 导航看到的车"自己在转"。
-#     所以本脚本拒绝 `--gimbal-spin`，只保留"协议补齐回传后用 --gimbal-joint-topic 接进来"的接口。
+#   * C 板固件执行 wz，且**下位机已改为按云台的"前"执行 vx/vy**（电控确认）。
+#     "符号/增益/死区"只有转起来才知道：首次务必架起车辆（轮子离地）或留人守物理急停，
+#     用 `--chassis-spin 0.3` 这种小速度先看方向。
+#   * 云台自转由下位机驱动。**开机后先让云台静止**，等 LIO 初始化完成、导航起来之后再转：
+#     loam_interface/zlio_bridge 在开机第一帧拍一次 `gimbal_yaw <- 雷达` 的快照，那一帧
+#     必须是静止的（方案 §4.7）。协议 0x0010 现在回传云台关节角，`--gimbal-joint-topic`
+#     默认就接上，RViz 里的底盘朝向才跟手。
 #
 # 速度限幅 (控制器 / 平滑器 / mux / 恢复行为) 的**唯一来源**:
 #   src/srm27_navigation/srm27_nav_bringup/config/real/speed_limits.yaml
@@ -68,9 +72,9 @@
 # 用法:
 #   ./script/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
 #   ./script/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
-#   ./script/start_real_nav.sh --chassis-spin        # 小陀螺 2.0 rad/s (首跑建议给 0.3)
+#   ./script/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./script/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
-#   ./script/start_real_nav.sh --yaw-mode xy_only    # A/B 对照: 导航不控自转
+#   ./script/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
 #   ./script/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
 #   ./script/start_real_nav.sh --lio-frontend zlio   # 定位前端换 ZLIO (实车参数在 config/real)
 #   ./script/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
@@ -97,7 +101,7 @@
 #       --lio-frontend <point_lio|zlio>   里程计前端（**默认 zlio**；point_lio = 回退）
 #       --init-pose "<x,y,z,roll,pitch,yaw>"   map->odom 初值（实车只取 x/y/yaw）
 #       --prior-pcd-manifest <路径>   仿真专用, 实车只提示忽略
-#       --yaw-mode <auto|se2|spin>    MINCO 航向策略（实车另有 xy_only 对照档）
+#       --yaw-mode <auto|xy_only>    MINCO 航向策略（实车默认 xy_only；se2/spin 会被告警/拒绝）
 #       --chassis-spin [rad/s] / --no-chassis-spin   底盘小陀螺（默认 2.0 rad/s）
 #       --gimbal-spin [rad/s] / --no-gimbal-spin
 #                               **实车不执行**：云台由下位机驱动、上位机无指令通道;
@@ -129,10 +133,10 @@
 #                              选 minco 时自动走 nav_srm_real_launch.py（迁移链 + mux）、
 #                              把导航出口对准 cmd_vel_nav_fake，并跑一轮 MINCO 预检。
 #       --minco / --omni        等价于 --controller minco / --controller omni
-#       --yaw-mode <auto|se2|spin|xy_only>
-#                               MINCO 航向策略 (默认 auto=se2, 导航拥有 wz):
-#                                se2 / spin / xy_only 含义同上; 仿真只到 spin。
-#                               只给 --yaw-mode spin 车**还不会转**, 要转加 --chassis-spin。
+#       --yaw-mode <auto|xy_only>    MINCO 航向策略 (默认 xy_only = 导航只出平移):
+#                                auto = xy_only。se2 / spin 在云台系下不再使用
+#                                (se2 直接拒绝, spin 会改写成 xy_only 并提示)，
+#                                底盘自转请用 --chassis-spin 或决策层的 rotation_cmd。
 #       --chassis-spin [rad/s]  底盘小陀螺（默认 2.0, 负值反向）:
 #                               ⚠ 首跑请架起车辆或用 0.3 这种小转速先确认方向；
 #                               mux 的 wz_max 首跑限在 1.5 rad/s。
@@ -259,8 +263,9 @@ FAKE_VEL_CLI_GIVEN=0
 USE_CHASSIS_MUX="${USE_CHASSIS_MUX:-1}"
 MUX_CLI_GIVEN=0
 
-# MINCO 航向策略: auto=按链路推导 (迁移链 se2); spin=小陀螺; xy_only=导航不控自转。
-YAW_MODE="${YAW_MODE:-auto}"
+# MINCO 航向策略: 2026-11-08 云台系改造后实车默认 xy_only（导航只出平移）。
+# 底盘 wz 由决策层发 rotation_cmd，在 srm_cmd_mux 里合进输出（方案 §4.3）。
+YAW_MODE="${YAW_MODE:-xy_only}"
 YAW_MODE_CLI_GIVEN=0
 # 底盘小陀螺角速度 (rad/s): 留空 = 不自转; --chassis-spin 不带数值时用 2.0。
 CHASSIS_SPIN_WZ="${CHASSIS_SPIN_WZ:-}"
@@ -680,6 +685,28 @@ case "$YAW_MODE" in
   auto|se2|spin|xy_only) ;;
   *) echo "[错误] --yaw-mode 只支持 auto / se2 / spin / xy_only, 收到: $YAW_MODE" >&2; exit 2 ;;
 esac
+# 2026-11-08（方案 §4.2）：云台系下导航的 yaw 是**云台**，而 wz 转的是**底盘**。
+#   * se2（导航用 wz 追路径切线）在语义上不成立 -> 直接拒绝，提示改走 rotation_cmd；
+#   * spin 保留参数面兼容，但按 xy_only 跑（自转请求由 mux 消费，不进 MINCO）。
+if [ "$YAW_MODE" = "se2" ]; then
+  cat >&2 <<'EOF'
+[错误] 云台系下不再支持 --yaw-mode se2：
+[错误]   导航的 yaw 是**云台**（雷达定位直接给出），而下发的 wz 转的是**底盘**。
+[错误]   "导航用 wz 把云台对准路径切线"在物理上不成立，硬跑只会让底盘乱转。
+[提示] 底盘自转请改由**决策层**发 rotation_cmd（srm_cmd_mux 消费）：
+[提示]   script/spin_control.sh on 0.5     # 手动验证同一话题
+[提示]   ./script/start_real_nav.sh --chassis-spin 0.3   # 启动时自动下发
+EOF
+  exit 2
+fi
+if [ "$YAW_MODE" = "spin" ]; then
+  echo "[提示] --yaw-mode spin：云台系下导航只出平移，已按 xy_only 跑。" >&2
+  echo "[提示]   自转请求走 rotation_cmd -> srm_cmd_mux（不进 MINCO），停发 0.25 s 即停转。" >&2
+  YAW_MODE="xy_only"
+fi
+if [ "$YAW_MODE" = "auto" ]; then
+  YAW_MODE="xy_only"
+fi
 
 # 没给 --chassis-spin 就是不自转（默认行为）。
 if [ "$CHASSIS_SPIN_CLI_GIVEN" = "1" ] && [ -z "$CHASSIS_SPIN_WZ" ]; then
@@ -692,20 +719,12 @@ esac
 if ! awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit !(v == v + 0) }'; then
   echo "[错误] 底盘自转速度必须是数字 (rad/s): $CHASSIS_SPIN_WZ" >&2; exit 2
 fi
-# 底盘自转必须让 MINCO 进入 spin 航向策略，否则请求会被航向策略忽略（车不转）。
-if ! awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
-  if [ "$YAW_MODE_CLI_GIVEN" = "1" ] && [ "$YAW_MODE" != "spin" ]; then
-    echo "[错误] --chassis-spin 与 --yaw-mode ${YAW_MODE} 矛盾：" >&2
-    echo "       底盘自转请求只有在 yaw_mode=spin 时才会被 MINCO 消费。" >&2
-    echo "       去掉 --yaw-mode，或改成 --yaw-mode spin（只加 --chassis-spin 会自动切）。" >&2
-    exit 2
-  fi
-  YAW_MODE="spin"
-fi
+# 底盘自转：2026-11-08 起**不再**切 MINCO 的航向策略（那是"导航拥有 wz"时代的做法）。
+# 请求走 rotation_cmd -> srm_cmd_mux（方案 §4.3），与 MINCO 的 spin_request 无关。
 if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ a=(v<0)?-v:v; exit !(a > 0) }'; then
   echo "[提示] 底盘自转 ${CHASSIS_SPIN_WZ} rad/s 已请求：首跑请架起车辆或守物理急停，先确认方向与增益。"
-  echo "[提示] 实际 wz 还受两层钳位：velocity_smoother 的 yaw 界与 srm_cmd_mux.wz_max"
-  echo "[提示] （config/real/speed_limits.yaml，首跑都是 1.5 rad/s）。"
+  echo "[提示] 实际 wz 受 srm_cmd_mux.wz_max（config/real/speed_limits.yaml，当前 1.0 rad/s）"
+  echo "[提示] 与 mux 的 wz_ramp（4.5 rad/s²，起停斜率）两层限制。"
 fi
 
 # ---------- --no-lio（与 sim 同名）----------
@@ -753,11 +772,10 @@ if [ "$VERIFY_SPIN" = "1" ]; then
 [错误] 实车不支持 --verify-spin：它会自动下发自转请求与导航目标、让车自己动起来，
 [错误]   而实车没有"无头沙箱"这层保护（仿真里它还会顺手清掉 Gazebo/Nav2）。
 [提示] 参数被接受只是为了命令行一致；实车请按文档人工分步验收：
-[提示]   ./script/start_real_nav.sh --yaw-mode xy_only                     # S1 平移链路
-[提示]   ./script/start_real_nav.sh --yaw-mode spin --chassis-spin 0.3     # S2 方向/增益（架车）
-[提示]   ./script/start_real_nav.sh                                       # S3 SE(2) 闭环
-[提示]   ./script/start_real_nav.sh --chassis-spin 1.0                    # S4 小陀螺导航
-[提示]   完整清单见 docs/仿真链迁移实车实施记录(ai).md §6。
+[提示]   ./script/start_real_nav.sh                                  # S1 平移链路（导航只出平移）
+[提示]   ./script/start_real_nav.sh --chassis-spin 0.3               # S2 方向/增益（架车）
+[提示]   ./script/start_real_nav.sh --chassis-spin 0.5               # S3 小陀螺导航
+[提示]   云台系改造的完整验收清单见 docs/导航改云台系与决策层小陀螺实施方案.md §6.2。
 EOF
   exit 2
 fi
@@ -956,10 +974,12 @@ fi
 
 FAKE_ARG="$(bool_arg "$USE_FAKE_VEL_TRANSFORM")"
 
-# 迁移链要求参数文件是 base_link_fake 变体（否则 fakeyaw 链本身就是错的）。
+# 迁移链要求参数文件是"fake 系"变体（否则 fakeyaw 链本身就是错的）。
+# 2026-11-08：实车的假车头系从 base_link_fake 改成 gimbal_yaw_fake（云台系），
+# 两种名字都认 —— 旧参数文件仍然可用（回退路径）。
 MINCO_FAKEYAW_CHAIN=0
 if [ "$CONTROLLER" = "minco" ] && [ "$USE_FAKE_VEL_TRANSFORM" = "1" ] \
-   && grep -q "base_link_fake" "$PARAMS_FILE" 2>/dev/null; then
+   && grep -qE "gimbal_yaw_fake|base_link_fake" "$PARAMS_FILE" 2>/dev/null; then
   MINCO_FAKEYAW_CHAIN=1
 fi
 
@@ -989,7 +1009,7 @@ fi
 
 # 航向策略只在迁移链上有意义；旧链强制 xy_only（导航不控自转）。
 if [ "$MINCO_FAKEYAW_CHAIN" = "0" ] && [ "$CONTROLLER" = "minco" ]; then
-  echo "[提示] 参数文件不是 base_link_fake 变体：按旧链处理（导航不控自转，yaw_mode 忽略）。"
+  echo "[提示] 参数文件不是 fake 系（gimbal_yaw_fake/base_link_fake）变体：按旧链处理（导航不控自转，yaw_mode 忽略）。"
   YAW_MODE="xy_only"
 fi
 if [ "$CONTROLLER" = "omni" ] && [ "$CHASSIS_SPIN_CLI_GIVEN" = "1" ]; then
@@ -1381,8 +1401,15 @@ fi
 # 前提是 /joint_states 有发布者 —— nav_srm_real_launch.py 里的 gimbal_joint_state_relay
 # 一定会起: 给了 --gimbal-joint-topic 就用真实回传角, 没给就用 constant 模式暂位 0 度
 # (TF 与 fixed 等价, 但结构就绪, 协议补上回传字段后只需加这个参数)。
-# ⚠ 千万别在没有 relay 的情况下单独传 revolute —— 那会让整棵 TF 树断开。
+# ⚠ 千万别在没有 relay 的情况下单独传 revolute —— 那会让底盘那一支 TF 断开。
 RSP_CMD="$RSP_CMD gimbal_joint_type:=revolute"
+# 2026-11-08: TF 树反转 —— gimbal_yaw 当根、base_link(底盘) 挂在它下面。
+#   odom -> gimbal_yaw（sensor_scan_generation 直接发，固定外参） -> 雷达
+#   gimbal_yaw --[关节角]--> base_link
+# 这样导航链路（odom -> gimbal_yaw_fake）完全不经过关节角；关节角只在树的末端，
+# 断了只丢 RViz 里的底盘。⚠ 关节角语义变成"底盘相对云台"，所以 srm27_nav_protocol
+# 的 gimbal_joint_sign 必须是 +1.0（协议 yaml 已改）。
+RSP_CMD="$RSP_CMD gimbal_is_root:=true"
 
 # 3) 底盘串口: cmd_vel_chassis 的唯一消费者, 把速度写进串口发给 C 板。
 CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"
@@ -1418,7 +1445,9 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD use_composition:=$COMPOSITION_ARG"
   NAV_CMD="$NAV_CMD use_respawn:=false"
   NAV_CMD="$NAV_CMD use_fake_vel_transform:=$FAKE_ARG"
-  NAV_CMD="$NAV_CMD command_frame:=base_link_fake"
+  # 命令系 = 云台系的假车头系（2026-11-08）。必须与参数文件的
+  # FollowPath.command_frame 一致，否则 launch 会直接报错。
+  NAV_CMD="$NAV_CMD command_frame:=gimbal_yaw_fake"
   NAV_CMD="$NAV_CMD use_chassis_mux:=$Z_MUX_ARG"
   NAV_CMD="$NAV_CMD mux_nav_topic:=cmd_vel_nav_body"
   NAV_CMD="$NAV_CMD mux_output_topic:=cmd_vel_chassis"
@@ -1513,9 +1542,9 @@ fi
 
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   case "$YAW_MODE" in
-    auto|se2)  YAW_DESC="se2  (导航拥有 wz：车头跟路径切线)" ;;
-    spin)      YAW_DESC="spin (小陀螺：rotation_cmd → MINCO)" ;;
-    xy_only)   YAW_DESC="xy_only (导航不控自转，A/B 对照)" ;;
+    auto|xy_only) YAW_DESC="xy_only (导航只出平移；底盘 wz 由决策层 rotation_cmd 给)" ;;
+    spin)         YAW_DESC="spin (已按 xy_only 跑：自转请求走 mux)" ;;
+    se2)          YAW_DESC="se2 (云台系下不支持)" ;;
     *)         YAW_DESC="$YAW_MODE" ;;
   esac
 fi
@@ -1563,19 +1592,20 @@ if [ "$RELOC_ON" != "1" ] && [ "$SLAM_ON" != "1" ]; then
 fi
 echo "  速度链路    : $VEL_CHAIN"
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
-  echo "  wz 归属     : 导航(上位机)    航向策略: $YAW_DESC"
+  echo "  wz 归属     : 决策层 rotation_cmd → srm_cmd_mux   航向策略: $YAW_DESC"
   echo "  速度限幅    : $SPEED_LIMITS_FILE"
   if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
     echo "  底盘自转    : 关 (要转加 --chassis-spin [rad/s], 缺省 2.0; 首跑建议 0.3)"
   else
     echo "  底盘自转    : $CHASSIS_SPIN_WZ rad/s (Nav2 就绪后自动下发 rotation_cmd)"
-    echo "                mux wz_max 会在这一层钳住 (首跑 1.5 rad/s, 见 speed_limits.yaml)"
+    echo "                mux wz_max 会在这一层钳住 (当前 1.0 rad/s, 见 speed_limits.yaml)"
   fi
-  echo "  云台关节    : revolute (与仿真一致), base_link->gimbal_yaw 来自 /joint_states"
+  echo "  云台关节    : revolute, gimbal_yaw->base_link 来自 /joint_states（TF 树已反转）"
   if [ -n "$GIMBAL_JOINT_TOPIC" ]; then
     echo "                $GIMBAL_JOINT_TOPIC → /joint_states (真实回传角)"
     echo "                首次上车核对: 云台不动、手转底盘, RViz 里 base_link 要跟着转;"
-    echo "                反了改 srm27_nav_protocol.yaml 的 gimbal_joint_sign (+1.0/-1.0)"
+    echo "                反了改 srm27_nav_protocol.yaml 的 gimbal_joint_sign (+1.0/-1.0)，"
+    echo "                现在树是 gimbal_yaw 为根（gimbal_is_root:=true）→ 正常应为 +1.0"
   else
     echo "                暂位 0 度 (已显式关闭回传)。底盘相对云台转时 base_link yaw 会错,"
     echo "                正常跑导航请去掉 --no-gimbal-joint-topic"
@@ -1700,11 +1730,11 @@ for i in "${!STEP_TITLES[@]}"; do
 done
 
 # ---------- 底盘小陀螺（迁移链）：Nav2 就绪后自动下发 ----------
-# 契约与手动的 script/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
-#   rotation_cmd --20 Hz--> MINCO(yaw_policy.mode=spin) --cmd_vel_nav_fake-->
-#   fake_vel_transform --> srm_cmd_mux --> cmd_vel_chassis --> 串口
+# 契约与决策层、与手动的 script/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
+#   rotation_cmd --20 Hz--> srm_cmd_mux(只取 angular.z) --> cmd_vel_chassis --> 串口
+#   （MINCO 在 xy_only 下不参与 wz；它的 spin_request 只是保留的旧入口。）
 # 所以：停转 ./script/spin_control.sh off，查看 ./script/spin_control.sh status。
-# ⚠ wz 归导航：控制器只在**跟随路径时**输出速度，没有导航目标时底盘不会转 —— 这不是故障。
+# ⚠ 与导航解耦：导航没目标时**照样**能原地转（两路输入各自计时），这不再是故障判据。
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
    && awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 1 : 0 }'; then
   if [ -n "$NAMESPACE" ]; then
@@ -1724,7 +1754,7 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
     sleep 2
   done
   if [ -z "$_spin_subs" ] || [ "$_spin_subs" = "0" ]; then
-    echo "[警告] ${CHASSIS_SPIN_READY_TIMEOUT}s 内没等到 ${SPIN_TOPIC} 的订阅者（MINCO 还没起来？）" >&2
+    echo "[警告] ${CHASSIS_SPIN_READY_TIMEOUT}s 内没等到 ${SPIN_TOPIC} 的订阅者（srm_cmd_mux 还没起来？）" >&2
     echo "       仍会启动发布器：等 Nav2 上线后请求会自动被消费。" >&2
   fi
   if ROBOT_NS="$NAMESPACE" SPIN_MAX_WZ="$SPIN_ABS" \
@@ -1742,6 +1772,16 @@ fi
 cat <<EOF
 
 启动流程处理完成 (终端模式: $OPEN_MODE)。
+
+首跑核对 (云台系改造, 方案 §4.1 / §4.7 / §6.2):
+  1) 开机后**云台先静止**，等 LIO 初始化完成（/odometry 稳定输出、RViz 里点云不再跳）
+     再让云台转。loam_interface/zlio_bridge 的开机快照就取在第一帧。
+  2) 先看树: tf2_echo gimbal_yaw base_link 应为 z=-0.26805；tf2_echo odom gimbal_yaw
+     的父系必须是 odom（不是 base_link）。树没反过来 = 代价地图仍会被关节角带偏。
+  3) tf2_echo odom gimbal_yaw：云台快转时 yaw 匀速变化、xy 不画圈（<2 cm），
+     /odometry 的线速度 <0.03 m/s（有假速度说明 LIO 本身有问题，本方案不解决）。
+  4) 小陀螺由决策层控制：rotation_cmd 停发 0.25 s 即停转；
+     mux 诊断里 spin_valid / spin_freq_hz / nav_wz_ignored_count 一眼能看出通没通。
 
 安全提醒:
   - C 板固件自己**没有**超时保护: srm27_nav_protocol 的 0.5 s 看门狗只在它活着时有效,
@@ -1829,12 +1869,14 @@ cat <<'EOF'
   2) 迁移链的接线（fake 是链的一环，必须**在**，而不是"不在"）:
        ros2 node list | grep -i -E 'fake_vel_transform|srm_cmd_mux'   # 两个都应在
        ros2 topic info /cmd_vel_chassis -v                            # 发布者应**只有** srm_cmd_mux
-       ros2 run tf2_ros tf2_echo base_link base_link_fake             # yaw ≈ -底盘 yaw
-       ros2 param get /controller_server FollowPath.yaw_policy.mode    # se2 / spin / xy_only
-  5) 导航拥有 wz（se2/spin 模式）: 跟随路径时 /cmd_vel_nav_fake 的 wz 应非零，
-     且与 /cmd_vel_nav_body、/cmd_vel_chassis 的 wz **逐层相同**
-     （fake 只转平移不碰 wz；mux 只做钳位）。xy_only 模式下三层 wz 恒为 0 才是对的。
-     若请求了自转而 /cmd_vel_chassis 的 wz 仍是 0：先看 mux 的 wz_max、再看串口节点。
+       ros2 run tf2_ros tf2_echo gimbal_yaw gimbal_yaw_fake           # yaw ≈ -云台 yaw
+       ros2 run tf2_ros tf2_echo gimbal_yaw base_link                 # z = -0.26805 (底盘在云台基座面下方)
+       ros2 param get /controller_server FollowPath.yaw_policy.mode    # 应为 xy_only
+       ros2 topic echo /odometry --once                               # child_frame_id = gimbal_yaw
+  5) wz 归属: 导航三层（/cmd_vel_nav_fake、/cmd_vel_nav_body）的 wz 应恒为 0；
+     /cmd_vel_chassis 的 wz 只来自决策层的 rotation_cmd（受 mux 的 wz_max / wz_ramp 限制）。
+     若请求了自转而 /cmd_vel_chassis 的 wz 仍是 0：先看 mux 诊断的 spin_freq_hz/spin_valid，
+     再看串口节点与 max_wz。
   6) 速度没有被任何一层静默钳住: /cmd_vel_chassis 的合速度能达到
      min(controllers limits, velocity_smoother, mux v_max, 串口 max_vx) 的 90% 以上。
      想知道"是哪一层卡住"，跑:

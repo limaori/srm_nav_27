@@ -101,9 +101,10 @@ cleanup() {
 trap cleanup EXIT
 
 # ----------------------------------------------------------- 1. 伪串口
-say "1/4 起伪串口（合成 0x0010: vx=0.42 vy=0.05 wz=0.31 chassis_to_gimbal_yaw=45°, 33.3 Hz）"
+say "1/4 起伪串口（合成 0x0010: vx=0.42 vy=0.05 wz=0.31 chassis_to_gimbal_yaw=45° 与云台转速, 33.3 Hz）"
 PYTHONUNBUFFERED=1 python3 -u "$PTY_TOOL" --pty \
-  --vx 0.42 --vy 0.05 --wz 0.31 --yaw 45 --seconds 40 >"$PTY_LOG" 2>&1 &
+  --vx 0.42 --vy 0.05 --wz 0.31 --yaw 45 --rate-imu 1.0 \
+  --seconds 40 >"$PTY_LOG" 2>&1 &
 PTY_PID=$!
 
 PTY_DEV=""
@@ -161,7 +162,7 @@ echo
 if [[ -n "$RATE" ]]; then
   ok "/chassis_speed 频率 = ${RATE} Hz  （期望 ≈ 33.2 Hz）"
   if grep -q "长度不符" "$NODE_LOG"; then
-    warn "节点报过「0x0010 长度不符」：固件里 data_length 写的不是 16"
+    warn "节点报过「0x0010 长度不符」：固件里 data_length 既不是 20（新帧）也不是 16（旧帧）"
   fi
   if grep -q "含 NaN/Inf" "$NODE_LOG"; then
     warn "节点报过「含 NaN/Inf」：下位机算出了非法值"

@@ -80,6 +80,11 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr chassis_speed_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr chassis_to_gimbal_yaw_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr gimbal_joint_pub_;
+  // 2026-11-08（方案 §4.4.1）：0x0010 数据段 16 -> 20 字节，末尾追加**一路**云台 yaw 转速。
+  //   gimbal_yaw_rate = 陀螺仪转速（rad/s，相对地面，俯视逆时针为正）—— yaw 外推用。
+  // 编码器转速（云台相对底盘）不单独回传：它 = chassis_to_gimbal_yaw 的变化率。
+  // 旧帧（data_length=16）没有这个字段，此时这条话题**不发**，也不报错。
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr gimbal_yaw_rate_pub_;
 
   // Subscribe
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
@@ -126,6 +131,9 @@ private:
   // 放到参数里是为了现场能用 --ros-args -p 翻转，不用重新编译。
   double gimbal_joint_sign_{-1.0};
   std::string chassis_speed_frame_{"base_link"};
+  std::string gimbal_yaw_rate_topic_{"gimbal_yaw_rate"};
+  // 旧帧帧数（data_length=16），用来在现场区分"下位机还没升级"与"帧长度配错"。
+  std::atomic<uint64_t> chassis_speed_legacy_count_{0};
   // 超过这么久没收到 0x0010 就告警一次（收到后恢复也告警一次）。
   // 0x0010 约 33 Hz（10 ms 槽位轮转），0.5 s 相当于连丢 ~16 个槽位。
   double chassis_speed_timeout_sec_{0.5};
@@ -168,7 +176,12 @@ private:
   void publishProjectileAllowance(ReceiveProjectileAllowance & data); // 0x0208
   void publishSwitchPosition(ReceiveSwitchPosition & data);  // 0x000D
   void publishSefdefined(ReceiveSefdefinedData & data);     // 0x000B
-  void publishChassisSpeed(ReceiveChassisSpeedData & data); // 0x0010
+  /// \brief 发布 0x0010 的派生话题。
+  /// \param _has_rate 新帧（20 字节）为 true；旧帧（16 字节）为 false，此时云台转速
+  ///        话题不发（记为不可用，不报错）。
+  void publishChassisSpeed(
+    float _vx, float _vy, float _wz, float _chassis_to_gimbal_yaw_deg,
+    bool _has_rate, float _rate_imu); // 0x0010
   // 移除了 publishDebugData, publishImuData, publishRobotInfo, publishRobotMotion, publishJointState
 
   // Callbacks

@@ -12,21 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// \brief srm_cmd_mux：导航速度的唯一出口（限幅 + 超时清零 + 急停）。
+/// \brief srm_cmd_mux：导航速度的唯一出口（两路合成 + 限幅 + 超时清零 + 急停）。
 ///
-/// 输入：
-///   <nav_topic>        导航速度（geometry_msgs/msg/Twist，车体系，含 angular.z）
+/// 输入（2026-11-08 起两路，方案 §4.3）：
+///   <nav_topic>    导航速度（geometry_msgs/msg/Twist，云台系），**只取 linear.x/linear.y**；
+///                  它的 angular.z 一律忽略并计数告警（正常应为 0）。
+///   <spin_topic>   决策层底盘自转（geometry_msgs/msg/Twist），**只取 angular.z**；
+///                  停发 spin_timeout 即视为停转（wz 清零）。
 /// 输出：
-///   cmd_vel_sim        最终执行命令（mux 是唯一发布者）
+///   <output_topic> 最终执行命令（mux 是唯一发布者）
 ///
-/// 2026-10-19 起 **独立自转链已经删除**（`rotation_controller` /
-/// `rotation_test_sender` / `rotation_velocity`）：`wz` 只由上位机（导航栈）产生，
-/// 因此本节点没有第二路自转输入，也没有"两路 wz 相加"或"谁拥有 wz"的开关 ——
-/// 导航超时就连同平移一起清零，不存在"导航没了但还在自转"的状态。
+/// `spin_topic` 留空 = **单输入**（旧行为）：导航同时拥有平移与 wz，用于仿真链与回退。
 ///
-/// 平移按分量限幅后按向量模长缩放，`wz` 单独按 `wz_max` 限幅；全部限幅的权威值
-/// 仍来自 config/simulation/speed_limits.yaml（启动时合并进本包的参数）。
+/// 两路各自计时、互不影响：导航停了决策层还能让底盘原地转，决策层停发导航照常走。
+/// `wz` 还带变化率限制（`wz_ramp`，默认与 MINCO 的 max_angular_accel 同档 4.5 rad/s²），
+/// 避免决策层的阶跃请求在起停时冲击底盘；`stop_all` 例外 —— 它立即清零、不做斜率限制。
+///
+/// 限幅（vx_max / vy_max / v_max / wz_max）仍由 config/{real,simulation}/speed_limits.yaml
+/// 在启动时合并进本包的参数（唯一来源）。
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -64,19 +69,35 @@ public:
   {
     this->nav_topic_ = this->declare_parameter<std::string>(
       "nav_topic", "cmd_vel_nav");
+    this->spin_topic_ = this->declare_parameter<std::string>(
+      "spin_topic", "rotation_cmd");
     this->output_topic_ = this->declare_parameter<std::string>(
       "output_topic", "cmd_vel_sim");
     const double publishRate =
       this->declare_parameter<double>("publish_rate", 200.0);
     this->nav_timeout_ = this->declare_parameter<double>("nav_timeout", 0.3);
+    this->spin_timeout_ = this->declare_parameter<double>("spin_timeout", 0.25);
     this->limits_.vx_max = this->declare_parameter<double>("vx_max", 0.5);
     this->limits_.vy_max = this->declare_parameter<double>("vy_max", 0.5);
     this->limits_.v_max = this->declare_parameter<double>("v_max", 0.5);
     this->limits_.wz_max = this->declare_parameter<double>("wz_max", 2.0);
+    // 与 speed_limits.yaml 的 FollowPath.limits.max_angular_accel 同档（4.5）。
+    this->limits_.wz_ramp = this->declare_parameter<double>("wz_ramp", 4.5);
     this->diagnostics_period_ = std::chrono::duration<double>(
       this->declare_parameter<double>("diagnostics_period", 0.5));
 
+    if (!(this->spin_timeout_ > 0.0) || !std::isfinite(this->spin_timeout_)) {
+      RCLCPP_FATAL(get_logger(), "spin_timeout 必须为正的有限值");
+      throw std::invalid_argument("spin_timeout must be finite and positive");
+    }
+    if (!(this->limits_.wz_ramp >= 0.0) || !std::isfinite(this->limits_.wz_ramp)) {
+      RCLCPP_FATAL(get_logger(), "wz_ramp 必须是非负的有限值（0 = 不做斜率限制）");
+      throw std::invalid_argument("wz_ramp must be finite and non-negative");
+    }
+
     this->nav_watchdog_.setTimeout(this->nav_timeout_);
+    this->spin_watchdog_.setTimeout(this->spin_timeout_);
+    this->dual_input_ = !this->spin_topic_.empty();
 
     this->publish_period_ = std::chrono::duration<double>(
       publishRate > 0.0 ? 1.0 / publishRate : 0.005);
@@ -88,6 +109,13 @@ public:
       [this](const geometry_msgs::msg::Twist::SharedPtr _msg) {
         this->onNavCommand(*_msg);
       });
+    if (this->dual_input_) {
+      this->spin_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+        this->spin_topic_, qos,
+        [this](const geometry_msgs::msg::Twist::SharedPtr _msg) {
+          this->onSpinCommand(*_msg);
+        });
+    }
     this->output_pub_ =
       this->create_publisher<geometry_msgs::msg::Twist>(this->output_topic_, qos);
     this->diagnostics_pub_ =
@@ -101,7 +129,7 @@ public:
         std::shared_ptr<std_srvs::srv::Trigger::Response> _response) {
         this->stopAll();
         _response->success = true;
-        _response->message = "已停止导航输入，保持零输出直到 resume_all";
+        _response->message = "已停止导航与自转输入，保持零输出直到 resume_all";
       });
     this->resume_service_ = this->create_service<std_srvs::srv::Trigger>(
       "~/resume_all",
@@ -110,18 +138,29 @@ public:
         std::shared_ptr<std_srvs::srv::Trigger::Response> _response) {
         this->resumeAll();
         _response->success = true;
-        _response->message = "已重新启用导航输入";
+        _response->message = "已重新启用导航与自转输入";
       });
 
     this->guard_thread_ = std::thread([this]() {this->guardLoop();});
 
-    RCLCPP_INFO(
-      this->get_logger(),
-      "srm_cmd_mux 已启动: [%s] -> [%s]（平移与 wz 都来自导航）, "
-      "平移上限 %.3f m/s (v_max %.3f), wz 上限 %.3f rad/s, 导航超时 %.3f s",
-      this->nav_topic_.c_str(), this->output_topic_.c_str(),
-      this->limits_.vx_max, this->limits_.v_max,
-      this->limits_.wz_max, this->nav_timeout_);
+    if (this->dual_input_) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "srm_cmd_mux 已启动（双输入）: [%s] 平移 -> [%s]，[%s] wz -> [%s]\n"
+        "  平移上限 %.3f m/s (v_max %.3f)，wz 上限 %.3f rad/s，wz 斜率 %.2f rad/s²\n"
+        "  导航超时 %.3f s（平移清零），自转超时 %.3f s（wz 清零）",
+        this->nav_topic_.c_str(), this->output_topic_.c_str(), this->spin_topic_.c_str(),
+        this->output_topic_.c_str(), this->limits_.vx_max, this->limits_.v_max,
+        this->limits_.wz_max, this->limits_.wz_ramp, this->nav_timeout_, this->spin_timeout_);
+    } else {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "srm_cmd_mux 已启动（单输入）: [%s] -> [%s]（平移与 wz 都来自导航）, "
+        "平移上限 %.3f m/s (v_max %.3f), wz 上限 %.3f rad/s, 导航超时 %.3f s",
+        this->nav_topic_.c_str(), this->output_topic_.c_str(),
+        this->limits_.vx_max, this->limits_.v_max,
+        this->limits_.wz_max, this->nav_timeout_);
+    }
   }
 
   ~CmdMuxNode() override
@@ -130,6 +169,7 @@ public:
       std::lock_guard<std::mutex> lock(this->mutex_);
       this->shutdown_ = true;
       this->nav_ = geometry_msgs::msg::Twist();
+      this->spin_wz_ = 0.0;
     }
     this->condition_.notify_all();
     if (this->guard_thread_.joinable()) {
@@ -156,7 +196,8 @@ private:
         this->nav_ = geometry_msgs::msg::Twist();
         this->non_finite_nav_count_++;
       } else {
-        // 导航的 angular.z 就是要执行的 wz，原样保留由守护线程限幅后输出。
+        // 平移原样保留；wz 在双输入模式下由 mixVelocity 忽略（这里先存下来，
+        // 由守护线程统一判定并计数，避免在回调线程里做告警限流）。
         this->nav_ = _msg;
       }
       this->nav_watchdog_.markInput(now);
@@ -169,13 +210,46 @@ private:
     }
   }
 
+  /// \brief 决策层自转输入：只取 `angular.z`（方案 §4.3 / §8.2）。
+  void onSpinCommand(const geometry_msgs::msg::Twist & _msg)
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const double wz = _msg.angular.z;
+    bool rejected = false;
+    {
+      std::lock_guard<std::mutex> lock(this->mutex_);
+      // 与导航一致：stop_all 期间仍然计时，但输出保持为零。
+      this->spin_watchdog_.markInput(now);
+      this->spin_input_count_++;
+      if (std::isfinite(wz)) {
+        this->spin_wz_ = wz;
+      } else {
+        this->spin_wz_ = 0.0;
+        this->non_finite_spin_count_++;
+        rejected = true;
+      }
+    }
+    if (rejected) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "[%s] 收到含 NaN/Inf 的自转请求，已按零处理。",
+        this->spin_topic_.c_str());
+    }
+  }
+
   void stopAll()
   {
     std::lock_guard<std::mutex> lock(this->mutex_);
     this->stopped_ = true;
     this->nav_ = geometry_msgs::msg::Twist();
+    this->spin_wz_ = 0.0;
     this->nav_watchdog_.reset();
-    RCLCPP_WARN(this->get_logger(), "收到 stop_all：导航输入已清零并保持零输出。");
+    this->spin_watchdog_.reset();
+    // 急停不做斜率限制：输出立即归零。
+    this->wz_limited_ = 0.0;
+    this->wz_limited_valid_ = true;
+    RCLCPP_WARN(
+      this->get_logger(), "收到 stop_all：导航与自转输入已清零并保持零输出。");
   }
 
   void resumeAll()
@@ -183,14 +257,17 @@ private:
     std::lock_guard<std::mutex> lock(this->mutex_);
     this->stopped_ = false;
     this->nav_ = geometry_msgs::msg::Twist();
+    this->spin_wz_ = 0.0;
     this->nav_watchdog_.reset();
-    RCLCPP_INFO(this->get_logger(), "收到 resume_all：等待导航重新下发速度。");
+    this->spin_watchdog_.reset();
+    RCLCPP_INFO(this->get_logger(), "收到 resume_all：等待导航/自转重新下发速度。");
   }
 
   void guardLoop()
   {
     std::unique_lock<std::mutex> lock(this->mutex_);
     auto nextDiagnostics = std::chrono::steady_clock::now();
+    auto lastOutput = std::chrono::steady_clock::now();
     while (!this->shutdown_) {
       this->condition_.wait_for(lock, this->publish_period_);
       if (this->shutdown_) {
@@ -200,6 +277,7 @@ private:
 
       MixInput input;
       bool navExpired = false;
+      bool spinExpired = false;
       const bool stopped = this->stopped_;
       if (!this->stopped_) {
         navExpired = this->nav_watchdog_.expired(now);
@@ -208,43 +286,112 @@ private:
           input.nav_vy = this->nav_.linear.y;
           input.nav_wz = this->nav_.angular.z;
         }
+        if (this->dual_input_) {
+          input.spin_enabled = true;
+          spinExpired = this->spin_watchdog_.expired(now);
+          input.spin_valid = !spinExpired;
+          input.spin_wz = spinExpired ? 0.0 : this->spin_wz_;
+        }
+      } else if (this->dual_input_) {
+        input.spin_enabled = true;
+        input.spin_valid = false;
       }
-      const auto mixed = srm27_chassis_control::mixVelocity(input, this->limits_);
+
+      auto mixed = srm27_chassis_control::mixVelocity(input, this->limits_);
+
+      // ---- wz 变化率限制（方案 §4.3：避免决策层的阶跃请求冲击底盘）----
+      double wzOut = mixed.wz;
+      const double dt = std::chrono::duration<double>(now - lastOutput).count();
+      lastOutput = now;
+      if (stopped) {
+        // 急停/退出：立即归零，不做斜率限制。
+        this->wz_limited_ = 0.0;
+        this->wz_limited_valid_ = true;
+        wzOut = 0.0;
+        mixed.wz = 0.0;
+        this->wz_ramp_active_ = false;
+      } else if (this->limits_.wz_ramp > 0.0) {
+        if (!this->wz_limited_valid_) {
+          // 第一拍以"当前请求"为起点，避免启动瞬间从一个凭空的速度开始爬。
+          this->wz_limited_ = mixed.wz;
+          this->wz_limited_valid_ = true;
+        } else {
+          this->wz_limited_ = srm27_chassis_control::slewLimit(
+            mixed.wz, this->wz_limited_, this->limits_.wz_ramp, dt);
+        }
+        wzOut = this->wz_limited_;
+        this->wz_ramp_active_ = std::abs(wzOut - mixed.wz) > 1.0e-9;
+      } else {
+        this->wz_limited_ = mixed.wz;
+        this->wz_limited_valid_ = true;
+        this->wz_ramp_active_ = false;
+      }
+
       if (mixed.wz_clamped) {
-        if (!this->nav_wz_clamp_active_) {
-          this->nav_wz_clamp_active_ = true;
+        if (!this->wz_clamp_active_) {
+          this->wz_clamp_active_ = true;
           this->nav_wz_clamped_count_++;
           RCLCPP_WARN(
             this->get_logger(),
-            "导航 wz 被限幅到 %.3f rad/s（wz_max=%.3f）",
-            mixed.wz, this->limits_.wz_max);
+            "wz 被限幅到 %.3f rad/s（wz_max=%.3f，来源=%s）",
+            mixed.wz, this->limits_.wz_max,
+            mixed.wz_from_spin ? this->spin_topic_.c_str() : this->nav_topic_.c_str());
         }
       } else {
-        this->nav_wz_clamp_active_ = false;
+        this->wz_clamp_active_ = false;
+      }
+
+      // 导航漏出 wz：双输入模式下必须忽略并告警（方案 §4.3）。
+      if (mixed.nav_wz_ignored) {
+        if (!this->nav_wz_ignored_active_) {
+          this->nav_wz_ignored_active_ = true;
+          this->nav_wz_ignored_count_++;
+          RCLCPP_WARN(
+            this->get_logger(),
+            "导航输入带了非零 angular.z=%.3f，已忽略（底盘 wz 只认 [%s]；"
+            "导航侧应为 xy_only，见方案 §4.2）",
+            input.nav_wz, this->spin_topic_.c_str());
+        }
+      } else {
+        this->nav_wz_ignored_active_ = false;
       }
 
       if (navExpired && !this->nav_timeout_active_) {
         this->nav_timeout_active_ = true;
         RCLCPP_WARN(
-          this->get_logger(), "[%s] 超过 %.3f s 未收到导航速度，平移与 wz 均已清零。",
+          this->get_logger(), "[%s] 超过 %.3f s 未收到导航速度，平移已清零。",
           this->nav_topic_.c_str(), this->nav_timeout_);
       } else if (!navExpired) {
         this->nav_timeout_active_ = false;
       }
+      if (this->dual_input_) {
+        if (spinExpired && !this->spin_timeout_active_) {
+          this->spin_timeout_active_ = true;
+          this->spin_timeout_count_++;
+          RCLCPP_WARN(
+            this->get_logger(), "[%s] 超过 %.3f s 未收到自转请求，底盘停转（wz=0）。",
+            this->spin_topic_.c_str(), this->spin_timeout_);
+        } else if (!spinExpired) {
+          this->spin_timeout_active_ = false;
+        }
+      }
 
       const auto stamp = this->now();
+      const uint64_t spinCount = this->spin_input_count_;
+      const double spinWzInput = this->spin_wz_;
       lock.unlock();
 
       geometry_msgs::msg::Twist command;
       command.linear.x = mixed.vx;
       command.linear.y = mixed.vy;
-      command.angular.z = mixed.wz;
+      command.angular.z = wzOut;
       this->output_pub_->publish(command);
 
       if (now >= nextDiagnostics) {
         nextDiagnostics = now + std::chrono::duration_cast<
           std::chrono::steady_clock::duration>(this->diagnostics_period_);
-        this->publishDiagnostics(mixed, navExpired, stopped, stamp);
+        this->publishDiagnostics(
+          mixed, wzOut, navExpired, spinExpired, stopped, spinCount, spinWzInput, stamp);
       }
 
       lock.lock();
@@ -252,8 +399,9 @@ private:
   }
 
   void publishDiagnostics(
-    const srm27_chassis_control::MixOutput & _mixed, bool _navExpired,
-    bool _stopped, const rclcpp::Time & _stamp)
+    const srm27_chassis_control::MixOutput & _mixed, double _wzOut, bool _navExpired,
+    bool _spinExpired, bool _stopped, uint64_t _spinCount, double _spinWzInput,
+    const rclcpp::Time & _stamp)
   {
     diagnostic_msgs::msg::DiagnosticArray array;
     array.header.stamp = _stamp;
@@ -264,15 +412,27 @@ private:
     if (_stopped) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       status.message = "stop_all 生效中，输出保持为零";
+    } else if (_navExpired && this->dual_input_ && _spinExpired) {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      status.message = "导航与自转输入都超时，平移与 wz 均已清零";
     } else if (_navExpired) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      status.message = "导航输入超时，平移与 wz 均已清零";
+      status.message = this->dual_input_ ?
+        "导航输入超时，平移已清零（自转仍由 rotation_cmd 提供）" :
+        "导航输入超时，平移与 wz 均已清零";
+    } else if (this->dual_input_ && _spinExpired) {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      status.message = "自转输入超时（wz=0，底盘停转），导航照常输出平移";
+    } else if (this->dual_input_ && this->nav_wz_ignored_active_) {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      status.message = "导航漏出 wz，已忽略（底盘 wz 只认自转输入）";
     } else if (_mixed.wz_clamped) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      status.message = "导航 wz 被 wz_max 限幅";
+      status.message = "wz 被 wz_max 限幅";
     } else {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-      status.message = "导航同时拥有平移与 wz";
+      status.message = this->dual_input_ ?
+        "平移来自导航、wz 来自决策层" : "导航同时拥有平移与 wz（单输入）";
     }
 
     const auto addKeyValue = [&status](
@@ -282,8 +442,15 @@ private:
         kv.value = _value;
         status.values.push_back(kv);
       };
-    // wz 的唯一来源就是导航（独立自转链已删除），保留该字段便于旧脚本对照。
-    addKeyValue("wz_source", "navigation");
+    if (this->dual_input_) {
+      addKeyValue("wz_source", "spin_input");
+    } else {
+      // 单输入回退时保留旧值，便于旧脚本对照。
+      addKeyValue("wz_source", "navigation");
+    }
+    addKeyValue("dual_input", this->dual_input_ ? "true" : "false");
+    addKeyValue("nav_topic", this->nav_topic_);
+    addKeyValue("spin_topic", this->spin_topic_);
     {
       std::lock_guard<std::mutex> lock(this->mutex_);
       addKeyValue("nav_vx", std::to_string(this->nav_.linear.x));
@@ -293,10 +460,30 @@ private:
       addKeyValue("non_finite_nav_count", std::to_string(this->non_finite_nav_count_));
       addKeyValue("stopped", this->stopped_ ? "true" : "false");
     }
+    if (this->dual_input_) {
+      // 决策层自转输入的频率/超时/漏出统计（方案 §4.3 要求 diagnostics 里能看到）。
+      const double spin_freq = (_stamp - this->last_diagnostics_stamp_).seconds() > 0.0 ?
+        static_cast<double>(_spinCount - this->last_spin_count_) /
+        (_stamp - this->last_diagnostics_stamp_).seconds() :
+        0.0;
+      this->last_spin_count_ = _spinCount;
+      this->last_diagnostics_stamp_ = _stamp;
+      addKeyValue("spin_wz_input", std::to_string(_spinWzInput));
+      addKeyValue("spin_freq_hz", std::to_string(spin_freq));
+      addKeyValue("spin_valid", _spinExpired ? "false" : "true");
+      addKeyValue("spin_timeout", std::to_string(this->spin_timeout_));
+      addKeyValue("spin_timeout_count", std::to_string(this->spin_timeout_count_));
+      addKeyValue("spin_input_count", std::to_string(_spinCount));
+      addKeyValue("non_finite_spin_count", std::to_string(this->non_finite_spin_count_));
+      addKeyValue("nav_wz_ignored_count", std::to_string(this->nav_wz_ignored_count_));
+    }
     addKeyValue("mixed_vx", std::to_string(_mixed.vx));
     addKeyValue("mixed_vy", std::to_string(_mixed.vy));
     addKeyValue("mixed_wz", std::to_string(_mixed.wz));
+    addKeyValue("output_wz", std::to_string(_wzOut));
     addKeyValue("wz_clamped", _mixed.wz_clamped ? "true" : "false");
+    addKeyValue("wz_ramp", std::to_string(this->limits_.wz_ramp));
+    addKeyValue("wz_ramp_active", this->wz_ramp_active_ ? "true" : "false");
     addKeyValue("translation_scale", std::to_string(_mixed.scale));
     addKeyValue("clamped", _mixed.clamped ? "true" : "false");
     addKeyValue("wz_max", std::to_string(this->limits_.wz_max));
@@ -307,13 +494,18 @@ private:
   }
 
   std::string nav_topic_;
+  std::string spin_topic_;
   std::string output_topic_;
+  /// \brief 是否启用决策层自转输入（`spin_topic` 非空）。
+  bool dual_input_{false};
   double nav_timeout_{0.3};
+  double spin_timeout_{0.25};
   MixLimits limits_;
   std::chrono::duration<double> publish_period_{0.005};
   std::chrono::duration<double> diagnostics_period_{0.5};
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr output_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_;
@@ -321,16 +513,30 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr resume_service_;
 
   TwistWatchdog nav_watchdog_{0.3};
+  TwistWatchdog spin_watchdog_{0.25};
 
   std::mutex mutex_;
   std::condition_variable condition_;
   geometry_msgs::msg::Twist nav_;
+  double spin_wz_{0.0};
   bool stopped_{false};
   bool shutdown_{false};
   bool nav_timeout_active_{false};
-  bool nav_wz_clamp_active_{false};
+  bool spin_timeout_active_{false};
+  bool wz_clamp_active_{false};
+  bool nav_wz_ignored_active_{false};
+  bool wz_ramp_active_{false};
+  /// \brief `wz` 斜率限制的状态（上一拍输出的 wz）。
+  double wz_limited_{0.0};
+  bool wz_limited_valid_{false};
   uint64_t nav_wz_clamped_count_{0};
   uint64_t non_finite_nav_count_{0};
+  uint64_t nav_wz_ignored_count_{0};
+  uint64_t spin_input_count_{0};
+  uint64_t non_finite_spin_count_{0};
+  uint64_t spin_timeout_count_{0};
+  uint64_t last_spin_count_{0};
+  rclcpp::Time last_diagnostics_stamp_{0, 0, RCL_ROS_TIME};
   std::thread guard_thread_;
 };
 

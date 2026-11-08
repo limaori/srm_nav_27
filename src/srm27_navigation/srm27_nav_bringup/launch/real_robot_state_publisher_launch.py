@@ -68,6 +68,9 @@ def launch_setup(context):
         # 云台关节类型由调用方决定：默认 fixed（没人发 /joint_states 时这是唯一能
         # 让 TF 树连通的选择）；接上 --gimbal-joint-topic 的中继后再传 revolute。
         gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
+        # 2026-11-08：实车把 TF 树的根反过来（gimbal_yaw 为根、base_link 挂末端），
+        # 这样 odom -> gimbal_yaw 不经过关节角（方案 §4.1 的补漏）。
+        gimbal_is_root=LaunchConfiguration("gimbal_is_root").perform(context),
     )
 
     use_sim_time = ParameterValue(
@@ -121,6 +124,15 @@ def generate_launch_description():
             "livox_frame/livox_imu 整棵子树与 base_link 断开 —— 实测表现是 RViz "
             "Global Status 报错、RobotModel/TF 全红、nav2 的 transform 全部失败。"
             "云台角能回传后用 gimbal_joint_type:=revolute 切回来。",
+        ),
+        (
+            "gimbal_is_root",
+            "false",
+            "把 TF 树的根反过来：gimbal_yaw 当根、base_link 挂在它下面。实车导航要传 "
+            "true —— 雷达定位直接给云台位姿，odom->gimbal_yaw 不经过关节角；关节角只剩"
+            "gimbal_yaw->base_link 这一段末端，断了只影响 RViz 里的底盘。"
+            "同时关节角语义变成\"底盘相对云台\"，srm27_nav_protocol 的 "
+            "gimbal_joint_sign 要用 +1.0。默认 false = 原方向（仿真不变）。",
         ),
         ("use_sim_time", "False", "Use the simulation clock if True"),
     ]

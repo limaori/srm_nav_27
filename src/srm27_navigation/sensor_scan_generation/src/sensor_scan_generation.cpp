@@ -87,6 +87,15 @@ SensorScanGenerationNode::SensorScanGenerationNode(const rclcpp::NodeOptions & o
   this->declare_parameter<std::string>("base_frame", "");
   this->declare_parameter<std::string>("robot_base_frame", "");
   this->declare_parameter<bool>("publish_tf", true);
+  // 方案 §4.1.1：实车把 robot_base_frame 换成 gimbal_yaw 之后，`lidar -> robot_base_frame`
+  // 是一段**固定外参**（gimbal_yaw -> livox_frame -> livox_imu），可以开机查一次就缓存；
+  // 而 `lidar -> base_frame`（gimbal_yaw -> base_link）要经过关节角，关节角断流时必然查不到。
+  // 打开本参数后：前者只查一次，后者失败只跳过 odom->base_link 的 TF 并告警，/odometry 照常发。
+  // 默认 false = 保持仿真/旧链行为完全不变（每帧查两次，任一失败整帧跳过）。
+  this->declare_parameter<bool>("cache_robot_base_transform", false);
+  // 方案 §4.1 补漏：TF 树可以反转（URDF gimbal_is_root，云台为根、底盘挂末端）。
+  // 打开后直接发 odom -> robot_base_frame，**不再**碰 base_frame 的 TF。
+  this->declare_parameter<bool>("publish_robot_base_tf", false);
   this->declare_parameter<double>("max_sample_gap", 0.20);
   this->declare_parameter<double>("max_position_jump", 0.75);
   this->declare_parameter<double>("max_yaw_jump", 1.20);
@@ -95,6 +104,8 @@ SensorScanGenerationNode::SensorScanGenerationNode(const rclcpp::NodeOptions & o
   this->get_parameter("base_frame", base_frame_);
   this->get_parameter("robot_base_frame", robot_base_frame_);
   this->get_parameter("publish_tf", publish_tf_);
+  this->get_parameter("cache_robot_base_transform", cache_robot_base_transform_);
+  this->get_parameter("publish_robot_base_tf", publish_robot_base_tf_);
   this->get_parameter("max_sample_gap", max_sample_gap_);
   this->get_parameter("max_position_jump", max_position_jump_);
   this->get_parameter("max_yaw_jump", max_yaw_jump_);
@@ -142,38 +153,75 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
   // odom->base_link，避免规划器把失效状态继续用于控制（方案 §2.3 修正项 4）。
   bool used_latest = false;
   std::string tf_error;
-  if (!getTransform(
-        lidar_frame_, robot_base_frame_, pcd_msg->header.stamp, tf_lidar_to_robot_base_,
-        used_latest, tf_error)) {
-    RCLCPP_WARN_THROTTLE(
-      this->get_logger(), *this->get_clock(), 5000,
-      "跳过本次里程计/TF 输出：%s <- %s 查询失败 (%s)", lidar_frame_.c_str(),
-      robot_base_frame_.c_str(), tf_error.c_str());
-    last_transform_used_latest_ = false;
-    return;
+  // `lidar -> robot_base_frame`：默认每帧都查（仿真/旧链行为不变）；打开
+  // cache_robot_base_transform 后它是固定外参，查一次就缓存（方案 §4.1.1）。
+  const bool robot_base_cached = cache_robot_base_transform_ && robot_base_transform_cached_;
+  if (!robot_base_cached) {
+    if (!getTransform(
+          lidar_frame_, robot_base_frame_, pcd_msg->header.stamp, tf_lidar_to_robot_base_,
+          used_latest, tf_error)) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "跳过本次里程计/TF 输出：%s <- %s 查询失败 (%s)", lidar_frame_.c_str(),
+        robot_base_frame_.c_str(), tf_error.c_str());
+      last_transform_used_latest_ = false;
+      return;
+    }
+    if (cache_robot_base_transform_) {
+      robot_base_transform_cached_ = true;
+      RCLCPP_INFO(
+        this->get_logger(), "已缓存固定外参 %s <- %s（之后不再逐帧查询）",
+        robot_base_frame_.c_str(), lidar_frame_.c_str());
+    }
   }
   bool chassis_used_latest = false;
-  if (!getTransform(
-        lidar_frame_, base_frame_, pcd_msg->header.stamp, tf_lidar_to_chassis, chassis_used_latest,
-        tf_error)) {
+  // 缓存模式下这条查询只是"给 RViz 画底盘"用的**可选**项，而 tf2 在目标帧根本不存在时
+  // 也会等满 timeout（实测 0.5 s/帧，直接把 /odometry 拖到 2 Hz）。所以给它一个很短的
+  // 超时：关节角断流时宁可这一帧丢 TF，也不能拖慢导航依赖的 /odometry。
+  //
+  // publish_robot_base_tf=true（TF 树反转）时**根本不查** base_frame：`base_link` 现在是
+  // `gimbal_yaw` 的子节点，它的位姿由 /joint_states 给出，本节点不该再发 odom->base_link。
+  const double chassis_tf_timeout = cache_robot_base_transform_ ? 0.02 : 0.5;
+  const bool have_chassis_tf = !publish_robot_base_tf_ && getTransform(
+    lidar_frame_, base_frame_, pcd_msg->header.stamp, tf_lidar_to_chassis, chassis_used_latest,
+    tf_error, chassis_tf_timeout);
+  if (!have_chassis_tf && !publish_robot_base_tf_) {
+    if (!cache_robot_base_transform_) {
+      // 仿真/旧链：保持原行为 —— 缺 base_frame 就整帧跳过。
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "跳过本次里程计/TF 输出：%s <- %s 查询失败 (%s)", lidar_frame_.c_str(), base_frame_.c_str(),
+        tf_error.c_str());
+      last_transform_used_latest_ = false;
+      return;
+    }
+    // 实车（方案 §4.1.1）：关节角断流时只丢 odom->base_link 的 TF，/odometry 照常发。
+    // 否则导航会跟着 RViz 一起停 —— 底盘位姿本来就不该依赖关节角。
     RCLCPP_WARN_THROTTLE(
       this->get_logger(), *this->get_clock(), 5000,
-      "跳过本次里程计/TF 输出：%s <- %s 查询失败 (%s)", lidar_frame_.c_str(), base_frame_.c_str(),
-      tf_error.c_str());
-    last_transform_used_latest_ = false;
-    return;
+      "跳过 odom->%s 的 TF 发布：%s <- %s 查询失败 (%s)；/odometry 仍按点云频率输出",
+      base_frame_.c_str(), lidar_frame_.c_str(), base_frame_.c_str(), tf_error.c_str());
   }
   last_transform_used_latest_ = used_latest || chassis_used_latest;
 
-  tf_odom_to_chassis = tf_odom_to_lidar * tf_lidar_to_chassis;
   tf_odom_to_robot_base = tf_odom_to_lidar * tf_lidar_to_robot_base_;
+  if (have_chassis_tf) {
+    tf_odom_to_chassis = tf_odom_to_lidar * tf_lidar_to_chassis;
+  }
 
-  const auto chassis_transform = suppressJitter(planarize(tf_odom_to_chassis), false);
   const auto robot_base_transform = suppressJitter(planarize(tf_odom_to_robot_base), true);
 
   if (publish_tf_) {
-    publishTransform(
-      chassis_transform, odometry_msg->header.frame_id, base_frame_, pcd_msg->header.stamp);
+    if (publish_robot_base_tf_) {
+      // 树反转：TF 与 /odometry 共用同一个（未再压平的）机器人位姿。
+      publishTransform(
+        robot_base_transform, odometry_msg->header.frame_id, robot_base_frame_,
+        pcd_msg->header.stamp);
+    } else if (have_chassis_tf) {
+      const auto chassis_transform = suppressJitter(planarize(tf_odom_to_chassis), false);
+      publishTransform(
+        chassis_transform, odometry_msg->header.frame_id, base_frame_, pcd_msg->header.stamp);
+    }
   }
   publishOdometry(
     robot_base_transform, odometry_msg->header.frame_id, robot_base_frame_, pcd_msg->header.stamp);
@@ -217,13 +265,13 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
 
 bool SensorScanGenerationNode::getTransform(
   const std::string & target_frame, const std::string & source_frame, const rclcpp::Time & time,
-  tf2::Transform & transform, bool & used_latest, std::string & error)
+  tf2::Transform & transform, bool & used_latest, std::string & error, double timeout_seconds)
 {
   used_latest = false;
   error.clear();
   try {
     auto transform_stamped = tf_buffer_->lookupTransform(
-      target_frame, source_frame, time, rclcpp::Duration::from_seconds(0.5));
+      target_frame, source_frame, time, rclcpp::Duration::from_seconds(timeout_seconds));
     tf2::fromMsg(transform_stamped.transform, transform);
     return true;
   } catch (tf2::TransformException & ex) {
@@ -232,7 +280,7 @@ bool SensorScanGenerationNode::getTransform(
     // used_latest 会向上暴露，且失败时不再返回单位变换。
     try {
       auto transform_stamped = tf_buffer_->lookupTransform(
-        target_frame, source_frame, tf2::TimePointZero, tf2::durationFromSec(0.5));
+        target_frame, source_frame, tf2::TimePointZero, tf2::durationFromSec(timeout_seconds));
       tf2::fromMsg(transform_stamped.transform, transform);
       used_latest = true;
       RCLCPP_WARN_THROTTLE(

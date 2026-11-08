@@ -212,11 +212,14 @@ struct ReceiveSefdefinedData
   uint16_t crc;
 } __attribute__((packed));
 
-// 0x0010 底盘速度反馈（下位机速度观测器的**融合结果** speed->fused）
+// 0x0010 底盘/云台速度反馈（下位机速度观测器的**融合结果** speed->fused）
 //
 // 语义（下位机口径，别自己重新解释）:
-//   * 底盘系: +x 向前, +y 向左, +z 向上, +wz 俯视逆时针为正；
-//   * vx / vy 单位 m/s，wz 单位 rad/s；
+//   * **vx/vy 是云台系**（+x = 云台前、+y = 云台左）：2026-11-08 起下位机按云台的
+//     "前"执行 vx/vy，回传也用同一个系（方案 §4.6）。
+//   * **wz 是底盘转速**（俯视逆时针为正）：下发的 wz 转的是底盘，不是云台。
+//   * 单位：vx / vy 为 m/s，wz 为 rad/s，chassis_to_gimbal_yaw 为**度**，两路云台转速
+//     为 rad/s。
 //   * 第 4 个字段是 **chassis_to_gimbal_yaw**（单位**度**，不是弧度），定义见字段注释：
 //     它描述的是"底盘车头相对云台"的偏角，**不是**底盘在世界系/上电零位系里的 yaw，
 //     与 IMU、上电零位都无关，由云台 yaw 电机编码器解算。
@@ -224,8 +227,17 @@ struct ReceiveSefdefinedData
 //     拿它当"下位机收到了我的速度"的证据会误判。它的用途是反馈/对账/标定。
 //   * 该包与 0x0001 / 0x000B 按 10 ms 槽位轮转（各约 33.3 Hz），按 cmd_id 分派，
 //     不能按"第几个包"解析；槽位被跳过的轮次该包直接丢失（不是重发）。
-//   * 上行 **vx/vy 仍是底盘系**：云台板只把底盘板算好的速度原样转发，不做旋转。
-constexpr uint16_t DATA_LENGTH_CHASSIS_SPEED = 16;
+//
+// 2026-11-08（方案 §4.4.1）：数据段 16 -> **20 字节**，末尾追加**一路**云台 yaw 转速
+//   （gimbal_yaw_rate_imu，陀螺仪、相对地面）。上下位机要同时更新；
+//   接收侧按 `data_length` 区分新旧帧：16 = 旧帧（转速不可用，不报错），20 = 新帧。
+//
+// ⚠ 只加**陀螺仪**转速，不加编码器转速：编码器转速就是第 4 个字段
+//   `chassis_to_gimbal_yaw` 的变化率，上位机对它求导即可，多发一个 float 只是把
+//   同样的信息再搬一遍（2026-11-08 决定）。
+constexpr uint16_t DATA_LENGTH_CHASSIS_SPEED = 20;
+/// rief 旧帧（2026-11-08 之前）的数据段长度：只有 vx/vy/wz/chassis_to_gimbal_yaw。
+constexpr uint16_t DATA_LENGTH_CHASSIS_SPEED_V1 = 16;
 
 struct ReceiveChassisSpeedData
 {
@@ -234,15 +246,39 @@ struct ReceiveChassisSpeedData
 
   struct
   {
-    float vx;  // m/s, 底盘系 +x 向前
-    float vy;  // m/s, 底盘系 +y 向左
-    float wz;  // rad/s, 俯视逆时针为正
+    float vx;  // m/s, 云台系 +x 向前（云台的"前"）
+    float vy;  // m/s, 云台系 +y 向左
+    float wz;  // rad/s, **底盘**自转，俯视逆时针为正
     // 底盘相对云台的偏角，单位**度**，范围 (-180, 180]，俯视逆时针为正。
     // 定义：以**云台指向**为 0，底盘车头相对云台偏转了多少。
     //   · 云台不动、底盘被推着逆时针转 45° → 从云台看车头在左边 → +45；
     //   · 与 IMU、上电零位、世界系都无关，只来自云台 yaw 电机编码器；
     //   · URDF 的 gimbal_yaw_joint 是反过来的"云台相对底盘"且用弧度，
     //     所以 joint_rad = -chassis_to_gimbal_yaw_deg * π / 180（换算在 cpp 里做）。
+    float chassis_to_gimbal_yaw_deg;
+    // 云台陀螺仪 yaw 转速（rad/s，**相对地面**，俯视逆时针为正）。
+    // 用途：fake_vel_transform 的 yaw 外推（方案 §4.4.2 的 gimbal_rate 源）。
+    // ⚠ 正方向定义电控也不确定，必须先按方案 §8.1 上车实测，不要靠约定。
+    // 编码器转速（云台相对底盘）不单独回传：它 = 上面 chassis_to_gimbal_yaw 的变化率。
+    float gimbal_yaw_rate_imu;
+  } __attribute__((packed)) data;
+
+  uint16_t crc;
+} __attribute__((packed));
+
+// 旧帧：只有前 4 个字段。单独一个结构体是**必须**的 ——
+// `fromVector<T>()` 在数据短于结构体时会 stderr 警告并补零，拿新结构体去读 25 字节旧帧
+// 会每帧刷一行警告（33 Hz），而且分不清"字段真的是 0"还是"帧里没有这个字段"。
+struct ReceiveChassisSpeedDataV1
+{
+  HeaderFrame frame_header;
+  uint16_t cmd_id;
+
+  struct
+  {
+    float vx;
+    float vy;
+    float wz;
     float chassis_to_gimbal_yaw_deg;
   } __attribute__((packed)) data;
 
@@ -251,10 +287,16 @@ struct ReceiveChassisSpeedData
 
 static_assert(
   sizeof(ReceiveChassisSpeedData) == 9 + DATA_LENGTH_CHASSIS_SPEED,
-  "ReceiveChassisSpeedData 必须严格 25 字节: 帧头 5 + cmd_id 2 + 数据 16 + CRC16 2。");
+  "ReceiveChassisSpeedData 必须严格 29 字节: 帧头 5 + cmd_id 2 + 数据 20 + CRC16 2。");
+static_assert(
+  sizeof(ReceiveChassisSpeedDataV1) == 9 + DATA_LENGTH_CHASSIS_SPEED_V1,
+  "ReceiveChassisSpeedDataV1 必须严格 25 字节: 帧头 5 + cmd_id 2 + 数据 16 + CRC16 2。");
 static_assert(
   offsetof(ReceiveChassisSpeedData, data) == 7,
   "0x0010 的数据段必须紧跟在 cmd_id 之后（协议 §4.1: 帧头 5 + cmd_id 2）。");
+static_assert(
+  offsetof(ReceiveChassisSpeedData, data.gimbal_yaw_rate_imu) == 7 + 16,
+  "云台转速必须紧跟在旧的 4 个 float32 之后（数据段偏移 16）。");
 
 /********************************************************/
 /* Send data                                            */

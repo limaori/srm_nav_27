@@ -100,10 +100,11 @@ OMNI_PLUGIN = "srm27_omni_pid_controller::OmniPidPursuitController"
 VARIANT_MINCO = "minco"
 VARIANT_OMNI = "omni"
 VARIANT_NONE = ""
-#: 附加 profile：fakeyaw 迁移链（机器人参考系 base_link_fake、导航拥有 wz）。
+#: 附加 profile：fakeyaw 迁移链（机器人参考系 gimbal_yaw_fake / base_link_fake）。
 #: 它**叠加**在控制器变体之上生效（`@minco` 先、`@fakeyaw` 后，后者优先）：
-#: 同一条 MINCO 链，"导航不控自转"与"导航控自转"对 velocity_smoother 的 yaw 界
-#: 要求正好相反（前者钳 0，后者必须放开），而控制器变体只有一个。
+#: 迁移链需要单独钉住 velocity_smoother 的 yaw 界（2026-11-08 云台系改造后是**钳 0**：
+#: 导航只出平移，底盘 wz 由决策层的 rotation_cmd 经 srm_cmd_mux 给出），
+#: 而控制器变体那一段管不到这件事。
 VARIANT_FAKEYAW = "fakeyaw"
 
 #: Nav2 的节点段里这层是纯容器，比较路径时忽略。
@@ -245,10 +246,11 @@ def detect_variant(cfg):
 
 
 def detect_profile(cfg):
-    """判定参数文件是否属于 fakeyaw 迁移链（导航拥有 wz、参考系 base_link_fake）。
+    """判定参数文件是否属于 fakeyaw 迁移链（参考系 gimbal_yaw_fake / base_link_fake）。
 
     判据取"链路事实"而不是文件名：只要出现下面任一条，就说明这条链的机器人参考系
-    已经换成不随底盘自转的虚拟系，`velocity_smoother` 的 yaw 界必须放开：
+    已经换成不随底盘/云台自转的虚拟系，`velocity_smoother` 的 yaw 界要单独钉住
+    （2026-11-08 起是钳 0：导航只出平移）：
 
     * `FollowPath.fake_base_frame` 非空（MINCO 迁移链的正常写法）；
     * `fake_vel_transform.transform_mode == nav_se2`（转换器在迁移模式）；

@@ -19,14 +19,18 @@
 而这层错了的表现同样是"链路全绿、车不动"，所以这里钉住四件事：
 
 1. **唯一链路**：实车入口恒走 fakeyaw 迁移链（use_fakeyaw_transform=True、
-   command_frame=base_link_fake、cmd_vel_nav_topic=cmd_vel_nav_fake）。
+   command_frame=gimbal_yaw_fake、cmd_vel_nav_topic=cmd_vel_nav_fake）。
 2. **mux 出口是 cmd_vel_chassis**：串口节点只会订阅这个名字；出口写成 cmd_vel_sim
    （仿真默认值）时 launch 必须直接报错，而不是让车静默不动。
 3. **参数文件与 launch 一致**：fake 的输入/输出 == Nav2 出口/mux 输入；导航参考系在
-   bt / 两份 costmap / behavior 四处都是 base_link_fake；odom_timeout 容得下实车
+   bt / 两份 costmap / behavior 四处都是 gimbal_yaw_fake；odom_timeout 容得下实车
    10 Hz 的 /odometry。
-4. **yaw_mode 注入**：spin 时判停器换成 OmniStoppedGoalChecker（自转中不可能停稳），
-   其余模式用带 rot_stopped_velocity 的 StoppedGoalChecker。
+4. **云台系（2026-11-08）**：/odometry 的 child = gimbal_yaw 且固定外参已缓存（不再依赖
+   关节角 TF）；loam_interface 的开机快照也取 gimbal_yaw，并把 odom 的 z 拉回地面。
+5. **两路 wz**：mux 的第二路是决策层 rotation_cmd（只取 angular.z）；导航默认 xy_only
+   （只出平移），判停器是只看平移的 OmniStoppedGoalChecker。
+6. **TF 树方向**：`odom -> gimbal_yaw` 由本节点直接发（`publish_robot_base_tf`），
+   关节角只留在末端 `gimbal_yaw -> base_link`（细节见 test_gimbal_tree_direction.py）。
 
 测试不启动任何节点：只构造 LaunchDescription、求值替换、跑一个 OpaqueFunction。
 """
@@ -153,10 +157,14 @@ def test_defaults_select_the_migration_chain():
     conf = context.launch_configurations
 
     _assert(conf["use_fakeyaw_transform"] == "True", f"实车入口必须默认启用 fake 转换器: {conf}")
-    _assert(conf["command_frame"] == "base_link_fake", "命令系必须是 base_link_fake")
+    _assert(conf["command_frame"] == "gimbal_yaw_fake", "命令系必须是 gimbal_yaw_fake")
     _assert(conf["cmd_vel_nav_topic"] == "cmd_vel_nav_fake",
             "Nav2 出口必须是 cmd_vel_nav_fake（fake 的输入）")
     _assert(conf["use_chassis_mux"] == "True", "实车入口必须默认串 mux")
+    _assert(conf["mux_spin_topic"] == "rotation_cmd",
+            "mux 的第二路必须默认是决策层的 rotation_cmd（方案 §4.3）")
+    _assert(conf["yaw_mode"] == "xy_only",
+            "实车默认必须是 xy_only：导航只出平移，底盘 wz 由决策层给（方案 §4.2）")
     _assert(conf["mux_nav_topic"] == "cmd_vel_nav_body", "mux 输入必须是 fake 的输出")
     _assert(conf["mux_output_topic"] == "cmd_vel_chassis",
             "mux 输出必须是 cmd_vel_chassis（串口节点订阅它）")
@@ -172,6 +180,7 @@ def test_defaults_select_the_migration_chain():
 
     mux = _include_arguments(includes, context, "srm_chassis_control.launch.py")
     _assert(mux["nav_topic"] == "cmd_vel_nav_body", mux)
+    _assert(mux["spin_topic"] == "rotation_cmd", f"mux 必须订阅决策层自转: {mux}")
     _assert(mux["output_topic"] == "cmd_vel_chassis", mux)
 
     messages = "\n".join(_run_speed_chain_check(functions, context))
@@ -195,41 +204,58 @@ def test_params_file_matches_the_launch_wiring():
     _assert(fake["output_cmd_vel_topic"] == mux["nav_topic"],
             f"fake 输出 {fake['output_cmd_vel_topic']} != mux 输入 {mux['nav_topic']}")
     _assert(fake["transform_mode"] == "nav_se2", "实车参数必须是 nav_se2（legacy 会叠加自转）")
-    _assert(fake["robot_base_frame"] == "base_link" and
-            fake["fake_robot_base_frame"] == "base_link_fake",
-            "fake 节点 TF 父子必须与 TF 拓扑一致 (base_link -> base_link_fake)")
+    _assert(fake["robot_base_frame"] == "gimbal_yaw" and
+            fake["fake_robot_base_frame"] == "gimbal_yaw_fake",
+            "fake 节点 TF 父子必须与 TF 拓扑一致 (gimbal_yaw -> gimbal_yaw_fake)")
     _assert(float(fake["odom_timeout"]) >= 0.3,
             f"实车 /odometry 是 10 Hz，odom_timeout 至少 0.3 s（当前 {fake['odom_timeout']}）")
+    _assert(fake.get("yaw_rate_source") == "imu",
+            "云台系下 yaw 外推必须用云台转速（默认 imu；gimbal_rate 待 §8.1 验符号后切换）")
     _assert(fake.get("chassis_cmd_vel_topic", "") == "",
-            "yaw 外推默认必须关闭（串口延迟未标定前不要打开）")
+            "cmd_wz 源必须保持关闭（云台系下底盘 wz ≠ 云台转速）")
+
+    scan = cfg["sensor_scan_generation"]["ros__parameters"]
+    _assert(scan["robot_base_frame"] == "gimbal_yaw",
+            "/odometry 的机器人系必须是 gimbal_yaw（雷达定位直接给出，不经过关节角）")
+    _assert(scan.get("cache_robot_base_transform") is True,
+            "实车必须打开固定外参缓存，否则关节角断流会拖垮 /odometry（方案 §4.1.1）")
+    _assert(scan.get("publish_robot_base_tf") is True,
+            "TF 树反转后必须直接发 odom->gimbal_yaw（不能再发 odom->base_link，"
+            "否则 base_link 有两个父节点）")
+    for node in ("loam_interface", "zlio_bridge"):
+        section = cfg[node]["ros__parameters"]
+        _assert(section["base_frame"] == "gimbal_yaw",
+                f"{node}.base_frame 必须是 gimbal_yaw（开机快照不能含关节角，方案 §4.7）")
+        _assert(section.get("ground_frame") == "base_link",
+                f"{node}.ground_frame 必须补偿云台高度，否则代价地图的绝对 z 阈值整体上移")
 
     follow_path = cfg["controller_server"]["ros__parameters"]["FollowPath"]
+    _assert(follow_path["base_frame"] == "gimbal_yaw",
+            "MINCO 的车体系必须是 odometry 的 child（gimbal_yaw）")
     _assert(follow_path["command_frame"] == context.launch_configurations["command_frame"],
             "参数文件的 command_frame 与 launch 默认值必须一致")
     _assert(follow_path["fake_base_frame"] == fake["fake_robot_base_frame"],
             "FollowPath.fake_base_frame 必须与 fake 节点的 fake_robot_base_frame 一致")
-    _assert(follow_path["yaw_policy"]["mode"] in ("se2", "spin", "xy_only"),
-            "yaw_policy.mode 取值非法")
+    _assert(follow_path["yaw_policy"]["mode"] == "xy_only",
+            "实车参数文件必须是 xy_only（云台系下导航只出平移，方案 §4.2）")
     spin_request = follow_path["spin_request"]
     _assert(spin_request["topic"] == "rotation_cmd",
             f"spin_request.topic 必须是 rotation_cmd（spin_control.sh 发的就是它）: {spin_request}")
     _assert(float(spin_request["timeout"]) > 0.0, "spin_request.timeout 必须为正")
 
     checker = cfg["controller_server"]["ros__parameters"]["general_goal_checker"]
-    _assert("StoppedGoalChecker" in checker["plugin"] and
-            "OmniStoppedGoalChecker" not in checker["plugin"],
-            f"迁移链必须用带角速度停稳判定的 StoppedGoalChecker: {checker['plugin']}")
-    _assert(float(checker["rot_stopped_velocity"]) > 0.0,
-            "rot_stopped_velocity 必须显式给正数")
+    _assert("OmniStoppedGoalChecker" in checker["plugin"],
+            f"xy_only 下必须用只看平移的判停器（自转时 StoppedGoalChecker 永不判到点）: "
+            f"{checker['plugin']}")
 
     for node in ("bt_navigator", "behavior_server"):
         section = cfg[node]["ros__parameters"]
-        _assert(section["robot_base_frame"] == "base_link_fake",
-                f"{node}.robot_base_frame 必须是 base_link_fake")
+        _assert(section["robot_base_frame"] == "gimbal_yaw_fake",
+                f"{node}.robot_base_frame 必须是 gimbal_yaw_fake")
     for node in ("local_costmap", "global_costmap"):
         section = cfg[node][node]["ros__parameters"]
-        _assert(section["robot_base_frame"] == "base_link_fake",
-                f"{node}.robot_base_frame 必须是 base_link_fake")
+        _assert(section["robot_base_frame"] == "gimbal_yaw_fake",
+                f"{node}.robot_base_frame 必须是 gimbal_yaw_fake")
 
 
 def test_zlio_real_wiring_uses_g_units_and_livox():
@@ -248,23 +274,32 @@ def test_zlio_real_wiring_uses_g_units_and_livox():
 
 
 def test_yaw_mode_is_injected_into_the_params():
-    """yaw_mode 要真的改写参数文件（否则 --chassis-spin 会被航向策略忽略）。"""
-    module = _load_launch_module()
-    _, context, includes, _, _ = _make_context(
-        module, {"params_file": str(FAKEYAW_PARAMS), "yaw_mode": "spin"}
-    )
-    nav2 = _include_arguments(includes, context, "nav2_stack_launch.py")
-    params_sub = nav2["params_file"]
-    # params_file 是 RewrittenYaml 替换；求值一次看落盘内容。
-    path = _sub(context, params_sub)
+    """yaw_mode 要真的改写参数文件，且判停器跟着换（方案 §4.2）。
+
+    实车默认 xy_only：导航只出平移，底盘 wz 由决策层 rotation_cmd 给。
+    se2 / auto 都必须被改写（se2 在云台系下不成立），spin 保留但同样用平移判停器。
+    """
     import yaml
 
-    cfg = yaml.safe_load(open(path))
-    mode = cfg["controller_server"]["ros__parameters"]["FollowPath"]["yaw_policy"]["mode"]
-    plugin = cfg["controller_server"]["ros__parameters"]["general_goal_checker"]["plugin"]
-    _assert(mode == "spin", f"yaw_mode=spin 没有注入到参数: {mode}")
-    _assert("OmniStoppedGoalChecker" in plugin,
-            f"spin 模式必须换成只看平移的判停器（自转中停不下来）: {plugin}")
+    module = _load_launch_module()
+    for requested, expected_mode in (
+        ("auto", "xy_only"),
+        ("xy_only", "xy_only"),
+        ("se2", "xy_only"),
+        ("spin", "spin"),
+    ):
+        _, context, includes, _, _ = _make_context(
+            module, {"params_file": str(FAKEYAW_PARAMS), "yaw_mode": requested}
+        )
+        nav2 = _include_arguments(includes, context, "nav2_stack_launch.py")
+        path = _sub(context, nav2["params_file"])
+        cfg = yaml.safe_load(open(path))
+        mode = cfg["controller_server"]["ros__parameters"]["FollowPath"]["yaw_policy"]["mode"]
+        plugin = cfg["controller_server"]["ros__parameters"]["general_goal_checker"]["plugin"]
+        _assert(mode == expected_mode,
+                f"yaw_mode={requested} 应注入成 {expected_mode}，实际 {mode}")
+        _assert("OmniStoppedGoalChecker" in plugin,
+                f"yaw_mode={requested} 的判停器必须只看平移（自转中停不下来）: {plugin}")
 
 
 def test_mux_output_must_be_the_serial_topic():
@@ -296,7 +331,7 @@ def test_old_chain_and_bad_frame_are_rejected():
         raise AssertionError("use_fakeyaw_transform=False 没有被拦下来")
 
     _, context, _, _, functions = _make_context(module, {"params_file": str(FAKEYAW_PARAMS)})
-    context.launch_configurations["command_frame"] = "base_link"
+    context.launch_configurations["command_frame"] = "gimbal_yaw"
     try:
         _run_speed_chain_check(functions, context)
     except RuntimeError as error:

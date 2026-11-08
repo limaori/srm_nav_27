@@ -37,7 +37,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_test REQUIRED)
   foreach(test_name test_fakeyaw_launch_wiring test_fakeyaw_real_wiring
                     test_cli_parity test_lio_frontend_wiring test_zlio_bridge_math
-                    test_speed_limits)
+                    test_speed_limits test_gimbal_tree_direction)
     ament_add_test(${test_name}
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO
       COMMAND ${SRM27_PYTHON3_EXECUTABLE}

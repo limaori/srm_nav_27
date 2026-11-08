@@ -58,6 +58,11 @@ private:
   std::string odom_frame_;
   std::string lidar_frame_;
   std::string base_frame_;
+  /// \brief 原点在地面的参考系（实车 = base_link）；空 = 不做 z 补偿。
+  ///
+  /// base_frame 不在车底平面时（云台系改造后是 gimbal_yaw），odom 的 z=0 会跟着抬起来，
+  /// 而代价地图/体素层的 z 阈值是绝对值。这里在拍快照时把这段高度补偿掉。
+  std::string ground_frame_;
   bool planarize_pose_;
 
   bool base_frame_to_lidar_initialized_;

@@ -57,12 +57,14 @@
 
 ### 1.2 红线（下位机反馈）从哪来
 
-下位机按 `0x0010` 包回传底盘速度观测值（4 个 float32：`vx`/`vy`/`wz`/`chassis_to_gimbal_yaw_deg`），
-`srm27_nav_protocol` 解出来发三条话题：
+下位机按 `0x0010` 包回传速度观测值（**2026-11-08 起 5 个 float32**：`vx`/`vy`/`wz`/
+`chassis_to_gimbal_yaw_deg` + 云台陀螺仪 yaw 转速；旧固件仍是 4 个），`srm27_nav_protocol`
+解出来发**四条**话题（前三条见下表，第四条是 `gimbal_yaw_rate`（`TwistStamped`），
+只给 yaw 外推算转速用，本工具暂不画）：
 
 | 话题（默认） | 类型 | 内容 |
 | --- | --- | --- |
-| `chassis_speed` | `geometry_msgs/msg/TwistStamped` | `twist.linear.x/y` = vx/vy [m/s]（**底盘系**），`twist.angular.z` = wz [rad/s] |
+| `chassis_speed` | `geometry_msgs/msg/TwistStamped` | `twist.linear.x/y` = vx/vy [m/s]（**云台系**，`frame_id=gimbal_yaw`），`twist.angular.z` = wz [rad/s]（**底盘**转速） |
 | `chassis_to_gimbal_yaw_deg` | `std_msgs/msg/Float32` | 底盘相对云台的偏角（**度**，(-180,180]，云台指向为 0） |
 | `gimbal_joint_angle` | `std_msgs/msg/Float32` | 同上换成 URDF `gimbal_yaw_joint` 的关节角（云台相对底盘，弧度，另带 `gimbal_joint_sign`） |
 

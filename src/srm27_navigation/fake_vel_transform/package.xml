@@ -16,6 +16,8 @@
   <depend>rclcpp_components</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <!-- yaw 外推的 Mid-360 IMU 推算源（方案 §4.4.3）：sensor_msgs/Imu -->
+  <depend>sensor_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>

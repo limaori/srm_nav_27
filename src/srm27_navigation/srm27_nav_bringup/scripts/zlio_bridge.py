@@ -286,6 +286,12 @@ class ZlioBridge(Node):
 
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
+        # 原点在地面的参考系（实车 = base_link）。base_frame 不在车底平面时（2026-11-08
+        # 云台系改造后是 gimbal_yaw），odom 的 z=0 会跟着抬到云台平面，而代价地图/体素层的
+        # min/max_obstacle_height 与 origin_z 都是**绝对 z** —— 抬高之后轮子、低矮台阶会被
+        # 当成"太低"丢掉。这里在拍快照时把这段高度反向补偿掉，odom z=0 仍在地面。
+        # 留空 = 不补偿（仿真/旧链行为完全不变）。
+        self.declare_parameter("ground_frame", "")
         self.declare_parameter("lidar_frame", "front_mid360")
         self.declare_parameter("frame_topic", "zlio/frame")
         self.declare_parameter("session_topic", "zlio/session")
@@ -319,6 +325,7 @@ class ZlioBridge(Node):
 
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
+        self.ground_frame = str(self.get_parameter("ground_frame").value)
         self.lidar_frame = str(self.get_parameter("lidar_frame").value)
         frame_topic = str(self.get_parameter("frame_topic").value)
         session_topic = str(self.get_parameter("session_topic").value)
@@ -563,8 +570,15 @@ class ZlioBridge(Node):
             #   仿真雷达装了 30° roll，R_0 就带 30°，少乘逆等于把安装 roll 算两次：
             #   odom 系整体被绕一根水平轴转了约 30°，点云与地图平面歪 30°。
             #   形式与 _anchor() 的换代锚定完全一致（那里本来就是对的）。
+            ground_offset = self._capture_ground_offset(stamp)
+            if ground_offset is None:
+                # 与 mount 一样：拿不到就不猜，宁可丢帧。
+                self.dropped += 1
+                return
             self.mount = mount
-            self.t_off = mount * raw.inverse()
+            # ⚠ 补偿作用在 t_off（= odom 对齐量）上：点云与位姿走同一个 t_off，
+            # 两者一起平移，几何关系不变，但 odom 的 z 原点回到地面。
+            self.t_off = ground_offset * mount * raw.inverse()
             self.first_raw = raw
             self.epoch = msg.epoch
             self.get_logger().info(
@@ -623,6 +637,33 @@ class ZlioBridge(Node):
             return None
         self._offset_used_latest = True
         return _Rigid.from_transform_stamped(stamped)
+
+    def _capture_ground_offset(self, stamp):
+        """把 odom 的 z 原点拉回地面：返回 T(地面补偿) 或 None（还没查到）。
+
+        `ground_frame` 为空时返回单位变换（不做补偿）。否则查
+        `T(base_frame <- ground_frame)`，它的 z 是"地面在 base_frame 下方多少"，
+        取负得到"base_frame 离地多少"，作为纯 z 平移前乘到 t_off 上。
+        """
+        if not self.ground_frame:
+            return _Rigid()
+        timeout = Duration(seconds=self.tf_timeout)
+        try:
+            stamped = self.tf_buffer.lookup_transform(
+                self.base_frame, self.ground_frame, Time(), timeout
+            )
+        except TransformException:
+            self._warn_throttle(
+                "tf_ground",
+                f"等待 T({self.base_frame}←{self.ground_frame}) 以补偿 odom 的 z，在此之前丢帧",
+            )
+            return None
+        dz = -stamped.transform.translation.z
+        self.get_logger().info(
+            f"odom z 按 ground_frame={self.ground_frame} 拉回地面: "
+            f"base_frame={self.base_frame} 离地 {dz:.4f} m（补偿 {dz:+.4f} m）"
+        )
+        return _Rigid(t=(0.0, 0.0, dz))
 
     def _anchor(self, new_epoch, first_raw):
         """换代锚定（方案 §4.3）：T_off ← T_off · R_last_old · R_first_new⁻¹。"""

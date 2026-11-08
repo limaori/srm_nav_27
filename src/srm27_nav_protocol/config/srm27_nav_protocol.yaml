@@ -67,15 +67,22 @@
     # 本节点目前只解析 0x0010（速度与云台偏角），另外两包是裁判系统数据，**本车没有
     # 调用 RefereeInit()，它们实际恒为全 0**，解析了也没有意义。
     #
-    # 0x0010 = 4 个 float32: vx(m/s)、vy(m/s)、wz(rad/s)、chassis_to_gimbal_yaw(度)，
-    # 填充的是**底盘速度观测器的融合结果**（不是轮速正解），坐标系是底盘系
-    # （+x 前、+y 左、+z 上、+wz 俯视逆时针）。
+    # 0x0010（2026-11-08 起数据段 20 字节）= 5 个 float32：
+    #   vx(m/s)、vy(m/s)、wz(rad/s)、chassis_to_gimbal_yaw(度)、
+    #   gimbal_yaw_rate_imu(rad/s)。
+    # 先按 16 字节（4 个 float32）发的旧固件也能解析（转速记为不可用）。
+    # 编码器转速不单独回传：它 = chassis_to_gimbal_yaw 的变化率（上位机求导即可）。
+    # 填充的是**底盘速度观测器的融合结果**（不是轮速正解）。
+    #
+    # 坐标系（**2026-11-08 改过**，下位机已改为按云台系下发/回传）：
+    #   vx/vy：**云台系**（+x = 云台前、+y = 云台左）；下位机按云台的"前"执行 vx/vy，
+    #          回传也用同一个系。见下面 chassis_speed_frame 的说明。
+    #   wz   ：**底盘**自转（rad/s，俯视逆时针为正）；下发的 wz 转的是底盘，不是云台。
     #
     # 第 4 个字段的含义（**2026-11-08 改过**，别再按"底盘 yaw"理解）：
     #   chassis_to_gimbal_yaw：以**云台指向为 0**，底盘车头相对云台偏转的角度；
     #   单位**度**，范围 (-180, 180]，俯视逆时针为正；由云台 yaw 电机编码器解算，
     #   与 IMU、上电零位、世界系都无关。云台不动、底盘被推着逆时针转 45° → +45。
-    #   上行 vx/vy **仍是底盘系**：云台板只转发底盘算好的速度，不做旋转。
     #
     # 这是**观测值**，不是"指令已执行"的回显：指令→底盘→观测有延迟和尺度差。
     # 用途: 速度反馈、指令/实际对账、wz 符号与增益标定、示波。
@@ -85,16 +92,32 @@
     chassis_to_gimbal_yaw_topic: "chassis_to_gimbal_yaw_deg"
     # Float32: 换算给 URDF gimbal_yaw_joint 的关节角（云台相对底盘、弧度、俯视逆时针为正）：
     #   joint_rad = gimbal_joint_sign × chassis_to_gimbal_yaw_deg × π / 180，并 wrap 到 (-π, π]
+    #   （树反转后 sign = +1，即直接就是关节角的定义方向）
     # 这条话题直接喂 gimbal_joint_state_relay 的 float32 模式；
     # start_real_nav.sh 默认就带 --gimbal-joint-topic gimbal_joint_angle。
-    # 符号默认 -1.0（下位机"底盘相对云台" ↔ URDF"云台相对底盘"，互为相反数）。
+    # 符号默认 **+1.0**（2026-11-08 TF 树反转：URDF 的根是 gimbal_yaw、base_link 挂在它下面，
+    # gimbal_yaw_joint 的角就是"底盘相对云台"，与下位机的 chassis_to_gimbal_yaw 同向）。
     # **符号接反比不接更糟**（base_link 反向转，速度方向误差翻倍）：
     # 首次上车一定在 RViz 里核对——云台不动、手转底盘时 base_link 要跟着底盘转；
-    # 反了就把这里改成 +1.0 重启（launch 读的就是本文件，不用重新编译）；
+    # 反了就把这里改成 -1.0 重启（launch 读的就是本文件，不用重新编译）；
     # 直接 ros2 run 起节点时也可以 --ros-args -p gimbal_joint_sign:=1.0 临时覆盖。
     gimbal_joint_topic: "gimbal_joint_angle"
-    gimbal_joint_sign: -1.0
-    chassis_speed_frame: "base_link"            # TwistStamped.header.frame_id
+    gimbal_joint_sign: +1.0
+    # 2026-11-08（方案 §4.4.1）：0x0010 数据段 16 -> 20 字节，末尾追加**云台陀螺仪**转速。
+    # TwistStamped（angular.z，rad/s，stamp = 收到串口帧的时刻）：
+    #   gimbal_yaw_rate = 陀螺仪转速（**相对地面**，俯视逆时针为正）-> fake_vel_transform
+    #                     的 yaw 外推（yaw_rate_source=gimbal_rate）
+    # 编码器转速（云台相对底盘）不单独回传，它就是 chassis_to_gimbal_yaw 的变化率；
+    # 需要对照时对数取差值即可（陀螺仪转速 − 关节角变化率 ≈ 底盘自转）。
+    # ⚠ 陀螺仪转速的正方向电控也不确定，先按方案 §8.1 上车实测再改 yaw_rate_source。
+    # 旧帧（data_length=16）没有这个字段：这条话题**不发**，也不报错。
+    gimbal_yaw_rate_topic: "gimbal_yaw_rate"
+    # /chassis_speed 的 TwistStamped.header.frame_id，**只描述 vx/vy 所在的系**。
+    # 2026-11-08（方案 §4.6）：从 base_link 改为 gimbal_yaw —— 下位机回传的 vx/vy
+    # 按**云台**方向，配成 base_link 会让下游按底盘系解读，差一个关节角。
+    # ⚠ angular.z 例外：wz **始终是底盘转速**（下发的 wz 转的是底盘），
+    #   frame_id 对它没有意义，下游一律按底盘转速直接用。
+    chassis_speed_frame: "gimbal_yaw"           # TwistStamped.header.frame_id（只描述 vx/vy）
     # 失联告警门限（秒）。0x0010 约 33.3 Hz（10 ms 槽位轮转），0.5 s ≈ 连丢 16 个槽位。
     # 对**速度反馈**只影响日志（示波/对账），不影响控制链。
     # ⚠ 但它同时断掉 gimbal_joint_angle：relay 的 timeout_sec(0.3 s) 一到就停发

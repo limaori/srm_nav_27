@@ -173,34 +173,60 @@ def _joint_origin(joint):
 def lidar_mounting(robot, base_link, lidar_link):
     """从展开后的 URDF 解析 ``base_link -> lidar_link`` 的组合位姿。
 
-    路径上可能是多段固定关节（例如 ``base_link -> gimbal_yaw -> livox_frame``），
-    这里把每段 origin 依次复合；遇到非固定关节（云台放开成 revolute 时）按**零位**
-    处理——那正是"安装位姿"的语义（安装角与云台角是两回事）。
+    2026-11-08（方案 §4.1 补漏）：TF 树的根可以被反转（`gimbal_is_root`）——
+    云台做根、底盘挂在它下面。那样 `base_link` 反而在雷达**下面**，只"往上走"的
+    旧实现找不到路径，所以这里改成在**无向**关节图上做 BFS：
+      向上走（child -> parent）用关节 origin，向下走（parent -> child）用它的逆。
+    路径上的关节**一律按零位**处理 —— 那正是"安装位姿"的语义（安装角与云台角是两回事），
+    非固定关节（云台 revolute）的 origin 就是零位变换，直接可用。
     """
-    parents = {}
+    if base_link == lidar_link:
+        return {"xyz": [0.0, 0.0, 0.0], "rpy": [0.0, 0.0, 0.0]}
+
+    edges = {}
     for joint in robot.findall("joint"):
-        parents[joint.find("child").get("link")] = joint
+        parent = joint.find("parent").get("link")
+        child = joint.find("child").get("link")
+        # (邻居, 关节, 是否反着走) —— 反着走时变换要取逆。
+        edges.setdefault(parent, []).append((child, joint, False))
+        edges.setdefault(child, []).append((parent, joint, True))
 
-    chain = []
-    link = lidar_link
-    while link != base_link:
-        joint = parents.get(link)
-        if joint is None:
-            raise ValueError(f"URDF 里 {link!r} 到 {base_link!r} 没有关节链")
-        chain.append(joint)
-        link = joint.find("parent").get("link")
-        if len(chain) > 32:
-            raise ValueError("URDF 关节链异常（疑似成环）")
-    chain.reverse()
+    from collections import deque
 
-    position = [0.0, 0.0, 0.0]
-    orientation = (0.0, 0.0, 0.0, 1.0)
-    for joint in chain:
-        xyz, rpy = _joint_origin(joint)
-        rotated = _rotate(orientation, xyz)
-        position = [position[i] + rotated[i] for i in range(3)]
-        orientation = _quaternion_multiply(orientation, _quaternion_from_rpy(*rpy))
-    return {"xyz": position, "rpy": list(_rpy_from_quaternion(orientation))}
+    # 队列元素：(当前 link, T(base_link <- 当前 link) 的平移, 同一变换的四元数)
+    queue = deque([(base_link, [0.0, 0.0, 0.0], (0.0, 0.0, 0.0, 1.0))])
+    seen = {base_link}
+    while queue:
+        link, position, orientation = queue.popleft()
+        if link == lidar_link:
+            return {"xyz": position, "rpy": list(_rpy_from_quaternion(orientation))}
+        for neighbor, joint, inverted in edges.get(link, []):
+            if neighbor in seen:
+                continue
+            seen.add(neighbor)
+            xyz, rpy = _joint_origin(joint)
+            if inverted:
+                # T(link <- neighbor) = inverse(T(neighbor <- link))
+                step_quaternion = _quaternion_inverse(_quaternion_from_rpy(*rpy))
+                step_position = _rotate(step_quaternion, [-value for value in xyz])
+            else:
+                step_quaternion = _quaternion_from_rpy(*rpy)
+                step_position = _rotate(orientation, xyz)
+            queue.append((
+                neighbor,
+                [position[i] + step_position[i] for i in range(3)],
+                _quaternion_multiply(orientation, step_quaternion),
+            ))
+    raise ValueError(f"URDF 里 {lidar_link!r} 到 {base_link!r} 没有关节链")
+
+
+def _quaternion_inverse(quaternion):
+    """单位四元数的逆（共轭）。"""
+    w, x, y, z = quaternion
+    norm = w * w + x * x + y * y + z * z
+    if norm <= 0.0:
+        raise ValueError("退化四元数")
+    return (w / norm, -x / norm, -y / norm, -z / norm)
 
 
 def build_description(
@@ -209,6 +235,7 @@ def build_description(
     lidar_rpy,
     lidar_link_name="livox_frame",
     gimbal_joint_type="revolute",
+    gimbal_is_root=False,
 ):
     """构建实车 robot_description。
 
@@ -224,6 +251,13 @@ def build_description(
     兼容措施：拿不到 ``gimbal_yaw_joint`` 的关节角时，``robot_state_publisher`` 会把
     它摆在 0 位，TF 与旧的 ``fixed`` 完全一致，所以**不会因为上游没发关节状态而出问题**。
     需要回退时把它传成 ``"fixed"``（见 launch 的 ``gimbal_joint_type`` 参数）。
+
+    ``gimbal_is_root``（2026-11-08，实车用）：把 TF 树的根反过来 —— ``gimbal_yaw`` 是根、
+    ``base_link``（底盘）挂在它下面。雷达定位直接给云台位姿，于是 ``odom -> gimbal_yaw``
+    不经过关节角；关节角只在树的末端，断了只会让底盘从 RViz 里消失，导航不受影响。
+    此时关节角是"**底盘相对云台**"，与下位机回传的 `chassis_to_gimbal_yaw` 同向
+    （`srm27_nav_protocol` 的 `gimbal_joint_sign` 要用 +1.0）。
+    默认 False = 原来的方向（根是 base_link），仿真与旧配置行为不变。
     """
     if gimbal_joint_type not in ("revolute", "fixed"):
         raise ValueError(
@@ -233,6 +267,7 @@ def build_description(
         "root_frame": "base_link",
         "wheel_joint_type": "fixed",
         "gimbal_joint_type": gimbal_joint_type,
+        "gimbal_is_root": "true" if gimbal_is_root else "false",
         "lidar_link_name": lidar_link_name,
     }
     if str(lidar_xyz).strip():
@@ -252,10 +287,20 @@ def build_description(
     # 安装位姿从模型本身解析（含云台零位），不再由 launch 另抄一份数值。
     mounting = lidar_mounting(robot, "base_link", lidar_link_name)
 
+    # 水平二维切片系 livox_scan 挂在**雷达所在的那一支**上：
+    #   常规树（根 = base_link）挂在 base_link 下，偏移 = T(base_link <- 雷达)；
+    #   反转树（根 = gimbal_yaw）挂在 gimbal_yaw 下，偏移 = T(gimbal_yaw <- 雷达)。
+    # 两种情况下它在世界系里的位置都是"雷达高度上的一个水平系"，只是跟着谁转不同：
+    # 反转树里它跟云台转（雷达就在云台上），这才是对的。
+    scan_parent = "gimbal_yaw" if gimbal_is_root else "base_link"
+    scan_offset = (
+        mounting["xyz"]
+        if scan_parent == "base_link"
+        else lidar_mounting(robot, scan_parent, lidar_link_name)["xyz"]
+    )
     for child, parent, translation in [
         ("livox_imu", lidar_link_name, [-value for value in imu_translation]),
-        # livox_scan 是**水平**的二维切片系：留在 base_link 下，高度取雷达高度。
-        ("livox_scan", "base_link", mounting["xyz"]),
+        ("livox_scan", scan_parent, scan_offset),
     ]:
         ET.SubElement(robot, "link", name=child)
         joint = ET.SubElement(robot, "joint", name=f"{child}_joint", type="fixed")

@@ -15,10 +15,11 @@
 #   A) 旧链（`@minco` / `@omni`，导航不控自转）：
 #      控制器 FollowPath ─cmd_vel_controller─► velocity_smoother ─► cmd_vel_chassis
 #                                                    ─► srm27_nav_protocol ─► 串口
-#   B) 迁移链（`@fakeyaw`，与仿真 `start_sim_nav.sh --chassis-spin` 同构）：
+#   B) 迁移链（`@fakeyaw`，云台系：导航只出平移 + 决策层 rotation_cmd 走 mux）：
 #      控制器 FollowPath ─cmd_vel_nav_fake─► fake_vel_transform ─cmd_vel_nav_body─►
 #      srm_cmd_mux ─cmd_vel_chassis─► srm27_nav_protocol ─► 串口
-#      `@fakeyaw` 段叠加在 `@minco` 之上（后写优先），只覆盖"放开 yaw"的那几个键。
+#      `@fakeyaw` 段叠加在 `@minco` 之上（后写优先），只覆盖 smoother 的 yaw 界那几个键
+#      （2026-11-08 云台系改造后是**钳 0**：导航只出平移，底盘 wz 走 mux，见该段注释）。
 # 串口那一层（max_vx/max_vy/max_wz、linear_velocity_scale）**故意不在这里**：
 # 它是最后一道安全限幅，见 srm27_nav_protocol/config/srm27_nav_protocol.yaml。
 # ⚠ 串口限幅作用在缩放**之后**，所以实车出口上限 = max_vx 与
@@ -124,33 +125,32 @@ velocity_smoother@minco:
 
 # -----------------------------------------------------------------------------
 # 迁移链（fakeyaw，`config/real/nav2_params_srm_minco_fakeyaw.yaml`）
-# 叠加在 `velocity_smoother@minco` 之上：只改"放开 yaw"这一件事，平移档不动。
+# 叠加在 `velocity_smoother@minco` 之上：平移档不动，只钉住"导航这一路不许出 wz"。
 # -----------------------------------------------------------------------------
 velocity_smoother@fakeyaw:
   ros__parameters:
-    # 导航拥有 wz 之后，平滑器的 yaw 界就是**上游唯一还拦着自转的地方**
-    # （再往下 srm_cmd_mux 的 wz_max 与串口 max_wz 各有一道，见下）。
-    # 2026-11-06 首次实车值取 1.5 rad/s：先把"wz 方向对不对、底盘跟不跟"验掉，
-    # 再按标定结果抬高。⚠ 它在仿真里是 6.0（与 MINCO limits.max_angular_speed 同档）。
-    max_velocity: [0.4, 0.4, 1.0]
-    min_velocity: [-0.4, -0.4, -1.0]
-    # 角加速度与 MINCO 的 max_angular_accel(4.5) 同档；给小了会让自转起停变钝，
-    # 给大了则会在串口层被 max_wz 削平，都会让"请求 2.0 实际多少"变得难判。
-    max_accel: [7.0, 7.0, 4.5]
-    max_decel: [-7.0, -7.0, -4.5]
+    # 2026-11-08（方案 §4.2）：云台系下导航只出平移，yaw 界钳 0。
+    # 底盘 wz 改由**决策层**发 rotation_cmd，在 srm_cmd_mux 里合进输出（方案 §4.3），
+    # 不经过平滑器。这一层因此是"导航漏出 wz"的最后一道上游闸：
+    # 界钳 0 之后平滑器任何 yaw 都会被削成 0，mux 还会再忽略一次并计数告警。
+    # ⚠ 仿真里它仍是 6.0（仿真链由 MINCO 出 wz，见 config/simulation/speed_limits.yaml）。
+    max_velocity: [0.4, 0.4, 0.0]
+    min_velocity: [-0.4, -0.4, 0.0]
+    max_accel: [7.0, 7.0, 0.0]
+    max_decel: [-7.0, -7.0, 0.0]
 
 # -----------------------------------------------------------------------------
 # 速度合成 mux（合并进 srm27_chassis_control/config/srm_chassis_control.yaml）
 # 迁移链的最后一道钳位，也是 cmd_vel_chassis 的**唯一发布者**：
-#   fake_vel_transform ─cmd_vel_nav_body─► srm_cmd_mux ─cmd_vel_chassis─► 串口节点
+#   fake_vel_transform ─cmd_vel_nav_body─┐
+#                                        ├─► srm_cmd_mux ─cmd_vel_chassis─► 串口节点
+#   决策层 rotation_cmd ────────────────┘
 # 旧链（@minco 不带 fakeyaw、@omni）**不经过** mux，这些值对它们无效。
 # ────────────────────────────────────────────────────────────────────────────
-# 平移档：取"与串口上限同档"（4.5），这样 mux 不会成为比串口更早生效的瓶颈；
-#   真正卡住实车速度的仍是串口 max_vx/max_vy(=4.5) 与 smoother(5.0) 中的较小者。
-# 自转档：⚠ **首次实车验证的限速闸**，取 1.5 rad/s。
-#   `--chassis-spin` 默认请求 2.0 rad/s，会在这一层被削到 1.5 —— 这是刻意保守，
-#   验完"wz 符号 / 增益 / 底盘是否真的跟着转"之后再抬（抬到多少见
-#   docs/仿真链迁移实车实施记录(ai).md 的验收步骤）。
+# 平移档：取"与串口上限同档"（0.40），这样 mux 不会成为比串口更早生效的瓶颈；
+#   真正卡住实车速度的仍是串口 max_vx/max_vy(=0.40)。
+# 自转档：wz 现在**只**来自决策层的 rotation_cmd（导航那一路会被忽略），
+#   wz_max 是它唯一的上限闸（下游还有串口 max_wz=1.0）。
 #   注意 mux 的限幅参数**没有**动态回调，改完必须重启节点。
 # -----------------------------------------------------------------------------
 srm_cmd_mux:

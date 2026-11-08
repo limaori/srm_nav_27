@@ -40,6 +40,20 @@ if(BUILD_TESTING)
   set(ament_cmake_clang_format_CLANG_FORMAT_VERSION 21)
   set(ament_cmake_clang_format_CONFIG_FILE "${CMAKE_SOURCE_DIR}/.clang-format")
   set(ament_cmake_clang_tidy_CONFIG_FILE "${CMAKE_SOURCE_DIR}/.clang-tidy")
+
+  # 方案 §4.1.1 的回归：关节角 TF 缺失时 /odometry 仍按点云频率输出。
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(tf2_msgs REQUIRED)
+  ament_add_gtest(test_odometry_without_joint_tf
+    test/test_odometry_without_joint_tf.cpp
+  )
+  if(TARGET test_odometry_without_joint_tf)
+    target_link_libraries(test_odometry_without_joint_tf
+      ${PROJECT_NAME}
+      ${tf2_msgs_TARGETS}
+    )
+  endif()
+
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()

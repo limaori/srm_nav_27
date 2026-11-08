@@ -24,13 +24,18 @@
 #include "diagnostic_msgs/msg/diagnostic_array.hpp"
 #include "example_interfaces/msg/float32.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/approximate_time.h"
 #include "message_filters/synchronizer.h"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/imu.hpp"
+#include "tf2/LinearMath/Matrix3x3.h"
+#include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_broadcaster.h"
+#include "tf2_ros/transform_listener.h"
 
 #include "fake_vel_transform/velocity_transform.hpp"
 
@@ -60,6 +65,17 @@ public:
   explicit FakeVelTransform(const rclcpp::NodeOptions & options);
 
 private:
+  /// \brief yaw 外推的推算源（方案 §4.4.2）。
+  enum class YawRateSource {
+    /// \brief 积分下发给底盘的 wz 指令（改造前的行为；仿真回归用）。
+    kCmdWz = 0,
+    /// \brief 下位机回传的**云台陀螺仪**转速（`gimbal_yaw_rate`，相对地面）——实车目标方案。
+    kGimbalRate = 1,
+    /// \brief Mid-360 IMU 的角速度（`livox/imu`，装在云台上，换算到竖直轴）。
+    ///        协议字段（§4.4.1）落地并验过符号前用它。
+    kImu = 2,
+  };
+
   /// \brief 运行模式。
   enum class Mode {
     /// \brief 既有链路：自转叠加 + odom/local_plan 同步转换。
@@ -83,11 +99,27 @@ private:
   // ---- nav_se2 模式路径 ----
   /// \brief 用"外推到指令生效时刻"的 yaw 做一次坐标转换并发布；无法转换时输出零速。
   void publishTransformedVelocity(const geometry_msgs::msg::Twist & _cmd);
-  /// \brief 记录底盘真正执行的角速度指令（mux 输出），供外推积分用。
+  /// \brief 记录底盘真正执行的角速度指令（mux 输出），供外推积分用（`cmd_wz` 源）。
   void chassisCmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
+  /// \brief 记录下位机回传的云台陀螺仪转速（`gimbal_rate` 源）。
+  void gimbalRateCallback(const geometry_msgs::msg::TwistStamped::SharedPtr msg);
+  /// \brief 记录 Mid-360 IMU 的角速度（`imu` 源）。
+  void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
+  /// \brief 把 IMU 的角速度投影到 `imu_target_frame` 的 z 轴上（缓存一次固定外参）。
+  bool imuYawRate(const sensor_msgs::msg::Imu & _msg, double & _wz, std::string & _error);
   /// \brief 对"分段常值"的 wz 指令在 [from, to] 上积分；调用方必须已持有 state_mutex_。
   /// \param[out] partial 缓存覆盖不到 from 时为 true（只积分到能覆盖的那一段）。
   double integrateCommandWz(
+    const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const;
+  /// \brief 对**实测转速**（云台陀螺仪 / Mid-360 IMU）在 [from, to] 上积分。
+  ///
+  /// 与 `integrateCommandWz` 的区别：样本是"测量值"而不是"指令"，用零阶保持；
+  /// 最新样本比 `to` 老超过 `gimbal_rate_timeout_` 时视为断流 —— 推算项按 0 处理并置
+  /// `partial`（方案 §4.4.2：断流不停止输出，只丢掉这一项）。
+  double integrateMeasuredRate(
+    const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const;
+  /// \brief 按 `yaw_rate_source_` 选择积分源。
+  double integrateYawRate(
     const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const;
   /// \brief 发布零速（无有效 yaw / 非有限输入 / 里程计超时）。
   void publishZeroVelocity();
@@ -108,6 +140,10 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   /// \brief 底盘真正执行的角速度指令（mux 输出 cmd_vel_sim）；外推积分用它。
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr chassis_cmd_sub_;
+  /// \brief `gimbal_rate` 源的实测转速订阅（下位机陀螺仪）。
+  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr gimbal_rate_sub_;
+  /// \brief `imu` 源的 Mid-360 IMU 订阅。
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   /// \brief 外推结果的高频出口（示波用）：x=预测 yaw, y=odom yaw, z=积分量（rad）。
   rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr yaw_debug_pub_;
   message_filters::Subscriber<nav_msgs::msg::Odometry> odom_sub_filter_;
@@ -173,6 +209,26 @@ private:
   std::deque<WzSample> wz_history_;
   std::string chassis_cmd_vel_topic_;
   std::string yaw_debug_topic_;
+  // ---- yaw 外推的推算源（方案 §4.4.2）----
+  YawRateSource yaw_rate_source_{YawRateSource::kCmdWz};
+  std::string yaw_rate_source_name_{"cmd_wz"};
+  std::string gimbal_rate_topic_{"gimbal_yaw_rate"};
+  std::string imu_topic_{"livox/imu"};
+  std::string imu_target_frame_{"gimbal_yaw"};
+  /// \brief 实测转速允许的最大断流（s）；超过按 0 处理并计数。
+  double gimbal_rate_timeout_{0.1};
+  /// \brief 最近约 `wz_history_window_` 秒的 (仿真时刻, 实测转速)，按时间递增。
+  std::deque<WzSample> rate_history_;
+  /// \brief 实测转速样本计数（诊断用）。
+  uint64_t rate_sample_count_{0};
+  /// \brief 实测转速断流次数（诊断用）。
+  uint64_t rate_stale_count_{0};
+  /// \brief IMU 角速度 -> `imu_target_frame` z 轴的固定旋转（只查一次）。
+  tf2::Matrix3x3 imu_to_target_rotation_;
+  bool imu_rotation_ready_{false};
+  std::string imu_frame_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   /// \brief 指令下发到底盘真正执行的延迟（仿真秒）；仿真里估计 10~30 ms，需标定。
   double actuation_delay_{0.02};
   double wz_history_window_{1.0};

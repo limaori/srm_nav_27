@@ -19,7 +19,8 @@
 这一层错了的表现非常分散，而且都不会报错：
 * CRC 覆盖范围写错（漏掉 cmd_id）→ 偶发整帧被丢，看起来像"下位机没发"；
 * 按"第几个包"解析而不是按 cmd_id → 丢一个槽位之后**永久错位**；
-* 长度不自检 → 把 12 字节当成 16 字节读，vx/vy/wz/chassis_to_gimbal_yaw 变成帧里别的字节；
+* 长度不自检 → 把 12 字节当成 20 字节读，vx/vy/wz/chassis_to_gimbal_yaw 变成帧里别的字节；
+* 新旧帧不区分 → 下位机还没升级时（16 字节）把 CRC 字节当成云台转速读出来；
 * 小端当大端 → 速度变成 1e-38 或天文数字。
 
 本测试用**独立实现**的组帧/解析（`script/test_chassis_speed_feedback.py`，与 C++ 节点
@@ -61,7 +62,8 @@ crc16 = TOOL_MODULE.crc16
 PKT_CHASSIS_SPEED = TOOL_MODULE.PKT_CHASSIS_SPEED
 PKT_GAME_STATUS = TOOL_MODULE.PKT_GAME_STATUS
 PKT_ROBOT_STATUS = TOOL_MODULE.PKT_ROBOT_STATUS
-LEN_CHASSIS_SPEED = TOOL_MODULE.LEN_CHASSIS_SPEED
+LEN_CHASSIS_SPEED = TOOL_MODULE.LEN_CHASSIS_SPEED          # 20（新帧）
+LEN_CHASSIS_SPEED_V1 = TOOL_MODULE.LEN_CHASSIS_SPEED_V1    # 16（旧帧）
 
 
 def test_crc_reference_vector_from_the_protocol_doc():
@@ -77,16 +79,40 @@ def test_crc_reference_vector_from_the_protocol_doc():
 
 
 def test_chassis_speed_frame_shape():
-    """0x0010 = 9 + 16 = 25 字节，小端，四个 float32。"""
-    frame = build_frame(PKT_CHASSIS_SPEED, build_chassis_speed(0.4, -0.1, 0.75, 45.0), seq=3)
-    _assert(len(frame) == 25, f"整帧应为 25 字节，实得 {len(frame)}")
+    """0x0010 = 9 + 20 = 29 字节（2026-11-08 起），小端，五个 float32。"""
+    frame = build_frame(
+        PKT_CHASSIS_SPEED, build_chassis_speed(0.4, -0.1, 0.75, 45.0, 1.25), seq=3)
+    _assert(len(frame) == 29, f"整帧应为 29 字节，实得 {len(frame)}")
     _assert(frame[0] == 0xA5, "帧首应为 0xA5")
-    _assert(struct.unpack("<H", frame[1:3])[0] == LEN_CHASSIS_SPEED, "data_length 应为 16")
+    _assert(struct.unpack("<H", frame[1:3])[0] == LEN_CHASSIS_SPEED, "data_length 应为 20")
     _assert(frame[3] == 3, "seq 应写在偏移 3")
     _assert(struct.unpack("<H", frame[5:7])[0] == PKT_CHASSIS_SPEED, "cmd_id 应为 0x0010（小端）")
-    vx, vy, wz, yaw = struct.unpack("<ffff", frame[7:23])
+    vx, vy, wz, yaw, rate_imu = struct.unpack("<fffff", frame[7:27])
     _assert(abs(vx - 0.4) < 1e-6 and abs(vy + 0.1) < 1e-6, "vx/vy 编解码不一致")
     _assert(abs(wz - 0.75) < 1e-6 and abs(yaw - 45.0) < 1e-6, "wz/yaw 编解码不一致")
+    _assert(abs(rate_imu - 1.25) < 1e-6, "云台陀螺仪转速必须落在数据段偏移 16")
+    _assert(frame[7 + 16:7 + 20] == struct.pack("<f", 1.25), "陀螺仪转速偏移必须是 16")
+
+
+def test_legacy_16_byte_frame_is_still_accepted():
+    """旧固件（data_length=16）必须能解析：前 4 个字段位置不变，两路转速记为不可用。
+
+    方案 §4.4.1：上下位机不是同时升级的 —— 遇到旧帧绝不报错，只是转速不可用
+    （None，而不是 0 rad/s；0 会被下游当成"云台没转"的真实观测）。
+    """
+    parser = FrameParser()
+    legacy = build_frame(PKT_CHASSIS_SPEED, build_chassis_speed(0.4, -0.1, 0.75, 45.0), seq=5)
+    _assert(len(legacy) == 25, f"旧帧整帧应为 25 字节，实得 {len(legacy)}")
+    _assert(struct.unpack("<H", legacy[1:3])[0] == LEN_CHASSIS_SPEED_V1,
+            "旧帧 data_length 必须仍是 16")
+    out = parser.feed(legacy)
+    _assert(len(out) == 1, "旧帧本身是合法的，解析器应收到它")
+    decoded = parser.decode(out[0][1])
+    _assert(decoded is not None, "旧帧不能被当成非法长度")
+    _assert(abs(decoded["vx"] - 0.4) < 1e-6 and abs(decoded["vy"] + 0.1) < 1e-6,
+            "旧帧前 4 个字段的位置与语义必须不变")
+    _assert(decoded["gimbal_yaw_rate_imu"] is None,
+            "旧帧没有云台转速，必须是 None（不可用）")
 
 
 def test_crc16_covers_cmd_id():
@@ -169,17 +195,17 @@ def test_truncated_frame_waits_for_more_bytes():
 
 
 def test_wrong_data_length_is_rejected():
-    """0x0010 的 data_length 必须是 16；写成 12 时解码必须返回 None。
+    """0x0010 的 data_length 只能是 20（新）或 16（旧）；写成 12 时解码必须返回 None。
 
-    节点侧对应的是 `receive_length_matches<T>()` 检查 —— 长度不符直接丢弃，
-    否则 12 字节会被当成 16 字节读（多出来的 4 字节是 CRC 与下一帧的字节）。
+    节点侧对应的是 `receive_length_matches<T>()` 检查 —— 长度不符直接丢弃 +
+    计数告警，否则 12 字节会被当成 20 字节读（多出来的字节是 CRC 与下一帧的开头）。
     """
     parser = FrameParser()
     bogus = build_frame(PKT_CHASSIS_SPEED, b"\x00" * 12, seq=1)
     _assert(len(bogus) == 21, "12 字节数据段的整帧应为 21 字节")
     out = parser.feed(bogus)
     _assert(len(out) == 1, "帧本身（CRC）是合法的，解析器应收到它")
-    _assert(parser.decode(out[0][1]) is None, "data_length != 16 时必须拒绝解码")
+    _assert(parser.decode(out[0][1]) is None, "data_length 既不是 20 也不是 16 时必须拒绝解码")
 
 
 def test_seq_wraps_without_losing_frames():

@@ -47,6 +47,14 @@ LoamInterfaceNode::LoamInterfaceNode(const rclcpp::NodeOptions & options)
   this->declare_parameter<std::string>("odom_frame", "odom");
   this->declare_parameter<std::string>("base_frame", "");
   this->declare_parameter<std::string>("lidar_frame", "");
+  // 方案 §4.1（2026-11-08 云台系）：base_frame 改成 gimbal_yaw 之后，odom 的原点会跟着
+  // 抬到云台平面（gimbal_yaw 在 base_link 上方 0.268 m），地面的 odom z 变成 -0.268。
+  // 而代价地图/体素层的 min_obstacle_height / max_obstacle_height / origin_z 都是**绝对 z**，
+  // 抬高之后车身底部（轮子、低矮台阶）会被当成"低于 min_obstacle_height"而丢掉。
+  // ground_frame 给一个**原点在地面**的系（实车填 base_link），本节点在拍快照时顺手把
+  // base_frame 相对它的 z 反向补偿掉，odom z=0 仍在地面，下游阈值一个都不用改。
+  // 留空 = 不补偿（仿真/旧链行为不变）。
+  this->declare_parameter<std::string>("ground_frame", "");
   this->declare_parameter<bool>("planarize_pose", false);
 
   this->get_parameter("state_estimation_topic", state_estimation_topic_);
@@ -54,6 +62,7 @@ LoamInterfaceNode::LoamInterfaceNode(const rclcpp::NodeOptions & options)
   this->get_parameter("odom_frame", odom_frame_);
   this->get_parameter("base_frame", base_frame_);
   this->get_parameter("lidar_frame", lidar_frame_);
+  this->get_parameter("ground_frame", ground_frame_);
   this->get_parameter("planarize_pose", planarize_pose_);
 
   base_frame_to_lidar_initialized_ = false;
@@ -122,7 +131,22 @@ void LoamInterfaceNode::odometryCallback(const nav_msgs::msg::Odometry::ConstSha
         base_frame_, lidar_frame_, msg->header.stamp, rclcpp::Duration::from_seconds(0.5));
       tf2::Transform tf_base_frame_to_lidar;
       tf2::fromMsg(tf_stamped.transform, tf_base_frame_to_lidar);
-      tf_odom_to_lidar_odom_ = tf_base_frame_to_lidar;
+      tf2::Transform tf_ground_offset = tf2::Transform::getIdentity();
+      if (!ground_frame_.empty()) {
+        // T(base_frame <- ground_frame) 的 z 是"地面在 base_frame 下方多少"，取负即
+        // "base_frame 在地面上方多少"。把它加到 odom 的 z 上，odom z=0 就仍在**地面**。
+        const auto ground_stamped = tf_buffer_->lookupTransform(
+          base_frame_, ground_frame_, msg->header.stamp, rclcpp::Duration::from_seconds(0.5));
+        const double dz = -ground_stamped.transform.translation.z;
+        tf_ground_offset.setOrigin(tf2::Vector3(0.0, 0.0, dz));
+        RCLCPP_INFO(
+          this->get_logger(),
+          "odom z 按 ground_frame=%s 拉回地面: base_frame=%s 离地 %.4f m（补偿 %+.4f m）",
+          ground_frame_.c_str(), base_frame_.c_str(), dz, dz);
+      }
+      // ⚠ 补偿必须作用在**快照**上：点云与位姿都走同一个 tf_odom_to_lidar_odom_，
+      // 两者一起平移，几何关系不变，但 odom 的 z 原点回到地面。
+      tf_odom_to_lidar_odom_ = tf_ground_offset * tf_base_frame_to_lidar;
       base_frame_to_lidar_initialized_ = true;
     } catch (tf2::TransformException & ex) {
       RCLCPP_WARN(this->get_logger(), "TF lookup failed: %s Retrying...", ex.what());

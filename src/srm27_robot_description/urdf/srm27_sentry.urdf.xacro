@@ -105,6 +105,14 @@
   <xacro:arg name="root_frame"        default="base_link"/>
   <xacro:arg name="wheel_joint_type"  default="fixed"/>
   <xacro:arg name="gimbal_joint_type" default="fixed"/>
+  <!-- 2026-11-08（方案 §4.1 补漏）：把 TF 树的根反过来 —— `gimbal_yaw` 当根、
+       `base_link`（底盘）挂在它下面。雷达定位直接给云台位姿，这样
+       odom -> gimbal_yaw 不经过关节角；关节角只出现在树的末端
+       （gimbal_yaw -> base_link），断了只会让底盘从 RViz 里消失，导航不受影响。
+       含义变化：关节角从"云台相对底盘"变成"**底盘相对云台**"，正好等于下位机回传的
+       `chassis_to_gimbal_yaw`（所以 srm27_nav_protocol 的 gimbal_joint_sign 用 +1.0）。
+       默认 false = 原来的方向（根是 base_link），仿真与旧配置行为完全不变。 -->
+  <xacro:arg name="gimbal_is_root"    default="false"/>
 
   <!-- 几何（默认值 = CAD 实测；model_builder 会用几何 YAML 的值覆盖，保证 SDF/URDF 同源） -->
   <xacro:arg name="chassis_radius"    default="0.2743"/>
@@ -167,7 +175,12 @@
   <xacro:property name="wheel_joint_velocity" value="${float('$(arg wheel_velocity)')}"/>
 
   <!-- 由 args 派生的开关 -->
-  <xacro:property name="root_is_footprint" value="${'$(arg root_frame)' == 'base_footprint'}"/>
+  <!-- 根反过来时 base_link 挂在 gimbal_yaw 下面，base_footprint 就没地方放了（会变成两个根）。
+       两者同时给时以 gimbal_is_root 为准，base_footprint 被忽略。 -->
+  <xacro:property name="gimbal_root"
+                  value="${'$(arg gimbal_is_root)'.lower() in ('true', '1')}"/>
+  <xacro:property name="root_is_footprint"
+                  value="${(not gimbal_root) and '$(arg root_frame)' == 'base_footprint'}"/>
   <xacro:property name="wheels_move"       value="${'$(arg wheel_joint_type)' == 'continuous'}"/>
   <xacro:property name="gimbal_moves"      value="${'$(arg gimbal_joint_type)' == 'revolute'}"/>
   <!-- 画不画云台圆柱 / 旋转标记（容忍 true/True/1 这些写法） -->
@@ -406,12 +419,22 @@
                     axis_yaw="${ PI/4}" rpy_yaw="${3*PI/4}"/>
 
   <!-- ============================ 云台示意包络 ============================ -->
-  <!-- link 始终存在（保证 TF 稳定、名字可被引用），use_yaw=false 时只是不画。 -->
+  <!-- link 始终存在（保证 TF 稳定、名字可被引用），use_yaw=false 时只是不画。
+       `gimbal_is_root` 决定这条关节的方向（谁是谁的父亲）：
+         false（默认）：base_link -> gimbal_yaw，关节角 = 云台相对底盘（原行为）；
+         true         ：gimbal_yaw -> base_link，关节角 = 底盘相对云台（云台系导航用）。 -->
+  <xacro:property name="gimbal_joint_parent"
+                  value="${'gimbal_yaw' if gimbal_root else 'base_link'}"/>
+  <xacro:property name="gimbal_joint_child"
+                  value="${'base_link' if gimbal_root else 'gimbal_yaw'}"/>
+  <!-- 根反过来时 base_link 在云台基座面下方 `chassis_top + z_shift` 处（原点仍在地面）。 -->
+  <xacro:property name="gimbal_joint_z"
+                  value="${-(chassis_top + z_shift) if gimbal_root else (chassis_top + z_shift)}"/>
   <xacro:if value="${gimbal_moves}">
     <joint name="gimbal_yaw_joint" type="revolute">
-      <parent link="base_link"/>
-      <child link="gimbal_yaw"/>
-      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 0"/>
+      <parent link="${gimbal_joint_parent}"/>
+      <child link="${gimbal_joint_child}"/>
+      <origin xyz="0 0 ${gimbal_joint_z}" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
       <limit lower="${-PI}" upper="${PI}" effort="30" velocity="10"/>
       <dynamics damping="0.2" friction="0.1"/>
@@ -419,10 +442,10 @@
   </xacro:if>
   <xacro:unless value="${gimbal_moves}">
     <joint name="gimbal_yaw_joint" type="fixed">
-      <parent link="base_link"/>
-      <child link="gimbal_yaw"/>
+      <parent link="${gimbal_joint_parent}"/>
+      <child link="${gimbal_joint_child}"/>
       <!-- rpy 只为调试：把云台摆到 gimbal_fixed_yaw（正式运行时保持 0） -->
-      <origin xyz="0 0 ${chassis_top + z_shift}" rpy="0 0 ${float('$(arg gimbal_fixed_yaw)')}"/>
+      <origin xyz="0 0 ${gimbal_joint_z}" rpy="0 0 ${float('$(arg gimbal_fixed_yaw)')}"/>
     </joint>
   </xacro:unless>
 

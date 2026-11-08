@@ -75,6 +75,7 @@ def launch_setup(context):
         # 没有 /registered_scan -> 没有 /scan -> 没有 map。所以下面一定会起
         # gimbal_joint_state_relay：有回传话题就用真实角，没有就 constant 暂位 0 度。
         gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
+        gimbal_is_root=LaunchConfiguration("gimbal_is_root").perform(context),
     )
     # 安装位姿与 gravity 都来自同一个来源（唯一模型），不会再出现"模型改了、重力没改"。
     position = mounting["xyz"]
@@ -286,6 +287,12 @@ def generate_launch_description():
             "lidar_rpy",
             "",
             "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+        ),
+        (
+            "gimbal_is_root",
+            "false",
+            "TF 树反转（gimbal_yaw 为根、base_link 挂末端）。云台系导航要传 true，"
+            "见 real_robot_state_publisher_launch.py 的同名参数。",
         ),
         (
             "gimbal_joint_type",

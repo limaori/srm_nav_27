@@ -151,7 +151,7 @@ def test_overlay_values_reach_the_merged_config():
             f"{params.name} 合并后控制器上限 {actual} != 覆盖层 {expected}",
         )
 
-        # 平滑器的期望值：迁移链（profile=fakeyaw）要叠加 `@fakeyaw` 段（放开 yaw），
+        # 平滑器的期望值：迁移链（profile=fakeyaw）要叠加 `@fakeyaw` 段（yaw 界钳 0），
         # 其余文件就是 `@<variant>` 段本身。这里按"生效顺序"重算一遍，不与实现耦合。
         smoother_section = f"velocity_smoother@{variant}"
         smoother = overlay[smoother_section]["ros__parameters"]["max_velocity"]
@@ -193,9 +193,10 @@ def test_variant_sections_do_not_leak_between_controllers():
 def test_fakeyaw_profile_stacks_on_top_of_the_minco_variant():
     """`@fakeyaw` 段只在迁移链生效，并且**叠加**在 `@minco` 之上。
 
-    两条链同属 MINCO 控制器，但 yaw 界的要求相反：
-    旧链（导航不控自转）必须把 smoother 的 yaw 钳成 0；迁移链（导航拥有 wz）必须放开。
-    这里同时钉住"叠加"和"不串味"两件事。
+    2026-11-08（方案 §4.2）：云台系下导航**只出平移**，底盘 wz 由决策层的 rotation_cmd
+    经 srm_cmd_mux 给出、不经过平滑器。所以 `@fakeyaw` 段的作用从"放开 yaw"变成
+    "把 yaw 钳成 0"——它是"导航漏出 wz"的最后一道上游闸。
+    这里钉住三件事：profile 命中、yaw 被钳 0、平移档不被顺手改掉。
     """
     legacy = speed.merge_params_files(str(REAL_MINCO_PARAMS))
     _assert(legacy.variant == speed.VARIANT_MINCO, legacy.variant)
@@ -210,8 +211,12 @@ def test_fakeyaw_profile_stacks_on_top_of_the_minco_variant():
             f"迁移链应命中 fakeyaw profile，实际 {chain.profile}")
     _assert("velocity_smoother@fakeyaw" in chain.skipped_sections or True, "")
     smoother = speed.lookup(chain.merged, "velocity_smoother.max_velocity")
-    _assert(float(smoother[2]) > 0.0,
-            f"迁移链必须放开 smoother 的 yaw 界（导航拥有 wz），实际 {smoother}")
+    _assert(float(smoother[2]) == 0.0,
+            f"迁移链必须把 smoother 的 yaw 钳成 0（导航只出平移，wz 走 mux），实际 {smoother}")
+    legacy_yaw = speed.lookup(legacy.merged, "velocity_smoother.min_velocity")[2]
+    chain_yaw_min = speed.lookup(chain.merged, "velocity_smoother.min_velocity")[2]
+    _assert(float(chain_yaw_min) == 0.0,
+            f"迁移链的 smoother yaw 下界也必须钳 0，实际 {legacy_yaw} -> {chain_yaw_min}")
     # 平移档来自 @minco，不能被 @fakeyaw 顺手改掉。
     legacy_xy = speed.lookup(legacy.merged, "velocity_smoother.max_velocity")[0]
     _assert(abs(float(smoother[0]) - float(legacy_xy)) < 1e-9,
@@ -231,7 +236,7 @@ def test_fakeyaw_profile_is_detected_from_content_not_filename():
     result = speed.merge_params(copy.deepcopy(cfg), overlay, variant=None, profile=None)
     _assert(result.profile == speed.VARIANT_FAKEYAW, result.profile)
 
-    # 去掉迁移链的两处特征 -> 不再命中（避免"只要文件名像就放开 yaw"）。
+    # 去掉迁移链的两处特征 -> 不再命中（避免"只要文件名像就套 yaw 界"）。
     legacy = speed.load_yaml(str(REAL_MINCO_PARAMS))
     result = speed.merge_params(copy.deepcopy(legacy), overlay, variant=None, profile=None)
     _assert(result.profile is None, result.profile)

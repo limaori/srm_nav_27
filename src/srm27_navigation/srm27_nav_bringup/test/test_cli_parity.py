@@ -147,9 +147,13 @@ def test_same_named_flags_keep_their_semantics():
     _assert("apply_init_pose" in real_text and "MAP_TO_ODOM_X" in real_text,
             "--init-pose 必须被转成 map->odom 的 x/y/yaw")
 
-    # --chassis-spin 必须仍然把航向策略切到 spin（否则请求没人消费）
-    _assert('YAW_MODE="spin"' in real_text,
-            "--chassis-spin 必须自动切 yaw_mode=spin")
+    # 2026-11-08（云台系）：--chassis-spin 不再切 MINCO 的航向策略 —— 请求由 srm_cmd_mux
+    # 的 rotation_cmd 直接消费（方案 §4.3）。它必须仍然在，且不能再往 spin 模式跳。
+    _assert('CHASSIS_SPIN_CLI_GIVEN=1' in real_text,
+            "--chassis-spin 仍然必须能下发决策层自转请求（spin_control.sh）")
+    _assert('YAW_MODE="spin"' not in real_text,
+            "--chassis-spin 不能再把航向策略切成 spin：云台系下 wz 由 mux 消费，"
+            "MINCO 的 spin 模式只会输出没人用的 wz（方案 §4.2/§4.3）")
     # --gimbal-spin 必须真的提示"不执行"，而不是静默吞掉
     _assert("实车不执行 --gimbal-spin" in real_text,
             "--gimbal-spin 必须有明确的「不执行」告警")

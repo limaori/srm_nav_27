@@ -2,14 +2,17 @@
 #
 # 本文件只描述 srm_cmd_mux（速度出口）。
 #
-# 2026-10-19：独立自转链（rotation_controller / rotation_test_sender /
-# rotation_velocity）已删除 —— `wz` 只由上位机（导航栈）产生，mux 不再有第二路自转
-# 输入，也没有 wz_control_mode 开关。想手动控制自转（小陀螺）请走导航侧：
-#   --yaw-mode spin + script/spin_control.sh（请求进 MINCO，wz 仍由导航输出）。
+# 2026-11-08（docs/导航改云台系与决策层小陀螺实施方案.md §4.3）：mux 变成**两路输入**：
+#   nav_topic   导航速度（只取 linear.x/y，angular.z 一律忽略并计数告警）
+#   spin_topic  决策层底盘自转（只取 angular.z），停发 spin_timeout 即视为停转
+# 两路各自超时、互不影响：导航停了决策层还能让底盘原地转，决策层停发导航照常走。
+# `spin_topic` **留空 = 单输入**（导航同时拥有平移与 wz）：仿真链与回退都靠它，
+# 所以本文件里默认是空串，由实车入口 nav_srm_real_launch.py 覆盖成 rotation_cmd。
+#
 # 2026-11-06：实车入口也串本 mux（nav_srm_real_launch.py），此时
 #   nav_topic   = cmd_vel_nav_body   （fake_vel_transform 的输出）
 #   output_topic= cmd_vel_chassis    （串口节点 srm27_nav_protocol 订阅的话题）
-# 下面两行的值是仿真默认值；两条链都在启动时由 launch 参数覆盖。
+# 下面几行的值是仿真默认值；两条链都在启动时由 launch 参数覆盖。
 #
 # 本文件里没有速度限幅：mux 的限幅（vx_max/vy_max/v_max/wz_max）统一写在
 #   src/srm27_navigation/srm27_nav_bringup/config/<mode>/speed_limits.yaml 的
@@ -20,15 +23,26 @@
 srm_cmd_mux:
   ros__parameters:
     use_sim_time: True
-    # 输入：导航速度（车体系），angular.z 就是最终执行的 wz。
+    # 输入 1：导航速度（云台系），**只取平移**；angular.z 被忽略并计数（方案 §4.2/§4.3）。
     # fakeyaw 迁移链上由导航入口重写为 cmd_vel_nav_body（fake_vel_transform 的输出）。
     nav_topic: "cmd_vel_nav"
+    # 输入 2：决策层底盘自转（geometry_msgs/Twist，只读 angular.z，rad/s，正值为俯视逆时针）。
+    # 空串 = 单输入（旧行为）。决策层接口约定见方案 §4.3 / §8.2：
+    #   要持续转就以 >= 10 Hz 持续发；停发 spin_timeout 秒即视为关闭；也可以直接发 0。
+    # 注意 mux 的 `rotation_cmd` 与 MINCO 的 `spin_request.topic` 同名但**互不影响**：
+    # xy_only 下 MINCO 只缓存不进线（方案 §4.3）。
+    spin_topic: ""
     # 输出：mux 是它**唯一**的发布者。
     # 仿真 = cmd_vel_sim（速度适配器订阅）；实车入口会重写为 cmd_vel_chassis（串口节点订阅）。
     output_topic: "cmd_vel_sim"
     publish_rate: 200.0                   # 输出频率（Hz）
-    # 超时清零：导航输入超时则平移与 wz 一起清零（不存在"导航没了但还在自转"的状态）
-    nav_timeout: 0.3                      # 导航输入超时（s）
+    # 超时清零：两路各自计时（方案 §4.3）。
+    nav_timeout: 0.3                      # 导航输入超时（s）-> 平移清零（wz 不受影响）
+    spin_timeout: 0.25                    # 自转输入超时（s）-> wz 清零（底盘停转）
+    # wz 变化率上限（rad/s²）：与 speed_limits.yaml 的 FollowPath.limits.max_angular_accel
+    # 同档（4.5）。决策层发的是阶跃式目标，不限制斜率时起停会给底盘一次冲击。
+    # 0 = 不做斜率限制。`stop_all` 例外：它立即归零，不走斜率。
+    wz_ramp: 4.5
     # 限幅：见文件头——vx_max / vy_max / v_max / wz_max 在 speed_limits.yaml 里。
     # 注意 mux 的限幅参数**没有**动态回调，改 speed_limits.yaml 后必须重启节点。
     diagnostics_period: 0.5               # 诊断发布周期（s）

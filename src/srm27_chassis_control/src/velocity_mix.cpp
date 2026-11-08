@@ -27,6 +27,30 @@ double clampFinite(double _value, double _limit)
   return std::clamp(_value, -limit, limit);
 }
 
+bool isNonZeroRate(double _wz)
+{
+  if (!std::isfinite(_wz)) {
+    return true;
+  }
+  return std::abs(_wz) > 1.0e-9;
+}
+
+double slewLimit(double _target, double _previous, double _max_rate, double _dt)
+{
+  if (!std::isfinite(_target)) {
+    return _previous;
+  }
+  if (!std::isfinite(_max_rate) || _max_rate <= 0.0 || !std::isfinite(_dt) || _dt <= 0.0) {
+    return _target;
+  }
+  const double step = _max_rate * _dt;
+  const double delta = _target - _previous;
+  if (std::abs(delta) <= step) {
+    return _target;
+  }
+  return _previous + (delta > 0.0 ? step : -step);
+}
+
 MixOutput mixVelocity(const MixInput & _input, const MixLimits & _limits)
 {
   MixOutput output;
@@ -47,10 +71,21 @@ MixOutput mixVelocity(const MixInput & _input, const MixLimits & _limits)
   output.vx *= output.scale;
   output.vy *= output.scale;
 
-  // 导航是 wz 的唯一来源（独立自转链已删除），这里只做限幅。
-  output.wz = clampFinite(_input.nav_wz, _limits.wz_max);
-  // NaN 与任何值都不相等，因此非有限输入同样会被记为"被限幅"（它确实被改成了 0）。
-  output.wz_clamped = !(_input.nav_wz == output.wz);
+  // ---- wz：两路输入，二选一（方案 §4.3）----
+  if (_input.spin_enabled) {
+    // 双输入：导航的 angular.z 一律忽略（它本该是 0，非零说明上游有节点在往导航出口发 wz）。
+    output.wz_from_spin = true;
+    output.nav_wz_ignored = isNonZeroRate(_input.nav_wz);
+    // 决策层停发/超时 = 停转：按 0 处理，不沿用上一帧。
+    const double requested = _input.spin_valid ? _input.spin_wz : 0.0;
+    output.wz = clampFinite(requested, _limits.wz_max);
+    // NaN 与任何值都不相等，因此非有限输入同样会被记为"被限幅"（它确实被改成了 0）。
+    output.wz_clamped = !(requested == output.wz);
+  } else {
+    // 单输入（旧行为 / 仿真链 / 回退）：导航是 wz 的唯一来源，这里只做限幅。
+    output.wz = clampFinite(_input.nav_wz, _limits.wz_max);
+    output.wz_clamped = !(_input.nav_wz == output.wz);
+  }
   return output;
 }
 }  // namespace srm27_chassis_control

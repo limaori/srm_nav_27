@@ -475,10 +475,13 @@ def check_goal_checker(cfg, report, fakeyaw=False):
       `srm27_nav_plugins::OmniStoppedGoalChecker` —— 与 `nav2_controller::StoppedGoalChecker`
       的唯一差别是去掉 `|wz| <= rot_stopped_velocity`，因为自转不归导航管，拿它否掉
       到达结论等于把下位机的状态当成导航的失败。
-    * 迁移链（导航拥有 wz）：必须用 Nav2 官方 `StoppedGoalChecker` 并显式给
-      `rot_stopped_velocity` —— "到点停稳"必须把角速度算进去，否则车还在自转就判到点。
-      （SPIN 模式下 launch 会自动换回 OmniStoppedGoalChecker，那是刻意行为，见
-      nav_srm_real_launch.py。）
+    * fakeyaw 迁移链 + yaw_policy.mode 为 se2/spin（导航拥有 wz）：必须用 Nav2 官方
+      `StoppedGoalChecker` 并显式给 `rot_stopped_velocity` —— "到点停稳"必须把角速度算进去，
+      否则车还在自转就判到点。
+    * 2026-11-08 云台系（方案 §4.2）：导航只出平移（`yaw_policy.mode = xy_only`），
+      底盘 wz 由决策层的 rotation_cmd 经 srm_cmd_mux 给出，导航既不了解也不控制它。
+      此时必须用只看平移的 `srm27_nav_plugins::OmniStoppedGoalChecker` —— 拿 |wz| 否掉
+      到达结论会让"小陀螺常驻自转"时永远判不到点。
     """
     plugin = _first_scalar(cfg, "controller_server.general_goal_checker.plugin")
     xy = _as_float(_first_scalar(cfg, "controller_server.general_goal_checker.xy_goal_tolerance"))
@@ -491,7 +494,26 @@ def check_goal_checker(cfg, report, fakeyaw=False):
     if plugin is None:
         report.add(BLOCK, "缺少 general_goal_checker.plugin", "无法确认到点判定由谁负责。")
         return
-    if fakeyaw:
+    # 云台系 xy_only：导航不产生也不控制 wz —— 判停必须只看平移。
+    yaw_mode = str(_first_scalar(cfg, "controller_server.FollowPath.yaw_policy.mode") or "")
+    nav_owns_wz = fakeyaw and yaw_mode in ("se2", "spin")
+
+    if fakeyaw and not nav_owns_wz:
+        if "OmniStoppedGoalChecker" not in str(plugin):
+            report.add(
+                BLOCK,
+                "云台系(xy_only)的到点判定用错插件 (plugin = %s)" % shown,
+                "期望 srm27_nav_plugins::OmniStoppedGoalChecker：yaw_policy.mode = xy_only 时\n"
+                "导航只出平移，底盘 wz 来自决策层的 rotation_cmd（srm_cmd_mux）。\n"
+                "用 StoppedGoalChecker 会在小陀螺常驻自转时永远判不到点（方案 §4.2）。",
+            )
+        elif xy is None or trans is None:
+            report.add(
+                WARN,
+                "OmniStoppedGoalChecker 缺少 xy_goal_tolerance / trans_stopped_velocity",
+                "这两个是它仅有的判据（位置容差 + 平移停稳），缺省会退回 Nav2 默认值。",
+            )
+    elif nav_owns_wz:
         if "StoppedGoalChecker" not in str(plugin) or "OmniStoppedGoalChecker" in str(plugin):
             report.add(
                 BLOCK,
@@ -937,6 +959,66 @@ def check_fakeyaw_chain(cfg, period, report):
                        "%.2f s vs 周期 %.3f s；建议 >= 3 帧（0.3 s 以上）。"
                        % (odom_timeout, period))
 
+    # ---- 云台系（2026-11-08，方案 §4.1/§4.1.1/§4.7）----
+    scan_robot = _first_scalar(cfg, "sensor_scan_generation.robot_base_frame")
+    scan_base = _first_scalar(cfg, "sensor_scan_generation.base_frame")
+    scan_frame = str(scan_robot).strip() if isinstance(scan_robot, str) else ""
+    if scan_frame and scan_frame != "base_link":
+        # 机器人系不是底盘系 -> /odometry 的位姿靠固定外参，必须允许关节角 TF 缺失。
+        cache = _first_scalar(cfg, "sensor_scan_generation.cache_robot_base_transform")
+        if cache is not True:
+            report.add(
+                BLOCK,
+                "sensor_scan_generation.cache_robot_base_transform 未打开",
+                "robot_base_frame = %s（不是 base_link）：`lidar -> %s` 是固定外参，\n"
+                "但 `lidar -> base_frame` 要经过关节角。关节角一断流，旧实现会整帧跳过，\n"
+                "/odometry 跟着停、导航停车（方案 §4.1.1）。请把它设为 true。"
+                % (scan_frame, scan_frame),
+            )
+        else:
+            report.add(
+                NOTE, "固定外参已缓存",
+                "lidar -> %s 只查一次（固定外参，不随关节角变）" % scan_frame)
+        if str(scan_base) == scan_frame:
+            report.add(
+                BLOCK,
+                "sensor_scan_generation.base_frame 与 robot_base_frame 相同",
+                "odom->base_link 那条 TF 就没了（RViz 里底盘消失、自车模型也拿不到位姿）。",
+            )
+        # 只改 /odometry 不够：代价地图/BT/假车头查的是 TF。
+        publish_robot_tf = _first_scalar(cfg, "sensor_scan_generation.publish_robot_base_tf")
+        if publish_robot_tf is not True:
+            report.add(
+                WARN,
+                "odom->%s 仍要经过 base_link（TF 树没反转）" % scan_frame,
+                "只要 odom->%s 这一段还经过 base_link，云台快转时关节角那几十度的误差就照样\n"
+                "进代价地图 —— 只把 /odometry 改成云台位姿是不够的（方案 §4.1 的补漏）。\n"
+                "做法：publish_robot_base_tf=true + URDF 的 gimbal_is_root:=true"
+                "（gimbal_yaw 当根、base_link 挂末端）。" % scan_frame,
+            )
+        else:
+            report.add(
+                NOTE, "TF 树已反转",
+                "odom->%s 由 sensor_scan_generation 直接发；关节角只剩 gimbal_yaw->base_link "
+                "这一段末端（断了只影响 RViz 里的底盘）。\n"
+                "配套要求：URDF 用 gimbal_is_root:=true，且 srm27_nav_protocol 的 "
+                "gimbal_joint_sign = +1.0（关节角语义变成\"底盘相对云台\"）。" % scan_frame,
+            )
+        # base_frame 不在车底平面 -> odom 的 z 原点会被抬高，代价地图的绝对 z 阈值整体偏移。
+        loam_base = _first_scalar(cfg, "loam_interface.base_frame")
+        loam_ground = _first_scalar(cfg, "loam_interface.ground_frame")
+        if str(loam_base) == scan_frame and not str(loam_ground or "").strip():
+            report.add(
+                WARN,
+                "loam_interface.base_frame 抬离地面但没有 ground_frame 补偿",
+                "loam_interface 用 T(base<-lidar) 给 odom 定原点；base_frame = %s 在地面上方时，\n"
+                "odom 的 z=0 会跟着抬高，costmap 的 min/max_obstacle_height、origin_z 与\n"
+                "terrain_map 的绝对 z 一起偏移。请把 ground_frame 设成原点在地面的系（base_link）。"
+                % scan_frame,
+            )
+        else:
+            report.add(NOTE, "odom z 原点", "ground_frame = %s" % (loam_ground or "<未补偿>"))
+
     yaw_mode = _first_scalar(cfg, "controller_server.FollowPath.yaw_policy.mode")
     if str(yaw_mode) in ("se2", "spin"):
         spin_topic = _first_scalar(cfg, "controller_server.FollowPath.spin_request.topic")
@@ -962,10 +1044,26 @@ def check_fakeyaw_chain(cfg, period, report):
         else:
             report.add(NOTE, "yaw 外推已启用",
                        "指令源 %s, 延迟 %.3f s（需与串口实测一致）" % (extrapolation_topic, delay))
-    else:
+    source = str(_fake("yaw_rate_source", "cmd_wz"))
+    if source not in ("cmd_wz", "gimbal_rate", "imu"):
+        report.add(BLOCK, "yaw_rate_source 非法 (%s)" % source,
+                   "只支持 cmd_wz / gimbal_rate / imu（方案 §4.4.2）。")
+    elif source == "cmd_wz" and not extrapolation_topic:
         report.add(NOTE, "yaw 外推关闭",
-                   "chassis_cmd_vel_topic 为空 = 不做外推（行为与迁移前一致）。"
-                   "标定串口下发延迟后再打开。")
+                   "yaw_rate_source=cmd_wz 且 chassis_cmd_vel_topic 为空 = 不做外推。")
+    elif source == "cmd_wz":
+        report.add(WARN, "云台系下 yaw_rate_source=cmd_wz",
+                   "积分的是下发给**底盘**的 wz，而底盘 wz 不改变云台朝向 —— "
+                   "云台系下这一项是错的（只有仿真回归该用它）。改 gimbal_rate 或 imu。")
+    elif source == "gimbal_rate":
+        report.add(NOTE, "yaw 外推源 = 云台陀螺仪",
+                   "话题 %s，断流门限 %.2f s。⚠ 正方向必须先按方案 §8.1 实测。"
+                   % (_fake("gimbal_rate_topic", "gimbal_yaw_rate"),
+                      _as_float(_fake("gimbal_rate_timeout")) or 0.0))
+    else:
+        report.add(NOTE, "yaw 外推源 = Mid-360 IMU",
+                   "%s -> %s 的旋转把角速度换算到竖直轴（雷达斜装，不能直接取 z）。"
+                   % (_fake("imu_topic", "livox/imu"), _fake("imu_target_frame", "gimbal_yaw")))
 
 
 def check_yaw_ownership(cfg, report):
@@ -977,9 +1075,9 @@ def check_yaw_ownership(cfg, report):
             "yaw_policy.mode = xy_only -> MPC 的角速度上下界与参考都为 0, "
             "输出 angular.z 恒为 0。\n"
             "注意: 仿真的独立自转链 (rotation_controller / rotation_velocity) 已于 "
-            "2026-10-19 删除, wz 只由上位机(导航)产生; 实车若仍是 xy_only, 自转只能来自 "
-            "下位机或行为树 (srm27_behavior 的 PublishSpinSpeed), 需要切到 se2/spin 才能"
-            "由导航输出 wz。",
+            "2026-10-19 删除。2026-11-08 云台系改造后，实车的底盘 wz 由**决策层**发 "
+            "rotation_cmd，在 srm_cmd_mux 里合进输出（方案 §4.3）；不需要、也不应该把 "
+            "yaw_policy.mode 切回 se2/spin（导航的 yaw 是云台，wz 转的是底盘）。",
         )
 
 
@@ -1085,7 +1183,8 @@ def main(argv=None):
     print()
 
     fakeyaw = detect_fakeyaw(cfg)
-    print("迁移链    : %s" % ("fakeyaw（导航拥有 wz / base_link_fake）" if fakeyaw else "否（旧链）"))
+    print("迁移链    : %s" % ("fakeyaw（云台系 gimbal_yaw_fake；导航只出平移，wz 走 mux）"
+                              if fakeyaw else "否（旧链）"))
     print()
 
     check_plugin(cfg, args.expect_minco, report)

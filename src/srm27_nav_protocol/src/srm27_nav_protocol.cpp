@@ -5,6 +5,7 @@
 #include <cmath>
 #include <deque>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -58,12 +59,12 @@ Srm27NavProtocolNode::Srm27NavProtocolNode(const rclcpp::NodeOptions & options)
   if (publish_chassis_speed_) {
     RCLCPP_INFO(
       get_logger(),
-      "接收侧 0x0010 底盘速度反馈 -> [%s](TwistStamped, frame_id=%s, m/s 与 rad/s), "
-      "[%s](Float32, 底盘相对云台, 度) 与 [%s](Float32, gimbal_yaw_joint, 弧度, sign=%+.1f); "
-      "失联门限 %.2f s",
+      "接收侧 0x0010 底盘速度反馈 -> [%s](TwistStamped, frame_id=%s, vx/vy 云台系 + wz 底盘), "
+      "[%s](Float32, 底盘相对云台, 度) 与 [%s](Float32, gimbal_yaw_joint, 弧度, sign=%+.1f)，"
+      "[%s](TwistStamped, 云台陀螺仪 yaw 转速, 旧帧 16 字节时不发); 失联门限 %.2f s",
       chassis_speed_topic_.c_str(), chassis_speed_frame_.c_str(),
       chassis_to_gimbal_yaw_topic_.c_str(), gimbal_joint_topic_.c_str(), gimbal_joint_sign_,
-      chassis_speed_timeout_sec_);
+      gimbal_yaw_rate_topic_.c_str(), chassis_speed_timeout_sec_);
   } else {
     RCLCPP_INFO(
       get_logger(), "接收侧 0x0010 底盘速度反馈: 已关闭 (publish_chassis_speed=false)");
@@ -112,6 +113,10 @@ void Srm27NavProtocolNode::createPublisher()
   // 云台关节角：gimbal_joint_state_relay 的 float32 模式直接订这条（云台相对底盘、弧度）。
   gimbal_joint_pub_ = this->create_publisher<std_msgs::msg::Float32>(
     gimbal_joint_topic_, rclcpp::QoS(1));
+  // 2026-11-08（方案 §4.4.1）：云台陀螺仪 yaw 转速。TwistStamped + angular.z，
+  // stamp = 收到串口帧的时刻（帧里没有时间字段）。旧帧（data_length=16）不发。
+  gimbal_yaw_rate_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
+    gimbal_yaw_rate_topic_, rclcpp::QoS(1));
 }
 
 void Srm27NavProtocolNode::createSubscription()
@@ -207,6 +212,10 @@ void Srm27NavProtocolNode::getParams()
     "chassis_to_gimbal_yaw_topic", "chassis_to_gimbal_yaw_deg");
   chassis_speed_frame_ = declare_parameter<std::string>("chassis_speed_frame", "base_link");
   chassis_speed_timeout_sec_ = declare_parameter<double>("chassis_speed_timeout_sec", 0.5);
+  // 云台陀螺仪转速（方案 §4.4.1）：喂 fake_vel_transform 的 yaw 外推。
+  // 定义与符号都要上车实测（方案 §8.1）；编码器转速不单独回传（= 关节角变化率）。
+  gimbal_yaw_rate_topic_ = declare_parameter<std::string>(
+    "gimbal_yaw_rate_topic", "gimbal_yaw_rate");
   // 云台关节角（URDF gimbal_yaw_joint）的换算：joint_rad = sign * deg * π / 180。
   // 下位机给的是"底盘相对云台"，URDF 要的是"云台相对底盘"，所以默认 sign = -1。
   // 符号接反比不接更糟（base_link 反向转，速度方向误差翻倍），所以允许现场用参数翻转：
@@ -462,19 +471,44 @@ void Srm27NavProtocolNode::receiveData()
           case ID_CHASSIS_SPEED: {
             // 长度必须精确匹配: data_length 写错时 fromVector 只会部分拷贝,
             // 那样 vx/vy/wz/yaw 会是"帧里其它字节"的误读值, 比丢包更难查。
-            if (!receive_length_matches<ReceiveChassisSpeedData>(header_frame.data_length)) {
+            //
+            // 2026-11-08（方案 §4.4.1）：0x0010 的数据段从 16 变成 20 字节（末尾追加
+            // 云台陀螺仪 yaw 转速）。上下位机不是同时升级的，所以**两种长度都认**：
+            //   20 = 新帧 -> 转速可用；
+            //   16 = 旧帧 -> 转速记为不可用（话题不发），不报错、不丢帧。
+            if (receive_length_matches<ReceiveChassisSpeedData>(header_frame.data_length)) {
+              ReceiveChassisSpeedData chassis_speed_data =
+                fromVector<ReceiveChassisSpeedData>(full_packet);
+              publishChassisSpeed(
+                chassis_speed_data.data.vx, chassis_speed_data.data.vy,
+                chassis_speed_data.data.wz, chassis_speed_data.data.chassis_to_gimbal_yaw_deg,
+                true, chassis_speed_data.data.gimbal_yaw_rate_imu);
+            } else if (
+              receive_length_matches<ReceiveChassisSpeedDataV1>(header_frame.data_length))
+            {
+              ReceiveChassisSpeedDataV1 legacy_data =
+                fromVector<ReceiveChassisSpeedDataV1>(full_packet);
+              chassis_speed_legacy_count_.fetch_add(1);
+              RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 10000,
+                "0x0010 是旧帧（data_length=%u）：云台转速不可用，yaw 外推请用 "
+                "yaw_rate_source=imu 或升级下位机固件（累计 %lu 帧）",
+                static_cast<unsigned>(header_frame.data_length),
+                static_cast<unsigned long>(chassis_speed_legacy_count_.load()));
+              publishChassisSpeed(
+                legacy_data.data.vx, legacy_data.data.vy, legacy_data.data.wz,
+                legacy_data.data.chassis_to_gimbal_yaw_deg, false, 0.0F);
+            } else {
               chassis_speed_bad_length_.fetch_add(1);
               RCLCPP_WARN_THROTTLE(
                 get_logger(), *get_clock(), 5000,
-                "0x0010 长度不符: data_length=%u, 期望 %u (整帧 %zu), 已丢弃",
+                "0x0010 长度不符: data_length=%u, 期望 %u（新帧, 整帧 %zu）或 %u（旧帧, 整帧 %zu）, 已丢弃",
                 static_cast<unsigned>(header_frame.data_length),
                 static_cast<unsigned>(DATA_LENGTH_CHASSIS_SPEED),
-                sizeof(ReceiveChassisSpeedData));
-              break;
+                sizeof(ReceiveChassisSpeedData),
+                static_cast<unsigned>(DATA_LENGTH_CHASSIS_SPEED_V1),
+                sizeof(ReceiveChassisSpeedDataV1));
             }
-            ReceiveChassisSpeedData chassis_speed_data =
-              fromVector<ReceiveChassisSpeedData>(full_packet);
-            publishChassisSpeed(chassis_speed_data);
           } break;
           case ID_SEFDEFINED:
           case ID_ROBOT_STATUS_V1: {
@@ -497,13 +531,18 @@ void Srm27NavProtocolNode::receiveData()
 /* Publish data                                         */
 /********************************************************/
 
-void Srm27NavProtocolNode::publishChassisSpeed(ReceiveChassisSpeedData & data)
+void Srm27NavProtocolNode::publishChassisSpeed(
+  float _vx, float _vy, float _wz, float _chassis_to_gimbal_yaw_deg,
+  bool _has_rate, float _rate_imu)
 {
-  const double vx = static_cast<double>(data.data.vx);
-  const double vy = static_cast<double>(data.data.vy);
-  const double wz = static_cast<double>(data.data.wz);
-  const double chassis_to_gimbal_yaw_deg =
-    static_cast<double>(data.data.chassis_to_gimbal_yaw_deg);
+  const double vx = static_cast<double>(_vx);
+  const double vy = static_cast<double>(_vy);
+  const double wz = static_cast<double>(_wz);
+  const double chassis_to_gimbal_yaw_deg = static_cast<double>(_chassis_to_gimbal_yaw_deg);
+  const double rate_imu = static_cast<double>(_rate_imu);
+  // 旧帧没有这个转速：NaN 是"不可用"的显式标记，不要伪装成 0 rad/s 的观测值。
+  const double kNan = std::numeric_limits<double>::quiet_NaN();
+  const double published_rate_imu = _has_rate ? rate_imu : kNan;
 
   chassis_speed_count_.fetch_add(1);
   chassis_speed_last_steady_ns_.store(
@@ -514,15 +553,16 @@ void Srm27NavProtocolNode::publishChassisSpeed(ReceiveChassisSpeedData & data)
   // 串口里出现 NaN/Inf（下位机解算异常、字节错位）时不要往下游传：
   // 下游（示波/标定脚本）拿 NaN 做统计会静默污染结果。
   // 注意是**整帧丢弃**：速度、度数、关节角三条话题都不发，避免下游拿半帧数据。
+  const bool rate_finite = !_has_rate || std::isfinite(rate_imu);
   if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(wz) ||
-    !std::isfinite(chassis_to_gimbal_yaw_deg))
+    !std::isfinite(chassis_to_gimbal_yaw_deg) || !rate_finite)
   {
     chassis_speed_nonfinite_.fetch_add(1);
     RCLCPP_WARN_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "0x0010 含 NaN/Inf (vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.1f), "
-      "本帧丢弃 (累计 %lu)",
-      vx, vy, wz, chassis_to_gimbal_yaw_deg,
+      "0x0010 含 NaN/Inf (vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.1f "
+      "rate_imu=%.3f), 本帧丢弃 (累计 %lu)",
+      vx, vy, wz, chassis_to_gimbal_yaw_deg, rate_imu,
       static_cast<unsigned long>(chassis_speed_nonfinite_.load()));
     return;
   }
@@ -564,11 +604,23 @@ void Srm27NavProtocolNode::publishChassisSpeed(ReceiveChassisSpeedData & data)
   gimbal_joint_msg.data = static_cast<float>(joint_rad);
   gimbal_joint_pub_->publish(gimbal_joint_msg);
 
+  // 云台陀螺仪 yaw 转速（方案 §4.4.1）：与上面几条共用一个 stamp，便于对时。
+  // 旧帧（16 字节）没有这个字段 -> 这里不发，下游按"不可用"处理（不是 0 rad/s）。
+  if (_has_rate) {
+    geometry_msgs::msg::TwistStamped rate_imu_msg;
+    rate_imu_msg.header.stamp = stamp;
+    rate_imu_msg.header.frame_id = chassis_speed_frame_;
+    rate_imu_msg.twist.angular.z = published_rate_imu;
+    gimbal_yaw_rate_pub_->publish(rate_imu_msg);
+  }
+
   RCLCPP_DEBUG(
     get_logger(),
-    "0x0010 底盘速度: vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.2f deg "
-    "→ gimbal_yaw_joint=%.4f rad",
-    vx, vy, wz, chassis_to_gimbal_yaw_deg, joint_rad);
+    "0x0010 底盘/云台反馈: vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.2f deg "
+    "gimbal_yaw_rate=%s → gimbal_yaw_joint=%.4f rad",
+    vx, vy, wz, chassis_to_gimbal_yaw_deg,
+    _has_rate ? std::to_string(published_rate_imu).c_str() : "N/A",
+    joint_rad);
 }
 
 void Srm27NavProtocolNode::checkChassisSpeedFreshness()

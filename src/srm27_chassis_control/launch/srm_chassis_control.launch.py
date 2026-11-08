@@ -14,14 +14,19 @@
 
 """速度出口链路（srm_cmd_mux）。
 
-链路：
-  <nav_topic> ─ srm_cmd_mux ── <output_topic>
+链路（2026-11-08 起两路输入，方案 §4.3）：
+  <nav_topic>  ─┐
+                ├─ srm_cmd_mux ── <output_topic>
+  <spin_topic> ─┘
+
+`nav_topic` 给平移（angular.z 一律忽略），`spin_topic` 给底盘 wz（决策层）。
+`spin_topic` **留空 = 单输入**（导航同时拥有平移与 wz）：仿真链与回退用这个。
+实车入口（nav_srm_real_launch.py）会传 `spin_topic:=rotation_cmd`。
 
 2026-10-19：独立自转链（rotation_controller / rotation_test_sender /
-rotation_velocity）已删除。`wz` 只由上位机（导航栈）产生，本链路不再有第二路自转输入，
-也没有 `wz_control_mode` 开关：mux 收到的导航 `angular.z` 就是最终执行的 wz。
+rotation_velocity）已删除，自转请求改由**决策层**直接发 `rotation_cmd`。
 
-`nav_topic` 由导航入口按链路给出：
+`nav_topic` / `output_topic` 由导航入口按链路给出：
   * 仿真入口（nav_srm_simulation_launch.py）：cmd_vel_nav_body（fake_vel_transform 的输出），
     输出仍叫 cmd_vel_sim；
   * 实车入口（nav_srm_real_launch.py）：同样是 cmd_vel_nav_body，但**输出必须改成
@@ -51,10 +56,11 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
     nav_topic = LaunchConfiguration("nav_topic")
+    spin_topic = LaunchConfiguration("spin_topic")
     output_topic = LaunchConfiguration("output_topic")
 
-    # mux 的 nav_topic / output_topic 也走 RewrittenYaml：配置文件里仍然写着这个键
-    # （"参数从哪来"在文件里可见），启动时按链路覆盖，避免"两处定义、一处静默生效"。
+    # mux 的 nav_topic / spin_topic / output_topic 也走 RewrittenYaml：配置文件里仍然写着
+    # 这些键（"参数从哪来"在文件里可见），启动时按链路覆盖，避免"两处定义、一处静默生效"。
     configured = ParameterFile(
         RewrittenYaml(
             source_file=params_file,
@@ -62,6 +68,7 @@ def generate_launch_description():
             param_rewrites={
                 "use_sim_time": use_sim_time,
                 "nav_topic": nav_topic,
+                "spin_topic": spin_topic,
                 "output_topic": output_topic,
             },
             convert_types=True,
@@ -92,8 +99,16 @@ def generate_launch_description():
                 "nav_topic",
                 default_value="cmd_vel_nav",
                 description=(
-                    "mux 的导航输入话题；fakeyaw 迁移链上是 fake_vel_transform 的输出 "
-                    "cmd_vel_nav_body。"
+                    "mux 的导航输入话题（只取平移）；fakeyaw 迁移链上是 "
+                    "fake_vel_transform 的输出 cmd_vel_nav_body。"
+                ),
+            ),
+            DeclareLaunchArgument(
+                "spin_topic",
+                default_value="",
+                description=(
+                    "决策层自转输入话题（只取 angular.z）。**留空 = 单输入**：导航同时拥有"
+                    "平移与 wz（仿真链/回退）。实车入口传 rotation_cmd。"
                 ),
             ),
             DeclareLaunchArgument(
@@ -108,3 +123,4 @@ def generate_launch_description():
             cmd_mux,
         ]
     )
+

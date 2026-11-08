@@ -25,6 +25,7 @@ ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/fake_vel_transform.cpp
+  src/rate_integration.cpp
 )
 
 rclcpp_components_register_node(${PROJECT_NAME}
@@ -42,6 +43,16 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_velocity_transform test/test_velocity_transform.cpp)
   target_include_directories(test_velocity_transform PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  # 方案 §6.1：实测转速积分（三种 yaw_rate_source 里两种都走它）的回归 ——
+  # 断流按 0 处理、左端没覆盖只少算不瞎猜。
+  # 纯逻辑直接编进测试：不依赖 rclcpp，单测也就不需要起 ROS。
+  ament_add_gtest(test_rate_integration
+    test/test_rate_integration.cpp
+    src/rate_integration.cpp
+  )
+  target_include_directories(test_rate_integration PRIVATE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   )
 

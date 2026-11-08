@@ -15,20 +15,23 @@
 #      **包含 cmd_id**, init 0xFFFF)
 #   整帧长度 = 5 + 2 + data_length + 2 = 9 + data_length
 #
-# 多包复用: 0x0001(比赛状态, 11B) / 0x000B(机器人状态, 13B) / 0x0010(速度, 16B)
+# 多包复用: 0x0001(比赛状态, 11B) / 0x000B(机器人状态, 13B) / 0x0010(速度, 20B 新 / 16B 旧)
 #   按 10 ms 槽位轮转（各自约 33.3 Hz）。串口 DMA 没发完时会**跳过该槽**（不是重发），
 #   所以上位机必须按 cmd_id 分派，不能按"第几个包"解析。本工具演示的正是这种写法。
 #
-# 0x0010 数据段（4 个 float32）:
-#   vx  m/s   底盘系 +x 向前
-#   vy  m/s   底盘系 +y 向左
-#   wz  rad/s 俯视逆时针为正
+# 0x0010 数据段（2026-11-08 起 20 字节 = 5 个 float32；旧固件仍是 16 字节 = 4 个）:
+#   vx  m/s   **云台系** +x 向前（云台的"前"）
+#   vy  m/s   **云台系** +y 向左
+#   wz  rad/s **底盘**自转，俯视逆时针为正
 #   chassis_to_gimbal_yaw  度   底盘车头相对云台的偏角：云台指向为 0，范围 (-180,180]，
 #                               俯视逆时针为正，由云台 yaw 编码器解算，与 IMU/上电零位无关。
 #                               （2026-11-08 改的口径；它不是"底盘在世界系里的 yaw"）
+#   gimbal_yaw_rate_imu  rad/s  云台陀螺仪 yaw 转速（相对地面）  ← 新增，yaw 外推用
+#   （编码器转速不单独回传：它就是 chassis_to_gimbal_yaw 的变化率）
 #   注意: 填充的是底盘速度观测器的融合结果 speed->fused，不是轮速正解；
 #         也不要拿它当"指令已被执行"的证据（指令→观测有延迟与尺度差）。
-#         上行 vx/vy 仍是**底盘系**：云台板只把底盘算好的速度转发，不做旋转。
+#         上行 vx/vy 按**云台系**（下位机按云台前执行 vx/vy，2026-11-08 起）。
+#   新旧帧靠 data_length 区分：20 = 新帧（有转速），16 = 旧帧（转速不可用，不报错）。
 #
 # 用法:
 #   ./script/test_chassis_speed_feedback.py --self-test
@@ -53,6 +56,8 @@
 #       --rate <Hz>       --pty 模式的发送频率，默认 33.3（与真实轮转频率一致）
 #       --vx/--vy/--wz/--yaw   --pty 模式合成的四个字段（m/s, m/s, rad/s, 度）；
 #                           --yaw 合成的是 chassis_to_gimbal_yaw（底盘相对云台）
+#       --rate-imu        --pty 模式合成的云台陀螺仪 yaw 转速（rad/s，默认 1.0）
+#       --legacy          --pty 模式发旧帧（data_length=16，没有云台转速）
 #       --seq-mode <inc|fixed>  流水号模式（inc=逐帧自增，默认；fixed=恒 0，用于排查）
 #       --seconds <秒>    --pty 模式运行时长，默认 0=一直跑
 #       --count <N>       收到 N 帧后退出（--device / --pty 均可用；0=不限）
@@ -152,9 +157,12 @@ def build_frame(cmd_id, payload, seq=0):
     return body + struct.pack("<H", crc16(body))
 
 
-#: 0x0010 的数据段：vx, vy, wz, chassis_to_gimbal_yaw(度)，四个小端 float32。
-def build_chassis_speed(vx, vy, wz, chassis_to_gimbal_yaw_deg):
-    return struct.pack("<ffff", vx, vy, wz, chassis_to_gimbal_yaw_deg)
+#: 0x0010 的数据段：vx, vy, wz, chassis_to_gimbal_yaw(度)[, rate_imu]。
+#: 给 4 个参数 = 旧帧（16 字节）；给 5 个 = 新帧（20 字节，方案 §4.4.1）。
+def build_chassis_speed(vx, vy, wz, chassis_to_gimbal_yaw_deg, rate_imu=None):
+    if rate_imu is None:
+        return struct.pack("<ffff", vx, vy, wz, chassis_to_gimbal_yaw_deg)
+    return struct.pack("<fffff", vx, vy, wz, chassis_to_gimbal_yaw_deg, float(rate_imu))
 
 
 PKT_GAME_STATUS = 0x0001
@@ -162,7 +170,8 @@ PKT_ROBOT_STATUS = 0x000B
 PKT_CHASSIS_SPEED = 0x0010
 LEN_GAME_STATUS = 11
 LEN_ROBOT_STATUS = 13
-LEN_CHASSIS_SPEED = 16
+LEN_CHASSIS_SPEED = 20          # 2026-11-08 起；旧帧仍按 LEN_CHASSIS_SPEED_V1 解析
+LEN_CHASSIS_SPEED_V1 = 16
 
 
 def self_test():
@@ -184,12 +193,13 @@ def self_test():
           "CRC16 参考向量: 0x%04X == 0x%04X"
           % (crc16(ref[:17]), struct.unpack("<H", ref[17:])[0]))
 
-    # 0x0010：25 字节整帧、数据段 16 字节、CRC16 覆盖范围包含 cmd_id。
-    payload = build_chassis_speed(0.4, -0.1, 0.75, 45.0)
+    # 0x0010：29 字节整帧、数据段 20 字节、CRC16 覆盖范围包含 cmd_id。
+    payload = build_chassis_speed(0.4, -0.1, 0.75, 45.0, 1.25)
     frame = build_frame(PKT_CHASSIS_SPEED, payload, seq=7)
-    check(len(frame) == 9 + LEN_CHASSIS_SPEED, "0x0010 整帧应为 25 字节（实得 %d）" % len(frame))
+    check(len(frame) == 9 + LEN_CHASSIS_SPEED, "0x0010 整帧应为 29 字节（实得 %d）" % len(frame))
     check(frame[0] == SOF, "帧首应为 0xA5")
-    check(struct.unpack("<H", frame[1:3])[0] == LEN_CHASSIS_SPEED, "data_length 应为 16")
+    check(struct.unpack("<H", frame[1:3])[0] == LEN_CHASSIS_SPEED,
+          "data_length 应为 20（新帧）")
     check(frame[3] == 7, "seq 应为 7")
     check(crc8(frame[:4]) == frame[4], "CRC8 应覆盖前 4 字节")
     check(struct.unpack("<H", frame[5:7])[0] == PKT_CHASSIS_SPEED, "cmd_id 应小端为 0x0010")
@@ -200,10 +210,17 @@ def self_test():
     broken[5] ^= 0xFF
     check(crc16(bytes(broken[:len(broken) - 2])) != struct.unpack("<H", frame[-2:])[0],
           "改动 cmd_id 必须导致 CRC16 失败（即 cmd_id 在 CRC16 覆盖范围内）")
-    # 解码往返
-    vx, vy, wz, yaw = struct.unpack("<ffff", frame[7:7 + LEN_CHASSIS_SPEED])
+    # 解码往返（新帧 5 个 float32）
+    vx, vy, wz, yaw, rate_imu = struct.unpack("<fffff", frame[7:7 + LEN_CHASSIS_SPEED])
     check((abs(vx - 0.4) < 1e-6 and abs(vy + 0.1) < 1e-6 and abs(wz - 0.75) < 1e-6
-           and abs(yaw - 45.0) < 1e-6), "0x0010 解码往返一致")
+           and abs(yaw - 45.0) < 1e-6 and abs(rate_imu - 1.25) < 1e-6),
+          "0x0010 新帧解码往返一致")
+    # 旧帧兼容：25 字节整帧、16 字节数据段，前 4 个字段位置不变。
+    legacy = build_frame(PKT_CHASSIS_SPEED, build_chassis_speed(0.4, -0.1, 0.75, 45.0), seq=7)
+    check(len(legacy) == 9 + LEN_CHASSIS_SPEED_V1,
+          "0x0010 旧帧应为 25 字节（实得 %d）" % len(legacy))
+    check(struct.unpack("<H", legacy[1:3])[0] == LEN_CHASSIS_SPEED_V1,
+          "旧帧 data_length 应为 16")
 
     # 另外两包只校验长度，不解析（本车 RefereeInit 未调用，内容恒 0）。
     check(9 + LEN_GAME_STATUS == 20, "0x0001 整帧应为 20 字节")
@@ -272,14 +289,28 @@ class FrameParser:
 
     @staticmethod
     def decode(payload):
-        """只解析 0x0010；其它包返回 None（本车裁判系统包恒为 0，解析无意义）。"""
-        if len(payload) != LEN_CHASSIS_SPEED:
-            return None
-        vx, vy, wz, chassis_to_gimbal_yaw = struct.unpack("<ffff", payload)
-        return {
-            "vx": vx, "vy": vy, "wz": wz,
-            "chassis_to_gimbal_yaw_deg": chassis_to_gimbal_yaw,
-        }
+        """只解析 0x0010；其它包返回 None（本车裁判系统包恒为 0，解析无意义）。
+
+        新旧帧都认（2026-11-08，方案 §4.4.1）：旧帧 16 字节没有两路云台转速，
+        此时 `gimbal_yaw_rate_imu` 为 None（不可用，而不是 0）。
+        """
+        if len(payload) == LEN_CHASSIS_SPEED:
+            vx, vy, wz, chassis_to_gimbal_yaw, rate_imu = struct.unpack("<fffff", payload)
+            return {
+                "vx": vx, "vy": vy, "wz": wz,
+                "chassis_to_gimbal_yaw_deg": chassis_to_gimbal_yaw,
+                "gimbal_yaw_rate_imu": rate_imu,
+                "legacy": False,
+            }
+        if len(payload) == LEN_CHASSIS_SPEED_V1:
+            vx, vy, wz, chassis_to_gimbal_yaw = struct.unpack("<ffff", payload)
+            return {
+                "vx": vx, "vy": vy, "wz": wz,
+                "chassis_to_gimbal_yaw_deg": chassis_to_gimbal_yaw,
+                "gimbal_yaw_rate_imu": None,
+                "legacy": True,
+            }
+        return None
 
 
 def run_device(args):
@@ -349,10 +380,15 @@ def run_device(args):
                          parser.stats["crc8_fail"], parser.stats["crc16_fail"],
                          parser.stats["bad_length"], parser.stats["dropped_bytes"]))
                 if last_speed is not None:
+                    if last_speed["gimbal_yaw_rate_imu"] is None:
+                        rates = "（旧帧：云台转速不可用）"
+                    else:
+                        rates = ("gimbal_yaw_rate=%+.3f rad/s"
+                                 % last_speed["gimbal_yaw_rate_imu"])
                     print("        最新 0x0010: vx=%+.3f m/s vy=%+.3f m/s wz=%+.3f rad/s "
-                          "chassis_to_gimbal_yaw=%+.2f deg"
+                          "chassis_to_gimbal_yaw=%+.2f deg %s"
                           % (last_speed["vx"], last_speed["vy"], last_speed["wz"],
-                             last_speed["chassis_to_gimbal_yaw_deg"]))
+                             last_speed["chassis_to_gimbal_yaw_deg"], rates))
                 else:
                     print("        还没收到 0x0010 —— 检查下位机是否在发、波特率、TX/RX 是否接反。")
                 if args.seconds and elapsed >= args.seconds:
@@ -378,6 +414,12 @@ def print_last(speed, parser, got):
     print("[结果] 共解出 0x0010 帧 %d 个；最新: vx=%+.3f vy=%+.3f wz=%+.3f "
           "chassis_to_gimbal_yaw=%+.2f deg (gimbal_yaw_joint=%+.4f rad)"
           % (got, speed["vx"], speed["vy"], speed["wz"], deg, joint_rad))
+    if speed["gimbal_yaw_rate_imu"] is None:
+        print("[结果] 这是旧帧（data_length=16）：云台转速不可用，"
+              "fake_vel_transform 请用 yaw_rate_source=imu")
+    else:
+        print("[结果] 云台陀螺仪转速 gimbal_yaw_rate=%+.3f rad/s（相对地面）"
+              % speed["gimbal_yaw_rate_imu"])
     print("[统计] 总帧 %d, CRC8失败 %d, CRC16失败 %d, 丢弃字节 %d"
           % (parser.stats["frames"], parser.stats["crc8_fail"], parser.stats["crc16_fail"],
              parser.stats["dropped_bytes"]))
@@ -396,6 +438,7 @@ def run_pty(args):
     print("  ros2 topic echo /chassis_speed     # TwistStamped")
     print("  ros2 topic echo /chassis_to_gimbal_yaw_deg   # Float32 (度)")
     print("  ros2 topic echo /gimbal_joint_angle          # Float32 (rad)")
+    print("  ros2 topic echo /gimbal_yaw_rate             # TwistStamped (云台陀螺仪转速)")
     print("Ctrl-C 退出。")
 
     seq = 0
@@ -403,7 +446,12 @@ def run_pty(args):
     start = time.time()
     try:
         while True:
-            payload = build_chassis_speed(args.vx, args.vy, args.wz, args.yaw)
+            # 默认发**新帧**（20 字节，含云台转速）；--legacy 可以发旧帧验证兼容路径。
+            if args.legacy:
+                payload = build_chassis_speed(args.vx, args.vy, args.wz, args.yaw)
+            else:
+                payload = build_chassis_speed(
+                    args.vx, args.vy, args.wz, args.yaw, args.rate_imu)
             frame = build_frame(PKT_CHASSIS_SPEED, payload,
                                 seq if args.seq_mode == "inc" else 0)
             if args.raw:
@@ -443,6 +491,10 @@ def main(argv=None):
     parser.add_argument("--vx", type=float, default=0.4, help="--pty 合成的 vx (m/s)")
     parser.add_argument("--vy", type=float, default=-0.1, help="--pty 合成的 vy (m/s)")
     parser.add_argument("--wz", type=float, default=0.8, help="--pty 合成的 wz (rad/s)")
+    parser.add_argument("--rate-imu", type=float, default=1.0,
+                        help="--pty: 云台陀螺仪 yaw 转速 (rad/s, 相对地面)")
+    parser.add_argument("--legacy", action="store_true",
+                        help="--pty: 发旧帧（data_length=16，没有云台转速）")
     parser.add_argument("--yaw", type=float, default=45.0,
                         help="--pty 合成的 chassis_to_gimbal_yaw（底盘相对云台, 度）")
     parser.add_argument("--seq-mode", choices=("inc", "fixed"), default="inc",

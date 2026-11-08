@@ -15,6 +15,8 @@
 
 #include "fake_vel_transform/fake_vel_transform.hpp"
 
+#include "fake_vel_transform/rate_integration.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -85,6 +87,16 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->declare_parameter<std::string>("yaw_debug_topic", "yaw_debug");
   this->declare_parameter<double>("diagnostics_period", 0.5);
   this->declare_parameter<float>("init_spin_speed", 0.0);
+  // 方案 §4.4.2：yaw 外推的推算源。云台系（2026-11-08）之后积分"下发给底盘的 wz"
+  // 不再代表云台转速（底盘 wz 不改变云台朝向），实车必须换成云台自己的转速：
+  //   cmd_wz      = 积分 mux 输出的 wz 指令（改造前的行为，仿真回归用）
+  //   gimbal_rate = 下位机回传的云台陀螺仪转速（gimbal_yaw_rate 话题）
+  //   imu         = Mid-360 IMU 的角速度换算到竖直轴（协议字段验符号前用它）
+  this->declare_parameter<std::string>("yaw_rate_source", "cmd_wz");
+  this->declare_parameter<std::string>("gimbal_rate_topic", "gimbal_yaw_rate");
+  this->declare_parameter<std::string>("imu_topic", "livox/imu");
+  this->declare_parameter<std::string>("imu_target_frame", "gimbal_yaw");
+  this->declare_parameter<double>("gimbal_rate_timeout", 0.1);
 
   std::string mode_text;
   this->get_parameter("transform_mode", mode_text);
@@ -102,6 +114,11 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->get_parameter("yaw_debug_topic", yaw_debug_topic_);
   this->get_parameter("diagnostics_period", diagnostics_period_);
   this->get_parameter("init_spin_speed", spin_speed_);
+  this->get_parameter("yaw_rate_source", yaw_rate_source_name_);
+  this->get_parameter("gimbal_rate_topic", gimbal_rate_topic_);
+  this->get_parameter("imu_topic", imu_topic_);
+  this->get_parameter("imu_target_frame", imu_target_frame_);
+  this->get_parameter("gimbal_rate_timeout", gimbal_rate_timeout_);
 
   if (mode_text == "nav_se2") {
     mode_ = Mode::kNavSe2;
@@ -112,6 +129,22 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
       get_logger(), "fake_vel_transform: 不支持的 transform_mode=%s（可选 legacy / nav_se2）",
       mode_text.c_str());
     throw std::invalid_argument("unsupported transform_mode: " + mode_text);
+  }
+  if (yaw_rate_source_name_ == "cmd_wz") {
+    yaw_rate_source_ = YawRateSource::kCmdWz;
+  } else if (yaw_rate_source_name_ == "gimbal_rate") {
+    yaw_rate_source_ = YawRateSource::kGimbalRate;
+  } else if (yaw_rate_source_name_ == "imu") {
+    yaw_rate_source_ = YawRateSource::kImu;
+  } else {
+    RCLCPP_FATAL(
+      get_logger(), "fake_vel_transform: 不支持的 yaw_rate_source=%s（可选 cmd_wz / "
+      "gimbal_rate / imu）", yaw_rate_source_name_.c_str());
+    throw std::invalid_argument("unsupported yaw_rate_source: " + yaw_rate_source_name_);
+  }
+  if (!(gimbal_rate_timeout_ > 0.0) || !std::isfinite(gimbal_rate_timeout_)) {
+    RCLCPP_FATAL(get_logger(), "fake_vel_transform: gimbal_rate_timeout 必须为正数");
+    throw std::invalid_argument("gimbal_rate_timeout must be positive");
   }
   if (!(odom_timeout_ > 0.0) || !std::isfinite(odom_timeout_)) {
     RCLCPP_FATAL(get_logger(), "fake_vel_transform: odom_timeout 必须为正数");
@@ -161,14 +194,35 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, rclcpp::QoS(1).best_effort(),
       std::bind(&FakeVelTransform::odometryCallback, this, std::placeholders::_1));
-    // ★ 外推必须用**底盘真正执行**的 wz：mux 是最靠近底盘的一层，会做钳位(wz_max)、
-    //   切换输入源、超时清零。用本节点自己的输入（cmd_vel_nav_fake）会和外推目标不一致。
-    // 空字符串 = **关闭外推**（回到"直接用 odom yaw"的旧行为）。给实车留的开关：
-    // 串口链路的下发延迟还没标定时，宁可不动，也不要拿错的 d 去外推。
-    if (!chassis_cmd_vel_topic_.empty()) {
-      chassis_cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-        chassis_cmd_vel_topic_, rclcpp::QoS(100).reliable(),
-        std::bind(&FakeVelTransform::chassisCmdCallback, this, std::placeholders::_1));
+    // ---- yaw 外推的数据源（方案 §4.4.2）----
+    // 云台系下不能再用"下发给底盘的 wz"：底盘 wz 不改变云台朝向。
+    switch (yaw_rate_source_) {
+      case YawRateSource::kCmdWz:
+        // ★ 旧行为：外推用**底盘真正执行**的 wz（mux 输出，含钳位/超时清零）。
+        // 空字符串 = **关闭外推**（回到"直接用 odom yaw"的旧行为）。
+        if (!chassis_cmd_vel_topic_.empty()) {
+          chassis_cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+            chassis_cmd_vel_topic_, rclcpp::QoS(100).reliable(),
+            std::bind(&FakeVelTransform::chassisCmdCallback, this, std::placeholders::_1));
+        }
+        break;
+      case YawRateSource::kGimbalRate:
+        // 下位机回传的云台陀螺仪转速（相对地面）：`gimbal_yaw_rate` 的 angular.z。
+        gimbal_rate_sub_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+          gimbal_rate_topic_, rclcpp::QoS(10),
+          std::bind(&FakeVelTransform::gimbalRateCallback, this, std::placeholders::_1));
+        break;
+      case YawRateSource::kImu: {
+        // Mid-360 IMU 装在云台上，测的就是云台相对地面的转速；雷达斜装 roll 30°，
+        // 所以角速度必须用 `livox_imu -> gimbal_yaw` 的旋转换算到竖直轴，
+        // 不能直接取 angular_velocity.z（方案 §4.4.3）。
+        tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+        tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+        imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+          imu_topic_, rclcpp::QoS(100),
+          std::bind(&FakeVelTransform::imuCallback, this, std::placeholders::_1));
+        break;
+      }
     }
   } else {
     odom_sub_filter_.subscribe(this, odom_topic_);
@@ -183,8 +237,8 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
     if (std::abs(spin_speed_) > 1e-9) {
       RCLCPP_WARN(
         get_logger(),
-        "fake_vel_transform: nav_se2 模式忽略 init_spin_speed=%.3f；导航拥有 wz，"
-        "叠加自转会造成双重旋转（方案 §3.1）。",
+        "fake_vel_transform: nav_se2 模式忽略 init_spin_speed=%.3f；底盘 wz 只由决策层的 "
+        "rotation_cmd 经 srm_cmd_mux 给出（方案 §4.3），本节点再叠自转就是双重旋转。",
         static_cast<double>(spin_speed_));
       spin_speed_ = 0.0F;
     }
@@ -192,12 +246,15 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
       get_logger(),
       "FakeVelTransform 已启动 (nav_se2): TF %s -> %s, odom=%s, 速度 [%s] -> [%s], "
       "odom 超时 %.3f s（墙钟）, wz 逐条透传，无自转叠加。\n"
-      "  yaw 外推: 指令源=%s, 生效延迟 d=%.3f s（仿真秒）, 积分窗口 %.2f s; "
-      "外推用节点时钟(use_sim_time=%s) + odom.stamp，不用墙钟。",
-      // 空话题 = 关闭外推
+      "  yaw 外推: 推算源=%s（%s）, 生效延迟 d=%.3f s（仿真秒）, 积分窗口 %.2f s, "
+      "实测转速断流门限 %.2f s; 外推用节点时钟(use_sim_time=%s) + odom.stamp，不用墙钟。",
       robot_base_frame_.c_str(), fake_robot_base_frame_.c_str(), odom_topic_.c_str(),
       input_cmd_vel_topic_.c_str(), output_cmd_vel_topic_.c_str(), odom_timeout_,
-      chassis_cmd_vel_topic_.c_str(), actuation_delay_, wz_history_window_,
+      yaw_rate_source_name_.c_str(),
+      yaw_rate_source_ == YawRateSource::kCmdWz ? chassis_cmd_vel_topic_.c_str() :
+      (yaw_rate_source_ == YawRateSource::kGimbalRate ? gimbal_rate_topic_.c_str() :
+      imu_topic_.c_str()),
+      actuation_delay_, wz_history_window_, gimbal_rate_timeout_,
       this->get_parameter("use_sim_time").as_bool() ? "true" : "false");
   } else {
     local_plan_sub_filter_.subscribe(this, local_plan_topic_);
@@ -361,6 +418,128 @@ void FakeVelTransform::chassisCmdCallback(const geometry_msgs::msg::Twist::Share
   }
 }
 
+void FakeVelTransform::gimbalRateCallback(const geometry_msgs::msg::TwistStamped::SharedPtr msg)
+{
+  const double wz = msg->twist.angular.z;
+  if (!std::isfinite(wz)) {
+    return;
+  }
+  // 时间戳取**消息到达**时刻：协议帧里没有时间字段（方案 §4.4.1 规定 stamp = 收到串口帧
+  // 的时刻），外推区间用节点时钟，两边同轴。
+  const rclcpp::Time now = this->now();
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  rate_history_.push_back({now, wz});
+  rate_sample_count_++;
+  const rclcpp::Time oldest = now - rclcpp::Duration::from_seconds(wz_history_window_);
+  while (!rate_history_.empty() && rate_history_.front().stamp < oldest) {
+    rate_history_.pop_front();
+  }
+}
+
+void FakeVelTransform::imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+  double wz = 0.0;
+  std::string error;
+  if (!imuYawRate(*msg, wz, error)) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "fake_vel_transform: IMU 角速度换算到 %s 失败（%s），本帧不参与外推。",
+      imu_target_frame_.c_str(), error.c_str());
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    rate_stale_count_++;
+    return;
+  }
+  const rclcpp::Time now = this->now();
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  rate_history_.push_back({now, wz});
+  rate_sample_count_++;
+  const rclcpp::Time oldest = now - rclcpp::Duration::from_seconds(wz_history_window_);
+  while (!rate_history_.empty() && rate_history_.front().stamp < oldest) {
+    rate_history_.pop_front();
+  }
+}
+
+bool FakeVelTransform::imuYawRate(
+  const sensor_msgs::msg::Imu & _msg, double & _wz, std::string & _error)
+{
+  _error.clear();
+  const std::string & frame_id = _msg.header.frame_id;
+  if (frame_id.empty()) {
+    _error = "IMU 消息没有 frame_id";
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (imu_rotation_ready_ && imu_frame_ == frame_id) {
+      const auto & omega = _msg.angular_velocity;
+      const tf2::Vector3 rotated =
+        imu_to_target_rotation_ * tf2::Vector3(omega.x, omega.y, omega.z);
+      _wz = rotated.z();
+      return true;
+    }
+  }
+
+  if (!tf_buffer_) {
+    _error = "没有 TF buffer";
+    return false;
+  }
+  // 雷达相对云台的安装角是**固定外参**：只查一次并缓存（方案 §4.4.3）。
+  try {
+    const auto stamped = tf_buffer_->lookupTransform(
+      imu_target_frame_, frame_id, tf2::TimePointZero, tf2::durationFromSec(0.2));
+    tf2::Quaternion rotation;
+    tf2::fromMsg(stamped.transform.rotation, rotation);
+    tf2::Matrix3x3 matrix(rotation);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      imu_to_target_rotation_ = matrix;
+      imu_frame_ = frame_id;
+      imu_rotation_ready_ = true;
+    }
+    RCLCPP_INFO(
+      get_logger(), "IMU 角速度换算到 %s 的固定旋转已缓存（imu frame=%s）",
+      imu_target_frame_.c_str(), frame_id.c_str());
+  } catch (const tf2::TransformException & ex) {
+    _error = ex.what();
+    return false;
+  }
+
+  const auto & omega = _msg.angular_velocity;
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  const tf2::Vector3 rotated =
+    imu_to_target_rotation_ * tf2::Vector3(omega.x, omega.y, omega.z);
+  _wz = rotated.z();
+  return true;
+}
+
+double FakeVelTransform::integrateMeasuredRate(
+  const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const
+{
+  partial = false;
+  if (to <= from) {
+    return 0.0;
+  }
+  // 纯逻辑在 rate_integration.cpp 里（可单测）：这里只负责把 rclcpp::Time 换成秒。
+  // 以 `from` 为 0 点，避免拿 1.7e9 秒的绝对时间做减法带来的精度损失。
+  std::vector<RateSample> samples;
+  samples.reserve(rate_history_.size());
+  for (const auto & sample : rate_history_) {
+    samples.push_back({(sample.stamp - from).seconds(), sample.wz});
+  }
+  return fake_vel_transform::integrateMeasuredRate(
+    samples, 0.0, (to - from).seconds(), gimbal_rate_timeout_, partial);
+}
+
+double FakeVelTransform::integrateYawRate(
+  const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const
+{
+  if (yaw_rate_source_ == YawRateSource::kCmdWz) {
+    return integrateCommandWz(from, to, partial);
+  }
+  return integrateMeasuredRate(from, to, partial);
+}
+
 double FakeVelTransform::integrateCommandWz(
   const rclcpp::Time & from, const rclcpp::Time & to, bool & partial) const
 {
@@ -483,13 +662,16 @@ void FakeVelTransform::publishTransformedVelocity(const geometry_msgs::msg::Twis
         last_odom_stamp_ - rclcpp::Duration::from_seconds(actuation_delay_);
       if (now > from) {
         bool partial = false;
-        const double integral = integrateCommandWz(from, now, partial);
+        const double integral = integrateYawRate(from, now, partial);
         predicted_yaw_ = yaw + integral;
         extrapolation_span_ = (now - from).seconds();
         last_wz_integral_ = integral;
         extrapolation_count_++;
         if (partial) {
           extrapolation_partial_count_++;
+          if (yaw_rate_source_ != YawRateSource::kCmdWz) {
+            rate_stale_count_++;
+          }
         }
       }
     }
@@ -649,6 +831,14 @@ void FakeVelTransform::publishDiagnostics()
   add("extrapolation_count", std::to_string(extrapolation_count_));
   add("extrapolation_partial_count", std::to_string(extrapolation_partial_count_));
   add("chassis_cmd_vel_topic", chassis_cmd_vel_topic_);
+  add("yaw_rate_source", yaw_rate_source_name_);
+  add("rate_topic", yaw_rate_source_ == YawRateSource::kCmdWz ? chassis_cmd_vel_topic_ :
+    (yaw_rate_source_ == YawRateSource::kGimbalRate ? gimbal_rate_topic_ : imu_topic_));
+  add("rate_sample_count", std::to_string(rate_sample_count_));
+  add("rate_stale_count", std::to_string(rate_stale_count_));
+  add("rate_history_size", std::to_string(rate_history_.size()));
+  add("rate_timeout", formatDouble(gimbal_rate_timeout_));
+  add("imu_rotation_ready", imu_rotation_ready_ ? "true" : "false");
   add("odom_age", formatDouble(odom_age));
   // odom 年龄的**仿真时间**版本（odom_age 是墙钟，两者之比就是 RTF）
   add(
