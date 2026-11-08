@@ -14,6 +14,7 @@ find_package(serial_driver REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(example_interfaces REQUIRED)
 find_package(rm_decision_interfaces REQUIRED)
@@ -39,6 +40,7 @@ ament_target_dependencies(${PROJECT_NAME}
   tf2_ros
   tf2_geometry_msgs
   geometry_msgs
+  std_msgs
   sensor_msgs
   example_interfaces
   rm_decision_interfaces
@@ -68,5 +70,18 @@ install(DIRECTORY
   launch
   DESTINATION share/${PROJECT_NAME}
 )
+
+# 反馈帧协议回归（0x0010 底盘速度包）：不需要串口/ROS，纯 python。
+# 用 **独立实现** 的组帧/解析与 C++ 节点互相校验（CRC 覆盖范围、按 cmd_id 分派、
+# 槽位跳过、长度自检、seq 回绕）。参考实现在 script/test_chassis_speed_feedback.py。
+if(BUILD_TESTING)
+  find_package(ament_cmake_test REQUIRED)
+  ament_add_test(test_feedback_protocol
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+    COMMAND ${CMAKE_COMMAND} -E env
+      python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/test_feedback_protocol.py
+    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/test_feedback_protocol.txt
+  )
+endif()
 
 ament_package()

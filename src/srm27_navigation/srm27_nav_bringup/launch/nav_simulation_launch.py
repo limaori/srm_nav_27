@@ -50,6 +50,8 @@ _FORWARDED_ARGUMENTS = (
     "use_rviz",
     "use_pcd_localization",
     "use_lio_odometry",
+    # 里程计前端（zlio / point_lio）：本入口只透传，默认值由 nav_srm_simulation_launch.py 给。
+    "odometry_frontend",
     "map_to_odom_x",
     "map_to_odom_y",
     "map_to_odom_yaw",
@@ -116,6 +118,7 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument("use_rviz", default_value="True"))
     ld.add_action(DeclareLaunchArgument("use_pcd_localization", default_value="False"))
     ld.add_action(DeclareLaunchArgument("use_lio_odometry", default_value="False"))
+    ld.add_action(DeclareLaunchArgument("odometry_frontend", default_value="zlio"))
     ld.add_action(DeclareLaunchArgument("map_to_odom_x", default_value="0.0"))
     ld.add_action(DeclareLaunchArgument("map_to_odom_y", default_value="0.0"))
     ld.add_action(DeclareLaunchArgument("map_to_odom_yaw", default_value="0.0"))

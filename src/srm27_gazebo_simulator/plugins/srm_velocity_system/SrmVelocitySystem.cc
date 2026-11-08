@@ -25,6 +25,8 @@
 #include <ignition/gazebo/Model.hh>
 #include <ignition/gazebo/Util.hh>
 #include <ignition/gazebo/components/AngularVelocity.hh>
+#include <ignition/gazebo/components/JointVelocity.hh>
+#include <ignition/gazebo/components/JointVelocityCmd.hh>
 #include <ignition/gazebo/components/LinearVelocity.hh>
 #include <ignition/gazebo/components/Model.hh>
 #include <ignition/gazebo/components/Name.hh>
@@ -99,6 +101,27 @@ class SrmVelocitySystemPrivate
 
   /// \brief 是否已经打过一次超时清零日志，避免刷屏。
   public: bool timeoutLogged{false};
+
+  /// \brief 云台关节实体（<gimbal_joint>，默认 gimbal_yaw_joint）。
+  public: ignition::gazebo::Entity gimbalJoint{
+    ignition::gazebo::kNullEntity};
+
+  /// \brief 云台匀速自转的角速度（rad/s，<gimbal_spin_rate>；0 = 不转）。
+  ///
+  /// 由**仿真器自己**每步施加，不依赖任何 ROS 话题/桥接/外部脚本：
+  /// 小陀螺（--yaw-mode spin）时给正/负值即可让云台连同其上的雷达匀速转，
+  /// 点云因此真的在转，Point-LIO 天然"感知到"这个自转。
+  public: double gimbalSpinRate{0.0};
+
+  /// \brief 是否已经打过一次"云台自转已启用"的日志。
+  public: bool gimbalSpinLogged{false};
+
+  /// \brief 是否已经做过一次"命令 vs 实测"自检。
+  public: bool gimbalSpinChecked{false};
+
+  /// \brief 云台是否由外部（ROS 话题 + gz JointController）驱动。
+  /// true 时本插件**完全不碰**云台关节，避免两个所有者互相覆盖。
+  public: bool gimbalExternalDriver{false};
 };
 
 //////////////////////////////////////////////////
@@ -161,6 +184,38 @@ void SrmVelocitySystem::Configure(
   if (this->dataPtr->odomPublishFrequency <= 0.0)
   {
     this->dataPtr->odomPublishFrequency = 50.0;
+  }
+
+  // 云台：仿真器直接驱动，不走 ROS 命令（小陀螺时由 SDF 给出恒定角速度）。
+  // external 模式（LIO 用）：云台转速改由 ROS 话题 + gz JointController 决定，
+  // 本插件完全不碰该关节，否则两个所有者会互相覆盖。
+  if (_sdf && _sdf->HasElement("gimbal_external_driver"))
+  {
+    this->dataPtr->gimbalExternalDriver = _sdf->Get<bool>("gimbal_external_driver");
+  }
+  auto gimbalJointName = std::string("gimbal_yaw_joint");
+  if (_sdf && _sdf->HasElement("gimbal_joint"))
+  {
+    gimbalJointName = _sdf->Get<std::string>("gimbal_joint");
+  }
+  if (_sdf && _sdf->HasElement("gimbal_spin_rate"))
+  {
+    this->dataPtr->gimbalSpinRate = _sdf->Get<double>("gimbal_spin_rate");
+  }
+  // 只要模型里给了 <gimbal_joint> 就解析（**包括转速为 0 的情形**）：
+  // 转速 0 也必须持续写 JointVelocityCmd(0)，等价于把云台锁在"相对底盘不转"，
+  // 也就是改造前 fixed 关节的行为。否则那是个自由关节，车一转弯云台会因惯性自己漂，
+  // 雷达朝向跟着漂 —— 那会悄悄改变默认行为。
+  if (_sdf && _sdf->HasElement("gimbal_joint"))
+  {
+    this->dataPtr->gimbalJoint = model.JointByName(
+        _ecm, _sdf->Get<std::string>("gimbal_joint"));
+    if (this->dataPtr->gimbalJoint == ignition::gazebo::kNullEntity)
+    {
+      ignerr << "SrmVelocitySystem 找不到云台关节 [" << gimbalJointName
+             << "]，云台将不被驱动（检查 yaw_envelope.movable 是否为 true）。"
+             << std::endl;
+    }
   }
 
   const auto resolvedCommandTopic = modelName + "/" + commandTopic;
@@ -296,6 +351,37 @@ void SrmVelocitySystem::PreUpdate(
   chassisLink.SetAngularVelocity(
       _ecm, ignition::math::Vector3d(
           angularVel.X(), angularVel.Y(), wz));
+
+  // 云台匀速自转：每个物理步都写一次 JointVelocityCmd，等价于"恒速电机"。
+  // 它与底盘速度完全独立 —— 底盘可以不动、云台照样转（小陀螺的语义）。
+  if (!this->dataPtr->gimbalExternalDriver &&
+      this->dataPtr->gimbalJoint != ignition::gazebo::kNullEntity)
+  {
+    auto *jointVelCmd =
+        _ecm.Component<ignition::gazebo::components::JointVelocityCmd>(
+            this->dataPtr->gimbalJoint);
+    if (jointVelCmd == nullptr)
+    {
+      _ecm.CreateComponent(
+          this->dataPtr->gimbalJoint,
+          ignition::gazebo::components::JointVelocityCmd(
+              {this->dataPtr->gimbalSpinRate}));
+    }
+    else
+    {
+      jointVelCmd->Data() = {this->dataPtr->gimbalSpinRate};
+    }
+    if (!this->dataPtr->gimbalSpinLogged)
+    {
+      // 用 warn 而不是 dbg：默认日志级别下也要能看见，否则"云台为什么不转"
+      // 只能靠猜。这一行同时回答两个问题：关节有没有被接管、当前转速是多少。
+      ignwarn << "SrmVelocitySystem: 云台关节已接管，角速度 "
+              << this->dataPtr->gimbalSpinRate
+              << " rad/s（0 = 锁定在相对底盘不转；非零 = 匀速自转）。"
+              << std::endl;
+      this->dataPtr->gimbalSpinLogged = true;
+    }
+  }
 }
 
 //////////////////////////////////////////////////
@@ -303,6 +389,36 @@ void SrmVelocitySystem::PostUpdate(
     const ignition::gazebo::UpdateInfo &_info,
     const ignition::gazebo::EntityComponentManager &_ecm)
 {
+  // 云台自检（只做一次）：命令了转速但关节实际不动，说明"模型里关节/驱动力路径"有问题，
+  // 而不是参数没传到。这样下次一跑就能凭日志区分是"模型没建对"还是"命令没生效"。
+  if (!this->dataPtr->gimbalSpinChecked &&
+      this->dataPtr->gimbalJoint != ignition::gazebo::kNullEntity &&
+      this->dataPtr->gimbalSpinRate != 0.0 &&
+      _info.simTime > std::chrono::seconds(2))
+  {
+    this->dataPtr->gimbalSpinChecked = true;
+    const auto *jointVel =
+        _ecm.Component<ignition::gazebo::components::JointVelocity>(
+            this->dataPtr->gimbalJoint);
+    const double measured = (jointVel != nullptr && !jointVel->Data().empty())
+        ? jointVel->Data()[0] : 0.0;
+    if (std::abs(measured - this->dataPtr->gimbalSpinRate) >
+        0.5 * std::abs(this->dataPtr->gimbalSpinRate))
+    {
+      ignwarn << "SrmVelocitySystem: 云台自检失败 —— 命令 "
+              << this->dataPtr->gimbalSpinRate << " rad/s，实测 " << measured
+              << " rad/s。关节存在但没被驱动：查 SDF 的关节类型/限位、以及 "
+                 "JointVelocityCmd 是否被物理引擎接受。" << std::endl;
+    }
+    else
+    {
+      ignwarn << "SrmVelocitySystem: 云台自检通过 —— 实测 " << measured
+              << " rad/s（命令 " << this->dataPtr->gimbalSpinRate
+              << " rad/s），云台确实在转。" << std::endl;
+    }
+  }
+
+
   this->dataPtr->UpdateOdometry(_info, _ecm);
 }
 

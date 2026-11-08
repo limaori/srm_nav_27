@@ -72,6 +72,11 @@ def generate_launch_description():
             "slam": "True",
             "use_pcd_localization": "False",
             "use_lio_odometry": "False",
+            # 建图/SLAM 链路固定 Point-LIO：nav2_slam_launch.py 自己起 point_lio，
+            # 不经过 localization_launch，所以 ZLIO 在这里起不来（方案 §10 的边界）。
+            # 必须显式给，否则仿真入口的默认值 zlio 会撞上 nav2_stack_launch 的
+            # "zlio + slam 不兼容"校验，把建图入口直接打死。
+            "odometry_frontend": "point_lio",
             "start_simulation": "False",
             "start_chassis_control": chassis_control,
             # 建图时不做自转测试，避免把旋转揉进地图

@@ -37,6 +37,7 @@ from ament_index_python.packages import get_package_prefix, get_package_share_di
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
+from launch.substitutions import PythonExpression
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
@@ -49,7 +50,6 @@ sys.path.insert(
 from srm_robot_description import (  # noqa: E402
     build_description,
     gravity_from_mounting,
-    parse_triplet,
 )
 
 
@@ -64,17 +64,42 @@ def launch_setup(context):
                 "Set driver extrinsics to zero; use lidar_xyz/lidar_rpy for mounting"
             )
 
-    lidar_xyz = LaunchConfiguration("lidar_xyz").perform(context)
-    lidar_rpy = LaunchConfiguration("lidar_rpy").perform(context)
-    position = parse_triplet(lidar_xyz, "lidar_xyz")
-    parse_triplet(lidar_rpy, "lidar_rpy")
-
-    robot_xml = build_description(params_file, lidar_xyz, lidar_rpy)
-    gravity = gravity_from_mounting(lidar_rpy)
+    robot_xml, mounting = build_description(
+        params_file,
+        LaunchConfiguration("lidar_xyz").perform(context),
+        LaunchConfiguration("lidar_rpy").perform(context),
+        # 云台按**真关节**处理（默认 revolute，与仿真一致）。
+        # 关键前提：revolute 时 base_link -> gimbal_yaw 这条 TF **只来自 /joint_states**，
+        # 没有发布者的话 robot_state_publisher 一个动态 TF 都不发，livox_frame / livox_imu
+        # 整棵子树从 base_link 断开 —— 实测后果是 loam_interface 永远初始化不了、
+        # 没有 /registered_scan -> 没有 /scan -> 没有 map。所以下面一定会起
+        # gimbal_joint_state_relay：有回传话题就用真实角，没有就 constant 暂位 0 度。
+        gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
+    )
+    # 安装位姿与 gravity 都来自同一个来源（唯一模型），不会再出现"模型改了、重力没改"。
+    position = mounting["xyz"]
+    gravity = gravity_from_mounting(mounting["rpy"])
 
     use_sim_time = ParameterValue(
         LaunchConfiguration("use_sim_time"), value_type=bool
     )
+    # 累积点云默认落到与 Point-LIO 同一个文件：下游 pcd_to_mapframe.py /
+    # build_pcd_from_bag.sh 都按这个路径找，换前端不该换路径。
+    default_pcd_path = str(
+        Path(get_package_share_directory("srm27_nav_bringup")).parents[4]
+        / "src/srm27_navigation/point_lio/PCD/scans.pcd"
+    )
+    pcd_save_path = LaunchConfiguration("pcd_save_path").perform(context) or default_pcd_path
+    lio_frontend = LaunchConfiguration("lio_frontend").perform(context)
+    zlio_config = LaunchConfiguration("zlio_config").perform(context)
+    # 建图只换"谁产生里程计与配准点云"这一层：point_lio + loam_interface
+    # 换成 frontend/zlio_node + zlio_bridge。下游 sensor_scan_generation /
+    # pointcloud_to_laserscan / slam_toolbox 全部照旧（bridge 的输出沿用
+    # registered_scan / lidar_odometry 原名）。
+    use_zlio = lio_frontend == "zlio"
+    gimbal_joint_topic = LaunchConfiguration("gimbal_joint_topic").perform(context)
+    # 云台按真关节(与仿真一致)。没有回传角时用 constant 暂位 0 度, 见下方 relay 节点。
+    gimbal_input_type = "float32" if gimbal_joint_topic else "constant"
     clock_params = {"use_sim_time": use_sim_time}
     point_lio_defaults = str(
         Path(get_package_share_directory("point_lio")) / "config/mid360.yaml"
@@ -89,6 +114,18 @@ def launch_setup(context):
             parameters=[
                 clock_params,
                 {"robot_description": robot_xml},
+            ],
+        ),
+        Node(
+            package="srm27_nav_bringup",
+            executable="gimbal_joint_state_relay.py",
+            name="gimbal_joint_state_relay",
+            output="screen",
+            parameters=[
+                clock_params,
+                {"input_topic": gimbal_joint_topic},
+                {"input_type": gimbal_input_type},
+                {"constant_angle": 0.0},
             ],
         ),
         Node(
@@ -107,6 +144,7 @@ def launch_setup(context):
             package="point_lio",
             executable="pointlio_mapping",
             name="point_lio",
+            condition=IfCondition(PythonExpression(["not ", str(use_zlio)])),
             output="screen",
             parameters=[
                 point_lio_defaults,
@@ -125,8 +163,59 @@ def launch_setup(context):
             package="loam_interface",
             executable="loam_interface_node",
             name="loam_interface",
+            condition=IfCondition(PythonExpression(["not ", str(use_zlio)])),
             output="screen",
             parameters=[params_file, clock_params],
+        ),
+        # ---- ZLIO 前端（lio_frontend:=zlio）----
+        # 输入接线是实车口径：CustomMsg + livox/imu + IMU 单位 g。
+        Node(
+            package="frontend",
+            executable="zlio_node",
+            name="zlio",
+            condition=IfCondition(PythonExpression([str(use_zlio)])),
+            output="screen",
+            parameters=[
+                clock_params,
+                {"config_file": zlio_config},
+                {"input_type": "livox"},
+                {"lidar_topic": "livox/lidar"},
+                {"imu_topic": "livox/imu"},
+                {"imu_acceleration_scale": 9.81},
+                {"publish_tf": False},
+                {"world_frame": "odom"},
+                {"body_frame": "livox_imu"},
+                {"reset_mode": "warm"},
+                {"coordinated_reset": False},
+            ],
+            remappings=[
+                ("odometry", "zlio/odometry"),
+                ("lidar_odometry", "zlio/lidar_odometry"),
+                ("frontend/frame", "zlio/frame"),
+                ("frontend/odometry", "zlio/frontend_odometry"),
+                ("frontend/session", "zlio/session"),
+            ],
+        ),
+        Node(
+            package="srm27_nav_bringup",
+            executable="zlio_bridge.py",
+            name="zlio_bridge",
+            condition=IfCondition(PythonExpression([str(use_zlio)])),
+            output="screen",
+            parameters=[
+                params_file,
+                clock_params,
+                # bridge 的默认 lidar_frame 是仿真的 front_mid360，实车必须覆盖。
+                {"odom_frame": "odom", "base_frame": "base_link", "lidar_frame": "livox_imu"},
+                # 累积点云落盘（等价 Point-LIO 的 pcd_save）：退出时按体素降采样写 PCD。
+                {
+                    "pcd_save_en": ParameterValue(
+                        LaunchConfiguration("save_pcd"), value_type=bool
+                    ),
+                    "pcd_save_path": pcd_save_path,
+                    "pcd_voxel_leaf": 0.10,
+                },
+            ],
         ),
         Node(
             package="sensor_scan_generation",
@@ -190,13 +279,37 @@ def generate_launch_description():
         ),
         (
             "lidar_xyz",
-            "0.12081 -0.056721 0.346388",
+            "",
             "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
         ),
         (
             "lidar_rpy",
-            "0.523598776 0.0 1.099557429",
+            "",
             "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+        ),
+        (
+            "gimbal_joint_type",
+            "revolute",
+            "云台关节类型（与仿真一致，默认 revolute）。"
+            "前提是 /joint_states 有发布者：本文件一定会起 gimbal_joint_state_relay，"
+            "有回传话题就用真实角，没有就用 constant 暂位 0 度。",
+        ),
+        (
+            "lio_frontend",
+            "zlio",
+            "里程计/配准点云前端: zlio（默认，与导航链一致）或 point_lio（回退）。"
+            "zlio 会起 frontend/zlio_node + zlio_bridge，不再起 point_lio/loam_interface；"
+            "注意 ZLIO 没有 --save-pcd 那样的 PCD 落盘。",
+        ),
+        (
+            "zlio_config",
+            str(bringup_dir / "config/real/zlio_mid360.yaml"),
+            "ZLIO 算法参数（只在 lio_frontend:=zlio 时生效）",
+        ),
+        (
+            "gimbal_joint_topic",
+            "",
+            "云台关节角回传话题; 留空 = constant 暂位 0 度 (TF 与 fixed 等价)",
         ),
         (
             "start_lidar",
@@ -206,9 +319,15 @@ def generate_launch_description():
         ("use_sim_time", "False", "Use the bag clock when replaying with --clock"),
         ("use_rviz", "True", "Start the mapping RViz view"),
         (
+            "pcd_save_path",
+            "",
+            "累积点云落盘路径（默认 <ws>/src/srm27_navigation/point_lio/PCD/scans.pcd，"
+            "与 Point-LIO 同路径；只在 save_pcd 为真时生效）",
+        ),
+        (
             "save_pcd",
             "False",
-            "Accumulate a Point-LIO PCD and save it on clean shutdown",
+            "在正常退出时落盘累积点云: point_lio 由它自己写, zlio 由 zlio_bridge 写",
         ),
     ]
     return LaunchDescription(

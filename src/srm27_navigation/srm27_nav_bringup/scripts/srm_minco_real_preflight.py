@@ -467,13 +467,18 @@ def check_terminal_stop(cfg, report):
                    % (a_chassis - a_required, slide, 2.0 * effective_tolerance))
 
 
-def check_goal_checker(cfg, report):
-    """到点判定必须由"角速度不参与"的检查器负责。
+def check_goal_checker(cfg, report, fakeyaw=False):
+    """到点判定必须与该链的 wz 归属匹配。
 
-    2026-10-09 之后 SRM 改为自建插件 `srm27_nav_plugins::OmniStoppedGoalChecker`：
-    与 `nav2_controller::StoppedGoalChecker` 的唯一差别是去掉了
-    `|wz| <= rot_stopped_velocity` 这一条。导航不拥有自转（xy_only 下插件输出 wz≡0，
-    smoother 把 yaw 上界钳成 0），拿 wz 否掉到达结论等于把下位机的状态当成导航的失败。
+    两条链的期望**正好相反**：
+    * 旧链（导航不控自转，xy_only + smoother 把 yaw 钳 0）：用自建的
+      `srm27_nav_plugins::OmniStoppedGoalChecker` —— 与 `nav2_controller::StoppedGoalChecker`
+      的唯一差别是去掉 `|wz| <= rot_stopped_velocity`，因为自转不归导航管，拿它否掉
+      到达结论等于把下位机的状态当成导航的失败。
+    * 迁移链（导航拥有 wz）：必须用 Nav2 官方 `StoppedGoalChecker` 并显式给
+      `rot_stopped_velocity` —— "到点停稳"必须把角速度算进去，否则车还在自转就判到点。
+      （SPIN 模式下 launch 会自动换回 OmniStoppedGoalChecker，那是刻意行为，见
+      nav_srm_real_launch.py。）
     """
     plugin = _first_scalar(cfg, "controller_server.general_goal_checker.plugin")
     xy = _as_float(_first_scalar(cfg, "controller_server.general_goal_checker.xy_goal_tolerance"))
@@ -486,24 +491,47 @@ def check_goal_checker(cfg, report):
     if plugin is None:
         report.add(BLOCK, "缺少 general_goal_checker.plugin", "无法确认到点判定由谁负责。")
         return
-    if "OmniStoppedGoalChecker" not in str(plugin):
-        report.add(
-            BLOCK,
-            "到点判定仍依赖角速度 (plugin = %s)" % shown,
-            "期望 srm27_nav_plugins::OmniStoppedGoalChecker。\n"
-            "nav2_controller::StoppedGoalChecker 在位置/航向满足后还要求 |wz| <= "
-            "rot_stopped_velocity，\n也就是**自转会让它永远判不了到点**；而 SRM 的自转不归导航管。",
-        )
+    if fakeyaw:
+        if "StoppedGoalChecker" not in str(plugin) or "OmniStoppedGoalChecker" in str(plugin):
+            report.add(
+                BLOCK,
+                "迁移链的到点判定用错插件 (plugin = %s)" % shown,
+                "期望 nav2_controller::StoppedGoalChecker：导航拥有 wz 之后，\n"
+                "「到点停稳」必须把角速度算进去；OmniStoppedGoalChecker 刻意不看 wz，\n"
+                "用它会让车在自转中被判到点。",
+            )
+        elif rot is None:
+            report.add(
+                BLOCK,
+                "迁移链缺少 rot_stopped_velocity",
+                "StoppedGoalChecker 的默认值是 0.25 rad/s，对小陀螺(2.0 rad/s)过于宽松，"
+                "会在明显还在转的时候判到点。请显式写 rot_stopped_velocity（仿真取 0.05）。",
+            )
+        elif rot <= 0.0:
+            report.add(WARN, "rot_stopped_velocity = %s（等于不检查角速度）" % rot,
+                       "迁移链想要的是「角速度也要停稳」，取 0 与设计意图相反。")
+        else:
+            report.add(NOTE, "到点判定包含角速度停稳",
+                       "plugin = %s, rot_stopped_velocity = %.3f rad/s" % (shown, rot))
     else:
-        report.add(NOTE, "到点判定不依赖角速度", "plugin = %s" % shown)
+        if "OmniStoppedGoalChecker" not in str(plugin):
+            report.add(
+                BLOCK,
+                "到点判定仍依赖角速度 (plugin = %s)" % shown,
+                "期望 srm27_nav_plugins::OmniStoppedGoalChecker。\n"
+                "nav2_controller::StoppedGoalChecker 在位置/航向满足后还要求 |wz| <= "
+                "rot_stopped_velocity，\n也就是**自转会让它永远判不了到点**；而这份链的自转不归导航管。",
+            )
+        else:
+            report.add(NOTE, "到点判定不依赖角速度", "plugin = %s" % shown)
 
-    if rot is not None:
-        report.add(
-            BLOCK,
-            "参数文件里残留 rot_stopped_velocity = %s" % rot,
-            "OmniStoppedGoalChecker 没有这个参数：未声明的键不会被声明、也就不会被读取，"
-            "留在配置里只会让人误以为它生效。请删掉这一行。",
-        )
+        if rot is not None:
+            report.add(
+                BLOCK,
+                "参数文件里残留 rot_stopped_velocity = %s" % rot,
+                "OmniStoppedGoalChecker 没有这个参数：未声明的键不会被声明、也就不会被读取，"
+                "留在配置里只会让人误以为它生效。请删掉这一行。",
+            )
     if trans is None:
         report.add(WARN, "缺少 trans_stopped_velocity",
                    "没有它就无法保证\"到点\"时车真的停住，可能高速掠过目标点即判成功。")
@@ -665,6 +693,62 @@ def check_velocity_layers(cfg, protocol_cfg, report):
                    "yaw_policy.mode = %s, 而 velocity_smoother.max_velocity[2] = 0.0; "
                    "导航指令的角速度会被静默清零。" % yaw_mode)
 
+    # ---- 迁移链：mux 是 cmd_vel_chassis 前的最后一道钳位，必须与上下游自洽 ----
+    mux = _first_scalar(cfg, "srm_cmd_mux")
+    mux_v = _as_float(_first_scalar(cfg, "srm_cmd_mux.v_max"))
+    mux_wz = _as_float(_first_scalar(cfg, "srm_cmd_mux.wz_max"))
+    controller_wz = _as_float(
+        _first_scalar(cfg, "controller_server.FollowPath.limits.max_angular_speed"))
+    if isinstance(mux, dict):
+        serial_vx = None
+        if protocol_cfg is not None:
+            serial_vx = _as_float(_first_scalar(protocol_cfg, "max_vx"))
+        if mux_v is not None and smoother_x is not None and mux_v < smoother_x:
+            if serial_vx is not None and mux_v <= serial_vx:
+                # mux 与串口同档：真瓶颈是串口那一层，mux 只是把同样的值再写一遍。
+                report.add(
+                    NOTE,
+                    "mux 平移上限与串口同档（不构成额外瓶颈）",
+                    "mux.v_max = %.2f <= 串口 max_vx = %.2f < 平滑器 %.2f："
+                    "实际卡住速度的是串口层，想提速要一起改这两处。"
+                    % (mux_v, serial_vx, smoother_x),
+                )
+            else:
+                report.add(
+                    WARN,
+                    "srm_cmd_mux 的平移上限低于速度平滑器",
+                    "mux.v_max = %.2f < velocity_smoother.max_velocity[0] = %.2f："
+                    "上层调参会被 mux 悄悄吃掉（mux 没有动态回调，改完要重启）。"
+                    % (mux_v, smoother_x),
+                )
+        else:
+            report.add(NOTE, "mux 平移层自洽",
+                       "srm_cmd_mux.v_max = %s（>= 平滑器 %s）" % (mux_v, smoother_x))
+        if yaw_mode and str(yaw_mode) != "xy_only" and mux_wz is not None:
+            if mux_wz <= 0.0:
+                report.add(BLOCK, "导航拥有 wz 但 mux 把 wz 钳成 0",
+                           "srm_cmd_mux.wz_max = %.2f：所有自转请求都会在这里被清零。" % mux_wz)
+            elif controller_wz is not None and mux_wz > controller_wz:
+                report.add(WARN, "mux 的 wz 上限高于控制器",
+                           "mux.wz_max = %.2f > FollowPath.limits.max_angular_speed = %.2f："
+                           "mux 这一层等于没起作用，实际限额由控制器决定。"
+                           % (mux_wz, controller_wz))
+            elif smoother_wz is not None and mux_wz > smoother_wz:
+                report.add(NOTE, "mux 的 wz 上限高于平滑器",
+                           "mux.wz_max = %.2f > smoother.max_velocity[2] = %.2f："
+                           "实际生效的是平滑器那一层。" % (mux_wz, smoother_wz))
+            else:
+                report.add(NOTE, "mux 是 wz 的最后一层钳位",
+                           "srm_cmd_mux.wz_max = %.2f（首跑刻意压得比控制器低，验过再抬）" % mux_wz)
+    elif yaw_mode and str(yaw_mode) != "xy_only" and detect_fakeyaw(cfg):
+        report.add(
+            WARN,
+            "迁移链没有 srm_cmd_mux 段",
+            "速度限幅覆盖层里找不到 srm_cmd_mux 段：mux 会退回节点默认值"
+            "（0.5 m/s、wz 2.0），实车速度会被吃掉一半，且这一层不可见。"
+            "请确认 --speed-limits 指向 config/real/speed_limits.yaml。",
+        )
+
     if protocol_cfg is not None:
         max_vx = _as_float(_first_scalar(protocol_cfg, "max_vx"))
         max_wz = _as_float(_first_scalar(protocol_cfg, "max_wz"))
@@ -748,6 +832,142 @@ def check_safety_geometry(cfg, report):
                    "robot_radius = %.3f m。窄通道前必须实测车身外接圆(含轮子外廓)。" % radius)
 
 
+def detect_fakeyaw(cfg):
+    """判定这份参数是不是 fakeyaw 迁移链（导航拥有 wz、参考系 base_link_fake）。
+
+    判据取链路事实，不看文件名（与 `srm_speed_limits.detect_profile` 同一套思路）：
+    `FollowPath.fake_base_frame` 非空，或 `fake_vel_transform.transform_mode == nav_se2`。
+    """
+    fake_base = _first_scalar(cfg, "controller_server.FollowPath.fake_base_frame")
+    if isinstance(fake_base, str) and fake_base.strip():
+        return True
+    mode = _first_scalar(cfg, "fake_vel_transform.transform_mode")
+    return isinstance(mode, str) and mode.strip().lower() == "nav_se2"
+
+
+def check_fakeyaw_chain(cfg, period, report):
+    """fakeyaw 迁移链的接线自检（只在 detect_fakeyaw 成立时跑）。
+
+    这一层的错法都是"链路全绿、车不动或静默转错方向"，所以逐条钉住：
+      1. transform_mode 必须是 nav_se2（legacy 会叠加 cmd_spin）；
+      2. 输入/输出话题必须非空且不同（相等 = 自环）；
+      3. 导航参考系（bt/两份 costmap/behavior/FollowPath.command_frame）必须统一是
+         `fake_robot_base_frame`；`robot_base_frame` 必须仍是真实底盘（改错了 odom 查 TF 会断）；
+      4. odom_timeout 必须容得下实车 /odometry 的到达周期（10 Hz）；
+      5. 导航拥有 wz 时必须有 spin_request 段（没有的话 rotation_cmd 没人订阅）；
+      6. yaw 外推开着却给 0 延迟 = 等于没开。
+    """
+    # 注意：这里必须逐键取值（`_first_scalar` 会穿透 ros__parameters），
+    # 取整段拿到的是外层 dict，`.get("transform_mode")` 永远是 None。
+    def _fake(key, default=None):
+        value = _first_scalar(cfg, "fake_vel_transform." + key)
+        return default if value is None else value
+
+    if _first_scalar(cfg, "fake_vel_transform") is None:
+        report.add(BLOCK, "迁移链缺少 fake_vel_transform 段",
+                   "参数文件里没有这个节点段：fake 节点会退回默认话题，链路断开。")
+        return
+
+    mode = str(_fake("transform_mode", "legacy"))
+    if mode != "nav_se2":
+        report.add(BLOCK, "fake_vel_transform.transform_mode 不是 nav_se2 (%s)" % mode,
+                   "legacy 模式会叠加 cmd_spin、并且按 local_plan 同步（只有 Omni 发布该话题），"
+                   "MINCO 链上行为不可预测。迁移链必须 nav_se2。")
+    else:
+        report.add(NOTE, "fake_vel_transform 工作在 nav_se2", "wz 逐条透传、只旋转平移。")
+
+    input_topic = str(_fake("input_cmd_vel_topic", ""))
+    output_topic = str(_fake("output_cmd_vel_topic", ""))
+    if not input_topic or not output_topic:
+        report.add(BLOCK, "fake_vel_transform 的输入/输出话题为空",
+                   "input=%r output=%r：节点会退回默认名，与 Nav2 出口/mux 输入对不上。"
+                   % (input_topic, output_topic))
+    elif input_topic == output_topic:
+        report.add(BLOCK, "fake_vel_transform 输入输出话题相同 (%s)" % input_topic,
+                   "等于自环：节点订阅自己发布的话题，速度会被反复旋转。")
+    else:
+        report.add(NOTE, "fake_vel_transform 话题", "%s -> %s" % (input_topic, output_topic))
+
+    real_base = _fake("robot_base_frame")
+    fake_base = _fake("fake_robot_base_frame")
+    if not real_base or not fake_base:
+        report.add(BLOCK, "fake_vel_transform 缺少 robot_base_frame / fake_robot_base_frame",
+                   "real=%r fake=%r" % (real_base, fake_base))
+        return
+    if str(real_base) == str(fake_base):
+        report.add(BLOCK, "robot_base_frame 与 fake_robot_base_frame 相同 (%s)" % real_base,
+                   "两者必须不同：一个是随底盘自转的真实系，一个是朝向稳定的虚拟系。")
+
+    nav_frame = _first_scalar(cfg, "bt_navigator.robot_base_frame")
+    command_frame = _first_scalar(cfg, "controller_server.FollowPath.command_frame")
+    local_frame = _first_scalar(cfg, "local_costmap.local_costmap.robot_base_frame")
+    global_frame = _first_scalar(cfg, "global_costmap.global_costmap.robot_base_frame")
+    behavior_frame = _first_scalar(cfg, "behavior_server.robot_base_frame")
+    frames = {
+        "bt_navigator.robot_base_frame": nav_frame,
+        "controller_server.FollowPath.command_frame": command_frame,
+        "local_costmap.robot_base_frame": local_frame,
+        "global_costmap.robot_base_frame": global_frame,
+        "behavior_server.robot_base_frame": behavior_frame,
+    }
+    wrong = {name: value for name, value in frames.items() if str(value) != str(fake_base)}
+    if wrong:
+        report.add(
+            BLOCK,
+            "导航参考系没有统一到 %s" % fake_base,
+            "以下位置仍不是 %s:\n%s\n"
+            "说明: 只要有一处还挂在真实底盘系上，底盘自转时那张图/那条路径就会跟着转，"
+            "而控制器在虚拟系里算速度 —— 两套参考系混用不会报错，只会走歪。"
+            % (fake_base, "\n".join("  %-46s = %s" % (k, v) for k, v in wrong.items())),
+        )
+    else:
+        report.add(NOTE, "导航参考系统一", "bt/costmap x2/behavior/FollowPath.command_frame = %s" % fake_base)
+
+    odom_timeout = _as_float(_fake("odom_timeout"))
+    if odom_timeout is None:
+        report.add(WARN, "迁移链未设置 fake_vel_transform.odom_timeout",
+                   "缺省值偏小，实车 /odometry 慢一拍就会被判超时并清零速度。")
+    elif period is not None:
+        if odom_timeout <= period:
+            report.add(BLOCK, "odom_timeout 小于里程计周期",
+                       "odom_timeout = %.2f s <= /odometry 周期 %.3f s："
+                       "正常情况下就会周期性判超时、输出零速。" % (odom_timeout, period))
+        elif odom_timeout < 2.0 * period:
+            report.add(WARN, "odom_timeout 余量不足两帧",
+                       "%.2f s vs 周期 %.3f s；建议 >= 3 帧（0.3 s 以上）。"
+                       % (odom_timeout, period))
+
+    yaw_mode = _first_scalar(cfg, "controller_server.FollowPath.yaw_policy.mode")
+    if str(yaw_mode) in ("se2", "spin"):
+        spin_topic = _first_scalar(cfg, "controller_server.FollowPath.spin_request.topic")
+        spin_timeout = _as_float(_first_scalar(cfg, "controller_server.FollowPath.spin_request.timeout"))
+        if not spin_topic:
+            report.add(BLOCK, "yaw_policy.mode=%s 但没有 spin_request.topic" % yaw_mode,
+                       "小陀螺请求没有入口：script/spin_control.sh 发的 rotation_cmd 没人订阅，"
+                       "MINCO 也永远不会消费它。")
+        elif spin_timeout is None or spin_timeout <= 0.0:
+            report.add(BLOCK, "spin_request.timeout 非法 (%r)" % spin_timeout,
+                       "必须为正数；小于发布周期会让请求持续被判过期（车不转）。")
+        else:
+            report.add(NOTE, "自转请求进线就绪",
+                       "spin_request.topic = %s, timeout = %.2f s" % (spin_topic, spin_timeout))
+
+    extrapolation_topic = str(_fake("chassis_cmd_vel_topic", ""))
+    delay = _as_float(_fake("actuation_delay"))
+    if extrapolation_topic:
+        if delay is None or delay <= 0.0:
+            report.add(WARN, "yaw 外推开着但 actuation_delay = %r" % delay,
+                       "chassis_cmd_vel_topic = %s 会订阅整段 wz 序列，但延迟为 0 时外推量恒 0 ——"
+                       "等于没开，却多了两条订阅。要么标定出 delay，要么把话题留空。" % extrapolation_topic)
+        else:
+            report.add(NOTE, "yaw 外推已启用",
+                       "指令源 %s, 延迟 %.3f s（需与串口实测一致）" % (extrapolation_topic, delay))
+    else:
+        report.add(NOTE, "yaw 外推关闭",
+                   "chassis_cmd_vel_topic 为空 = 不做外推（行为与迁移前一致）。"
+                   "标定串口下发延迟后再打开。")
+
+
 def check_yaw_ownership(cfg, report):
     mode = _first_scalar(cfg, "controller_server.FollowPath.yaw_policy.mode")
     if mode == "xy_only":
@@ -756,8 +976,10 @@ def check_yaw_ownership(cfg, report):
             "阶段一 yaw 所有权: 导航不产生自转",
             "yaw_policy.mode = xy_only -> MPC 的角速度上下界与参考都为 0, "
             "输出 angular.z 恒为 0。\n"
-            "哨兵自转必须由独立链路提供; 实车当前没有 rotation_controller/cmd_spin 发布者, "
-            "自转只能来自下位机或行为树 (srm27_behavior 的 PublishSpinSpeed)。",
+            "注意: 仿真的独立自转链 (rotation_controller / rotation_velocity) 已于 "
+            "2026-10-19 删除, wz 只由上位机(导航)产生; 实车若仍是 xy_only, 自转只能来自 "
+            "下位机或行为树 (srm27_behavior 的 PublishSpinSpeed), 需要切到 se2/spin 才能"
+            "由导航输出 wz。",
         )
 
 
@@ -862,6 +1084,10 @@ def main(argv=None):
         print("仿真对照: %s" % sim_path)
     print()
 
+    fakeyaw = detect_fakeyaw(cfg)
+    print("迁移链    : %s" % ("fakeyaw（导航拥有 wz / base_link_fake）" if fakeyaw else "否（旧链）"))
+    print()
+
     check_plugin(cfg, args.expect_minco, report)
     sim_like = check_sim_time(cfg, report)
     check_frames(cfg, report)
@@ -871,12 +1097,14 @@ def main(argv=None):
     check_braking_corridor(cfg, state_timeout, report, reaction_latency=reaction_latency)
     check_terminal_stop(cfg, report)
     check_goal_change_tolerance(cfg, report)
-    check_goal_checker(cfg, report)
+    check_goal_checker(cfg, report, fakeyaw=fakeyaw)
     check_velocity_layers(cfg, protocol_cfg, report)
     check_goal_geometry(cfg, report)
     check_timing(cfg, report)
     check_safety_geometry(cfg, report)
     check_yaw_ownership(cfg, report)
+    if fakeyaw:
+        check_fakeyaw_chain(cfg, period, report)
     check_real_sim_divergence(cfg, sim_path, report)
 
     report.dump(sys.stdout)

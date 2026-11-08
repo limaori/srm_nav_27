@@ -44,8 +44,9 @@ def _topic_list(namespace, record_clouds):
         "/clock",
         f"{prefix}/cmd_vel_nav",
         f"{prefix}/cmd_vel_sim",
+        # rotation_cmd = 小陀螺（--yaw-mode spin）的自转请求；独立自转链与其
+        # rotation_velocity 已于 2026-10-19 删除。
         f"{prefix}/rotation_cmd",
-        f"{prefix}/rotation_velocity",
         f"{prefix}/odometry",
         f"{prefix}/chassis_odometry_gt",
         f"{prefix}/tf",

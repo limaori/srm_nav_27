@@ -1,0 +1,32 @@
+# 协调后端进程重启时更换请求者身份，与 transaction_id 共同构成幂等键。
+uint64 requester_instance_id
+uint64 transaction_id
+# 除 REJECTED 外的终态必须启用此后端目标代次。
+uint64 target_epoch
+---
+# 请求在估计器或设备尚未被操作前被拒绝。
+uint8 REJECTED=0
+# 估计状态和输入队列已共同跨越完整代次边界。
+uint8 COMPLETED=1
+# 操作已接受且可能触及状态，但无法确认完成；消费方应视为已跨越代次边界。
+uint8 INDETERMINATE=2
+# 相同事务仍在执行；该结果非终态，调用方须保留事务并沿用幂等键重试或查询。
+uint8 IN_PROGRESS=3
+
+uint8 outcome
+string message
+uint64 requester_instance_id
+uint64 transaction_id
+uint64 target_epoch
+# 每次前端进程重启时更换。
+uint64 frontend_instance_id
+# 同一前端进程内，每个 COMPLETED/INDETERMINATE 事务使此值单调推进。
+uint64 reset_generation
+# 仅成功暖重置提供同一后验时刻的新旧里程计坐标系边界。
+bool has_boundary
+# 重置前的前端代次。
+uint64 source_epoch
+# 新旧位姿共同对应的后验时间。
+builtin_interfaces/Time boundary_stamp
+# 将新里程计系坐标变换到旧里程计系：T_old_body * inverse(T_new_body)。
+geometry_msgs/Transform old_from_new

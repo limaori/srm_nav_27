@@ -15,7 +15,7 @@
 #   二维投影系          -> livox_scan     (real_mapping_launch.py 追加的水平系)
 #
 # 本车 TF 链（与 real_mapping_launch.py 一致）:
-#   map -> odom -> base_link -> livox_frame -> livox_imu
+#   map -> odom -> base_link -> gimbal_yaw -> livox_frame -> livox_imu
 #                            -> livox_scan
 #                            -> wheel_front_left/rear_left/front_right/rear_right (same publisher)
 #   odom -> base_link 由 sensor_scan_generation 发布；map -> odom 由 slam_toolbox 或
@@ -224,6 +224,11 @@ fake_vel_transform:
     # 底盘串口节点订阅的是 cmd_vel_chassis(SRM 老工程的命名), 不是 cmd_vel;
     # 老工程里 fake_vel_transform 就是发这个名, 两边必须一致, 否则链路断开、车不动。
     output_cmd_vel_topic: "cmd_vel_chassis"
+    # yaw 外推（2026-11-06 新增，默认**关闭**）：仿真里用 mux 输出的 cmd_vel_sim 做外推，
+    # 实车的串口下发延迟还没标定，所以这里给空串 = 完全不外推（行为与之前一致）。
+    # 标定出实车的 actuation_delay 之后，把它填成实车 mux 输出的话题名即可打开。
+    chassis_cmd_vel_topic: ""
+    actuation_delay: 0.0
     cmd_spin_topic: "cmd_spin"
     init_spin_speed: 0.0
 

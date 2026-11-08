@@ -50,7 +50,7 @@ def launch_setup(context):
     namespace = LaunchConfiguration("namespace")
     use_sim_time = LaunchConfiguration("use_sim_time")
 
-    robot_description = build_description(
+    robot_description, _mounting = build_description(
         params_file,
         LaunchConfiguration("lidar_xyz").perform(context),
         LaunchConfiguration("lidar_rpy").perform(context),
@@ -97,12 +97,12 @@ def generate_launch_description():
         ),
         (
             "lidar_xyz",
-            "0.12081 -0.056721 0.346388",
+            "",
             "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
         ),
         (
             "lidar_rpy",
-            "0.523598776 0.0 1.099557429",
+            "",
             "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
         ),
     ]

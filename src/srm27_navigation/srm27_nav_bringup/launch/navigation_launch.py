@@ -59,6 +59,11 @@ def launch_setup(context):
     # 这套条件里的每一项在纯 LIO 下都必须按"有里程计"处理, 否则会出现
     # TF 不发(车在图上不动)或地面分割订阅到没人发布的话题(避障失效)。
     use_lio_odometry = LaunchConfiguration("use_lio_odometry")
+    # 里程计前端（方案 §6.2）：point_lio / zlio。只有 point_lio 前端才需要 loam_interface
+    # 做坐标系改写；换 zlio 时同一职责由 zlio_bridge 承担（它在 localization_launch 里起）。
+    # ⚠ 两者绝不可同时在跑：它们抢同一个 registered_scan / lidar_odometry，
+    #   terrain_analysis 会吃到跳变的点云，而且不会报任何错。
+    odometry_frontend = LaunchConfiguration("odometry_frontend")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     params_file = LaunchConfiguration("params_file")
@@ -94,6 +99,14 @@ def launch_setup(context):
     # 使用 Point-LIO / GICP / SLAM 时由这些节点提供里程计。
     has_odometry_source = PythonExpression([
         slam, " or ", use_pcd_localization, " or ", use_lio_odometry,
+    ])
+
+    # loam_interface 是否由本 launch 负责：有里程计来源 **且** 前端是 point_lio。
+    # 外层必须加括号 —— PythonExpression 拼的是一整串 Python 表达式，
+    # `A or B or C and D` 的优先级会把 and 只挂到最后一个操作数上。
+    use_point_lio_frontend = PythonExpression(["'", odometry_frontend, "' == 'point_lio'"])
+    use_loam_interface = PythonExpression([
+        "(", has_odometry_source, ") and (", use_point_lio_frontend, ")",
     ])
 
     # Create our own temporary YAML files that include substitutions
@@ -155,7 +168,9 @@ def launch_setup(context):
         condition=IfCondition(PythonExpression(["not ", use_composition])),
         actions=[
             Node(
-                condition=IfCondition(has_odometry_source),
+                # 两条独立启动路径之一（非组合）。组合路径见文件末尾的
+                # load_loam_interface_component，**两处必须同时加条件**。
+                condition=IfCondition(use_loam_interface),
                 package="loam_interface",
                 executable="loam_interface_node",
                 name="loam_interface",
@@ -415,8 +430,10 @@ def launch_setup(context):
     )
 
     load_loam_interface_component = LoadComposableNodes(
+        # 组合路径（use_composition 两条入口的默认值不同：start_sim_nav.sh 给 False，
+        # nav2_stack_launch.py 的声明缺省是 True，直接 ros2 launch 时会走到这里）。
         condition=IfCondition(PythonExpression([
-            use_composition, " and (", has_odometry_source, ")",
+            use_composition, " and (", use_loam_interface, ")",
         ])),
         target_container=container_name_full,
         composable_node_descriptions=[
@@ -476,6 +493,17 @@ def generate_launch_description():
             "use_lio_odometry",
             default_value="False",
             description="Whether Point-LIO odometry (without GICP relocalization) provides navigation odometry",
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "odometry_frontend",
+            default_value="point_lio",
+            description=(
+                "里程计前端: point_lio (默认) 或 zlio。只有 point_lio 才由本 launch 起 "
+                "loam_interface；zlio 的坐标系改写由 localization_launch 里的 zlio_bridge "
+                "承担，两者不能同时发布 registered_scan/lidar_odometry"
+            ),
         )
     )
     ld.add_action(

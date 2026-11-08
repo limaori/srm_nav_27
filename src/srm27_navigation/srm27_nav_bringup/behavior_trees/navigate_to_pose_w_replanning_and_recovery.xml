@@ -2,12 +2,28 @@
 <root BTCPP_format="3"
       main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
+    <!-- 最外层 RecoveryNode 的重试次数（2026-11-06: 10 -> 100）。
+         它是"整条导航流水线失败多少次之后才把 NavigateToPose 判 ABORT"的唯一开关：
+         每一轮重试里已经包含 ComputePathToPose 的 3 次与 FollowPath 的 10 次子重试，
+         所以 100 意味着**几乎不会因为偶发失败而放弃目标** —— 规划失败就清代价地图、
+         FollowPath 失败就清局部图，然后接着试，直到上层显式取消目标（Cancel）为止。
+         ⚠ 副作用（要有意识）：目标若真的不可达，行为树会一直重试、一直做恢复动作
+           （清图 / 脱困），不会再自己返回 ABORT。此时唯一的出口是上层取消目标或
+           `lifecycle_manager` 把它停掉；脚本的 verify-spin 模式与各验收脚本都自己控制超时，不受影响。
+         ⚠ 子节点（ComputePathToPose=3 / FollowPath=10）的数值是 2026-11-04 为了给
+           控制器内部脱困（recovery.window_sec=3 s）留完整窗口定的，别跟着一起放大。 -->
     <RecoveryNode name="NavigateRecovery"
-                  number_of_retries="10">
+                  number_of_retries="100">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="3.0">
+          <!-- number_of_retries: 1 -> 3（2026-11-04）。只重试 1 次时，全局规划连失败两次
+               （3 Hz 下约 0.6~1 s）就会让 PipelineSequence 整体失败，行为树随即取消 FollowPath
+               并进入自己的 recovery；而控制器内部脱困（链路 A）的窗口是 recovery.window_sec = 3 s，
+               实测它常只跑到 1.8 s 就被掐断（2026-11-04 14:19:03：净空 0.341 m 进入，1.8 s 后被取消，
+               随后会话还被停滞看门狗作废）。重试 3 次给链路 A 留出完整窗口；代价是全局规划确属失败时
+               晚约 1~2 s 才进 clear-costmap + backup，这段延迟由恢复行为兜底。 -->
           <RecoveryNode name="ComputePathToPose"
-                        number_of_retries="1">
+                        number_of_retries="3">
             <ComputePathToPose goal="{goal}"
                                path="{path}"
                                planner_id="GridBased"/>
@@ -32,15 +48,42 @@
             <ClearEntireCostmap name="ClearGlobalCostmap-Subtree"
                                 service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <!-- backup_speed 必须 < controller_server 的 v_linear_max(0.5):
-               脱困走的是 srm27_nav_behaviors/BackUpFreeSpace, 它并不倒车, 而是
-               "朝当前最空的方向开", 且发布到 cmd_vel_nav2_result 绕过了
-               velocity_smoother 的限速/加速度限制。原来 1.0 m/s 是导航限速的
-               两倍, 在窄角落里会变成连续高速前冲(2026-09-14 实测连续 71 秒)。
-               改 0.2 后 1 m 距离约 5~7 秒能走完, 行为能正常成功返回而不是
-               10 秒超时重试。 -->
+          <!-- 脱困走的是 srm27_nav_behaviors/BackUpFreeSpace, 它并不倒车, 而是
+               "朝当前最空的方向开", 且发布到 cmd_vel_nav2_result **绕过了
+               velocity_smoother 的限速与加速度限制** —— 速度是多少, 底盘就收到多少。
+               历史: 1.0 m/s 时曾在窄角落连续高速前冲 71 s(2026-09-14 实测),
+               于是先降到 0.2 m/s；2026-11-04 又按操作手要求抬到 1.5 m/s
+               （与 recovery.escape_speed 对齐, 让步进保持同一节奏）。
+               当前 MINCO 控制器上限 limits.max_linear_speed = 2.60 m/s（2026-11-06 按底盘能力
+               写入）, 所以 1.5 在此之下; mux 的合速度上限 2.60 m/s 也能过。下面那条 note
+               说明了速度抬上去之后
+               提前退出会变成什么行为。 -->
+          <!-- backup_dist / backup_speed / time_allowance 三个端口**仍然是活的**, 别删:
+               2026-11-04 曾以为"提前退出"上线后它们没用了, 其实 back_up_free_space 里
+                 backup_speed -> 逃逸速度大小 (cos/sin(角度) x speed), 恒定输出;
+                 backup_dist  -> ① 走满它才算备份成功; ② 父类 isCollisionFree 用它决定
+                                 "还要往前预演多远"做碰撞检查;
+                 time_allowance -> 硬超时(默认 10 s)。
+               删掉它们会退回 BT 端口默认值 0.15 m / 0.025 m/s, 于是:
+                 ① 每次只挪 0.15 m, 基本没用;
+                 ② 更致命 —— 我们新加的提前退出有 early_exit_min_travel = 0.30 m 的前置门坎,
+                    0.15 m 永远跨不过去, 提前退出会**静默失效**, 行为退回"盲推到底"。
+               三个数只在"提前退出没触发"时(比如真被三面围住)才决定全过程, 它们是兜底包络。 -->
+          <!-- backup_speed: 0.2 -> 1.5 -> **1.0**（2026-11-04 定稿；仿真与实车共用本文件，
+               所以两边同值；与 recovery.escape_speed 一致，两条链路同一节奏）。
+               必须同时知道的三件事：
+               1) 1.0 m / 1.0 m/s = **1.0 s** 走满 —— 正好等于 behavior_server 的
+                  early_exit_min_time(1.0 s)，而距离判定又排在提前退出之前，所以
+                  **正常情况（车没被顶住）几乎不会触发提前退出**，备份会走满 1.0 m。
+                  提前退出只在"被顶住、位移推不动"时才真正生效 —— 那正是它要救的场景，
+                  此时 1.0 m/s 会一直顶到 10 s 超时或净空恢复为止。
+               2) 该动作**绕过 velocity_smoother**（直接进 cmd_vel_nav 出口），1.0 m/s 是
+                  阶跃式给到底盘的，没有加速斜坡。mux 合速度上限 6.0 m/s 能过。
+               3) 父类的碰撞预演按 simulate_ahead_time(2.0 s) x 当前速度向前模拟，但以剩余
+                  距离封顶：0.2 m/s 时只看 0.4 m，1.0 m/s 时看满 1.0 m —— 窄处更容易直接判
+                  "Collision Ahead" 并返回 FAILED（安全的一侧，但会表现为"备份经常失败"）。 -->
           <BackUp backup_dist="1.0"
-                  backup_speed="0.2"/>
+                  backup_speed="1.0"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

@@ -28,6 +28,15 @@
   <exec_depend>livox_ros_driver2</exec_depend>
   <exec_depend>point_lio</exec_depend>
   <exec_depend>loam_interface</exec_depend>
+  <!-- 仿真 LIO 前端替换 Z-LIO（方案 §6.2）：zlio 前端节点 + 它的消息接口。
+       zlio_bridge.py 订阅 localization_interfaces/msg/FrontendFrame|FrontendSession；
+       tf2_sensor_msgs 在下面已经有了，不需要加。 -->
+  <exec_depend>frontend</exec_depend>
+  <exec_depend>localization_interfaces</exec_depend>
+  <!-- zlio_bridge 用 sensor_msgs_py.point_cloud2 给 ZLIO 的 xyz-only 点云补 intensity 字段
+       （否则 terrain_analysis 的 PCL 转换会每条消息刷 "Failed to find match for field
+       'intensity'"）。python3-numpy 由它带入。 -->
+  <exec_depend>sensor_msgs_py</exec_depend>
   <exec_depend>sensor_scan_generation</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>xacro</exec_depend>

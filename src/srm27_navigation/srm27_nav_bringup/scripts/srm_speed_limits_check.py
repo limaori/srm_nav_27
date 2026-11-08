@@ -68,8 +68,12 @@ def _fmt(value, unit=""):
     return ("%.2f" % number) + ((" " + unit) if unit else "")
 
 
-def check_invariants(merged, variant):
-    """分层自洽性检查，返回 [(等级, 说明)]。"""
+def check_invariants(merged, variant, profile=None):
+    """分层自洽性检查，返回 [(等级, 说明)]。
+
+    `profile` = "fakeyaw" 时说明这是**经过 mux** 的迁移链（mux 的限幅是真实的一层），
+    其余链的出口直接是 cmd_vel_chassis / cmd_vel_nav2_result，不该拿 mux 去卡它。
+    """
     summary = speed.chain_summary(merged)
     controller = _num(summary["controller"])
     smoother = _num(summary["smoother"])
@@ -93,12 +97,13 @@ def check_invariants(merged, variant):
                 "上游提速会被它整个吃掉" % (smoother, controller),
             )
         )
+    exit_topic = "cmd_vel_chassis" if profile else "执行端话题"
     if mux is not None and mux < controller:
         problems.append(
             (
                 BLOCK,
                 "srm_cmd_mux.v_max 的 %.2f m/s 低于控制器上限 %.2f m/s："
-                "cmd_vel_sim 被钳住（仿真的常见坑）" % (mux, controller),
+                "%s 被钳住（mux 没有动态回调，改档位后要重启）" % (mux, controller, exit_topic),
             )
         )
     if ctrl_accel is not None and smooth_accel is not None and smooth_accel < ctrl_accel:
@@ -240,6 +245,9 @@ def check_one(params_path, overlay, protocol_cfg, dump=None):
     else:
         print("覆盖层:   （无——只检查参数文件里已写的值）")
     print("控制器变体: %s" % (result.variant or "未识别（本文件没有控制器插件段）"))
+    if result.profile:
+        print("附加 profile: %s（fakeyaw 迁移链：导航拥有 wz、经 srm_cmd_mux 出车）"
+              % result.profile)
 
     blocking = 0
     for entry in result.conflicts:
@@ -258,7 +266,7 @@ def check_one(params_path, overlay, protocol_cfg, dump=None):
 
     print(speed.format_chain(result.merged, indent="  "))
 
-    for level, message in check_invariants(result.merged, result.variant):
+    for level, message in check_invariants(result.merged, result.variant, result.profile):
         print("  [%s] %s" % (level, message))
         if level == BLOCK:
             blocking += 1

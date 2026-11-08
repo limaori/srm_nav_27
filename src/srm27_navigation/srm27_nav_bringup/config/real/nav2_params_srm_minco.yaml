@@ -59,7 +59,7 @@
 #   二维投影系          -> livox_scan     (real_mapping_launch.py 追加的水平系)
 #
 # 本车 TF 链（与 real_mapping_launch.py 一致）:
-#   map -> odom -> base_link -> livox_frame -> livox_imu
+#   map -> odom -> base_link -> gimbal_yaw -> livox_frame -> livox_imu
 #                            -> livox_scan
 #                            -> wheel_front_left/rear_left/front_right/rear_right (same publisher)
 #   odom -> base_link 由 sensor_scan_generation 发布；map -> odom 由 slam_toolbox 或
@@ -119,7 +119,12 @@ point_lio:
       lidar_type: 1                                     # 1 for Livox serials LiDAR
       scan_line: 4
       timestamp_unit: 3                                 # nanosecond
-      blind: 0.5
+      # 2026-11-06: 0.5 -> 0.46 -> 0.3。这是**自车盲区**球的半径（到雷达原点的球面径向）。
+      #   0.3 已**小于车体外廓 0.33**：0.30 m 起的真实回波全部保留（目的就是让贴墙/
+      #   桌腿这类近处障碍能进 ESDF），代价是车身自反射也会进点云。
+      #   ⚠ 代价地图侧还有 footprint_clearing(robot_radius 0.40) 兜一层；LIO 侧没有 ——
+      #     建图拖影/里程计抖动时先查 cloud_registered 里的自反射残留。
+      blind: 0.3
 
     mapping:
       imu_en: True
@@ -266,6 +271,11 @@ fake_vel_transform:
     # 底盘串口节点订阅的是 cmd_vel_chassis(SRM 老工程的命名), 不是 cmd_vel;
     # 老工程里 fake_vel_transform 就是发这个名, 两边必须一致, 否则链路断开、车不动。
     output_cmd_vel_topic: "cmd_vel_chassis"
+    # yaw 外推（2026-11-06 新增，默认**关闭**）：仿真里用 mux 输出的 cmd_vel_sim 做外推，
+    # 实车的串口下发延迟还没标定，所以这里给空串 = 完全不外推（行为与之前一致）。
+    # 标定出实车的 actuation_delay 之后，把它填成实车 mux 输出的话题名即可打开。
+    chassis_cmd_vel_topic: ""
+    actuation_delay: 0.0
     cmd_spin_topic: "cmd_spin"
     init_spin_speed: 0.0
 
@@ -804,10 +814,30 @@ controller_server:
       # 若实测发现"车在动但 3 s 内走不出卡死区"，先加大 window_sec 而不是 escape_speed——
       # 提高逃逸速度会同时抬高贴障碍时的碰撞风险，而延长时间只是让它多推一会儿。
       recovery:
-        fail_threshold: 5                               # 连续规划失败多少次才允许进入脱困
-        cooldown_sec: 1.0                               # 两次脱困之间的最小间隔（秒）
+        # ★ 2026-11-06：5 -> 10。门限数的是"规划失败结果条数"，不是时长 ——
+        #   有已提交轨迹时重规划被 replan_period(0.1 s) 节流 → 5 次 ≈ 0.5 s；
+        #   **没有**已提交轨迹时 ReplanManager 在节流判断之前就放行（每控制周期提交一次，
+        #   controller_frequency 50 Hz）→ 5 次 ≈ 0.1 s。同一门限代表的物理时长差 5 倍，
+        #   "太容易进脱困"主要来自这一档；取 10 后 ≈ 0.2 s（无轨迹）/ 1.0 s（稳定跟随）。
+        #   ⚠ 只改"多快进"，不改"为什么进"（分诊仍只看自身净空 < 0.40 m），
+        #     也不改"进得去出不来"（escaped_clearance 0.50 在窄通道内不可达）。
+        fail_threshold: 10                              # 连续规划失败多少次才允许进入脱困
+        # ★ 2026-11-03：1.0 -> 2.0。窄通道里链路 A 曾 1.5~2.0 s 就再进一次
+        #   （方向成对相反、净位移≈0），冷却太短是抖动频率的直接放大器。
+        cooldown_sec: 2.0                               # 两次脱困之间的最小间隔（秒）
         window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
-        escape_speed: 0.5                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
+        # ★ 历史：0.5 -> 1.5 -> **1.0**（2026-11-04 定稿；与仿真、与链路 B 的
+        #   backup_speed 同值，两条链路保持同一节奏）。
+        #   ⚠ 实车风险清单：
+        #   1) 窗口上限 = escape_speed x window_sec = 1.0 x 3.0 = **3.0 m**：
+        #      一次脱困最多盲推 3.0 m，且**不受任何碰撞校验保护**（脱困旁路 MPC 校验），
+        #      方向只来自车周 0.40 m 环上的梯度/环形搜索，跑满窗口时方向早已过期；
+        #   2) 脱困是主动给速度的行为，急停只能靠物理按钮或断电；
+        #   3) 历史事故参考：备份速度曾取 1.0 m/s 时在窄角落连续高速前冲 71 s
+        #      （docs/导航速度调试指南.md）。现在有提前退出 + 10 s 硬超时 + 碰撞预演兜底，
+        #      所以 1.0 m/s 是可用的；但仍建议首跑在空地上确认方向与刹车距离。
+        #   回退：改回 0.5（并把 window_sec 视情况缩到 1.5~2.0 s）。
+        escape_speed: 1.0                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
         # 卡死分诊阈值（米）：低于它才计入失败、才脱困。
         # ★ 2026-10-16 由 0.25 抬到 0.40（与仿真同步），原因见
         #   simulation/nav2_params_srm_minco.yaml 同段的"核心不变量"：
@@ -822,6 +852,14 @@ controller_server:
         escaped_clearance: 0.50
         search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
         search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
+        # 重复进入抑制：上一次脱困就在附近结束、而这次要往几乎相反的方向逃 ——
+        # 说明车夹在「推得动一点但推不出困境」的窄带里，继续按 escape_speed 盲推只会
+        # 左右来回荡（2026-11-03 实测 26 s 进 4 次、净位移≈0）。判据成立时**不脱困**，
+        # 交回重规划；一直失败就由建轨宽限抛给行为树 backup，真正把车挪开。
+        # radius 必须小于行为树 backup 的单次位移（1.0 m，提前退出时约 0.3~0.5 m），
+        # 否则兜底动作刚挪开就又被判成「同一处」。取 0 关闭该判据。
+        repeat_guard_radius: 0.35                       # 抑制半径（米）
+        repeat_guard_angle_deg: 120.0                   # 方向门限（度）：>= 它才判为「来回荡」
         publish_visualization: True                     # 是否发布 recovery_markers 可视化
 
 
@@ -1010,6 +1048,25 @@ behavior_server:
     esdf_search_radius: 0.4
     esdf_search_samples: 36
     esdf_unknown_is_seed: True
+
+    # === 脱困提前退出（P1）===
+    # 语义：链路 A 的 escaped_clearance 在链路 B 上的对应物。原实现的出口只有
+    # "走满 backup_dist(1.0 m)" / "碰撞预演失败" / "time_allowance(默认 10 s) 超时"，
+    # 于是"车已脱离危险、方向早已无意义"之后还会按冻结的方向继续推满 1 m。
+    # 2026-11-03 仿真实测：4 次 backup 全部报 completed successfully，同期自身净空
+    # 0.978 -> 0.369 -> 0.321 -> 0.204 -> 0.006 m 单调下降，最终把车顶死在障碍上。
+    #
+    # ⚠ 实车注意：提前退出会让备份行为只走 0.3~0.5 m 就把控制权交回重规划，
+    #   于是"备份次数"会比原来多、"单次备份"会更短。首验请盯 diagnostics 的
+    #   recovery_enter_count 与总任务时长，确认没有变成"退一步又退回来"的循环。
+    early_exit_enable: True                                # 是否启用提前退出
+    # 阈值必须 > 代价地图 robot_radius(0.40，见本文件 costmap 段)：否则全局规划器
+    # 把"车自己那一格"判成内接膨胀里的障碍，重规划仍然失败，退出等于白退。
+    early_exit_clearance: 0.55                             # 自身净空超过它即认为已在正常空地（米）
+    early_exit_hold_cycles: 3                              # 连续 N 个周期（10 Hz → 0.3 s）满足才退出
+    early_exit_min_travel: 0.30                            # 至少先真走出这么多米才有资格判"脱困了"（米）
+    early_exit_min_time: 1.0                               # 至少先跑这么久（秒），同时给雷达留出重新标记时间
+    early_exit_require_obstacles: True                     # 空图保护：整张图无致命障碍时不认净空结论
 
 waypoint_follower:
   ros__parameters:

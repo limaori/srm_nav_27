@@ -510,6 +510,156 @@ TEST(RecoveryDecider, ResetClearsEverything)
   EXPECT_EQ(decider.consecutiveFailures(), 0);
   EXPECT_LT(decider.lastRecoveryStartSec(), 0.0);
   EXPECT_LT(decider.lastRecoveryEndSec(), 0.0);
+  EXPECT_FALSE(decider.hasLastSessionAnchor());
+}
+
+// -----------------------------------------------------------------------------
+// 5) 重复进入抑制（2026-11-03 窄带振荡的回归）
+//
+// 现场形态：车夹在净空 0.4~0.5 m 的窄带里，26 s 内进 4 次脱困，方向成对相反
+// （-51.9° ↔ 168.8°、-35.7° ↔ 161.2°），每次"成功"都停在几乎同一位置，净位移≈0。
+// 判据：**距上次会话结束点 < repeat_guard_radius** 且 **新方向与上次方向夹角
+// >= repeat_guard_angle_deg** -> 不开会话（判为原地来回荡，交回重规划）。
+// -----------------------------------------------------------------------------
+
+namespace
+{
+
+/// \brief 让决策器跑完一次完整会话（进入 + 窗口超时退出），留下抑制基准。
+/// \return 进入时的逃逸方向（单位向量）。
+Eigen::Vector2d RunOneSession(
+  minco::RecoveryDecider & _decider, const minco::Esdf2D & _esdf,
+  const Eigen::Vector2d & _position, double _start_sec)
+{
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  EXPECT_EQ(
+    _decider.decide(_start_sec, _position, _esdf, &escape), minco::RecoveryDecision::kEscape);
+  // 净空始终低于成功阈值 -> 走窗口超时分支，会话在 _start_sec + window 之后结束。
+  Eigen::Vector2d out = Eigen::Vector2d::Zero();
+  const double end_sec = _start_sec + _decider.config().window_sec + 0.05;
+  for (double t = _start_sec; t <= end_sec; t += 0.1) {
+    _decider.updateRecovery(t, _position, _esdf, 0.30, &out);
+  }
+  EXPECT_FALSE(_decider.isRecovering());
+  return escape;
+}
+
+/// \brief 把窗口/冷却压短的决策器，避免测试里推进太久。
+minco::RecoveryDecider MakeShortWindowDecider(double _guard_radius = 0.35)
+{
+  minco::RecoveryDecider decider = MakeDecider(1);
+  minco::RecoveryConfig config = decider.config();
+  config.window_sec = 0.5;
+  config.cooldown_sec = 0.1;
+  config.repeat_guard_radius = _guard_radius;
+  decider.configure(config);
+  return decider;
+}
+
+/// \brief 墙在 -x 侧（0~0.15 m）：车在其右侧时梯度指向 +x。
+const Eigen::Vector2d kWallSpot(0.6, 5.0);
+/// \brief 同一位置但距离场换成"墙在 +x 侧"：梯度翻向 -x，模拟现场的方向反转。
+minco::Esdf2D MakeWallOnPositiveX()
+{
+  return MakeEsdf(true, 196, 0, kSizeX - 1, kSizeY - 1);
+}
+
+}  // namespace
+
+TEST(RecoveryDecider, RepeatSuppressedWhenSameSpotAndOppositeDirection)
+{
+  const minco::Esdf2D wall_negative_x = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  minco::RecoveryDecider decider = MakeShortWindowDecider();
+
+  const Eigen::Vector2d first_direction = RunOneSession(decider, wall_negative_x, kWallSpot, 1.0);
+  ASSERT_GT(first_direction.x(), 0.0) << "第一次应当朝 +x 逃离墙";
+  ASSERT_TRUE(decider.hasLastSessionAnchor());
+  ASSERT_EQ(decider.repeatSuppressedCount(), 0u);
+
+  // 同一处（偏移 5 cm < 0.35 m）、方向相反 -> 抑制。
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  const double after_cooldown = 1.0 + decider.config().window_sec +
+    decider.config().cooldown_sec + 0.05;
+  EXPECT_EQ(
+    decider.decide(after_cooldown, kWallSpot + Eigen::Vector2d(0.05, 0.0), MakeWallOnPositiveX(),
+      &escape),
+    minco::RecoveryDecision::kRepeatSuppressed);
+  EXPECT_FALSE(decider.isRecovering()) << "抑制不得开启会话";
+  EXPECT_EQ(decider.repeatSuppressedCount(), 1u);
+  EXPECT_EQ(decider.lastTrigger(), std::string("repeat_suppressed"));
+  EXPECT_TRUE(escape.isZero()) << "抑制时不得输出逃逸速度";
+  EXPECT_EQ(minco::toString(minco::RecoveryDecision::kRepeatSuppressed), std::string("repeat_suppressed"));
+}
+
+TEST(RecoveryDecider, RepeatAllowedWhenRobotMovedAway)
+{
+  const minco::Esdf2D wall_negative_x = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  minco::RecoveryDecider decider = MakeShortWindowDecider();
+  RunOneSession(decider, wall_negative_x, kWallSpot, 1.0);
+
+  // 行为树的 backup 把车推走了 1 m（> repeat_guard_radius）：属于新处境，允许脱困。
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  const double after_cooldown = 1.0 + decider.config().window_sec +
+    decider.config().cooldown_sec + 0.05;
+  ASSERT_EQ(
+    decider.decide(after_cooldown, kWallSpot + Eigen::Vector2d(1.0, 0.0), MakeWallOnPositiveX(),
+      &escape),
+    minco::RecoveryDecision::kEscape);
+  EXPECT_TRUE(decider.isRecovering());
+  EXPECT_EQ(decider.repeatSuppressedCount(), 0u);
+}
+
+TEST(RecoveryDecider, RepeatAllowedWhenDirectionAgrees)
+{
+  // 方向一致（继续沿梯度的弧线收敛）不是"来回荡"，不能拦。
+  const minco::Esdf2D wall_negative_x = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  minco::RecoveryDecider decider = MakeShortWindowDecider();
+  RunOneSession(decider, wall_negative_x, kWallSpot, 1.0);
+
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  const double after_cooldown = 1.0 + decider.config().window_sec +
+    decider.config().cooldown_sec + 0.05;
+  ASSERT_EQ(
+    decider.decide(after_cooldown, kWallSpot, wall_negative_x, &escape),
+    minco::RecoveryDecision::kEscape);
+  EXPECT_EQ(decider.repeatSuppressedCount(), 0u);
+}
+
+TEST(RecoveryDecider, RepeatGuardDisabledByZeroRadius)
+{
+  const minco::Esdf2D wall_negative_x = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  minco::RecoveryDecider decider = MakeShortWindowDecider(/*_guard_radius=*/0.0);
+  RunOneSession(decider, wall_negative_x, kWallSpot, 1.0);
+
+  // 判据被关掉：同一处 + 相反方向也照样脱困。
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  const double after_cooldown = 1.0 + decider.config().window_sec +
+    decider.config().cooldown_sec + 0.05;
+  EXPECT_EQ(
+    decider.decide(after_cooldown, kWallSpot, MakeWallOnPositiveX(), &escape),
+    minco::RecoveryDecision::kEscape);
+  EXPECT_EQ(decider.repeatSuppressedCount(), 0u);
+}
+
+TEST(RecoveryDecider, SuppressionKeepsFailureCountAndCooldownBehaviour)
+{
+  // 抑制之后失败计数不能被清零，也不能把会话留在"进行中"——否则冷却一过就再也进不来。
+  const minco::Esdf2D wall_negative_x = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  minco::RecoveryDecider decider = MakeShortWindowDecider();
+  RunOneSession(decider, wall_negative_x, kWallSpot, 1.0);
+
+  Eigen::Vector2d escape = Eigen::Vector2d::Zero();
+  const double suppressed_at = 1.0 + decider.config().window_sec +
+    decider.config().cooldown_sec + 0.05;
+  ASSERT_EQ(
+    decider.decide(suppressed_at, kWallSpot, MakeWallOnPositiveX(), &escape),
+    minco::RecoveryDecision::kRepeatSuppressed);
+  EXPECT_FALSE(decider.isRecovering());
+  EXPECT_GE(decider.consecutiveFailures(), 1) << "抑制不得清掉失败计数";
+  // 冷却以"抑制时刻"为基准继续生效。
+  EXPECT_FALSE(decider.shouldStartRecovery(suppressed_at + 0.01));
+  EXPECT_TRUE(
+    decider.shouldStartRecovery(suppressed_at + decider.config().cooldown_sec + 0.01));
 }
 
 }  // namespace

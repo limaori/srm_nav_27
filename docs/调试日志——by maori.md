@@ -491,3 +491,28 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ```bash
 ./script/start_real_nav.sh -m 227_1011 --controller minco --prior-pcd 227_1011_mapframe
 ```
+
+# 2026-11-5
+### 示波工具
+```bash
+./debug_tools/plot_lio_gt_yaw.py --headless
+```
+### 示波工具--电脑性能
+```bash
+./debug_tools/system_monitor.py
+```
+
+### 1105脚本参数
+```bash
+./script/start_sim_nav.sh                            # 两个都不转
+./script/start_sim_nav.sh --chassis-spin             # 底盘 2.0
+./script/start_sim_nav.sh --gimbal-spin              # 云台 -1.0
+./script/start_sim_nav.sh --chassis-spin 3 --gimbal-spin 0.5   # 自己给转速
+```
+# 2026-11-8
+### 示波速度
+```bash
+./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed,要先起导航栈
+./debug_tools/plot_vxvywz.py --save                           # 自动存到user_test_log文件夹
+```
+

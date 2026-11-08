@@ -9,6 +9,13 @@
 > **一句话结论**：链路本身（换参数文件 + 关闭 fake_vel_transform）已经打通，启动前会自动预检；
 > 但**参数里仍有两项是仿真标定值**（`mpc.command_lookahead`、`safety.braking_deceleration`），
 > 在按 §6 做完辨识之前，本文不承诺任何实车性能，也不建议超过 1.5 m/s。
+>
+> ⚠ **2026-11-06 更新**：本文描述的"MINCO 直接出 `cmd_vel_chassis`、关闭 fake_vel_transform"
+> 已不是实车默认链路。默认已切到与仿真同构的**迁移链**
+> （`base_link_fake` + `fake_vel_transform(nav_se2)` + `srm_cmd_mux`，导航拥有 wz），
+> 见 [`仿真链迁移实车实施记录(ai).md`](./仿真链迁移实车实施记录%28ai%29.md)。
+> 本文的"参数辨识清单"与"分阶段上电"仍然适用；想回到本文描述的旧链，用
+> `./script/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml`。
 
 ## 1. 交付物总览
 

@@ -30,6 +30,18 @@
   gz_type_name: "ignition.msgs.Model"
   direction: "GZ_TO_ROS"
 
+# 云台角速度命令（仅 gimbal_driver=external 时有用，即 LIO 模式）：
+# 由 gimbal_spin_gate 在 Point-LIO 稳定之后开始发，gz 侧由 JointController 接收。
+- ros_topic_name: "/<robot_name>/cmd_gimbal_vel"
+  # 话题名以 gz 侧为准（见 Gazebo 服务端日志）:
+  #   [JointController] subscribing to Double messages on
+  #   [/model/<robot>/joint/gimbal_yaw_joint/cmd_vel]
+  # 注意**没有** /world/default 前缀、**没有** /0/ 这一段 —— 写错就会发到没人听的话题上。
+  gz_topic_name: "/model/<robot_name>/joint/gimbal_yaw_joint/cmd_vel"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "ignition.msgs.Double"
+  direction: "ROS_TO_GZ"
+
 - ros_topic_name: "/<robot_name>/livox/lidar"
   gz_topic_name: "/world/default/model/<robot_name>/link/front_mid360/sensor/front_mid360_lidar/scan/points"
   ros_type_name: "sensor_msgs/msg/PointCloud2"

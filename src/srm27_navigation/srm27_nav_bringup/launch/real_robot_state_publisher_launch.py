@@ -61,10 +61,13 @@ def launch_setup(context):
                 "Set driver extrinsics to zero; use lidar_xyz/lidar_rpy for mounting"
             )
 
-    robot_xml = build_description(
+    robot_xml, mounting = build_description(
         params_file,
         LaunchConfiguration("lidar_xyz").perform(context),
         LaunchConfiguration("lidar_rpy").perform(context),
+        # 云台关节类型由调用方决定：默认 fixed（没人发 /joint_states 时这是唯一能
+        # 让 TF 树连通的选择）；接上 --gimbal-joint-topic 的中继后再传 revolute。
+        gimbal_joint_type=LaunchConfiguration("gimbal_joint_type").perform(context),
     )
 
     use_sim_time = ParameterValue(
@@ -101,13 +104,23 @@ def generate_launch_description():
         ),
         (
             "lidar_xyz",
-            "0.12081 -0.056721 0.346388",
-            "LiDAR origin in base_link, in metres (CAD measurement, ground = 0)",
+            "",
+            "LiDAR origin in base_link (empty = 用唯一模型里的值)",
         ),
         (
             "lidar_rpy",
-            "0.523598776 0.0 1.099557429",
-            "LiDAR mounting roll pitch yaw, in radians (CAD: roll 30 deg, yaw 63 deg)",
+            "",
+            "LiDAR mounting rpy in radians (empty = 用唯一模型里的值)",
+        ),
+        (
+            "gimbal_joint_type",
+            "fixed",
+            "云台关节类型。默认 fixed: revolute 需要有人发 /joint_states 的 "
+            "gimbal_yaw_joint (nav 的 --gimbal-joint-topic 中继), 否则 "
+            "robot_state_publisher 一个动态 TF 都不发, base_link->gimbal_yaw 缺失, "
+            "livox_frame/livox_imu 整棵子树与 base_link 断开 —— 实测表现是 RViz "
+            "Global Status 报错、RobotModel/TF 全红、nav2 的 transform 全部失败。"
+            "云台角能回传后用 gimbal_joint_type:=revolute 切回来。",
         ),
         ("use_sim_time", "False", "Use the simulation clock if True"),
     ]

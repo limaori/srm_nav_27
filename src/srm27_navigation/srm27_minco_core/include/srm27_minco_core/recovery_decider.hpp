@@ -36,6 +36,15 @@ enum class RecoveryDecision {
   /// 调用方**不得**据此进入脱困状态：没有方向的脱困等于原地不动，
   /// 会把一次可恢复的卡死变成永久卡死。保留目标、继续重试是唯一安全的处置。
   kNoEscapeDirection,
+  /// \brief 门限已到，但判定这是"原地来回荡"而不是"被卡住"，**刻意不脱困**。
+  ///
+  /// 判据见 `RecoveryConfig::repeat_guard_radius` / `repeat_guard_angle_deg`：
+  /// 上一次会话就在附近结束，而这次算出来的逃逸方向与上次几乎相反 —— 说明车在
+  /// 一个净空被夹在 `stuck_clearance` 与 `escaped_clearance` 之间的窄带里，
+  /// 两边都推不动。此时代码层面的正确处置是**把失败交回重规划 / 行为树**，
+  /// 而不是继续按 0.5 m/s 盲推（2026-11-03 实测：26 s 内进 4 次、方向成对相反、
+  /// 净位移≈0）。
+  kRepeatSuppressed,
 };
 
 /// \brief 脱困决策的转出原因（写出到诊断，不影响行为）。
@@ -82,6 +91,19 @@ struct RecoveryConfig
   int search_samples{36};
   /// \brief 梯度范数低于该值时判为"梯度平台"，改用环形搜索。
   double gradient_epsilon{1e-3};
+
+  /// \brief 重复进入抑制半径（m）：距上一次脱困会话**结束点**小于该值时启用抑制。
+  ///
+  /// 必须比行为树 backup 单次位移（`backup_dist`，默认 1.0 m，提前退出时约 0.3~0.5 m）
+  /// 更小，否则兜底动作刚把车挪开就又被判成"同一处"。
+  /// 取 0 表示关闭该判据。
+  double repeat_guard_radius{0.35};
+  /// \brief 重复进入抑制的方向门限（度）。
+  ///
+  /// 仅当"本次算出的逃逸方向"与"上次会话的方向"夹角 **≥ 该值**时才抑制。
+  /// 120° 的含义：只有"掉头往回逃"才算原地来回荡；0~120° 之间的方向偏差属于正常的
+  /// 沿弧线收敛，不该拦。取 0 表示关闭（退化为"只要在附近就不再脱困"）。
+  double repeat_guard_angle_deg{120.0};
 };
 
 /// \brief 脱困判定 / 脱困方向规划 / 脱困成功判定。
@@ -204,6 +226,12 @@ public:
   bool usedCircularSearch() const { return used_circular_search_; }
   /// \brief 最近一次环形搜索找到的最大净空（m）；未搜过为 -inf。
   double circularSearchBestClearance() const { return circular_best_clearance_; }
+  /// \brief 因"同处反向重复进入"而被抑制掉的脱困次数（诊断）。
+  std::uint64_t repeatSuppressedCount() const { return repeat_suppressed_count_; }
+  /// \brief 最近一次算出/进入脱困时的方向（单位向量，规划坐标系）。
+  const Eigen::Vector2d & lastEscapeDirection() const { return last_escape_direction_; }
+  /// \brief 上一次脱困会话结束时是否已记下"结束位置 + 方向"（抑制判据的基准）。
+  bool hasLastSessionAnchor() const { return has_last_session_; }
 
   // === 2) 脱困方向规划（纯函数，供行为树脱困行为复用） ===
 
@@ -229,6 +257,13 @@ private:
   /// \brief 时间是否可用（有限且非负）。
   static bool isTimeValid(double _now_sec);
 
+  /// \brief 记下"本次会话在哪儿结束、朝哪儿逃"，作为下一次的重复抑制基准。
+  void rememberSessionAnchor(const Eigen::Vector2d & _position);
+
+  /// \brief 本次是否应因"同处反向重复进入"而放弃脱困。
+  bool shouldSuppressRepeat(
+    const Eigen::Vector2d & _position, const Eigen::Vector2d & _direction) const;
+
   RecoveryConfig config_{};
 
   // 失败与脱困运行期状态
@@ -237,6 +272,12 @@ private:
   double last_recovery_start_sec_{-1.0};
   double last_recovery_end_sec_{-1.0};
   bool recovery_active_{false};
+
+  // 重复进入抑制的基准（上一次会话的结束位置与方向）
+  Eigen::Vector2d last_end_position_{Eigen::Vector2d::Zero()};
+  Eigen::Vector2d last_end_direction_{Eigen::Vector2d::Zero()};
+  bool has_last_session_{false};
+  std::uint64_t repeat_suppressed_count_{0};
 
   // 脱困会话缓存
   Eigen::Vector2d escape_velocity_{Eigen::Vector2d::Zero()};

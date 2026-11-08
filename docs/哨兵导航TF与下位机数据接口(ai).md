@@ -2,7 +2,7 @@
 
 本文整理 MID-360 在底盘或 yaw 云台上安装、底盘是否自旋这四种组合的 TF 解算方法，以及上下位机需要交换的数据。
 
-适用条件：上位机运行 ROS 2、Nav2 和 Point-LIO；导航只控制平移速度 `vx/vy`，底盘角速度 `wz` 完全由下位机控制；现有硬件包括 MID-360、底盘陀螺仪和带编码器的 yaw 电机。这里是设计与接口约定，不代表当前代码已经实现所有接口。
+适用条件：上位机运行 ROS 2、Nav2 和 Point-LIO；导航只控制平移速度 `vx/vy`，底盘角速度 `wz` 完全由下位机控制；现有硬件包括 MID-360、底盘陀螺仪和带编码器的 yaw 电机。**2026-11-08 起，第 5 节的关节角接口已在下位机与上位机两侧落地**（`0x0010` 第 4 个字段 + `/gimbal_joint_angle` → `/joint_states`），实测口径与偏差见 §5.4；其余条目仍是设计与接口约定。
 
 ## 1. 结论
 
@@ -117,14 +117,18 @@ Point-LIO 的常规用法要求雷达与其使用的 IMU 刚性固定。使用 M
 | 字段 | 含义与单位 | 要求 |
 |---|---|---|
 | `timestamp` | 实际采样时间，可换算到 ROS 时间 | 必须；异步采样的不同传感器应各有对应时间 |
-| `yaw_joint_angle` | 云台相对底盘的实际关节角，rad | 雷达在 yaw 上时必须 |
-| `base_wz` | 底盘陀螺仪测得并转换到底盘系的实际 z 轴角速度，rad/s | 强烈建议；不是 TF 解算的必需输入 |
+| `yaw_joint_angle` | 云台相对底盘的实际关节角，rad | 雷达在 yaw 上时必须。**2026-11-08 已有实现**：`0x0010` 第 4 个 float32 是 `chassis_to_gimbal_yaw`（底盘相对云台，**度**，(-180, 180]），上位机换算成 `gimbal_joint_angle`（云台相对底盘，弧度）接进 `gimbal_yaw_joint`，见 §5.4 |
+| `base_wz` | 底盘陀螺仪测得并转换到底盘系的实际 z 轴角速度，rad/s | 强烈建议；不是 TF 解算的必需输入。**2026-11-06 已有实现**：`0x0010` 速度包的 `wz` 字段 → `/chassis_speed`（`angular.z`），见[导航通信协议 §4.2](./导航通信协议-下位机接口说明.md) |
 | `yaw_joint_velocity` | 云台相对底盘的关节角速度，rad/s | 建议，用于插值、有限的短时预测 |
 | `spin_active` / `mode` | 是否处于自旋状态及底盘控制模式 | 建议 |
 | `valid` / 故障状态 | 编码器、陀螺仪等数据是否有效 | 建议 |
 | `base_vx`、`base_vy` | 底盘系实际平移速度估计，m/s | 可选，可由轮速估计，供速度反馈和辅助里程计使用 |
 
 不要求下位机专门回传累计自旋角、云台世界绝对 yaw 或完整底盘世界位姿。实际平移速度也可以在上位机从 LIO 等状态估计中获得；不能将收到的 `vx/vy` 指令当作实测速度。
+
+**上行 `vx/vy` 的坐标系约定**：`0x0010` 的 `vx/vy` 是**底盘系**（+x 车头、+y 左侧）。
+现在的物理链路是先到**云台板**再转 USB 给上位机，云台板只做**转发**，不做坐标旋转
+（不要因为云台板在链路上就以为它把速度旋到了云台系）。
 
 ### 5.1 坐标、零位和单位
 
@@ -150,6 +154,55 @@ Point-LIO 的常规用法要求雷达与其使用的 IMU 刚性固定。使用 M
 - 底盘陀螺仪可通过独立反馈消息或 `sensor_msgs/msg/Imu` 发布。若仅有角速度，不应伪造姿态；使用 IMU 消息时按约定标记不可用量并设置合理协方差。
 - 求 `odom → base_link` 时按 LIO 位姿时间查询动态外参；关节 TF 缺失时不能用单位阵冒充有效外参。
 - 每条 TF 边保持唯一发布者，避免同时发布 `odom → lidar` 和 `base_link → lidar` 导致同一子坐标系有多个父节点。LIO 原始位姿可作为话题输入，由转换节点统一发布底盘 TF。
+
+### 5.4 当前实现与已知偏差（2026-11-08）
+
+链路已经打通，细节：
+
+```text
+下位机云台 yaw 编码器
+  → 0x0010 第 4 个 float32  chassis_to_gimbal_yaw（底盘相对云台，度，(-180,180]，俯视逆时针为正）
+  → srm27_nav_protocol: joint_rad = gimbal_joint_sign(-1) × deg × π/180，wrap 到 (-π, π]
+  → 话题 /gimbal_joint_angle (std_msgs/Float32)
+  → gimbal_joint_state_relay.py (input_type=float32) → /joint_states 的 gimbal_yaw_joint
+  → robot_state_publisher → base_link -> gimbal_yaw 动态 TF
+  → sensor_scan_generation 每帧查 odom->base_link（= odom->lidar * base_link->lidar⁻¹）
+```
+
+- `gimbal_yaw_joint` 在 URDF 里是 **parent=base_link、child=gimbal_yaw、绕 +z、弧度**，描述
+  "云台相对底盘"；下位机给的是"底盘相对云台"，所以**必须取反**（默认 `gimbal_joint_sign=-1`）。
+  符号写反时 `base_link` 会往反方向转，速度方向误差变成两倍，比不接更糟。现场翻转参数
+  `gimbal_joint_sign` 即可，不用重新编译。
+- 度数话题 `/chassis_to_gimbal_yaw_deg` 与弧度话题 `/gimbal_joint_angle` 同时发布，前者用于
+  现场核对（云台底盘对正 ≈ 0；手把底盘逆时针转 45° ⇒ 度数 +45、弧度 -0.785）。
+- 云台不动、底盘被外力转动时，`base_link` 会跟着底盘转、`livox_frame` 保持不动，
+  `fake_vel_transform` 下发的底盘系速度方向也随之正确。
+- `sensor_scan_generation` 每帧都会重新查 `base_link → 雷达` 的 TF，关节角变化实时反映到
+  `odom → base_link`；yaw 差动用 `atan2` 归一化，±180° 跳变不会产生速度尖峰。
+- **`fake_vel_transform`、MINCO、`srm_cmd_mux`、`gimbal_joint_state_relay.py` 都不用改**。
+
+已知偏差与风险（首次上车逐条盯）：
+
+1. **断流不会让导航停**：relay 的 `timeout_sec` 默认 0.3 s，超时后停止发布 `/joint_states`，
+   TF 停在最后一帧；`sensor_scan_generation` 查不到精确时刻的 TF 时退化为"用最新一帧"并
+   告警。所以串口断了以后导航会用**过时的关节角**继续跑，不会自己停。
+2. **`odom` 朝向 = 启动瞬间的底盘车头朝向**：`loam_interface` 只在启动时查一次
+   `base_link → 雷达` 来确定 odom 原点。接真实关节角后，这个原点跟的是**底盘车头**而不是
+   云台指向。用 `--no-reloc` + `--map-to-odom` 时，填的 yaw 要按**底盘车头**在地图里的朝向给。
+   最省事的做法：启动前把云台和底盘对正。
+3. **零点误差一比一进速度方向**：下位机侧 168.97° 之类的零位标定误差会直接变成方向误差，
+   需要电控给出标定方法。若雷达在云台上的安装朝向与云台指向不一致，还要和 URDF 里的雷达
+   yaw 外参一起核对。
+4. **速率与时间戳**：角度只有约 33 Hz，时间戳是**上位机收到时刻**（帧里没有采样时间）。
+   被推着慢慢转没问题；开 2 rad/s 小陀螺时 30 ms 左右延迟约对应 3~4° 方向误差，后面再评估
+   要不要补偿；另加的 6~13 ms 指令延迟等以后标定 `fake_vel_transform` 的 `actuation_delay`
+   时一起算（该外推目前是关着的）。
+5. **上电就没数据（与"跑着断流"不同）**：`publish_chassis_speed: false` 或串口没起来时，
+   `gimbal_joint_angle` 不会发布，relay 在 float32 模式下**一帧都不会发**（不是发 0），
+   `base_link -> gimbal_yaw` 这条 TF 从未存在。于是 `sensor_scan_generation` 每次查
+   `lidar -> base_link` 都失败、直接跳过 `/odometry` 与 `odom -> base_link`（日志
+   「跳过本次里程计/TF 输出」），`loam_interface` 一直打 `TF lookup failed` —— 车没法导航，
+   不会静默跑。排查顺序：串口设备号 → 0x0010 是否在发 → 话题名是否两边一致。
 
 ## 6. 导航只控制 vx/vy 时的要求
 

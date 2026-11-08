@@ -16,11 +16,10 @@ find_package(std_srvs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 
 # ---------------------------------------------------------------- 纯逻辑核心
-# 速度合成、超时判定和自转波形都不依赖 ROS，便于单元测试。
+# 速度限幅与超时判定都不依赖 ROS，便于单元测试。
 add_library(srm_chassis_control_core
   src/velocity_mix.cpp
   src/twist_watchdog.cpp
-  src/rotation_waveform.cpp
 )
 target_include_directories(srm_chassis_control_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -28,25 +27,18 @@ target_include_directories(srm_chassis_control_core PUBLIC
 )
 
 # ---------------------------------------------------------------- 节点
-foreach(node_name cmd_mux rotation_controller rotation_test_sender)
-  if(node_name STREQUAL "cmd_mux")
-    set(node_source src/cmd_mux_node.cpp)
-  elseif(node_name STREQUAL "rotation_controller")
-    set(node_source src/rotation_controller_node.cpp)
-  else()
-    set(node_source src/rotation_test_sender_node.cpp)
-  endif()
-  add_executable(${node_name} ${node_source})
-  target_link_libraries(${node_name}
-    srm_chassis_control_core
-    rclcpp::rclcpp
-    ${geometry_msgs_TARGETS}
-    ${diagnostic_msgs_TARGETS}
-    ${std_srvs_TARGETS}
-    ${rcl_interfaces_TARGETS}
-  )
-  install(TARGETS ${node_name} DESTINATION lib/${PROJECT_NAME})
-endforeach()
+# 独立自转链（rotation_controller / rotation_test_sender）已于 2026-10-19 删除：
+# wz 只由上位机（导航栈）产生，仿真链上只剩 srm_cmd_mux 这一个出口节点。
+add_executable(cmd_mux src/cmd_mux_node.cpp)
+target_link_libraries(cmd_mux
+  srm_chassis_control_core
+  rclcpp::rclcpp
+  ${geometry_msgs_TARGETS}
+  ${diagnostic_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${rcl_interfaces_TARGETS}
+)
+install(TARGETS cmd_mux DESTINATION lib/${PROJECT_NAME})
 
 install(TARGETS srm_chassis_control_core
   ARCHIVE DESTINATION lib
@@ -61,8 +53,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_velocity_mix test/test_velocity_mix.cpp)
   target_link_libraries(test_velocity_mix srm_chassis_control_core)
 
-  ament_add_gtest(test_rotation_and_watchdog test/test_rotation_and_watchdog.cpp)
-  target_link_libraries(test_rotation_and_watchdog srm_chassis_control_core)
+  ament_add_gtest(test_twist_watchdog test/test_twist_watchdog.cpp)
+  target_link_libraries(test_twist_watchdog srm_chassis_control_core)
 
   find_package(ament_lint_auto REQUIRED)
   list(APPEND AMENT_LINT_AUTO_EXCLUDE

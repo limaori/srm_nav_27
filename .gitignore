@@ -59,3 +59,12 @@ sentry_*/
 !maps/**/*.data
 !maps/**/*.posegraph
 
+# 现场测试产物（波形图/CSV/日志片段），随时可删，不进版本库；
+# 需要保留的结论请写进 docs/。
+# 只忽略产物本身，保留 README 说明。
+/user_test_log/*
+!/user_test_log/README.md
+
+# 临时工作目录（抓取的参考文章/图片、解包的第三方仓库等），仅供本地查阅，
+# 不属于工程产物，随时可删，不进版本库。
+/.rm_scratch/

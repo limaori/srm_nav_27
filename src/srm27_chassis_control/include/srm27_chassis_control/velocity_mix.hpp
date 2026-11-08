@@ -19,7 +19,7 @@
 
 namespace srm27_chassis_control
 {
-/// \brief 速度合成的限幅参数。
+/// \brief 速度输出的限幅参数。
 struct MixLimits
 {
   /// \brief 前后方向速度上限（m/s）。
@@ -32,33 +32,38 @@ struct MixLimits
   double wz_max{2.0};
 };
 
-/// \brief 速度合成输入。
+/// \brief 速度输入：**唯一**来源是导航（`vx` / `vy` / `wz`）。
+///
+/// 2026-10-19 起独立自转链路（`rotation_controller` → `rotation_velocity`）已经删除：
+/// `wz` 归上位机（导航栈）所有，不存在第二路自转输入，也就不存在两路 `wz` 相加。
 struct MixInput
 {
   /// \brief 导航平移速度，车体系 x 前（m/s）。
   double nav_vx{0.0};
   /// \brief 导航平移速度，车体系 y 左（m/s）。
   double nav_vy{0.0};
-  /// \brief 独立自转角速度（rad/s）。导航输入的角速度不会出现在这里。
-  double rotation_wz{0.0};
+  /// \brief 导航角速度（rad/s），`wz` 的唯一来源。
+  double nav_wz{0.0};
 };
 
-/// \brief 速度合成输出。
+/// \brief 速度输出。
 struct MixOutput
 {
-  /// \brief 合成后的前向速度（m/s）。
+  /// \brief 输出前向速度（m/s）。
   double vx{0.0};
-  /// \brief 合成后的左向速度（m/s）。
+  /// \brief 输出左向速度（m/s）。
   double vy{0.0};
-  /// \brief 合成后的自转角速度（rad/s）。
+  /// \brief 输出自转角速度（rad/s）。
   double wz{0.0};
   /// \brief 平移限幅比例，1 表示未限幅。
   double scale{1.0};
-  /// \brief 是否发生了限幅。
+  /// \brief 是否发生了平移限幅。
   bool clamped{false};
+  /// \brief 本次 `wz` 是否被 `wz_max` 限幅（含非有限输入按 0 处理）。
+  bool wz_clamped{false};
 };
 
-/// \brief 按方案 3.3 的规则合成导航平移与独立自转速度。
+/// \brief 按方案 §3.3 / §4.3 的规则对导航速度做限幅（不含任何自转叠加）。
 ///
 /// \code
 /// vx = clamp(nav_vx, -vx_max, vx_max)
@@ -66,11 +71,10 @@ struct MixOutput
 /// scale = min(1, v_max / hypot(vx, vy))   // 零向量时 scale = 1
 /// vx *= scale
 /// vy *= scale
-/// wz = clamp(rotation_wz, -wz_max, wz_max)
+/// wz = clamp(nav_wz, -wz_max, wz_max)
 /// \endcode
 ///
-/// 导航输入的 angular.z 在调用本函数之前就被丢弃，因此这里只可能拿到
-/// 独立自转的 wz。非有限输入按 0 处理。
+/// 非有限输入按 0 处理。
 MixOutput mixVelocity(const MixInput & _input, const MixLimits & _limits);
 
 /// \brief 单轴限幅，非有限值返回 0。

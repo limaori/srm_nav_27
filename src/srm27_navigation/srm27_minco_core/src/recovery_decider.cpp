@@ -14,6 +14,7 @@
 
 #include "srm27_minco_core/recovery_decider.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -75,6 +76,14 @@ void RecoveryDecider::configure(const RecoveryConfig & _config)
     (std::isfinite(_config.gradient_epsilon) && _config.gradient_epsilon >= 0.0)
       ? _config.gradient_epsilon
       : 1e-3;
+  config_.repeat_guard_radius =
+    (std::isfinite(_config.repeat_guard_radius) && _config.repeat_guard_radius >= 0.0)
+      ? _config.repeat_guard_radius
+      : 0.35;
+  config_.repeat_guard_angle_deg =
+    (std::isfinite(_config.repeat_guard_angle_deg) && _config.repeat_guard_angle_deg >= 0.0)
+      ? _config.repeat_guard_angle_deg
+      : 120.0;
 }
 
 void RecoveryDecider::reset()
@@ -91,6 +100,50 @@ void RecoveryDecider::reset()
   last_exit_ = "none";
   used_circular_search_ = false;
   circular_best_clearance_ = -1.0;
+  // 重复抑制的基准一起清掉：`reset()` 的语义是"换目标/取消/定位重置"，
+  // 那时"上次在哪儿逃过"已经不代表同一个处境了。
+  last_end_position_.setZero();
+  last_end_direction_.setZero();
+  has_last_session_ = false;
+}
+
+void RecoveryDecider::rememberSessionAnchor(const Eigen::Vector2d & _position)
+{
+  if (!_position.allFinite() || last_escape_direction_.norm() < 1e-9) {
+    // 没有方向就没有可比对的基准；清掉旧基准，避免拿两段无关的会话做比较。
+    has_last_session_ = false;
+    return;
+  }
+  last_end_position_ = _position;
+  last_end_direction_ = last_escape_direction_.normalized();
+  has_last_session_ = true;
+}
+
+bool RecoveryDecider::shouldSuppressRepeat(
+  const Eigen::Vector2d & _position, const Eigen::Vector2d & _direction) const
+{
+  if (!has_last_session_) {
+    return false;
+  }
+  if (!(config_.repeat_guard_radius > 0.0)) {
+    return false;   // 判据被显式关掉
+  }
+  if (!_position.allFinite() || !_direction.allFinite() || _direction.norm() < 1e-9 ||
+    last_end_direction_.norm() < 1e-9)
+  {
+    return false;
+  }
+  // 车已经离开上一处：这可能是新的处境，交给正常脱困。
+  if ((_position - last_end_position_).norm() >= config_.repeat_guard_radius) {
+    return false;
+  }
+  if (!(config_.repeat_guard_angle_deg > 0.0)) {
+    return true;   // 角度门限关闭 = 只要还在同一处就不再脱困
+  }
+  const Eigen::Vector2d now_direction = _direction.normalized();
+  const double cosine = std::clamp(now_direction.dot(last_end_direction_), -1.0, 1.0);
+  const double angle_deg = std::acos(cosine) * 180.0 / M_PI;
+  return angle_deg >= config_.repeat_guard_angle_deg;
 }
 
 // -----------------------------------------------------------------------------
@@ -146,12 +199,12 @@ RecoveryDecision RecoveryDecider::decide(
     return RecoveryDecision::kNone;
   }
 
-  // 门限已跨过：开一次脱困会话。**先开会话再算方向**，与参考实现一致
-  // （参考实现的 handleReplanFailure 里 onReplanFailure 已经调用了 startRecovery），
-  // 这样即使方向算不出来也不会在下一个周期把计数再累加一遍。
-  recovery_active_ = true;
-  last_recovery_start_sec_ = _now_sec;
-
+  // 门限已跨过。**先算方向、再决定要不要开会话**。
+  //
+  // 与参考实现"先开会话再算方向"的顺序不同，原因是新增的重复进入抑制需要方向才能
+  // 判断，而"算不出方向"这个分支本来就不开会话（见下），所以调整顺序不改变原有语义：
+  //  * 算不出方向 -> 不开会话、不动失败计数、打一个冷却参考点（冷却一过就能再试）；
+  //  * 判定为"原地来回荡" -> 同样不开会话，只是把处置交给重规划 / 行为树。
   const EsdfQueryResult here = _esdf.query(_position.x(), _position.y());
   entry_clearance_ = here.valid ? here.distance : std::numeric_limits<double>::quiet_NaN();
 
@@ -161,17 +214,31 @@ RecoveryDecision RecoveryDecider::decide(
   circular_best_clearance_ = -1.0;
   if (!planEscapeDirection(_esdf, _position, config_, &direction, &best_clearance)) {
     // 没有方向的脱困等于停车。这里必须让状态"可自愈"：
-    //  * 关掉会话（否则 shouldStartRecovery 恒为 false，参考实现在这一分支返回
+    //  * 不开会话（否则 shouldStartRecovery 恒为 false，参考实现在这一分支返回
     //    ENTER_EMER_STOP 且把 recovery_active_ 永久锁死，是同一个坑）；
     //  * **不动失败计数**，让它保持在门限之上，于是冷却一过就能立刻再试一次，
     //    而不是从头再累计 fail_threshold 次失败。
-    recovery_active_ = false;
-    last_recovery_start_sec_ = -1.0;
     last_recovery_end_sec_ = _now_sec;
     last_trigger_ = "no_escape_direction";
     return RecoveryDecision::kNoEscapeDirection;
   }
 
+  // 重复进入抑制：上一次会话就在附近结束，而这次要往几乎相反的方向逃 ——
+  // 说明车夹在"推得动一点、但推不出困境"的窄带里，继续盲推只会左右来回荡。
+  if (shouldSuppressRepeat(_position, direction)) {
+    last_recovery_end_sec_ = _now_sec;
+    last_trigger_ = "repeat_suppressed";
+    // 记下**候选**方向：会话并没有开启，但控制器/诊断需要知道"本来打算往哪逃"，
+    // 否则日志里只能打出一个零向量。`shouldSuppressRepeat` 比较的是
+    // `last_end_direction_`（只在会话真正结束时更新），不受这里影响。
+    last_escape_direction_ = direction;
+    ++repeat_suppressed_count_;
+    return RecoveryDecision::kRepeatSuppressed;
+  }
+
+  // 真正进入脱困会话。
+  recovery_active_ = true;
+  last_recovery_start_sec_ = _now_sec;
   escape_velocity_ = direction * config_.escape_speed;
   last_escape_direction_ = direction;
   last_trigger_ = used_circular_search_ ? "circular_search" : "gradient";
@@ -344,6 +411,7 @@ RecoveryExit RecoveryDecider::updateRecovery(
   if (std::isfinite(_clearance) && _clearance > config_.escaped_clearance) {
     last_exit_ = "escaped";
     finishRecovery(true, _now_sec);
+    rememberSessionAnchor(_position);
     if (_escape_velocity != nullptr) {
       _escape_velocity->setZero();
     }
@@ -353,6 +421,7 @@ RecoveryExit RecoveryDecider::updateRecovery(
   if (!inRecovery(_now_sec)) {
     last_exit_ = "timeout";
     finishRecovery(false, _now_sec);
+    rememberSessionAnchor(_position);
     if (_escape_velocity != nullptr) {
       _escape_velocity->setZero();
     }
@@ -401,6 +470,8 @@ const char * toString(RecoveryDecision _decision)
       return "escape";
     case RecoveryDecision::kNoEscapeDirection:
       return "no_escape_direction";
+    case RecoveryDecision::kRepeatSuppressed:
+      return "repeat_suppressed";
   }
   return "unknown";
 }

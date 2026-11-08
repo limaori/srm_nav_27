@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!-- 配置激光惯性里程计的构建与运行依赖。 -->
+<package format="3">
+  <name>frontend</name>
+  <version>0.4.0</version>
+  <description>基于逐点时间和概率平面的激光惯性里程计。</description>
+  <maintainer email="zhujunheng2005@gmail.com">mozihe</maintainer>
+  <author email="zhujunheng2005@gmail.com">mozihe</author>
+  <license>GPL-2.0-only</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>eigen</depend>
+  <depend>yaml-cpp</depend>
+  <build_depend>libnanoflann-dev</build_depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+  <depend>localization_interfaces</depend>
+  <depend>livox_ros_driver2</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>sensor_msgs_py</test_depend>
+  <test_depend>domain_coordinator</test_depend>
+
+  <export><build_type>ament_cmake</build_type></export>
+</package>

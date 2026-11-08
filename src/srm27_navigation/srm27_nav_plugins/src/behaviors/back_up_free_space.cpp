@@ -16,8 +16,11 @@
 #include "srm27_nav_plugins/behaviors/back_up_free_space.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,20 @@ void BackUpFreeSpace::onConfigure()
     node, "esdf_search_samples", rclcpp::ParameterValue(36));
   nav2_util::declare_parameter_if_not_declared(
     node, "esdf_unknown_is_seed", rclcpp::ParameterValue(true));
+  // === 提前退出（P1）：语义对应链路 A 的 escaped_clearance ===
+  // 背景见 shouldExitEarly() 的注释：原实现的三个出口里没有"我已经在空地了"。
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_enable", rclcpp::ParameterValue(true));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_clearance", rclcpp::ParameterValue(0.55));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_hold_cycles", rclcpp::ParameterValue(3));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_min_travel", rclcpp::ParameterValue(0.30));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_min_time", rclcpp::ParameterValue(1.0));
+  nav2_util::declare_parameter_if_not_declared(
+    node, "early_exit_require_obstacles", rclcpp::ParameterValue(true));
 
   node->get_parameter("global_frame", global_frame_);
   node->get_parameter("max_radius", max_radius_);
@@ -57,6 +74,25 @@ void BackUpFreeSpace::onConfigure()
   node->get_parameter("esdf_search_radius", esdf_search_radius_);
   node->get_parameter("esdf_search_samples", esdf_search_samples_);
   node->get_parameter("esdf_unknown_is_seed", esdf_unknown_is_seed_);
+  node->get_parameter("early_exit_enable", early_exit_enable_);
+  node->get_parameter("early_exit_clearance", early_exit_clearance_);
+  node->get_parameter("early_exit_hold_cycles", early_exit_hold_cycles_);
+  node->get_parameter("early_exit_min_travel", early_exit_min_travel_);
+  node->get_parameter("early_exit_min_time", early_exit_min_time_);
+  node->get_parameter("early_exit_require_obstacles", early_exit_require_obstacles_);
+
+  // 参数来自 yaml，畸形值一律夹到安全侧而不是抛异常：抛异常会让整个 behavior_server
+  // configure 失败，代价远大于"用一个保守默认值继续跑"。
+  if (!std::isfinite(early_exit_clearance_) || early_exit_clearance_ <= 0.0) {
+    early_exit_clearance_ = 0.55;
+  }
+  early_exit_hold_cycles_ = std::max(1, early_exit_hold_cycles_);
+  if (!std::isfinite(early_exit_min_travel_) || early_exit_min_travel_ < 0.0) {
+    early_exit_min_travel_ = 0.0;
+  }
+  if (!std::isfinite(early_exit_min_time_) || early_exit_min_time_ < 0.0) {
+    early_exit_min_time_ = 0.0;
+  }
 
   if (escape_direction_mode_ != "esdf_gradient" && escape_direction_mode_ != "costmap_gap") {
     RCLCPP_WARN(
@@ -78,6 +114,7 @@ void BackUpFreeSpace::onCleanup()
 {
   costmap_client_.reset();
   marker_pub_.reset();
+  early_exit_hold_count_ = 0;
 }
 
 nav2_behaviors::Status BackUpFreeSpace::onRun(
@@ -140,6 +177,10 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
   command_time_allowance_ = command->time_allowance;
 
   end_time_ = clock_->now() + command_time_allowance_;
+  // 提前退出的判据以"本次 backup 启动"为基准计时/计数，每次动作都必须从零开始，
+  // 否则上一轮留下的 hold 计数会让下一轮一上来就满足"连续 N 个周期"。
+  early_exit_start_stamp_ = clock_->now();
+  early_exit_hold_count_ = 0;
 
   if (!nav2_util::getCurrentPose(
         initial_pose_, *tf_, global_frame_, robot_base_frame_, transform_tolerance_)) {
@@ -185,14 +226,41 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
     return nav2_behaviors::Status::SUCCEEDED;
   }
 
-  auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>();
-  cmd_vel->linear.y = twist_y_;
-  cmd_vel->linear.x = twist_x_;
-
   geometry_msgs::msg::Pose2D pose;
   pose.x = current_pose.pose.position.x;
   pose.y = current_pose.pose.position.y;
   pose.theta = tf2::getYaw(current_pose.pose.orientation);
+
+  // === 提前退出（P1）：已经站在正常空地就停，不再盲推满 backup_dist ===
+  //
+  // 对应链路 A 的 `escaped_clearance` 判定。两道时间/位移护栏必须先满足：
+  //  * `early_exit_min_travel_`：必须先真走出去一段，否则会退化成
+  //    "清图 -> 净空虚高 -> 立刻退出 -> 重规划仍失败 -> 再清图"的原地空转；
+  //  * `early_exit_min_time_`：给雷达留出重新标记代价图的时间（BT 的
+  //    RecoveryFallback 是"先清图再 Backup"，进这个函数时图可能还是空的）。
+  // 两个护栏都不满足的周期里把 hold 计数清零，保证"连续"是真的连续。
+  if (early_exit_enable_) {
+    const double elapsed = (clock_->now() - early_exit_start_stamp_).seconds();
+    if (distance >= early_exit_min_travel_ && elapsed >= early_exit_min_time_) {
+      double clearance = std::numeric_limits<double>::quiet_NaN();
+      if (shouldExitEarly(pose, &clearance)) {
+        stopRobot();
+        RCLCPP_WARN(
+          logger_,
+          "提前退出脱困：自身净空 %.3f m > %.2f m，已无必要继续推 —— "
+          "已走 %.2f m / %.2f s（本次目标 %.2f m），交回重规划。",
+          clearance, early_exit_clearance_, static_cast<double>(distance), elapsed,
+          std::fabs(command_x_));
+        return nav2_behaviors::Status::SUCCEEDED;
+      }
+    } else {
+      early_exit_hold_count_ = 0;
+    }
+  }
+
+  auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>();
+  cmd_vel->linear.y = twist_y_;
+  cmd_vel->linear.x = twist_x_;
 
   if (!isCollisionFree(distance, cmd_vel.get(), pose)) {
     stopRobot();
@@ -203,6 +271,97 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   vel_pub_->publish(std::move(cmd_vel));
 
   return nav2_behaviors::Status::RUNNING;
+}
+
+double BackUpFreeSpace::queryCurrentClearance(const geometry_msgs::msg::Pose2D & pose)
+{
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  if (!costmap_client_ || !costmap_client_->service_is_ready()) {
+    return nan;
+  }
+
+  auto request = std::make_shared<nav2_msgs::srv::GetCostmap::Request>();
+  auto result = costmap_client_->async_send_request(request);
+  // 只等 100 ms：正常情况 1~2 ms 就回。**不能**像 onRun 那样等 1 s ——
+  // 那会把 10 Hz 的行为周期直接拖死，而"这一周期没有可信数据"本来就该被跳过。
+  if (result.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+    return nan;
+  }
+  const auto costmap = result.get()->map;
+
+  // 空图保护：整张代价图里一格致命障碍都没有 => 这份数据不可信。
+  // 最典型的来源就是"刚清完图、雷达还没重新标记"，此时"到处都开阔"是假象
+  // （2026-11-03 那次实测：清图后 0.4 s 报出 净空 0.978 m 并据此选了方向）。
+  if (early_exit_require_obstacles_) {
+    bool has_obstacle = false;
+    for (const auto cost : costmap.data) {
+      if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
+        has_obstacle = true;
+        break;
+      }
+    }
+    if (!has_obstacle) {
+      return nan;
+    }
+  }
+
+  // 与 planEscapeDirectionByEsdf 完全同一条链路：快照 -> ESDF -> 插值查询。
+  // 净空的语义（只把原始占用与未知当种子、膨胀代价 1..252 视为自由）因此与
+  // "选方向"和控制器内部脱困判定完全一致。
+  //
+  // 唯一区别是**只抠机器人周围一小块**：整张全局图建一次 ESDF 实测 15~24 ms，
+  // 而这里是 10 Hz 的周期函数，付不起（详见 buildGridSnapshotAround 的说明）。
+  const double crop_radius = std::max(1.0, 2.0 * early_exit_clearance_);
+  srm27_minco_core::GridSnapshot snapshot;
+  if (!buildGridSnapshotAround(costmap, pose, crop_radius, &snapshot)) {
+    return nan;
+  }
+  srm27_minco_core::Esdf2D esdf;
+  srm27_minco_core::Esdf2D::Config esdf_config;
+  esdf_config.unknown_is_seed = esdf_unknown_is_seed_;
+  if (!esdf.build(snapshot, esdf_config)) {
+    return nan;
+  }
+  const srm27_minco_core::EsdfQueryResult here = esdf.query(pose.x, pose.y);
+  if (!here.valid || !std::isfinite(here.distance)) {
+    return nan;
+  }
+  // 窗口内一个障碍种子都没有时，`Esdf2D` 返回的是 `no_obstacle_distance`(1e3) 哨兵值：
+  // 它只说明"最近障碍比窗口半径还远"，**不是**精确测量值。直接往日志里打
+  // 1000.000 m 会被当成 bug（2026-11-03 的日志里就这么出现过一次），因此把上报
+  // 值夹到窗口半径。判据不受影响：阈值(0.55) 永远小于窗口半径(1.10)。
+  const double reported = std::min(here.distance, crop_radius);
+  last_clearance_ = reported;
+  return reported;
+}
+
+bool BackUpFreeSpace::shouldExitEarly(
+  const geometry_msgs::msg::Pose2D & pose, double * clearance)
+{
+  if (clearance != nullptr) {
+    *clearance = std::numeric_limits<double>::quiet_NaN();
+  }
+
+  const double current = queryCurrentClearance(pose);
+  if (clearance != nullptr) {
+    *clearance = current;
+  }
+  // 数据不可信（NaN）与"确实还很挤"一律清零计数：宁可多推一格，也不要误退。
+  if (!std::isfinite(current) || current <= early_exit_clearance_) {
+    early_exit_hold_count_ = 0;
+    return false;
+  }
+
+  ++early_exit_hold_count_;
+  if (early_exit_hold_count_ < early_exit_hold_cycles_) {
+    if (early_exit_hold_count_ == 1) {
+      RCLCPP_INFO(
+        logger_, "脱困净空已恢复（%.3f m > %.2f m），连续确认中 (%d/%d)",
+        current, early_exit_clearance_, early_exit_hold_count_, early_exit_hold_cycles_);
+    }
+    return false;
+  }
+  return true;
 }
 
 bool BackUpFreeSpace::planEscapeDirectionByEsdf(
@@ -287,6 +446,74 @@ bool BackUpFreeSpace::buildGridSnapshot(
   return snapshot->reset(
     costmap.metadata.origin.position.x, costmap.metadata.origin.position.y, resolution, size_x,
     size_y, std::move(cells), /*map_version=*/0u, clock_->now().seconds());
+}
+
+bool BackUpFreeSpace::buildGridSnapshotAround(
+  const nav2_msgs::msg::Costmap & costmap, const geometry_msgs::msg::Pose2D & pose,
+  double radius, srm27_minco_core::GridSnapshot * snapshot) const
+{
+  if (snapshot == nullptr) {
+    return false;
+  }
+  const int size_x = static_cast<int>(costmap.metadata.size_x);
+  const int size_y = static_cast<int>(costmap.metadata.size_y);
+  const double resolution = costmap.metadata.resolution;
+  const double origin_x = costmap.metadata.origin.position.x;
+  const double origin_y = costmap.metadata.origin.position.y;
+  if (size_x <= 0 || size_y <= 0 || !(resolution > 0.0)) {
+    return false;
+  }
+  const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
+  if (costmap.data.size() != count) {
+    return false;
+  }
+  if (!std::isfinite(pose.x) || !std::isfinite(pose.y)) {
+    return false;
+  }
+
+  // 机器人所在格（可能落在图外 -> 给不出可信净空）。
+  const int robot_mx = static_cast<int>(std::floor((pose.x - origin_x) / resolution));
+  const int robot_my = static_cast<int>(std::floor((pose.y - origin_y) / resolution));
+  if (robot_mx < 0 || robot_my < 0 || robot_mx >= size_x || robot_my >= size_y) {
+    return false;
+  }
+
+  const double crop = (std::isfinite(radius) && radius > 0.0) ? radius : 1.0;
+  const int half = std::max(1, static_cast<int>(std::ceil(crop / resolution)));
+  const int x0 = std::max(0, robot_mx - half);
+  const int y0 = std::max(0, robot_my - half);
+  const int x1 = std::min(size_x, robot_mx + half + 1);
+  const int y1 = std::min(size_y, robot_my + half + 1);
+  const int nx = x1 - x0;
+  const int ny = y1 - y0;
+  if (nx <= 0 || ny <= 0) {
+    return false;
+  }
+
+  // 逐行抠图。索引布局与 `buildGridSnapshot` 完全一致：行优先、自左下角起，
+  // 即 `my * size_x + mx`（`GetCostmap` 返回的是 `Costmap2D::getCharMap()`，不是
+  // nav_msgs/OccupancyGrid 那种自上而下的布局，不需要翻转 y）。
+  std::vector<srm27_minco_core::CellState> cells(
+    static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny),
+    srm27_minco_core::CellState::kFree);
+  for (int my = y0; my < y1; ++my) {
+    const std::size_t src_row = static_cast<std::size_t>(my) * static_cast<std::size_t>(size_x);
+    const std::size_t dst_row = static_cast<std::size_t>(my - y0) * static_cast<std::size_t>(nx);
+    for (int mx = x0; mx < x1; ++mx) {
+      const std::uint8_t cost = costmap.data[src_row + static_cast<std::size_t>(mx)];
+      srm27_minco_core::CellState & cell = cells[dst_row + static_cast<std::size_t>(mx - x0)];
+      if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
+        cell = srm27_minco_core::CellState::kOccupied;
+      } else if (cost == nav2_costmap_2d::NO_INFORMATION) {
+        cell = srm27_minco_core::CellState::kUnknown;
+      }
+    }
+  }
+
+  return snapshot->reset(
+    origin_x + static_cast<double>(x0) * resolution,
+    origin_y + static_cast<double>(y0) * resolution, resolution, nx, ny, std::move(cells),
+    /*map_version=*/0u, clock_->now().seconds());
 }
 
 void BackUpFreeSpace::visualizeEscape(

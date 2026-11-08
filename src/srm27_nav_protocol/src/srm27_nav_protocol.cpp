@@ -21,6 +21,24 @@ std::mutex send_mutex_;
 namespace srm27_nav_protocol
 {
 
+namespace
+{
+constexpr double kPi = 3.14159265358979323846;
+
+// 把角度折算到 (-π, π]。
+// 关节角在 ±π 处会整圈跳变，直接下发会让 TF 跳一整圈、yaw 差分出尖峰，
+// 所以发出去之前一定先归一化。
+// 注意区间是 (-π, π] 而不是 [-π, π)：-π 落到 +π，避免出现两个等价的端点。
+double wrapToPi(double angle)
+{
+  double wrapped = std::fmod(angle, 2.0 * kPi);
+  if (wrapped < 0.0) {
+    wrapped += 2.0 * kPi;  // [0, 2π)
+  }
+  return wrapped > kPi ? wrapped - 2.0 * kPi : wrapped;
+}
+}  // namespace
+
 Srm27NavProtocolNode::Srm27NavProtocolNode(const rclcpp::NodeOptions & options)
 : Node("Srm27NavProtocolNode", options),
   owned_ctx_{new IoContext(2)},
@@ -35,6 +53,21 @@ Srm27NavProtocolNode::Srm27NavProtocolNode(const rclcpp::NodeOptions & options)
   serial_port_protect_thread_ = std::thread(&Srm27NavProtocolNode::serialPortProtect, this);
   receive_thread_ = std::thread(&Srm27NavProtocolNode::receiveData, this);
   send_thread_ = std::thread(&Srm27NavProtocolNode::sendData, this);
+
+  // 启动时把"接收侧到底在发什么"打出来：现场排查时这一行比翻文档快。
+  if (publish_chassis_speed_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "接收侧 0x0010 底盘速度反馈 -> [%s](TwistStamped, frame_id=%s, m/s 与 rad/s), "
+      "[%s](Float32, 底盘相对云台, 度) 与 [%s](Float32, gimbal_yaw_joint, 弧度, sign=%+.1f); "
+      "失联门限 %.2f s",
+      chassis_speed_topic_.c_str(), chassis_speed_frame_.c_str(),
+      chassis_to_gimbal_yaw_topic_.c_str(), gimbal_joint_topic_.c_str(), gimbal_joint_sign_,
+      chassis_speed_timeout_sec_);
+  } else {
+    RCLCPP_INFO(
+      get_logger(), "接收侧 0x0010 底盘速度反馈: 已关闭 (publish_chassis_speed=false)");
+  }
 }
 
 Srm27NavProtocolNode::~Srm27NavProtocolNode()
@@ -69,6 +102,16 @@ void Srm27NavProtocolNode::createPublisher()
     this->create_publisher<rm_decision_interfaces::msg::ProjectileAllowance>("referee/projectile_allowance", 10);
   switch_position_pub_ =
     this->create_publisher<rm_decision_interfaces::msg::SwitchPosition>("referee/switch_position", 10);
+
+  // 0x0010 底盘速度反馈。**不受 referee 相关开关影响**：它来自底盘，不是裁判系统。
+  // 队列深度 1：这是"最新观测值"，积压旧值没有意义（消费方要的是当前速度）。
+  chassis_speed_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
+    chassis_speed_topic_, rclcpp::QoS(1));
+  chassis_to_gimbal_yaw_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+    chassis_to_gimbal_yaw_topic_, rclcpp::QoS(1));
+  // 云台关节角：gimbal_joint_state_relay 的 float32 模式直接订这条（云台相对底盘、弧度）。
+  gimbal_joint_pub_ = this->create_publisher<std_msgs::msg::Float32>(
+    gimbal_joint_topic_, rclcpp::QoS(1));
 }
 
 void Srm27NavProtocolNode::createSubscription()
@@ -155,8 +198,36 @@ void Srm27NavProtocolNode::getParams()
 
   try {
     debug_print_hex_ = declare_parameter<bool>("debug_print_hex", false);
+
+  // ---- 接收侧 0x0010 底盘速度反馈 ----
+  // 默认开启：这个包只是"看"，不参与控制，开了也不改变车的行为。
+  publish_chassis_speed_ = declare_parameter<bool>("publish_chassis_speed", true);
+  chassis_speed_topic_ = declare_parameter<std::string>("chassis_speed_topic", "chassis_speed");
+  chassis_to_gimbal_yaw_topic_ = declare_parameter<std::string>(
+    "chassis_to_gimbal_yaw_topic", "chassis_to_gimbal_yaw_deg");
+  chassis_speed_frame_ = declare_parameter<std::string>("chassis_speed_frame", "base_link");
+  chassis_speed_timeout_sec_ = declare_parameter<double>("chassis_speed_timeout_sec", 0.5);
+  // 云台关节角（URDF gimbal_yaw_joint）的换算：joint_rad = sign * deg * π / 180。
+  // 下位机给的是"底盘相对云台"，URDF 要的是"云台相对底盘"，所以默认 sign = -1。
+  // 符号接反比不接更糟（base_link 反向转，速度方向误差翻倍），所以允许现场用参数翻转：
+  //   ros2 run ... --ros-args -p gimbal_joint_sign:=1.0
+  gimbal_joint_topic_ = declare_parameter<std::string>(
+    "gimbal_joint_topic", "gimbal_joint_angle");
+  gimbal_joint_sign_ = declare_parameter<double>("gimbal_joint_sign", -1.0);
+  if (!std::isfinite(gimbal_joint_sign_) ||
+    std::abs(std::abs(gimbal_joint_sign_) - 1.0) > 1e-9)
+  {
+    RCLCPP_ERROR(
+      get_logger(), "gimbal_joint_sign 只能是 +1.0 或 -1.0, 收到 %f", gimbal_joint_sign_);
+    throw std::invalid_argument("gimbal_joint_sign must be +1.0 or -1.0");
+  }
+  if (!(chassis_speed_timeout_sec_ > 0.0) || !std::isfinite(chassis_speed_timeout_sec_)) {
+    RCLCPP_ERROR(get_logger(), "chassis_speed_timeout_sec 必须为正的有限值, 收到 %f",
+                 chassis_speed_timeout_sec_);
+    throw std::invalid_argument("chassis_speed_timeout_sec must be finite and positive");
+  }
   } catch (rclcpp::ParameterTypeException & ex) {
-    RCLCPP_ERROR(get_logger(), "The debug_print_hex provided was invalid");
+    RCLCPP_ERROR(get_logger(), "接收侧 0x0010 相关参数类型不合法");
     throw ex;
   }
 
@@ -388,6 +459,23 @@ void Srm27NavProtocolNode::receiveData()
             ReceiveSwitchPosition switch_position_data = fromVector<ReceiveSwitchPosition>(full_packet);
             publishSwitchPosition(switch_position_data);
           } break;
+          case ID_CHASSIS_SPEED: {
+            // 长度必须精确匹配: data_length 写错时 fromVector 只会部分拷贝,
+            // 那样 vx/vy/wz/yaw 会是"帧里其它字节"的误读值, 比丢包更难查。
+            if (!receive_length_matches<ReceiveChassisSpeedData>(header_frame.data_length)) {
+              chassis_speed_bad_length_.fetch_add(1);
+              RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 5000,
+                "0x0010 长度不符: data_length=%u, 期望 %u (整帧 %zu), 已丢弃",
+                static_cast<unsigned>(header_frame.data_length),
+                static_cast<unsigned>(DATA_LENGTH_CHASSIS_SPEED),
+                sizeof(ReceiveChassisSpeedData));
+              break;
+            }
+            ReceiveChassisSpeedData chassis_speed_data =
+              fromVector<ReceiveChassisSpeedData>(full_packet);
+            publishChassisSpeed(chassis_speed_data);
+          } break;
           case ID_SEFDEFINED:
           case ID_ROBOT_STATUS_V1: {
             ReceiveSefdefinedData sefdefined_data = fromVector<ReceiveSefdefinedData>(full_packet);
@@ -408,6 +496,110 @@ void Srm27NavProtocolNode::receiveData()
 /********************************************************/
 /* Publish data                                         */
 /********************************************************/
+
+void Srm27NavProtocolNode::publishChassisSpeed(ReceiveChassisSpeedData & data)
+{
+  const double vx = static_cast<double>(data.data.vx);
+  const double vy = static_cast<double>(data.data.vy);
+  const double wz = static_cast<double>(data.data.wz);
+  const double chassis_to_gimbal_yaw_deg =
+    static_cast<double>(data.data.chassis_to_gimbal_yaw_deg);
+
+  chassis_speed_count_.fetch_add(1);
+  chassis_speed_last_steady_ns_.store(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count(),
+    std::memory_order_relaxed);
+
+  // 串口里出现 NaN/Inf（下位机解算异常、字节错位）时不要往下游传：
+  // 下游（示波/标定脚本）拿 NaN 做统计会静默污染结果。
+  // 注意是**整帧丢弃**：速度、度数、关节角三条话题都不发，避免下游拿半帧数据。
+  if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(wz) ||
+    !std::isfinite(chassis_to_gimbal_yaw_deg))
+  {
+    chassis_speed_nonfinite_.fetch_add(1);
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "0x0010 含 NaN/Inf (vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.1f), "
+      "本帧丢弃 (累计 %lu)",
+      vx, vy, wz, chassis_to_gimbal_yaw_deg,
+      static_cast<unsigned long>(chassis_speed_nonfinite_.load()));
+    return;
+  }
+
+  if (!publish_chassis_speed_) {
+    return;
+  }
+
+  // 时间戳取收到时刻（下位机帧里没有时间字段；协议 §4.1 的 9+len 帧格式里没有留给它的位置）。
+  // 因此这个 stamp 反映"上位机收到的时刻"，做延迟测量时要把它和发送时刻一起算。
+  const rclcpp::Time stamp = this->now();
+
+  geometry_msgs::msg::TwistStamped speed;
+  speed.header.stamp = stamp;
+  speed.header.frame_id = chassis_speed_frame_;
+  speed.twist.linear.x = vx;
+  speed.twist.linear.y = vy;
+  speed.twist.linear.z = 0.0;
+  speed.twist.angular.x = 0.0;
+  speed.twist.angular.y = 0.0;
+  speed.twist.angular.z = wz;
+  chassis_speed_pub_->publish(speed);
+
+  // 度数话题保留下位机口径（度），方便现场用眼睛核对（对正 ≈ 0，底盘逆时针 45° ≈ +45）。
+  // 这里**故意不**转成弧度：一旦在传输环节换了单位，现场对"这 90 是度还是弧度"就没有唯一答案了。
+  std_msgs::msg::Float32 chassis_to_gimbal_yaw_msg;
+  chassis_to_gimbal_yaw_msg.data = static_cast<float>(chassis_to_gimbal_yaw_deg);
+  chassis_to_gimbal_yaw_pub_->publish(chassis_to_gimbal_yaw_msg);
+
+  // URDF 的 gimbal_yaw_joint：parent = base_link、child = gimbal_yaw、绕 +z、单位弧度，
+  // 描述的是"云台相对底盘"；下位机给的是"底盘相对云台"，两者**互为相反数**。
+  //   joint_rad = gimbal_joint_sign(-1) × chassis_to_gimbal_yaw_deg × π / 180
+  // 例：云台不动、底盘被推着逆时针转 45° ⇒ 下位机 +45 ⇒ joint = -0.785 rad。
+  // 符号写反的话 base_link 会往反方向转（速度误差变成 90°），比不接还糟；
+  // 所以符号做成参数，现场核对后可用 gimbal_joint_sign 翻转，不用重新编译。
+  const double joint_rad = wrapToPi(
+    gimbal_joint_sign_ * chassis_to_gimbal_yaw_deg * kPi / 180.0);
+  std_msgs::msg::Float32 gimbal_joint_msg;
+  gimbal_joint_msg.data = static_cast<float>(joint_rad);
+  gimbal_joint_pub_->publish(gimbal_joint_msg);
+
+  RCLCPP_DEBUG(
+    get_logger(),
+    "0x0010 底盘速度: vx=%.3f vy=%.3f wz=%.3f chassis_to_gimbal_yaw=%.2f deg "
+    "→ gimbal_yaw_joint=%.4f rad",
+    vx, vy, wz, chassis_to_gimbal_yaw_deg, joint_rad);
+}
+
+void Srm27NavProtocolNode::checkChassisSpeedFreshness()
+{
+  if (!is_usb_ok_ || !publish_chassis_speed_) {
+    return;
+  }
+  const int64_t last_ns = chassis_speed_last_steady_ns_.load(std::memory_order_relaxed);
+  const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+  const bool stale = (last_ns == 0) ||
+    (static_cast<double>(now_ns - last_ns) * 1e-9 > chassis_speed_timeout_sec_);
+
+  if (stale && !chassis_speed_stale_) {
+    chassis_speed_stale_ = true;
+    RCLCPP_WARN(
+      get_logger(),
+      "底盘速度反馈 (0x0010) 中断超过 %.2f s（累计收到 %lu 帧）。"
+      "速度反馈只影响示波/标定, 不影响控制链; 但此时无法再核对底盘实际速度。",
+      chassis_speed_timeout_sec_,
+      static_cast<unsigned long>(chassis_speed_count_.load()));
+  } else if (!stale && chassis_speed_stale_) {
+    chassis_speed_stale_ = false;
+    RCLCPP_INFO(
+      get_logger(), "底盘速度反馈 (0x0010) 恢复: 累计 %lu 帧, 非法长度 %lu, 非有限 %lu",
+      static_cast<unsigned long>(chassis_speed_count_.load()),
+      static_cast<unsigned long>(chassis_speed_bad_length_.load()),
+      static_cast<unsigned long>(chassis_speed_nonfinite_.load()));
+  }
+}
+
 void Srm27NavProtocolNode::publishEventData(ReceiveEventData & event_data)
 {
   rm_decision_interfaces::msg::EventData msg;
@@ -674,6 +866,7 @@ void Srm27NavProtocolNode::sendData()
   const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
     std::chrono::duration<double>(1.0 / send_rate_hz_));
   int retry_count = 0;
+  auto last_chassis_speed_check_ = std::chrono::steady_clock::now();
 
   while (rclcpp::ok()) {
     if (!is_usb_ok_) {
@@ -720,6 +913,17 @@ void Srm27NavProtocolNode::sendData()
     } catch (const std::exception & ex) {
       RCLCPP_ERROR(get_logger(), "Error sending data: %s", ex.what());
       is_usb_ok_ = false;
+    }
+
+    // 0x0010 失联检测：挂在**发送线程**上按 1 s 周期调用。
+    // 不放在接收循环里（断流时它不跑，报不出"断了"），也不用 rclcpp 的 wall timer
+    // （依赖 executor 自旋：组合节点/自旋方式一变就静默失效 —— 本机实测踩到过）。
+    {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - last_chassis_speed_check_ >= std::chrono::seconds(1)) {
+        last_chassis_speed_check_ = now;
+        checkChassisSpeedFreshness();
+      }
     }
 
     // 等满一个周期再发下一帧。以"上一帧刚发完"为基准, 所以被抢占时

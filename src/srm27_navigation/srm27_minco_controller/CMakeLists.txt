@@ -10,6 +10,7 @@ find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
+  src/command_frame.cpp
   src/costmap_adapter.cpp
   src/diagnostics.cpp
   src/local_path.cpp
@@ -34,6 +35,8 @@ if(BUILD_TESTING)
   # 只做不依赖 TF/costmap 的接口与行为测试；pluginlib 用例验证插件确实被导出。
   ament_add_gtest(test_pluginlib_loading test/test_pluginlib_loading.cpp)
   target_link_libraries(test_pluginlib_loading ${PROJECT_NAME})
+  ament_add_gtest(test_command_frame test/test_command_frame.cpp)
+  target_link_libraries(test_command_frame ${PROJECT_NAME})
   ament_add_gtest(test_yaw_policy test/test_yaw_policy.cpp)
   target_link_libraries(test_yaw_policy ${PROJECT_NAME})
   ament_add_gtest(test_diagnostics test/test_diagnostics.cpp)

@@ -1,5 +1,10 @@
 /srm27_nav_protocol:
   ros__parameters:
+    # 云台板 USART1 对应的 USB 转串口。
+    # 2026-11-08 现场确认：换成云台板 USART1 以后设备号**仍是 /dev/ttyACM0**（沿用改之前的值）。
+    # 哪天换转接板/换板子后编号变了，改这里就行，代码不用动（脚本按这一行做存在性检查）：
+    #   ls -l /dev/serial/by-id/     # 可选，插拔后名字不变
+    #   ls -l /dev/ttyACM* /dev/ttyUSB*
     device_name: /dev/ttyACM0
     baud_rate: 115200
     flow_control: none
@@ -25,32 +30,77 @@
     # 2026-10-09: 2.5 → 3.5, 与 FollowPath.limits.max_linear_speed 3.5 对齐。
     # 原因: 限幅作用在**缩放之后**(见下面的 linear_velocity_scale), 2.5 会把
     # 控制器允许的 3.5 静默截掉(预检会报 "串口层限速低于控制器")。
-    # 注意这个值不是"车的速度上限", 而是**发出去那一帧的数值上限**;
-    # 对齐系数 0.8 生效时, 出口最大是 0.8×3.5 = 2.8, 3.5 是留给它的余量。
-    # 若哪天把 linear_velocity_scale 改回 1.0, 请重新核对这里(那时 3.5 会真的发出去)。
-    max_vx: 4.5
-    max_vy: 4.5
-    max_wz: 4.0
+    # 注意这个值不是"车的速度上限", 而是**发出去那一帧的数值上限**。
+    # 缩放系数现在已改回 1.0 (见下), 出口最大 = max_vx 本身; 若哪天又重新
+    # 启用小于 1 的系数, 请把这里的余量重新核一遍。
+    # 2026-11-08: 统一降到 0.40 / 1.0（与 config/real/speed_limits.yaml 同档）。
+    # 这是"发出去那一帧"的最终硬限幅，任何上游失控也超不过它。
+    max_vx: 0.40
+    max_vy: 0.40
+    max_wz: 1.0
 
     # ---- 速度对齐 (指令值 ≠ 实际速度的尺度修正) ----
-    # 发往下位机之前把收到的指令乘这个系数。1.0 = 原行为(不缩放)。
+    # 发往下位机之前把收到的指令乘这个系数。1.0 = 不缩放。
     #
-    # 为什么需要: 2026-10-09 实车录包实测 (/cmd_vel_chassis 与 /odometry 的
-    # 稳态差商对比, 278 个样本):
-    #     实际速度 / 指令值 = 1.263 (中位; 0.4~0.7 档 1.327, 0.7~1.0 档 1.249,
-    #     1.0~1.3 档 1.245) —— 各速档基本一致, 说明是**尺度**不一致而不是动态误差。
-    #     即指令 1.24 m/s 时车实际跑 1.55 m/s (全段峰值 1.66)。
-    # 后果不止"跑得快": MINCO 的轨迹校验硬门槛是 limits.max_linear_speed × 1.02 = 1.53,
-    # 而轨迹的**起点速度是当前实测速度**这个硬边界条件 —— 实测 1.536 时任何候选轨迹
-    # 都必然超限, 整条被判死、控制器输出零速, 现场就是"一顿一顿 + 轨迹跳变"。
-    # 修法见 log_diag/real_bag_2026-10-09_22-13-51/REPORT.md §2.1。
+    # 2026-11-04: 按调试需求把两个系数从 0.80/0.8 改回 1.0 —— 串口那一帧现在
+    # 就是 /cmd_vel_chassis 的原值(只受上面 max_vx/max_vy/max_wz 限幅),
+    # 波形/录包与导航侧的口径一致, 不再有"图上 1.0、下位机收到 0.8"的错位。
+    # ⚠ 风险: 0.80 原本是抵消实测"实际速度 / 指令值 ≈ 1.263"的标定值,
+    #   去掉之后车实际会跑到指令的约 1.26 倍。重新启用 = 把下面两个键改回 0.80/0.8,
+    #   不用改代码。
     #
-    # 取值: 0.8 ≈ 1/1.263, 即把指令压到"车实际跑出来正好等于指令值"。
-    # 注意它同时会掩盖上游的尺度问题(LIO 尺度或底盘换算), 这只是先让闭环自洽;
-    # 定性要靠卷尺实测 /odometry 位移。改回 1.0 即恢复原行为, 不用改代码。
-    linear_velocity_scale: 0.80
-    # 角速度目前没有实测依据(本轮只对齐平移), 保持 1.0 不动。
-    angular_velocity_scale: 0.8
+    # 原始标定依据(2026-10-09 实车录包, /cmd_vel_chassis 与 /odometry 稳态差商,
+    # 278 个样本): 实际/指令 = 1.263 (0.4~0.7 档 1.327, 0.7~1.0 档 1.249,
+    # 1.0~1.3 档 1.245) —— 各速档基本一致, 说明是**尺度**不一致而不是动态误差。
+    # 后果不止"跑得快": MINCO 的轨迹校验硬门槛是 limits.max_linear_speed × 1.02,
+    # 而轨迹起点速度取当前实测速度, 实测超过门槛时整条候选轨迹被判死、
+    # 控制器输出零速, 现场表现为"一顿一顿 + 轨迹跳变"。
+    # 细节见 log_diag/real_bag_2026-10-09_22-13-51/REPORT.md §2.1。
+    # 注意该系数只是在出口做尺度补偿, 会掩盖上游的尺度问题(LIO 尺度或底盘换算);
+    # 关掉之后定性要靠卷尺实测 /odometry 位移。
+    linear_velocity_scale: 1.0
+    # 角速度同理(原值 0.8, 本轮一并改回 1.0)。
+    angular_velocity_scale: 1.0
+
+    # ---- 接收侧: 0x0010 底盘速度反馈 ----
+    # 下位机 → 上位机方向按 cmd_id 多包复用（0x0001 / 0x000B / 0x0010 轮转），
+    # 本节点目前只解析 0x0010（速度与云台偏角），另外两包是裁判系统数据，**本车没有
+    # 调用 RefereeInit()，它们实际恒为全 0**，解析了也没有意义。
+    #
+    # 0x0010 = 4 个 float32: vx(m/s)、vy(m/s)、wz(rad/s)、chassis_to_gimbal_yaw(度)，
+    # 填充的是**底盘速度观测器的融合结果**（不是轮速正解），坐标系是底盘系
+    # （+x 前、+y 左、+z 上、+wz 俯视逆时针）。
+    #
+    # 第 4 个字段的含义（**2026-11-08 改过**，别再按"底盘 yaw"理解）：
+    #   chassis_to_gimbal_yaw：以**云台指向为 0**，底盘车头相对云台偏转的角度；
+    #   单位**度**，范围 (-180, 180]，俯视逆时针为正；由云台 yaw 电机编码器解算，
+    #   与 IMU、上电零位、世界系都无关。云台不动、底盘被推着逆时针转 45° → +45。
+    #   上行 vx/vy **仍是底盘系**：云台板只转发底盘算好的速度，不做旋转。
+    #
+    # 这是**观测值**，不是"指令已执行"的回显：指令→底盘→观测有延迟和尺度差。
+    # 用途: 速度反馈、指令/实际对账、wz 符号与增益标定、示波。
+    publish_chassis_speed: true
+    chassis_speed_topic: "chassis_speed"        # TwistStamped: linear.x=vx, linear.y=vy, angular.z=wz
+    # Float32: 下位机原值（**度**，不转弧度），现场核对用（对正 ≈ 0）。
+    chassis_to_gimbal_yaw_topic: "chassis_to_gimbal_yaw_deg"
+    # Float32: 换算给 URDF gimbal_yaw_joint 的关节角（云台相对底盘、弧度、俯视逆时针为正）：
+    #   joint_rad = gimbal_joint_sign × chassis_to_gimbal_yaw_deg × π / 180，并 wrap 到 (-π, π]
+    # 这条话题直接喂 gimbal_joint_state_relay 的 float32 模式；
+    # start_real_nav.sh 默认就带 --gimbal-joint-topic gimbal_joint_angle。
+    # 符号默认 -1.0（下位机"底盘相对云台" ↔ URDF"云台相对底盘"，互为相反数）。
+    # **符号接反比不接更糟**（base_link 反向转，速度方向误差翻倍）：
+    # 首次上车一定在 RViz 里核对——云台不动、手转底盘时 base_link 要跟着底盘转；
+    # 反了就把这里改成 +1.0 重启（launch 读的就是本文件，不用重新编译）；
+    # 直接 ros2 run 起节点时也可以 --ros-args -p gimbal_joint_sign:=1.0 临时覆盖。
+    gimbal_joint_topic: "gimbal_joint_angle"
+    gimbal_joint_sign: -1.0
+    chassis_speed_frame: "base_link"            # TwistStamped.header.frame_id
+    # 失联告警门限（秒）。0x0010 约 33.3 Hz（10 ms 槽位轮转），0.5 s ≈ 连丢 16 个槽位。
+    # 对**速度反馈**只影响日志（示波/对账），不影响控制链。
+    # ⚠ 但它同时断掉 gimbal_joint_angle：relay 的 timeout_sec(0.3 s) 一到就停发
+    #   /joint_states，TF 停在最后一帧并由 sensor_scan_generation 沿用——串口断了
+    #   导航会用过时的角继续跑。上车第一次务必盯 relay / sensor_scan_generation 的告警。
+    chassis_speed_timeout_sec: 0.5
 
     # ---- 诊断开关 ----
     # 打开后终端会打印收发两端的原始 hex:

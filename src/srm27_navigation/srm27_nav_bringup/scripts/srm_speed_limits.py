@@ -100,6 +100,11 @@ OMNI_PLUGIN = "srm27_omni_pid_controller::OmniPidPursuitController"
 VARIANT_MINCO = "minco"
 VARIANT_OMNI = "omni"
 VARIANT_NONE = ""
+#: 附加 profile：fakeyaw 迁移链（机器人参考系 base_link_fake、导航拥有 wz）。
+#: 它**叠加**在控制器变体之上生效（`@minco` 先、`@fakeyaw` 后，后者优先）：
+#: 同一条 MINCO 链，"导航不控自转"与"导航控自转"对 velocity_smoother 的 yaw 界
+#: 要求正好相反（前者钳 0，后者必须放开），而控制器变体只有一个。
+VARIANT_FAKEYAW = "fakeyaw"
 
 #: Nav2 的节点段里这层是纯容器，比较路径时忽略。
 _TRANSPARENT_KEYS = ("ros__parameters",)
@@ -118,6 +123,7 @@ class MergeResult:
         params_path=None,
         overlay_path=None,
         variant=VARIANT_NONE,
+        profile=None,
         sections=None,
         skipped_sections=None,
         conflicts=None,
@@ -128,6 +134,8 @@ class MergeResult:
         self.params_path = params_path
         self.overlay_path = overlay_path
         self.variant = variant
+        #: 命中的附加 profile（当前只有 fakeyaw）；None 表示不是迁移链。
+        self.profile = profile
         #: 实际生效的覆盖层顶层键（已去掉 @变体 后缀）。
         self.sections = sections or {}
         #: 因变体不匹配被跳过的覆盖层键。
@@ -236,6 +244,31 @@ def detect_variant(cfg):
     return VARIANT_NONE
 
 
+def detect_profile(cfg):
+    """判定参数文件是否属于 fakeyaw 迁移链（导航拥有 wz、参考系 base_link_fake）。
+
+    判据取"链路事实"而不是文件名：只要出现下面任一条，就说明这条链的机器人参考系
+    已经换成不随底盘自转的虚拟系，`velocity_smoother` 的 yaw 界必须放开：
+
+    * `FollowPath.fake_base_frame` 非空（MINCO 迁移链的正常写法）；
+    * `fake_vel_transform.transform_mode == nav_se2`（转换器在迁移模式）；
+    * 局部代价地图的 `robot_base_frame` 以 `_fake` 结尾（导航参考系是虚拟系）。
+
+    文件名不可靠：`nav2_params_srm_minco.yaml` 与 `nav2_params_srm_minco_fakeyaw.yaml`
+    都可能被 --params 指过来，而覆盖层要跟着**内容**走。
+    """
+    fake_base = _lookup(cfg, "controller_server.FollowPath.fake_base_frame")
+    if isinstance(fake_base, str) and fake_base.strip():
+        return VARIANT_FAKEYAW
+    mode = _lookup(cfg, "fake_vel_transform.transform_mode")
+    if isinstance(mode, str) and mode.strip().lower() == "nav_se2":
+        return VARIANT_FAKEYAW
+    frame = _lookup(cfg, "local_costmap.local_costmap.robot_base_frame")
+    if isinstance(frame, str) and frame.strip().endswith("_fake"):
+        return VARIANT_FAKEYAW
+    return None
+
+
 def split_section_key(key):
     """把 `节点名@变体` 拆成 (节点名, 变体)；不带 @ 时变体为 None。"""
     if "@" in key:
@@ -244,16 +277,38 @@ def split_section_key(key):
     return key, None
 
 
-def effective_sections(overlay, variant):
-    """按变体挑出要生效的覆盖层段，返回 ({节点名: 段}, [被跳过的键])。"""
+def effective_sections(overlay, variant, profile=None):
+    """按变体挑出要生效的覆盖层段，返回 ({节点名: 段}, [被跳过的键])。
+
+    生效顺序固定（与覆盖层里的书写顺序无关，避免"谁写在后面谁生效"这种隐式约定）：
+
+    1. 不带 `@` 的共用段；
+    2. 控制器变体段（`@minco` / `@omni`）；
+    3. 附加 profile 段（`@fakeyaw`），仅当 `detect_profile` 命中时生效。
+
+    后一步深合并覆盖前一步，所以 `@fakeyaw` 可以只写"迁移链与原链不同"的那几个键。
+    """
+    wanted_order = [None]
+    if variant:
+        wanted_order.append(variant)
+    if profile and profile != variant:
+        wanted_order.append(profile)
+
     sections = {}
-    skipped = []
-    for key, value in overlay.items():
-        node, wanted = split_section_key(key)
-        if wanted is None or wanted == variant:
-            sections[node] = value
-        else:
-            skipped.append(key)
+    used = set()
+    for wanted in wanted_order:
+        for key, value in overlay.items():
+            if key in used:
+                continue
+            node, found = split_section_key(key)
+            if found == wanted:
+                if node in sections and isinstance(sections[node], dict) \
+                        and isinstance(value, dict):
+                    _deep_merge_into(sections[node], value)
+                else:
+                    sections[node] = copy.deepcopy(value)
+                used.add(key)
+    skipped = [key for key in overlay if key not in used]
     return sections, skipped
 
 
@@ -295,6 +350,7 @@ def merge_params(
     base_cfg,
     overlay_cfg,
     variant=None,
+    profile=None,
     allow_overrides=False,
     base_label="参数文件",
     overlay_label=OVERLAY_FILENAME,
@@ -304,13 +360,16 @@ def merge_params(
     :param base_cfg: 参数文件内容（dict）。
     :param overlay_cfg: 覆盖层内容（dict）。
     :param variant: 强制指定变体；None 表示按 base_cfg 自动判定。
+    :param profile: 强制指定附加 profile（fakeyaw）；None 表示按 base_cfg 自动判定。
     :param allow_overrides: 冲突只告警不报错（默认报错）。
     :param base_label / overlay_label: 报错信息里显示的文件名。
     :returns: MergeResult。
     """
     if variant is None:
         variant = detect_variant(base_cfg)
-    sections, skipped = effective_sections(overlay_cfg, variant)
+    if profile is None:
+        profile = detect_profile(base_cfg)
+    sections, skipped = effective_sections(overlay_cfg, variant, profile)
 
     # 覆盖层的段必须与参数文件同层：Nav2 / 底盘参数文件都是
     # `<节点名>: ros__parameters: {...}`，覆盖层少了这层容器就会合并到一个
@@ -353,6 +412,7 @@ def merge_params(
     result = MergeResult(
         merged=merged,
         variant=variant,
+        profile=profile,
         sections=sections,
         skipped_sections=skipped,
         conflicts=conflicts,
@@ -405,11 +465,13 @@ def merge_params_files(params_path, overlay=AUTO, allow_overrides=False):
             merged=base_cfg,
             params_path=params_path,
             variant=detect_variant(base_cfg),
+            profile=detect_profile(base_cfg),
         )
     result = merge_params(
         base_cfg,
         load_yaml(overlay_path),
         variant=None,
+        profile=None,
         allow_overrides=allow_overrides,
         base_label=os.path.basename(params_path),
         overlay_label=os.path.basename(overlay_path),
@@ -448,12 +510,17 @@ def chain_summary(cfg):
     controller = _lookup(cfg, follow + ".v_linear_max")
     if controller is None:
         controller = _lookup(cfg, follow + ".limits.max_linear_speed")
+    # mux 只在 fakeyaw 迁移链上处于速度通路里（实车旧链/Omni 链的出口是 smoother →
+    # cmd_vel_chassis，不经过 mux）。把它的限幅算进"这条链的上限"会误导人，
+    # 所以按 profile 决定要不要把它当作一层。
+    profile = detect_profile(cfg)
     summary = {
         "controller": _first(controller),
         "controller_accel": _first(_lookup(cfg, follow + ".limits.max_linear_accel")),
         "smoother": _first(_lookup(cfg, "velocity_smoother.max_velocity")),
         "smoother_accel": _first(_lookup(cfg, "velocity_smoother.max_accel")),
-        "mux_linear": _first(_lookup(cfg, "srm_cmd_mux.v_max")),
+        "mux_linear": _first(_lookup(cfg, "srm_cmd_mux.v_max")) if profile else None,
+        "profile": profile,
         "behavior_max_rotational_vel": _first(
             _lookup(cfg, "behavior_server.max_rotational_vel")
         ),
@@ -464,6 +531,7 @@ def chain_summary(cfg):
         if isinstance(value, (int, float)) and value > 0.0
     ]
     summary["binding"] = min(layers) if layers else None
+    summary["layers"] = layers
     return summary
 
 
@@ -491,7 +559,7 @@ def format_chain(cfg, indent="    "):
     ]
     if summary["mux_linear"] is not None:
         lines.append(
-            "%s合成 srm_cmd_mux:  %s"
+            "%s合成 srm_cmd_mux:  %s   （迁移链最后一道钳位）"
             % (indent, _fmt(summary["mux_linear"], "m/s 合速度"))
         )
     lines.append(
@@ -561,10 +629,13 @@ if HAVE_LAUNCH:
             merged_path = write_merged(result)
             self.__merged_path = merged_path
             if not self.__quiet:
+                variant_label = result.variant or "共用段"
+                if result.profile:
+                    variant_label = "%s + %s" % (variant_label, result.profile)
                 header = "[srm_speed_limits] 合并 %s + %s（变体 %s）" % (
                     os.path.basename(base_path),
                     os.path.basename(result.overlay_path),
-                    result.variant or "共用段",
+                    variant_label,
                 )
                 print("%s\n%s" % (header, format_chain(result.merged)))
                 if result.duplicates:

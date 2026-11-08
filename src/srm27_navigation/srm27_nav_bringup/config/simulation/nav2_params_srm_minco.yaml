@@ -111,9 +111,18 @@ point_lio:
     preprocess:
       lidar_type: 2                                     # 激光雷达类型：1 Livox，2 Velodyne，3 Ouster
       scan_line: 32                                     # 激光雷达扫描线数
-      scan_rate: 20                                     # 仿真雷达扫描频率（Hz）
+      # ★ 必须等于雷达真实出货频率：几何 YAML 的 lidar.update_rate = 10 Hz。
+      #   原来写 20，导致 Point-LIO 给每个点算的时间戳整体错一倍 —— 去畸变等于没做。
+      #   云台静止时只影响车体平移（量小、看不出来）；**云台一自转就致命**：
+      #   每帧云台已转 ~0.2 rad，残差把位姿顶飞（2026-11-04 实测：0.87 m / 1.06 m 位姿跳变）。
+      scan_rate: 10                                     # 仿真雷达扫描频率（Hz），必须 = lidar.update_rate
       timestamp_unit: 0                                 # 点云时间戳单位：0秒、1毫秒、2微秒、3纳秒
-      blind: 0.5                                        # 忽略雷达近距离盲区半径（米）
+      # 2026-11-06: 0.5 -> 0.46 -> 0.3。这是**自车盲区**球的半径（到雷达原点的球面径向）。
+      #   0.3 已**小于车体外廓 0.33**：0.30 m 起的真实回波全部保留（目的就是让贴墙/
+      #   桌腿这类近处障碍能进 ESDF），代价是车身自反射也会进点云。
+      #   ⚠ 代价地图侧还有 footprint_clearing(robot_radius 0.40) 兜一层；LIO 侧没有 ——
+      #     建图拖影/里程计抖动时先查 cloud_registered 里的自反射残留。
+      blind: 0.3                                        # 忽略雷达近距离盲区半径（米）
 
     mapping:
       imu_en: True                                      # 是否启用IMU融合
@@ -447,7 +456,14 @@ controller_server:
       # 但目标检查器不接受（详见 minco实车迁移实施记录 §4.4）。
       xy_goal_tolerance: 0.50                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
-      trans_stopped_velocity: 0.03                      # 判定停稳的平移速度阈值（米/秒）
+      # ★ 2026-11-03：0.03 -> 0.10。仿真里程计（simulation_ground_truth_odometry.py）
+      #   直接转发 Gazebo 的 twist，静止时实测恒为 (-0.061, 0.022) m/s（而位姿 3 s 只爬
+      #   4e-5 m，两者差 100 倍），于是 |vx| 永远 > 0.03，StoppedGoalChecker 判不了「停稳」：
+      #   车停在距末点 0.366 m（在 0.50 m 容差内）→ 控制器终点急停输出零速 →
+      #   目标检查器不接受 → 进度检查器(0.5 m/10 s)判失败 → 清图重发目标 → 再急停，
+      #   实测 8 分钟刷了 46 次、一次都没到点。0.10 留 1.6 倍余量；
+      #   同一次修复还在 odometry 适配器里加了「位姿静止即清零 twist」的一致性闸门。
+      trans_stopped_velocity: 0.10                      # 判定停稳的平移速度阈值（米/秒）
       # 没有 rot_stopped_velocity：角速度不参与到达判定（见上）。
 
     # MINCO + MPC 局部规划控制器。
@@ -625,10 +641,26 @@ controller_server:
       #   （还要扣掉底盘加速度斜坡）。超出这个位移必然超时，随后由建轨宽限与
       #   行为树的 BackUpFreeSpace 兜底。
       recovery:
-        fail_threshold: 5                               # 连续规划失败多少次才允许进入脱困
-        cooldown_sec: 1.0                               # 两次脱困之间的最小间隔（秒）
+        # ★ 2026-11-06：5 -> 10。门限数的是"规划失败结果条数"，不是时长 ——
+        #   有已提交轨迹时重规划被 replan_period(0.1 s) 节流 → 5 次 ≈ 0.5 s；
+        #   **没有**已提交轨迹时 ReplanManager 在节流判断之前就放行（每控制周期提交一次，
+        #   controller_frequency 50 Hz）→ 5 次 ≈ 0.1 s。同一门限代表的物理时长差 5 倍，
+        #   "太容易进脱困"主要来自这一档；取 10 后 ≈ 0.2 s（无轨迹）/ 1.0 s（稳定跟随）。
+        #   ⚠ 只改"多快进"，不改"为什么进"（分诊仍只看自身净空 < 0.40 m），
+        #     也不改"进得去出不来"（escaped_clearance 0.50 在窄通道内不可达）。
+        fail_threshold: 10                              # 连续规划失败多少次才允许进入脱困
+        # ★ 2026-11-03：1.0 -> 2.0。窄通道里链路 A 曾 1.5~2.0 s 就再进一次
+        #   （方向成对相反、净位移≈0），冷却太短是抖动频率的直接放大器。
+        cooldown_sec: 2.0                               # 两次脱困之间的最小间隔（秒）
         window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
-        escape_speed: 0.5                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
+        # ★ 历史：0.5 -> 1.5（2026-11-04 上午）-> **1.0**（同日定稿，与链路 B 的
+        #   backup_speed 对齐，两条链路同一节奏）。
+        #   ⚠ 窗口上限：escape_speed x window_sec = 1.0 x 3.0 = **3.0 m** ——
+        #     一次脱困最多能盲推 3.0 m（0.5 时代是 1.5 m，1.5 时代是 4.5 m）。
+        #     脱困旁路 MPC 的轨迹校验，方向只来自车周 0.40 m 环上的梯度/环形搜索，
+        #     所以跑满 3 s 窗口时方向早已过期，这 3.0 m 不受任何碰撞校验保护。
+        #     想保住"盲推距离 = 1.5 m"就把 window_sec 一起缩到 1.5 s。
+        escape_speed: 1.0                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
         # 卡死分诊阈值（米）：低于它才计入失败、才脱困。必须 >= 禁行带(0.30)
         # 且 >= 控制器硬校验(0.38)，否则 [阈值, 0.38) 是脱困接不了的死区。
         stuck_clearance: 0.40
@@ -636,6 +668,14 @@ controller_server:
         escaped_clearance: 0.50
         search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
         search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
+        # 重复进入抑制：上一次脱困就在附近结束、而这次要往几乎相反的方向逃 ——
+        # 说明车夹在「推得动一点但推不出困境」的窄带里，继续按 escape_speed 盲推只会
+        # 左右来回荡（2026-11-03 实测 26 s 进 4 次、净位移≈0）。判据成立时**不脱困**，
+        # 交回重规划；一直失败就由建轨宽限抛给行为树 backup，真正把车挪开。
+        # radius 必须小于行为树 backup 的单次位移（1.0 m，提前退出时约 0.3~0.5 m），
+        # 否则兜底动作刚挪开就又被判成「同一处」。取 0 关闭该判据。
+        repeat_guard_radius: 0.35                       # 抑制半径（米）
+        repeat_guard_angle_deg: 120.0                   # 方向门限（度）：>= 它才判为「来回荡」
         publish_visualization: True                     # 是否发布 recovery_markers 可视化
 
 
@@ -814,6 +854,22 @@ behavior_server:
     esdf_search_radius: 0.4                                # 环形搜索半径（米），应略大于膨胀半径
     esdf_search_samples: 36                                # 环形搜索采样数量
     esdf_unknown_is_seed: True                             # 未知区域是否按障碍处理（与控制器 safety.unknown_is_obstacle 保持一致）
+
+    # === 脱困提前退出（P1）===
+    # 语义：链路 A 的 escaped_clearance 在链路 B 上的对应物。原实现的出口只有
+    # "走满 backup_dist(1.0 m)" / "碰撞预演失败" / "time_allowance(10 s) 超时"，
+    # 于是"车已脱离危险、方向早已无意义"之后还会按冻结的方向继续推满 1 m。
+    # 2026-11-03 实测：4 次 backup 全部报 completed successfully，同期自身净空
+    # 0.978 -> 0.369 -> 0.321 -> 0.204 -> 0.006 m 单调下降，最终把车顶死在障碍上。
+    early_exit_enable: True                                # 是否启用提前退出
+    # 阈值必须 > 代价地图 robot_radius(0.40)：否则全局规划器把"车自己那一格"判成
+    # 内接膨胀里的障碍，重规划仍然失败（"Either of the start or goal pose are an
+    # obstacle!"），退出等于白退。0.55 = 0.40 + 0.15 余量。
+    early_exit_clearance: 0.55                             # 自身净空超过它即认为已在正常空地（米）
+    early_exit_hold_cycles: 3                              # 连续 N 个周期（10 Hz → 0.3 s）满足才退出
+    early_exit_min_travel: 0.30                            # 至少先真走出这么多米才有资格判"脱困了"（米）
+    early_exit_min_time: 1.0                               # 至少先跑这么久（秒），同时给雷达留出重新标记时间
+    early_exit_require_obstacles: True                     # 空图保护：整张图无致命障碍时不认净空结论
 
 waypoint_follower:
   ros__parameters:

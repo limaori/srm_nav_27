@@ -3,6 +3,8 @@
 > 本文由 AI 生成并随 SRM 仿真重构更新：原文对应的旧步兵链路（`gimbal_yaw_fake` /
 > `fake_vel_transform` / `MecanumDrive2` / `base_footprint`）已从 SRM 仿真中删除，
 > 本文描述重构后的实际链路。落地用法见 [`SRM仿真与自转控制实现(ai).md`](./SRM仿真与自转控制实现%28ai%29.md)。
+> **2026-11-06 起同一条链已迁到实车**（`nav_srm_real_launch.py`，只差执行端话题名）：
+> 见 [`仿真链迁移实车实施记录(ai).md`](./仿真链迁移实车实施记录%28ai%29.md)。
 
 本文说明 `nav_srm_simulation_launch.py` 启动的 SRM 仿真导航系统中，各模块使用的算法和数据流。
 默认命名空间为 `red_standard_robot1`，下文话题名前缀 `<ns>` 即指它。所有速度接口都是车体系

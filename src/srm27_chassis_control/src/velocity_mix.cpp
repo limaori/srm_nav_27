@@ -47,7 +47,10 @@ MixOutput mixVelocity(const MixInput & _input, const MixLimits & _limits)
   output.vx *= output.scale;
   output.vy *= output.scale;
 
-  output.wz = clampFinite(_input.rotation_wz, _limits.wz_max);
+  // 导航是 wz 的唯一来源（独立自转链已删除），这里只做限幅。
+  output.wz = clampFinite(_input.nav_wz, _limits.wz_max);
+  // NaN 与任何值都不相等，因此非有限输入同样会被记为"被限幅"（它确实被改成了 0）。
+  output.wz_clamped = !(_input.nav_wz == output.wz);
   return output;
 }
 }  // namespace srm27_chassis_control
