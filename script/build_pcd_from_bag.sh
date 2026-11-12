@@ -238,8 +238,14 @@ fi
 OUT_PCD="$PCD_OUT_DIR/$BAG_NAME.pcd"
 
 # ---------- 组装命令 ----------
-LAUNCH_CMD="ros2 launch srm27_nav_bringup real_mapping_launch.py"
-LAUNCH_CMD="$LAUNCH_CMD start_lidar:=False use_sim_time:=True save_pcd:=True use_rviz:=False"
+# ⚠ 必须显式指定 point_lio：real_mapping_launch.py 的 lio_frontend 默认已改成 zlio
+# （与实车建图一致），而**累积点云落盘 (save_pcd -> scans.pcd) 是 Point-LIO 的功能**，
+# zlio_bridge 没有这条路。少这一项会起 zlio、等不到 /point_lio，白跑一趟。
+# 2026-11-11 实测：漏写时日志里只有 zlio_node，脚本卡在"等 point_lio 订阅"。
+LIO_FRONTEND_FOR_PCD="${LIO_FRONTEND_FOR_PCD:-point_lio}"
+LAUNCH_ARGS="start_lidar:=False use_sim_time:=True save_pcd:=True use_rviz:=False"
+LAUNCH_ARGS="$LAUNCH_ARGS lio_frontend:=$LIO_FRONTEND_FOR_PCD"
+LAUNCH_CMD="ros2 launch srm27_nav_bringup real_mapping_launch.py $LAUNCH_ARGS"
 
 TOPIC_ARGS="$(printf '%s ' "${REPLAY_TOPICS[@]}")"
 PLAY_CMD="ros2 bag play $(q "$BAG_FILE") --clock --topics ${TOPIC_ARGS% } --rate $PCD_BAG_RATE"
@@ -254,7 +260,8 @@ echo "  时长      : ${BAG_DURATION} 秒 (按 ${PCD_BAG_RATE} 倍速回放)"
 echo "  回放话题  : ${REPLAY_TOPICS[*]}"
 echo "  输出      : $OUT_PCD"
 echo "  链路日志  : $RUN_LOG"
-echo "  坐标系    : camera_init (Point-LIO 世界系, 不是 map 系)"
+echo "  前端      : $LIO_FRONTEND_FOR_PCD (PCD 累积只有 Point-LIO 支持)
+  坐标系    : camera_init (Point-LIO 世界系, 不是 map 系)"
 echo "======================================================"
 
 if [ "$DRY_RUN" = "1" ]; then
@@ -347,7 +354,8 @@ echo "[2/6] 起回放链路 (start_lidar:=False use_sim_time:=True save_pcd:=Tru
 # 用 subshell 里 source 再 exec, 这样 $! 就是 ros2 launch 本身, 信号能直达。
 set +e
 ( set +u; source "$SETUP_FILE" >/dev/null 2>&1; exec ros2 launch srm27_nav_bringup real_mapping_launch.py \
-    start_lidar:=False use_sim_time:=True save_pcd:=True use_rviz:=False ) > "$RUN_LOG" 2>&1 &
+    start_lidar:=False use_sim_time:=True save_pcd:=True use_rviz:=False \
+    lio_frontend:="$LIO_FRONTEND_FOR_PCD" ) > "$RUN_LOG" 2>&1 &
 LAUNCH_PID=$!
 set -e
 

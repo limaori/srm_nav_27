@@ -11,13 +11,21 @@
 
 ================================ 为什�� base_link 会转 ================================
 
-TF 链是::
+TF 链（**2026-11-08 云台系改造后是反转的**，判据不受影响，见下）::
 
-    odom --(LIO 发布)--> livox_imu --(URDF 固定)--> gimbal_yaw --(gimbal_yaw_joint)--> base_link
+    新树（实车）: odom --(LIO+固定外参)--> gimbal_yaw --(gimbal_yaw_joint)--> base_link
+    旧树（仿真）: odom --(LIO 反推)----> base_link --(gimbal_yaw_joint)--> gimbal_yaw
 
-`odom -> base_link` 由 `sensor_scan_generation` **反推**得到:
+⚠ 本脚本查的一直是 **`--parent base_link --child gimbal_yaw`** 这一对的 yaw
+（= "云台相对底盘"），它在两种树里都等于 −φ（俯视逆时针转底盘 φ 时），
+所以**预期符号和判据都不变**。变的只是参数值：新树里 URDF 的
+`gimbal_yaw_joint` 定义成"底盘相对云台"，所以 `srm27_nav_protocol.yaml` 的
+`gimbal_joint_sign` 从 -1.0 改成 +1.0 —— 但两者合起来观察到的 TF 关系相同。
+脚本判断失败时，仍然是"翻转 `gimbal_joint_sign`"这一个动作。
 
-    odom->base_link = odom->livox_imu * (base_link->livox_imu)^-1
+（旧树里 `odom -> base_link` 由 `sensor_scan_generation` 反推：
+`odom->base_link = odom->livox_imu * (base_link->livox_imu)^-1`；新树里它是
+`odom->gimbal_yaw` 乘关节角，导航只用前者。）
 
 云台锁住、手转底盘时: 雷达没动 -> `odom->livox_imu` 不变; 关节角 θ 变了 -> 反推让
 `base_link` 跟着**手**转。所以:
@@ -229,7 +237,7 @@ def analyze(probe, hand):
     if probe.tf_ok == 0:
         print('[FAIL] 查不到 %s -> %s 的 TF。' % (probe.args.parent,
                                                   probe.args.child))
-        print('       base_link 的世界位姿是 sensor_scan_generation 反推出来的，'
+        print('       base_link 的位姿来自 gimbal_yaw ← 关节角（或旧树的 LIO 反推），'
               '没有这条 TF 就谈不上符号。')
         print('       先确认: ros2 run tf2_ros tf2_echo base_link gimbal_yaw')
         print('       常见原因: robot_state_publisher 没起 / URDF 里 '

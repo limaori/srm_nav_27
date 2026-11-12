@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 """云台单转、车不动 —— 三方 yaw 对照（RViz 里那根箭头的数值版）。
 
-背景
-====
+判据随**树的方向**变（看 `/odometry` 的 `child_frame_id`）：
+
+  * `gimbal_yaw`（**新树，实车默认**）：云台就是"车"，`odom -> gimbal_yaw` **必须**跟着
+    云台转（Δbase ≈ Δraw），关节角不许进这一项。
+  * `base_link`（旧树）：`odom -> base_link` 在云台转时**必须**几乎不动（下面这套恒等式）。
+
+背景（旧树）
+============
 云台自转、底盘静止时, 三个 yaw 应该满足一条**恒等式**::
 
     yaw(odom -> base_link) ≈ yaw(raw LIO) − θ_joint
@@ -88,6 +94,8 @@ class YawCollector(Node):
         self.raw_stamp = None
         self.base_yaw = None
         self.base_stamp = None
+        # 2026-11-08：/odometry 的 child 决定判据（gimbal_yaw = 新树 ⇒ 云台就是车）
+        self.base_child = None
         self.joint_yaw = None
         self.joint_stamp = None
         self.joint_source = ""
@@ -116,6 +124,7 @@ class YawCollector(Node):
     def base_cb(self, msg):
         self.base_yaw = yaw_of(msg.pose.pose.orientation)
         self.base_stamp = self.get_clock().now()
+        self.base_child = msg.child_frame_id
 
     def joint_cb(self, msg):
         if self.args.joint_name not in msg.name:
@@ -273,14 +282,45 @@ def main():
     residual = deg(wrap(node.raw_yaw - node.joint_yaw - node.base_yaw))
     tol = args.tol_deg
 
-    print("窗口 %.1f s, 有效样本 %d, 关节角来源: %s"
-          % (node.args.seconds, rows, node.joint_source), flush=True)
+    gimbal_tree = node.base_child not in (None, "", "base_link")
+    print("窗口 %.1f s, 有效样本 %d, 关节角来源: %s, 树: odom -> %s（%s）"
+          % (node.args.seconds, rows, node.joint_source, node.base_child or "?",
+             "新树：云台就是车" if gimbal_tree else "旧树：底盘就是车"), flush=True)
     print("  Δθ(关节) = %+.1f°   Δraw(LIO) = %+.1f°   Δbase(odom->base) = %+.1f°"
           % (d_theta, d_raw, d_base), flush=True)
     print("  raw-θ-base 的残差 = %+.1f°（理论 0；它不随时间变，就说明三路对齐）" % residual,
           flush=True)
     print("  base yaw 最大偏移 = %.1f°（容差 %.1f°）" % (max_base_dev, tol), flush=True)
     print("", flush=True)
+
+    if gimbal_tree:
+        # 新树（2026-11-08 云台系）：odom->gimbal_yaw 必须**跟着云台转**，
+        # 关节角不许进这一项；只看 Δbase 与 Δraw 一比一。
+        resid_new = deg(wrap(node.raw_yaw - node.base_yaw))
+        print("  Δθ(关节) = %+.1f°   Δraw(LIO) = %+.1f°   Δbase(odom->gimbal) = %+.1f°"
+              % (d_theta, d_raw, d_base), flush=True)
+        print("  raw-base 的残差 = %+.1f°（理论恒定=外参；跟着 θ 变就是关节角混进来了）"
+              % resid_new, flush=True)
+        if abs(d_raw) < args.min_spin_deg:
+            print("[结论] 云台只转了 %.1f°（门槛 %.1f°），测不出东西。"
+                  % (d_raw, args.min_spin_deg))
+            return 3
+        tolerance = max(tol, 0.15 * abs(d_raw))
+        if abs(d_base - d_raw) <= tolerance:
+            print("[结论] PASS：云台转了 %+.1f°，odom->gimbal_yaw 跟着转了 %+.1f°。"
+                  % (d_raw, d_base))
+            print("       定位位姿被完整继承、关节角没进这一项（方案 §6.2 第 1 步）。")
+            return 0
+        if abs(d_base) <= tol:
+            print("[结论] FAIL：odom->gimbal_yaw 没跟云台转（Δbase≈0）。")
+            print("       查: TF 反转是否生效（gimbal_is_root:=true）、")
+            print("           sensor_scan_generation 的 robot_base_frame 是否 gimbal_yaw、")
+            print("           publish_robot_base_tf 是否 true。")
+            return 1
+        print("[结论] FAIL：Δbase=%+.1f° 与 Δraw=%+.1f° 对不上，不是单一路径的问题。"
+              % (d_base, d_raw))
+        print("       常见原因: 还有一处把关节角减掉了、关节角延迟、LIO 在漂。")
+        return 1
 
     if abs(d_theta) < args.min_spin_deg:
         print("[结论] 云台只转了 %.1f°（门槛 %.1f°），测不出东西。" % (d_theta, args.min_spin_deg))

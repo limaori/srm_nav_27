@@ -39,10 +39,12 @@ srm_cmd_mux:
     # 超时清零：两路各自计时（方案 §4.3）。
     nav_timeout: 0.3                      # 导航输入超时（s）-> 平移清零（wz 不受影响）
     spin_timeout: 0.25                    # 自转输入超时（s）-> wz 清零（底盘停转）
-    # wz 变化率上限（rad/s²）：与 speed_limits.yaml 的 FollowPath.limits.max_angular_accel
-    # 同档（4.5）。决策层发的是阶跃式目标，不限制斜率时起停会给底盘一次冲击。
+    # wz 变化率上限（rad/s²）：数值与 speed_limits.yaml 的 FollowPath.limits.max_angular_accel
+    # 同档（2026-11-11: 4.5 → 25.0）。决策层发的是阶跃式目标，不限制斜率时起停会给底盘一次冲击。
     # 0 = 不做斜率限制。`stop_all` 例外：它立即归零，不走斜率。
-    wz_ramp: 4.5
+    # ⚠ 25.0 时 0→8.5 rad/s 只要 0.34 s：这是"参数上放行"，底盘能否给出这么快的角加速
+    #   由下位机决定；给不出就是饱和/超调/轮子打滑，参数不会报错。
+    wz_ramp: 25.0
     # 限幅：见文件头——vx_max / vy_max / v_max / wz_max 在 speed_limits.yaml 里。
     # 注意 mux 的限幅参数**没有**动态回调，改 speed_limits.yaml 后必须重启节点。
     diagnostics_period: 0.5               # 诊断发布周期（s）

@@ -111,6 +111,41 @@ def test_inverted_tree_puts_gimbal_yaw_at_the_root():
             f"反转树里 livox_scan 必须挂在 gimbal_yaw（雷达就在云台上）: {scan}")
 
 
+def test_launch_string_flags_are_parsed_as_booleans():
+    """launch 传进来的是**字符串**：`"false"` 不能被当成真值（2026-11-09 建图事故）。
+
+    `LaunchConfiguration(...).perform(context)` 一律返回 str，`if gimbal_is_root:` 对
+    非空字符串恒为真 —— 于是默认不反转树的建图链路也被反转：`base_link` 同时有
+    `odom` 和 `gimbal_yaw` 两个父节点，雷达子树从 `odom` 断开，`pointcloud_to_laserscan`
+    取不到 `odom -> livox_scan`，结果没有 `/scan`、没有 `/map`，RViz 全空。
+    """
+    from srm_robot_description import as_bool, build_description
+
+    for text in ("false", "False", "FALSE", "0", "no", "off", ""):
+        _assert(as_bool(text) is False, f"{text!r} 应解析为 False")
+    for text in ("true", "True", "1", "yes", "on"):
+        _assert(as_bool(text) is True, f"{text!r} 应解析为 True")
+    _assert(as_bool(True) is True and as_bool(False) is False, "bool 应原样返回")
+    try:
+        as_bool("maybe")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("无法解析的字符串应该报错，而不是静默取真")
+
+    # 关键：字符串 "false" 必须产出**原方向**的树（根 = base_link）。
+    xml_text, _ = build_description(
+        str(REAL_PARAMS), "", "", gimbal_joint_type="revolute", gimbal_is_root="false"
+    )
+    links, joints = _tree(xml_text)
+    children = {joint[2] for joint in joints.values()}
+    roots = links - children
+    _assert(roots == {"base_link"}, f'gimbal_is_root="false" 时根应是 base_link，实际 {sorted(roots)}')
+    joint = joints["gimbal_yaw_joint"]
+    _assert(joint[1] == "base_link" and joint[2] == "gimbal_yaw",
+            f'gimbal_is_root="false" 时关节应是 base_link -> gimbal_yaw: {joint}')
+
+
 def test_lidar_mounting_is_identical_in_both_directions():
     """安装位姿（base_link <- 雷达）与切片系高度不能因为换方向而变。"""
     _, mounting_default = _description(False)

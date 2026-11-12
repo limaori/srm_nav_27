@@ -1015,6 +1015,20 @@ for i in "${!STEP_TITLES[@]}"; do
 
   if process_running "$pattern"; then
     echo "[跳过] 已检测到正在运行的进程: $title"
+    # 以前只打这一行, 用户完全不知道是哪个进程、为什么 RViz 没起来。
+    # 把 pid + 命令行打出来, 并说清"RViz 在那条 launch 里"。
+    while read -r pid; do
+      if [ -n "$pid" ]; then
+        echo "        pid $pid  $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-160 || true)"
+      fi
+    done < <(matching_pids "$pattern")
+    if [ "$pattern" = "$MAPPING_PATTERN" ]; then
+      echo "        RViz 是在这条 launch 里起的 (use_rviz:=True), 所以这里不会另起一个。"
+      echo "        如果那个标签页已经关了 / RViz 崩了, 说明这是**残留的 launch 外壳**,"
+      echo "        先停干净再重来:  ./script/start_real_slam.sh --stop"
+    else
+      echo "        要先重起这一步:  ./script/start_real_slam.sh --stop"
+    fi
     continue
   fi
 

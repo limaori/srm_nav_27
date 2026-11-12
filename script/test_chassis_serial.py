@@ -23,11 +23,12 @@
 # 协议一致性 (对应《SRM 校内赛导航通信协议》):
 #   上→下 (§2): 固定 19 字节 = 帧头 5 + 数据 12 + CRC16 2, data_length 必须为 12。
 #                本方向没有 cmd_id —— 帧头之后直接是数据段。
-#   下→上 (§4): 9 + data_length 字节, 帧头 5 + cmd_id 2 + 数据 + CRC16 2。
-#                本脚本会解析 0x0001(比赛状态, 11B) 与 0x000B(机器人状态, 13B)。
+#   下→上 (§4): 本脚本**只往下发, 不解析任何反馈** —— 收到什么直接丢掉,
+#                只是为了不让 tty 接收缓冲堆满。要看回传请用
+#                script/test_chassis_speed_feedback.py 或 srm27_nav_protocol。
 #   CRC   (§2.2): CRC8(帧头前 4 字节, init 0xFF) / CRC16(帧头+数据段, init 0xFFFF)。
-#   §3.3 量级: 上位机 1.0 ≈ 四分之一杆, 起步建议 ≤ 0.2 → 本脚本默认限幅 0.2,
-#              要更大必须显式 --max-speed 抬限, 且协议层不限幅, 限幅是上位机的责任。
+#   §3.3 量级: 上位机 1.0 ≈ 四分之一杆, 起步建议 ≤ 0.2。协议层不限幅、限幅是上位机的
+#              责任; 本脚本**默认不限幅**(指令原样下发), 需要保守时才显式 --max-speed。
 #   §6   发送: 100 Hz 定频单帧(默认), 帧间有空闲; 不发 NaN/Inf; 退出补零速。
 #
 # 自检 (协议 §5): 本脚本内置协议给出的三条参考向量与两个 CRC 自检值,
@@ -63,12 +64,11 @@
 #       --vx/--vy/--wz    直接指定三个协议字段, 给出后忽略 --direction/--speed
 #       --duration <秒>   运动持续时间, 默认 2.0
 #       --rate <Hz>       发送频率, 默认 100 (协议 §6.1 推荐值)
-#       --max-speed <值>  协议层限幅上限, 默认 0.2 (协议 §3.3 起步建议值)
+#       --max-speed <值>  可选的上位机钳位上限; 不给 = 不限幅 (默认)
 #       --direction <方向>  vy-(默认right) / vy+(left) / vx+(forward) / vx-(back)
 #       --flip-y          翻转 vy 符号 (实测方向相反时用)
 #       --lead-zero <秒>  运动前先发零速的时间, 默认 0.3 (先把状态钉死)
 #       --hold-zero <秒>  运动后发零速的时间, 默认 1.0 (保证车停住)
-#       --quiet-in        不打印收到的原始数据, 只给统计
 #       --stop-only       只发零速后退出
 #       --dry-run         只打印帧, 不打开串口
 #       --self-test       只跑协议自检 (§2.2 + §5), 不打开串口
@@ -85,10 +85,10 @@
 #   - crc16: wCRC_table, init 0xFFFF, 覆盖偏移 0-16 (17 字节), 小端放在 17-18
 #   两张表逐字节取自 src/srm27_nav_protocol/src/crc_func.c。
 #
-# 结果怎么读:
-#   - 车动了            → 串口/接线/板子/电机/使能全通, 问题只在上位机软件层
-#   - 车不动, 但收到数据 → 板子在发但没执行指令, 重点查使能/模式/固件协议
-#   - 车不动, 且无数据   → 链路整条没通, 或板子固件没在解析(见下)
+# 结果怎么读 (本脚本只看车动没动, 不读回传):
+#   - 车动了   → 串口/接线/板子/电机/使能全通, 问题只在上位机软件层
+#   - 车不动   → 查使能/模式/固件协议; 先用 --vx/--vy 确认平移链路, 再单独试 --wz
+#                (要看底盘回传的 vx/vy/wz, 用 script/test_chassis_speed_feedback.py)
 #
 # ⚠ 如果板子上是 control-2026 a6e1638 那份固件: 它的
 #   UserApp/robot/sentry_omni_chassis/robot.c:490 把 navigator_init(&huart1)
@@ -143,9 +143,6 @@ DATA_LEN = 12                 # 上→下 数据段长度, 固定 12 (§2.1)
 FRAME_TOTAL = 19              # 上→下 整帧长度 = 5 + 12 + 2 (§2.1)
 CRC16_UPSTREAM_OFF = 17       # 上→下 crc16 偏移 = 5 + data_length (§2.1)
 
-ID_GAME_STATUS = 0x0001       # 下→上 比赛状态, data_length = 11 (§4.2)
-ID_ROBOT_STATUS = 0x000B      # 下→上 机器人状态, data_length = 13 (§4.2)
-
 # 协议 §5 参考向量 (seq = 0x01)
 REF_ZERO_FRAME = "A5 0C 00 01 26 00 00 00 00 00 00 00 00 00 00 00 00 18 9F"
 REFERENCE_FRAMES = (
@@ -155,10 +152,6 @@ REFERENCE_FRAMES = (
     ("vx=1, vy=-1, wz=3", 1.0, -1.0, 3.0,
      "A5 0C 00 01 26 00 00 80 3F 00 00 80 BF 00 00 40 40 D3 96"),
 )
-
-# 协议 §4.3 参考反馈帧 (cmd_id=0x0001)
-REF_FEEDBACK_FRAME = ("A5 0B 00 01 5C 01 00 AA 2C 01 88 77 66 55 44 33 22 11 "
-                      "EF 74")
 
 
 def crc8(data, crc=0xFF):
@@ -219,68 +212,6 @@ def hexs(data):
     return " ".join(f"{b:02X}" for b in data)
 
 
-# ---------------------------------------------------------------
-# 下→上 解析 (协议 §4)
-# ---------------------------------------------------------------
-def parse_feedback(buf, stats):
-    """从 buf 里滑动解析下→上帧, 消费掉的字节就地删除。
-
-    帧格式 (§4.1): A5 | data_length(u16 LE) | seq | crc8 | cmd_id(u16 LE) | data | crc16
-    整帧长 = 9 + data_length; crc16 覆盖偏移 0 .. 7+data_length-1。
-    返回本次解析出的 (cmd_id, data) 列表。
-    """
-    packets = []
-    while len(buf) >= 5:
-        if buf[0] != SOF:
-            del buf[0]
-            stats["resync"] += 1
-            continue
-        if crc8(bytes(buf[:4])) != buf[4]:                # crc8 覆盖偏移 0-3
-            del buf[0]
-            stats["crc8_fail"] += 1
-            continue
-        data_len = struct.unpack_from("<H", buf, 1)[0]
-        if data_len > 2048:                               # 防脏数据耗尽内存
-            del buf[0]
-            stats["bad_len"] += 1
-            continue
-        total = 9 + data_len
-        if len(buf) < total:                              # 断帧, 等更多数据
-            break
-        frame = bytes(buf[:total])
-        covered = 7 + data_len                            # crc16 覆盖长度
-        if crc16(frame[:covered]) != struct.unpack_from("<H", frame, covered)[0]:
-            del buf[0]
-            stats["crc16_fail"] += 1
-            continue
-        cmd_id = struct.unpack_from("<H", frame, 5)[0]    # cmd_id 在偏移 5-6
-        packets.append((cmd_id, frame[7:7 + data_len]))
-        del buf[:total]
-        stats["ok"] += 1
-    return packets
-
-
-def describe_feedback(cmd_id, data):
-    """把解析出的下→上数据段翻译成人话 (协议 §4.2)。"""
-    if cmd_id == ID_GAME_STATUS and len(data) == 11:
-        flags = data[0]                                   # 低 4 位类型, 高 4 位阶段
-        game_type = flags & 0x0F
-        game_progress = (flags >> 4) & 0x0F
-        stage = struct.unpack_from("<H", data, 1)[0]
-        stamp = struct.unpack_from("<Q", data, 3)[0]
-        return (f"0x0001 比赛状态   game_type={game_type} game_progress={game_progress} "
-                f"stage_remain_time={stage}s sync_time_stamp=0x{stamp:016X}")
-    if cmd_id == ID_ROBOT_STATUS and len(data) == 13:
-        robot_id, robot_level = data[0], data[1]
-        cur_hp, max_hp, cooling, heat_limit, power_limit = \
-            struct.unpack_from("<HHHHH", data, 2)
-        pm = data[12]
-        return (f"0x000B 机器人状态 robot_id={robot_id} level={robot_level} "
-                f"HP={cur_hp}/{max_hp} cooling={cooling} heat_limit={heat_limit} "
-                f"chassis_power_limit={power_limit} "
-                f"gimbal={pm & 1} chassis={(pm >> 1) & 1} shooter={(pm >> 2) & 1}")
-    return f"0x{cmd_id:04X} 未定义/未预期包 (data_length={len(data)}, 期望 11 或 13)"
-
 
 # ---------------------------------------------------------------
 # 协议自检 (协议 §2.2 自检值 + §5 参考向量)
@@ -323,27 +254,14 @@ def self_test(verbose=True):
         if len(frame) != FRAME_TOTAL:
             failures.append(f"{label} 帧长 {len(frame)} != {FRAME_TOTAL}")
 
-    # 反馈帧解析 (§4.3)
-    stats = {"ok": 0, "resync": 0, "crc8_fail": 0, "crc16_fail": 0, "bad_len": 0}
-    buf = bytearray(bytes.fromhex(REF_FEEDBACK_FRAME))
-    got = parse_feedback(buf, stats)
-    if len(got) == 1 and got[0][0] == ID_GAME_STATUS and got[0][1][0] == 0xAA \
-            and struct.unpack_from("<H", got[0][1], 1)[0] == 300 \
-            and struct.unpack_from("<Q", got[0][1], 3)[0] == 0x1122334455667788:
-        lines.append("  §4.3 参考反馈帧解析               ✓ (cmd_id=0x0001, "
-                     "time=300s, ts=0x1122334455667788)")
-    else:
-        lines.append(f"  §4.3 参考反馈帧解析               ✗ (得到 {got})")
-        failures.append("反馈帧解析不符")
-
     if verbose:
         print("=" * 62)
-        print(" 协议自检 (《SRM 校内赛导航通信协议》§2.2 / §5 / §4.3)")
+        print(" 协议自检 (《SRM 校内赛导航通信协议》§2.2 / §5)")
         print("=" * 62)
         for line in lines:
             print(line)
         print("=" * 62)
-        print("  自检通过 ✓ 打包/校验/解析与协议逐字节一致。" if not failures
+        print("  自检通过 ✓ 打包/校验与协议逐字节一致。" if not failures
               else f"  自检失败 ✗ {len(failures)} 项: {', '.join(failures)}")
         print("=" * 62)
     return not failures
@@ -391,6 +309,61 @@ def resolve_device(explicit):
         print("[提示] 用 -d 显式指定, 或先跑 --list-devices。回落到 /dev/ttyACM0。",
               file=sys.stderr)
     return "/dev/ttyACM0", "by-id 不可用, 回落到 /dev/ttyACM0"
+
+
+def _pid_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return "?"
+    parts = [chunk.decode("utf-8", "replace") for chunk in raw.split(b"\0") if chunk]
+    return " ".join(parts) if parts else "?"
+
+
+def find_serial_holders(device):
+    """找出还开着同一个 tty 的其它进程。
+
+    Linux **不会**阻止第两个进程 open 同一个 /dev/ttyACM*（没有排他锁），而 tty 的
+    接收数据是"读走就没了"：两个读者各抢一半，结果两边都掉帧。所以必须在打开前
+    自己查一遍 /proc/<pid>/fd，否则就会出现"下位机在发、ROS 节点收不全、
+    plot_vxvywz 波形断断续续"的现象。
+
+    返回 [(pid, cmdline, fd 指向的路径)]。
+    """
+    try:
+        rdev = os.stat(device).st_rdev
+    except OSError:
+        return []
+    me = os.getpid()
+    holders = []
+    for pid_dir in glob.glob("/proc/[0-9]*"):
+        try:
+            pid = int(os.path.basename(pid_dir))
+        except ValueError:
+            continue
+        if pid == me:
+            continue
+        fd_dir = os.path.join(pid_dir, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for name in fds:
+            try:
+                target = os.readlink(os.path.join(fd_dir, name))
+            except OSError:
+                continue
+            if not target.startswith("/dev/"):
+                continue
+            try:
+                if os.stat(target).st_rdev != rdev:
+                    continue
+            except OSError:
+                continue
+            holders.append((pid, _pid_cmdline(pid), target))
+            break
+    return holders
 
 
 def open_serial(device, baud):
@@ -488,10 +461,17 @@ def resolve_command(args):
 
 
 def clamp_or_die(vx, vy, wz, limit):
-    """协议 §3.3 / §6.4 / §6.5: 先查 NaN/Inf, 再自己限幅。"""
+    """协议 §3.3 / §6.4 / §6.5: 先查 NaN/Inf; limit=None 时**不限幅**(默认)。
+
+    2026-11-11: 默认不再限幅。原来是拿 --max-speed(默认 0.2) 把 vx/vy/wz 一起钳,
+    结果 `--wz 3` 实际只发出 0.2, 看起来像"下位机转不动"。要保守测试时可以显式给
+    `--max-speed <值>` 重新打开这一层钳位。
+    """
     for name, value in (("vx", vx), ("vy", vy), ("wz", wz)):
         if not math.isfinite(value):
             raise SystemExit(f"[错误] {name}={value} 不是有限数, 协议 §6.4 禁止发送 NaN/Inf")
+    if limit is None:
+        return vx, vy, wz
     clamped = []
     for name, value in (("vx", vx), ("vy", vy), ("wz", wz)):
         if abs(value) > limit:
@@ -516,14 +496,15 @@ def main():
     parser.add_argument("--duration", type=float, default=2.0)
     parser.add_argument("--rate", type=float, default=100.0,
                         help="发送频率, 协议 §6.1 推荐 100 Hz (默认)")
-    parser.add_argument("--max-speed", type=float, default=0.2,
-                        help="协议层限幅上限, 协议 §3.3 起步建议 ≤ 0.2 (默认)")
+    parser.add_argument("--max-speed", type=float, default=None,
+                        help="可选的上位机钳位上限; 不给 = 不限幅(默认, 指令原样下发)")
     parser.add_argument("--direction", choices=["right", "left", "forward", "back"], default="right")
     parser.add_argument("--flip-y", action="store_true")
     parser.add_argument("--lead-zero", type=float, default=0.3)
     parser.add_argument("--hold-zero", type=float, default=1.0)
-    parser.add_argument("--quiet-in", action="store_true")
     parser.add_argument("--stop-only", action="store_true")
+    parser.add_argument("--force", action="store_true",
+                        help="串口被其它进程占着也照样打开(会互相偷帧, 只用于排查)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--list-devices", action="store_true")
@@ -549,6 +530,27 @@ def main():
         list_devices()
         return 0
 
+    # 串口占用检查放在自检之前: 被占着就没必要再往屏幕上刷一堆自检行
+    device, device_why = resolve_device(args.device)
+    if not args.dry_run:
+        # 同一个 tty 被两个进程同时打开时 Linux 不报错, 但两边会互相偷走接收字节
+        # (表现: 下位机明明在发, ROS 节点/plot_vxvywz 的波形却断断续续)。
+        holders = find_serial_holders(device)
+        if holders:
+            print(f"[错误] 串口 {device} 已被下列进程打开:", file=sys.stderr)
+            for pid, cmdline, path in holders:
+                print(f"         pid {pid}  {path}\n            {cmdline}", file=sys.stderr)
+            print("[提示] 两个进程同时读同一个 tty 会互相抢字节 —— 你这边的波形断、"
+                  "对方的 /chassis_speed 也会断。", file=sys.stderr)
+            print("[提示] 先停掉它再测: ./script/start_real_nav.sh --stop", file=sys.stderr)
+            print("[提示]   (或 pkill -f '[s]rm27_nav_protocol')", file=sys.stderr)
+            print("[提示] 确认没有别的读取者后重跑; 确实要抢过来加 --force (会互相偷帧, 慎用)。",
+                  file=sys.stderr)
+            if not args.force:
+                return 1
+            print("[警告] --force: 仍然打开, 两边都会掉帧, 读到的波形不可信。",
+                  file=sys.stderr)
+
     # 每次运行都先做协议自检 —— 自检不过就不该上机
     ok = self_test(verbose=True)
     if args.self_test:
@@ -558,10 +560,10 @@ def main():
         return 1
 
     vx, vy, wz, dir_label = resolve_command(args)
-    vx, vy, wz = clamp_or_die(vx, vy, wz, abs(args.max_speed))
+    limit = None if args.max_speed is None else abs(args.max_speed)
+    vx, vy, wz = clamp_or_die(vx, vy, wz, limit)
 
     period = 1.0 / max(args.rate, 0.1)
-    device, device_why = resolve_device(args.device)
 
     print()
     print("=" * 62)
@@ -569,9 +571,13 @@ def main():
     print("=" * 62)
     print(f"  设备      : {device} @ {args.baud} 8N1  ({device_why})")
     print(f"  指令      : {dir_label}   vx={vx:+.4f}  vy={vy:+.4f}  wz={wz:+.4f}")
-    print(f"  时长      : {args.duration} s @ {args.rate} Hz   限幅 {abs(args.max_speed):.4f}")
+    print(f"  时长      : {args.duration} s @ {args.rate} Hz   限幅 "
+          f"{'关闭(原样下发)' if limit is None else format(limit, '.4f')}")
     print(f"  帧格式    : {FRAME_TOTAL} 字节, A5 | len={DATA_LEN:02X} 00 | seq | crc8 | "
           f"vx vy wz | crc16   (协议 §2.1)")
+    if limit is None and max(abs(vx), abs(vy), abs(wz)) > 0.2:
+        print("  ⚠ 无限幅  : 本次指令超过协议 §3.3 的起步建议 0.2, 且脚本/下位机都没有斜坡,")
+        print("              轮子离地或留人守急停; 末尾若被 kill -9, 车会保持该速度。")
     if wz != 0.0:
         print("  注意      : 协议 §3.2 说 wz 目前被下位机忽略, 不产生转向。")
     zero_frame = build_frame(0.0, 0.0, 0.0, 1)
@@ -613,24 +619,10 @@ def main():
         except (ValueError, OSError):
             pass
 
-    # 下→上 解析状态 (协议 §4)
-    stats = {"ok": 0, "resync": 0, "crc8_fail": 0, "crc16_fail": 0, "bad_len": 0}
-    seen = {}          # cmd_id -> 出现次数
-    last_desc = {}     # cmd_id -> 最后一次的翻译结果
-    rx_raw = bytearray()   # 只用于结尾打印原始 hex 的那一份
-    shown = [0]        # 已打印的详解条数
-
-    def drain():
-        """读走串口数据并就地解析, 打印新出现的包。"""
-        if read_available(fd, rx) == 0:
-            return
-        rx_raw.extend(rx[-4096:])
-        for cmd_id, data in parse_feedback(rx, stats):
-            seen[cmd_id] = seen.get(cmd_id, 0) + 1
-            last_desc[cmd_id] = describe_feedback(cmd_id, data)
-            if not args.quiet_in and shown[0] < 12:
-                shown[0] += 1
-                print(f"\n[收到] {last_desc[cmd_id]}")
+    # 本脚本只往下发: 板子回传的字节读掉就丢, 不解析、不统计、不打印。
+    # 留着这个读取动作只是为了不让 tty 接收缓冲堆满 (堆满后可能触发流控, 影响发送节奏)。
+    def discard_rx():
+        read_available(fd, bytearray())
 
     def send(frame):
         nonlocal seq, sent
@@ -642,6 +634,7 @@ def main():
         packet += struct.pack("<H", crc16(packet))        # 重算整包 CRC16
         os.write(fd, packet)
         sent += 1
+        discard_rx()
         return packet
 
     try:
@@ -649,7 +642,6 @@ def main():
         deadline = time.monotonic() + max(args.lead_zero, 0.0)
         while time.monotonic() < deadline:
             send(zero_frame)
-            drain()
             time.sleep(period)
 
         if args.stop_only:
@@ -661,7 +653,6 @@ def main():
             deadline = time.monotonic() + max(args.duration, 0.0)
             while time.monotonic() < deadline and not stop_requested[0]:
                 send(move_frame)
-                drain()
                 left = deadline - time.monotonic()
                 # 终端里用 \r 原地刷新进度; 重定向到文件时改成每 100 帧一行,
                 # 否则日志会被回车刷成一大坨。
@@ -682,7 +673,6 @@ def main():
             deadline = time.monotonic() + max(args.hold_zero, 0.5)
             while time.monotonic() < deadline:
                 send(zero_frame)
-                drain()
                 time.sleep(period)
             termios.tcflush(fd, termios.TCOFLUSH)
         except OSError as exc:
@@ -694,25 +684,11 @@ def main():
     print("\n" + "=" * 62)
     print(f" 共发送 {sent} 帧 (最后 {max(args.hold_zero, 0.5):.1f} s 为零速)")
     print(f" 上→下 每帧 {FRAME_TOTAL} 字节, 数据段 12 字节, @ {args.rate} Hz (协议 §2.1 / §6.1)")
-    print("-" * 62)
-    print(f" 下→上: 解析成功 {stats['ok']} 帧   "
-          f"crc8 错 {stats['crc8_fail']}  crc16 错 {stats['crc16_fail']}  "
-          f"重同步 {stats['resync']}")
-    if seen:
-        for cmd_id in sorted(seen):
-            print(f"   cmd_id=0x{cmd_id:04X}  x{seen[cmd_id]:<5} 最后一次: {last_desc[cmd_id]}")
-    if rx_raw:
-        print(f"  原始字节 {len(rx_raw)} 个, 前 40: {hexs(bytes(rx_raw[:40]))}")
-    else:
-        print("  → 整个测试期间没有收到任何字节。可能原因:")
-        print("     · 下位机没上电 / 固件没跑 / 裁判系统未接(状态包可能来自它)")
-        print("     · 板→上位机方向那根线(板 TX)没接或接反")
-        print("     · 转接芯片与板子波特率不一致, 或下位机根本没往 USART1 发")
+    print(" 下→上: 不解析 (本脚本只往下发; 要看回传用 test_chassis_speed_feedback.py)")
     print("=" * 62)
     print(" 结果判读:")
-    print("   车动了            → 串口/接线/板子/电机/使能全通, 问题在上位机软件层")
-    print("   车不动但有数据    → 板子在发但没执行指令, 查使能/模式/固件协议")
-    print("   车不动且无数据    → 链路整条没通: 查 TX/RX 接线、GND 共地、供电与使能")
+    print("   车动了   → 串口/接线/板子/电机/使能全通, 问题在上位机软件层")
+    print("   车不动   → 查使能/模式/固件协议; 先用 --vx/--vy 确认平移链路通不通")
     return 0
 
 

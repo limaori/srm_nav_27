@@ -229,6 +229,26 @@ def _quaternion_inverse(quaternion):
     return (w / norm, -x / norm, -y / norm, -z / norm)
 
 
+def as_bool(value, default=False):
+    """把 launch 传进来的字符串/布尔统一成 bool。
+
+    ⚠ 2026-11-09 事故：launch 用 ``LaunchConfiguration(...).perform(context)``
+    取到的是**字符串**，而 ``if gimbal_is_root:`` 对非空字符串恒为真，于是
+    "默认不反转树"的建图链路也被反转了 —— 表现为 RViz 全空、没有 /scan、没有 map
+    （base_link 同时有 odom 和 gimbal_yaw 两个父节点，雷达子树从 odom 断开）。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes", "on"):
+        return True
+    if text in ("false", "0", "no", "off", "", "none"):
+        return False
+    raise ValueError("无法解析成布尔值: %r" % (value,))
+
+
 def build_description(
     params_file,
     lidar_xyz,
@@ -259,6 +279,9 @@ def build_description(
     （`srm27_nav_protocol` 的 `gimbal_joint_sign` 要用 +1.0）。
     默认 False = 原来的方向（根是 base_link），仿真与旧配置行为不变。
     """
+    # launch 传进来的是字符串（"false" 也是真值），必须先归一化，否则建图会被当成反转树。
+    gimbal_is_root = as_bool(gimbal_is_root)
+
     if gimbal_joint_type not in ("revolute", "fixed"):
         raise ValueError(
             f"gimbal_joint_type 只能是 revolute/fixed，收到 {gimbal_joint_type!r}"

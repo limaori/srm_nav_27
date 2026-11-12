@@ -514,6 +514,9 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ```bash
 ./debug_tools/plot_vxvywz.py                                  # 默认就是 cmd_vel_chassis + chassis_speed,要先起导航栈
 ./debug_tools/plot_vxvywz.py --save                           # 自动存到user_test_log文件夹
+
+# 记得串口要开
+ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 ```
 ### 启动实车
 ```bash
@@ -523,4 +526,20 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 ```bash
 ./script/start_real_nav.sh -m 227_1108 --controller minco --no-reloc \
   --lio-frontend point_lio --no-gimbal-joint-topic
+```
+
+# 2026-11-9
+### 串口控制下位机脚本
+```bash
+./script/test_chassis_serial.py --duration 1.0 --vx 0.25
+```
+
+# 2026-11-11
+### 可视化PCD修复
+```bash
+# 最常用：自动找 maps/pcd/227_1111_mapframe.pcd，并连 RViz 一起起
+./script/show_pcd.sh 227_1111 --rviz
+
+# 直接给路径 / 看原始 700 万点 / 换坐标系
+./script/show_pcd.sh maps/pcd/227_1111_mapframe.pcd
 ```

@@ -198,14 +198,23 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
 
 ## 5. 上车待办（按顺序，前一步不过不进下一步）
 
+> **0. 工具已按新树改过（2026-11-09）**：`debug_tools/capture_gimbal_spin.py` 与
+> `script/check_gimbal_spin_yaw.py` 现在会读 `/odometry` 的 `child_frame_id` 自动切换判据：
+> `base_link`（旧树）判"底盘 yaw 不动"，`gimbal_yaw`（**新树，实车**）判
+> "`odom -> gimbal_yaw` 与 raw LIO **一比一**跟着云台转、残差恒定、xy 不画圈、
+> 线速度 <0.03 m/s"。没改之前这两个工具在新树下会把**正确结果判成 FAIL**。
+> `script/check_gimbal_joint_sign.py` 的判据不受树方向影响（它查的一直是
+> `base_link -> gimbal_yaw` 那一对），只在文档里补了说明。
+
 > ⚠ 方案 §1.3 的警告仍然有效：下位机已按云台系执行 vx/vy，**在完成下面第 1、2 步之前不要跑实车导航**。
 
 0. **先看树**：`ros2 run tf2_ros tf2_echo gimbal_yaw base_link` 应得 `z = -0.26805`，
    `tf2_echo odom gimbal_yaw` 的父系是 `odom` 而不是 `base_link`（`ros2 run tf2_tools view_frames`）。
    树没反过来的话下面所有测试都会"看起来正常但代价地图仍在抖"。
 1. **静止 + 云台快转**（底盘不动，云台 150°/s，30 s）：
-   `tf2_echo gimbal_yaw_fake odom` 的 yaw 匀速变化、xy 不画圈（<2 cm）；`/odometry` 线速度 <0.03 m/s；
-   `debug_tools/capture_gimbal_spin.py` 的 raw LIO 斜率应为 1.00。
+   `tf2_echo odom gimbal_yaw` 的 yaw 匀速变化、xy 不画圈（<2 cm）；`/odometry` 线速度 <0.03 m/s；
+   `./debug_tools/capture_gimbal_spin.py --duration 40`（车上有图形界面时它会出图；
+   无界面加 `--no-plot`）判 PASS 即通过，判据见上面第 0 条。
    不过 —— 说明 LIO 在高速转动下本身估不准，先查 LIO 外参/重力，本方案不解决。
 2. **架车确认方向**：云台与底盘差 90°，发前进 0.2 m/s，车朝**云台**指的方向走；
    云台转动时给前方 1 m 的小目标，平移方向不随云台转动而偏。
@@ -221,6 +230,88 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
    超差就在 URDF 的 `gimbal_yaw_joint` 上加固定 yaw 偏移。
 
 ---
+
+## 5.1 第一次「第 1 步」实测（2026-11-09 17:13，车不动、云台 150°/s、40 s）
+
+数据：`user_test_log/gimbal_spin_20261109_171319.txt`（13.6 圈）。
+
+| 项 | 实测 | 结论 |
+|---|---|---|
+| `raw / θ`（LIO 跟踪云台转角） | **−1.0011** | LIO 的**旋转**在 150°/s 下准确（0.1%），方案 §7 风险 1 的"旋转"部分排除 |
+| `base / raw`（odom→gimbal_yaw 是否继承雷达位姿） | **+1.0026** | 旋转链路正确，关节角没有混进来 |
+| 外参组合（独立复算） | 与 `/odometry` 差 **0.2 mm / 0.00°** | `sensor_scan_generation` 的 lidar→robot 组合数学正确；缓存与非缓存输出完全一致 |
+| `/odometry` 的 z | **0.2681** | 本轮修的"云台高度"生效，底盘不再沉到地面下 |
+| `/odometry` 的 **xy** | 跨度 **0.274 m**、线速度峰值 **0.425 m/s** | ❌ **平移仍有假运动**（与 2026-11-08 现场 0.62 m/s 同一机制），必须定位后再进第 2 步 |
+
+⚠ 当时的采集工具在多圈旋转下**判错了**（先 FAIL）：根因是它对已 wrap 的角度直接做差分，
+一圈以上会出现 ±360 的假增量，回归斜率被带偏。已修：unwrap 后再差分、改用累积转角比、
+CSV 增加 `base_x/base_y/base_vx/base_vy` 四列、平移失败时区分"半径≈0.1335 m 的圆
+（LIO 漏掉雷达绕轴平移）"与"随机漂移（LIO 平移不可观测/参数问题）"。
+
+**重录结论（同日 17:24 / 17:25，150°/s 与 60°/s 各一次）**：
+
+| 量 | 150°/s | 60°/s | 含义 |
+|---|---|---|---|
+| `base/raw` 累积转角比 | 0.9971 | 0.9952 | 旋转链路正常 |
+| `odom→gimbal_yaw` 圆半径 | 0.129 m | 0.131 m | **与转速无关**的固定圆 |
+| 圆与云台相位斜率 | +1.00 | +1.00 | 与云台转角**锁相** |
+| 线速度峰值 | 0.450 m/s | 0.164 m/s | 与转速成正比（0.164/0.450 ≈ 60/150） |
+| 反推的 LIO 雷达平移半径 | 0.043 m | 0.043 m | 物理上应 **0.1337 m**（雷达偏轴） |
+
+结论：**LIO 在"云台绕偏轴旋转"时只估到约 1/3 的绕轴平移**（0.043 / 0.1337），
+与转速无关 ⇒ 不是"快转跟不上"，而是这类运动下 LIO 的平移估计退化。
+`odom→gimbal_yaw` 上那个 0.13 m 的圆就是漏掉的偏轴距离。这是**方案 §7 风险 1**
+（"LIO 本身估不准，本方案不解决"），且**改造前就存在**（旧 `base_link` 链路的同一个
+组合数学，2026-11-08 现场 0.62 m/s 假速度就是这个）。
+
+**唯一还没排除的另一种解释**：如果雷达实际偏轴距离不是 133 mm 而是 ≈43 mm，
+那就是 URDF/几何 YAML 的 `lidar_xyz` 写错了（CAD 与实物不符），LIO 反而是对的。
+**用卷尺量一下雷达中心到云台转轴的水平距离即可定案**（CAD 值 133 mm；
+或把云台转 180°，看雷达本体移动 ≈267 mm 还是 ≈86 mm）。
+
+工具已升级：现在同时记录 raw LIO 的 xy 与下位机 `/chassis_speed`，
+下一次采集会直接给出"LIO 平移半径 vs 应有 0.1337 m"和"下位机说车没动"两条证据。
+
+## 5.2 事故：建图链路被误反转（2026-11-09 18:05）
+
+现象：`start_real_slam.sh` 起完，RViz 里除 Grid 之外全空，Global Status 报错。
+
+根因：`build_description(..., gimbal_is_root=LaunchConfiguration(...).perform(context))`
+拿到的是**字符串**，而函数里写的是 `if gimbal_is_root:` —— 字符串 `"false"` 在 Python 里
+是**真值**，于是"默认不反转树"的建图链路也用了反转树。后果是一条链：
+
+1. TF 里同时出现 `gimbal_yaw -> base_link`（URDF）和 `odom -> base_link`
+   （建图链路 `robot_base_frame: base_link`）→ `base_link` 两个父节点，
+   `gimbal_yaw` 子树从 `odom` 断开；
+2. `pointcloud_to_laserscan`（`target_frame: livox_scan`）取不到 `odom -> livox_scan`
+   → 一帧都不输出 → **没有 `/scan`**；
+3. `slam_toolbox` 没输入 → 没有 `map -> odom`、没有 `/map` → RViz 全空。
+
+实测证据：`/scan` 8 s 0 条；`tf2_echo odom livox_scan` 报 frame 不存在；
+而 `/livox/lidar` 10 Hz、`/zlio/odometry` 200 Hz、`/lidar_odometry` 10 Hz、
+`/registered_scan` 7.5 Hz 全部正常。
+
+修复：`srm_robot_description.as_bool()` 统一归一化（`"false"/"0"/"no"/"off"/""` → False，
+大小写无关；无法解析直接报错），`build_description` 入口先转换；新增回归测试
+`test_launch_string_flags_are_parsed_as_booleans`（把 `"false"` 钉死）。
+
+教训：launch 传进 Python 的**永远**是字符串，任何 `if 参数:` 都要先 `as_bool`。
+
+## 5.3 建图录包两个坑（2026-11-11）
+
+1. **kill 掉录制进程 → 没有 metadata.yaml**，`build_pcd_from_bag.sh` 直接报错。
+   救法（只读 db3，不改数据）：`ros2 bag reindex <包目录>`。本次 1.07 GB 的包
+   reindex 后恢复 263 s / 62465 条。
+2. **`build_pcd_from_bag.sh` 没传 `lio_frontend`**，而 `real_mapping_launch.py` 的默认
+   已改成 `zlio`，累积点云落盘（`save_pcd` → `scans.pcd`）只有 Point-LIO 有 →
+   脚本会起 zlio、等不到 `/point_lio` 干等。已在脚本里显式带
+   `lio_frontend:=point_lio`（变量 `LIO_FRONTEND_FOR_PCD` 可覆盖），并写进注释。
+3. **录包会丢 IMU**：本次 `/livox/imu` 有 52 个 >0.3 s 的空洞（最大 1.28 s），
+   `/livox/lidar` 与 `/tf` 都是干净的。后果是回放时 Point-LIO 报
+   "检测到时间跳变 … 已钳位到 0.100 s"，重建出的 PCD 与地图对不上
+   （`pcd_to_mapframe.py` 中位最近邻 0.18 m > 0.10 m 门限，拒绝输出）。
+   **更稳的做法：建图时直接加 `--save-pcd`**（ZLIO 由 zlio_bridge 落盘，
+   与地图同一次轨迹，事后不用从包重建）。
 
 ## 6. 回退开关一览（每一步都可单独回退）
 
