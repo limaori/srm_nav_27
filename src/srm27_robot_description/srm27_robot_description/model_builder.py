@@ -346,12 +346,16 @@ def _yaw_visual_sdf(config, base_link):
     </link>"""
 
 
-def _urdf_mappings(config):
+def _urdf_mappings(config, gimbal_is_root=False, gimbal_axis_sign=1.0):
     """把几何 YAML 的数值映射成唯一 xacro 的参数。
 
     仿真侧与实车侧只有坐标系契约不同（见 urdf/srm27_sentry.urdf.xacro 文件头）：
     仿真的轮子是 continuous（Gazebo 会按 SDF 的关节名发 /joint_states），
-    云台仍是 fixed（仿真里没有云台驱动）。
+    云台可动时必须是 revolute（否则 /joint_states 里的云台角被忽略）。
+
+    ``gimbal_is_root`` / ``gimbal_axis_sign`` 只服务云台系仿真：
+    树反过来（gimbal_yaw 当根）时，Gazebo 的 /joint_states 是"云台相对底盘"，
+    与反转后 URDF 关节（底盘相对云台）方向相反，所以要传 ``gimbal_axis_sign=-1``。
     """
     chassis = config["chassis"]
     wheel = config["wheel"]
@@ -368,6 +372,9 @@ def _urdf_mappings(config):
         # 与 SDF 侧保持一致：云台可动时 URDF 也必须是 revolute，否则
         # robot_state_publisher 会忽略 /joint_states 里的云台角（RViz 里看不到云台转）。
         "gimbal_joint_type": "revolute" if yaw_is_movable(config) else "fixed",
+        # 云台系仿真：树反转 + 关节轴反号（/joint_states 的方向与反转后的关节相反）
+        "gimbal_is_root": "true" if gimbal_is_root else "false",
+        "gimbal_axis_sign": repr(float(gimbal_axis_sign)),
         # 底盘 / 轮组
         "chassis_radius": repr(float(chassis["radius"])),
         "chassis_length": repr(float(chassis["length"])),
@@ -397,15 +404,20 @@ def _urdf_mappings(config):
     }
 
 
-def build_urdf(geometry=None):
+def build_urdf(geometry=None, gimbal_is_root=False, gimbal_axis_sign=1.0):
     """展开唯一 xacro 得到机器人描述（所有链路共用同一份 XML 结构）。
 
     与实车链路的差别只在映射：实车用 ``fixed`` 轮子、``livox_frame`` 帧名；
     这里用 ``continuous`` 轮子、``front_mid360`` 帧名，其余完全相同。
+
+    ``gimbal_is_root=True`` 且 ``gimbal_axis_sign=-1`` 是云台系仿真链路：
+    TF 反过来（gimbal_yaw 当根、base_link 挂末端），关节轴取反以匹配
+    Gazebo /joint_states 的"云台相对底盘"约定。
     """
     config = geometry or load_geometry()
     return xacro.process_file(
-        str(urdf_model_path()), mappings=_urdf_mappings(config)
+        str(urdf_model_path()),
+        mappings=_urdf_mappings(config, gimbal_is_root, gimbal_axis_sign),
     ).toxml()
 
 
@@ -418,6 +430,8 @@ def build_sdf(
     command_timeout=0.1,
     gimbal_spin_rate=0.0,
     gimbal_driver="system",
+    command_in_gimbal_frame=False,
+    odom_link="",
 ):
     """生成供 Gazebo Fortress 加载的完整 SRM 模型 SDF 文本。
 
@@ -435,6 +449,13 @@ def build_sdf(
     由 ``SrmVelocitySystem`` 每个物理步直接施加，**不经过任何 ROS 话题/桥接**，
     所以小陀螺时云台连同装在它上面的雷达就是匀速转 —— 点云真的在转，
     Point-LIO 天然感知到这个自转（与实车同构）。
+
+    ``command_in_gimbal_frame``：为 True 时把输入 vx/vy 按**云台系**解释，执行前
+    按云台关节角旋到底盘系（等价实车下位机按云台执行）；wz 仍是底盘角速度。
+    默认 False = 旧行为（车体系）。
+
+    ``odom_link``：真值里程计输出哪个 link 的位姿/速度。留空 = 底盘；
+    云台系导航填 ``gimbal_yaw``，使 ``odom -> gimbal_yaw`` 与导航参考系一致。
     """
     config = geometry or load_geometry()
     model_name = config["robot"]["name"]
@@ -483,6 +504,14 @@ def build_sdf(
     else:
         yaw_driver_plugin = ""
         yaw_external_plugin = ""
+    # 速度/里程计坐标系（云台系导航）：插件按这两个开关决定"vx/vy 是不是云台系"、
+    # "odom -> 谁"。
+    frame_plugin_params = (
+        f"\n      <command_in_gimbal_frame>"
+        f"{'true' if command_in_gimbal_frame else 'false'}</command_in_gimbal_frame>"
+    )
+    if odom_link:
+        frame_plugin_params += f"\n      <odom_link>{odom_link}</odom_link>"
     # 底盘的旋转标记（红）：刻线只画在云台外面的那圈顶面上，免得和云台圆柱打架。
     yaw_radius = float((config.get("yaw_envelope") or {}).get("radius", 0.150))
     chassis_marks = _rotation_marks_sdf(
@@ -664,7 +693,7 @@ def build_sdf(
       <command_topic>{velocity_topic}</command_topic>
       <odom_topic>{odometry_topic}</odom_topic>
       <odom_publish_frequency>50</odom_publish_frequency>
-      <command_timeout>{command_timeout!r}</command_timeout>{yaw_driver_plugin}
+      <command_timeout>{command_timeout!r}</command_timeout>{yaw_driver_plugin}{frame_plugin_params}
     </plugin>
   </model>
 </sdf>

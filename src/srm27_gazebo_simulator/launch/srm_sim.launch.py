@@ -119,6 +119,21 @@ def _launch_setup(context):
     gimbal_driver = LaunchConfiguration("gimbal_driver").perform(context) or "system"
     if gimbal_driver not in ("system", "external"):
         raise RuntimeError(f"gimbal_driver 只能是 system/external，收到 {gimbal_driver!r}")
+    # 速度命令坐标系：chassis = 旧行为（vx/vy 按底盘系执行）；
+    # gimbal = 云台系（插件按云台关节角旋到底盘，等价实车下位机按云台执行）。
+    velocity_command_frame = (
+        LaunchConfiguration("velocity_command_frame").perform(context) or "chassis"
+    )
+    if velocity_command_frame not in ("chassis", "gimbal"):
+        raise RuntimeError(
+            "velocity_command_frame 只能是 chassis/gimbal，"
+            f"收到 {velocity_command_frame!r}"
+        )
+    gimbal_frame = velocity_command_frame == "gimbal"
+    odom_link = LaunchConfiguration("odom_link").perform(context) or ""
+    if gimbal_frame and not odom_link:
+        # 云台系导航的 odom 必须跟导航参考系一致：odom -> gimbal_yaw。
+        odom_link = "gimbal_yaw"
     # 打印生效的云台转速：这条日志是"云台为什么转/不转"的第一现场证据。
     from launch.actions import LogInfo  # noqa: PLC0415 - 与文件内其它 import 风格一致
     if gimbal_driver == "external":
@@ -137,8 +152,16 @@ def _launch_setup(context):
         command_timeout=float(velocity["command_timeout"]),
         gimbal_spin_rate=gimbal_spin_rate,
         gimbal_driver=gimbal_driver,
+        command_in_gimbal_frame=gimbal_frame,
+        odom_link=odom_link,
     )
-    robot_urdf = build_urdf()
+    # 云台系导航：TF 树反过来（gimbal_yaw 当根、base_link 挂末端），关节轴取反，
+    # 因为 Gazebo /joint_states 的云台角是"云台相对底盘"。机器人参考系变成云台后，
+    # odom -> gimbal_yaw 才不经过关节角。
+    robot_urdf = build_urdf(
+        gimbal_is_root=gimbal_frame,
+        gimbal_axis_sign=-1.0 if gimbal_frame else 1.0,
+    )
 
     bridge_config = os.path.join(pkg_share, "config", "ros_gz_bridge.yaml")
     bridged = ReplaceString(
@@ -278,6 +301,25 @@ def generate_launch_description():
                     "云台匀速自转角速度 (rad/s, 负值反向, 0=不转)。默认 2.0 = 起来就一直转，"
                     "与有没有导航目标无关；由 SrmVelocitySystem 每个物理步直接施加。"
                     "要停就用 gimbal_spin_rate:=0。"
+                ),
+            ),
+
+            DeclareLaunchArgument(
+                "velocity_command_frame",
+                default_value="chassis",
+                description=(
+                    "速度命令坐标系：chassis=旧行为（vx/vy 按底盘系执行）；"
+                    "gimbal=云台系（插件按云台关节角把 vx/vy 旋到底盘，等价实车下位机"
+                    "按云台执行；wz 仍是底盘角速度）。云台系导航入口由启动脚本传 gimbal。"
+                ),
+            ),
+            DeclareLaunchArgument(
+                "odom_link",
+                default_value="",
+                description=(
+                    "真值里程计输出哪个 link：留空=底盘（旧行为）；云台系导航填 gimbal_yaw，"
+                    "使 odom -> gimbal_yaw 与导航参考系一致。velocity_command_frame=gimbal "
+                    "时留空会自动取 gimbal_yaw。"
                 ),
             ),
 

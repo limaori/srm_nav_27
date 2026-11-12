@@ -18,13 +18,16 @@
 这一层错了的表现是"车不动"或"重复旋转"，而且从日志上很难直接看出来，所以把三件事测住：
 
 1. **唯一链路**：本入口恒走 fakeyaw 迁移链（`use_fakeyaw_transform=True`、
-   `command_frame=base_link_fake`、`cmd_vel_nav_topic=cmd_vel_nav_fake`）；独立自转链
+   `command_frame=gimbal_yaw_fake`、`cmd_vel_nav_topic=cmd_vel_nav_fake`）；独立自转链
    已于 2026-10-19 删除，`use_fakeyaw_transform=False` 必须直接报错而不是退回旧行为。
 2. **一致性核对真的会拒绝**：参数文件里的 `FollowPath.command_frame` 与 launch 的
    `command_frame` 不一致时必须直接报错，而不是让"转一次还是转两次"变成隐含约定。
 3. **节点接线正确**：Nav2 的速度出口 == fake_vel_transform 的输入 == fakeyaw 配置里的
-   `input_cmd_vel_topic`；mux 的 `nav_topic` == fake 的输出；fakeyaw 链上独立自转
-   发送器必须是关的。
+   `input_cmd_vel_topic`；mux 的 `nav_topic` == fake 的输出；mux 的 `spin_topic`
+   == `rotation_cmd`（2026-11-12 云台系：wz 与导航解耦，由决策层给）。
+4. **云台系参考系**：四处 `robot_base_frame` / `FollowPath.command_frame` 都是
+   `gimbal_yaw_fake`，`yaw_policy.mode=xy_only`，判停器是只看平移的
+   `OmniStoppedGoalChecker`（导航不再拥有 wz）。
 
 测试不启动任何节点：只构造 LaunchDescription、求值替换、跑一个 OpaqueFunction。
 """
@@ -157,8 +160,8 @@ def test_fakeyaw_config_turns_the_whole_chain_on():
 
     _assert(context.launch_configurations["use_fakeyaw_transform"] == "True",
             f"fakeyaw 配置应默认启用迁移链路: {context.launch_configurations}")
-    _assert(context.launch_configurations["command_frame"] == "base_link_fake",
-            "fakeyaw 配置的命令系必须是 base_link_fake")
+    _assert(context.launch_configurations["command_frame"] == "gimbal_yaw_fake",
+            "云台系 fakeyaw 配置的命令系必须是 gimbal_yaw_fake")
     _assert(context.launch_configurations["cmd_vel_nav_topic"] == "cmd_vel_nav_fake",
             "fakeyaw 链上 Nav2 的输出必须是 cmd_vel_nav_fake")
 
@@ -169,12 +172,16 @@ def test_fakeyaw_config_turns_the_whole_chain_on():
     chassis = _chassis_include_arguments(includes, context)
     _assert(chassis["nav_topic"] == "cmd_vel_nav_body",
             f"mux 的 nav_topic 必须是 fake 转换器的输出: {chassis}")
+    _assert(chassis["spin_topic"] == "rotation_cmd",
+            f"云台系 wz 归决策层：mux 的 spin_topic 必须是 rotation_cmd: {chassis}")
     _assert("wz_control_mode" not in chassis and "start_rotation_sender" not in chassis,
             f"独立自转链已删除，mux 不该再有 wz_control_mode/自转发送器参数: {chassis}")
 
     messages = "\n".join(_run_speed_chain_check(functions, context))
-    _assert("base_link_fake" in messages and "cmd_vel_nav_body" in messages,
+    _assert("gimbal_yaw_fake" in messages and "cmd_vel_nav_body" in messages,
             f"启动日志必须打印最终速度链: {messages}")
+    _assert("rotation_cmd" in messages,
+            f"启动日志必须写明 wz 来自决策层 rotation_cmd: {messages}")
 
 
 def test_params_file_topics_match_the_launch_wiring():
@@ -193,27 +200,46 @@ def test_params_file_topics_match_the_launch_wiring():
     _assert(fake["output_cmd_vel_topic"] == chassis["nav_topic"],
             f"fake 输出 {fake['output_cmd_vel_topic']} != mux 输入 {chassis['nav_topic']}")
     _assert(fake["transform_mode"] == "nav_se2", "fakeyaw 配置的 transform_mode 必须是 nav_se2")
-    _assert(fake["robot_base_frame"] == "base_link" and
-            fake["fake_robot_base_frame"] == "base_link_fake",
-            "fake 节点的 TF 父子关系必须与 TF 拓扑一致")
+    _assert(fake["robot_base_frame"] == "gimbal_yaw" and
+            fake["fake_robot_base_frame"] == "gimbal_yaw_fake",
+            "fake 节点的 TF 父子关系必须与云台系 TF 拓扑一致")
+    _assert(fake["yaw_rate_source"] == "imu",
+            "云台系下 yaw 外推必须用云台自己的实测转速（imu），不能用底盘 cmd_wz")
 
     follow_path = cfg["controller_server"]["ros__parameters"]["FollowPath"]
+    _assert(follow_path["base_frame"] == "gimbal_yaw",
+            "FollowPath.base_frame 必须是真实云台（与 fake 节点的父系一致）")
     _assert(follow_path["command_frame"] == context.launch_configurations["command_frame"],
             "参数文件的 command_frame 与 launch 默认值必须一致")
     _assert(follow_path["fake_base_frame"] == fake["fake_robot_base_frame"],
             "FollowPath.fake_base_frame 必须与 fake 节点的 fake_robot_base_frame 一致")
-    _assert(follow_path["yaw_policy"]["mode"] == "se2",
-            "fakeyaw 配置必须让 MPC 拥有 wz（yaw_policy.mode=se2）")
+    _assert(follow_path["yaw_policy"]["mode"] == "xy_only",
+            "云台系配置导航只出平移（yaw_policy.mode=xy_only），wz 归决策层")
     goal_checker = cfg["controller_server"]["ros__parameters"]["general_goal_checker"]
-    _assert("StoppedGoalChecker" in goal_checker["plugin"],
-            f"迁移配置必须用带角速度停稳判定的检查器: {goal_checker['plugin']}")
-    _assert(float(goal_checker["rot_stopped_velocity"]) > 0.0,
-            "rot_stopped_velocity 必须显式给出正数")
-    for node, _ in (("bt_navigator", None), ("local_costmap", None), ("global_costmap", None)):
+    _assert("OmniStoppedGoalChecker" in goal_checker["plugin"],
+            f"导航只出平移时必须用只看平移的判停器: {goal_checker['plugin']}")
+    _assert("rot_stopped_velocity" not in goal_checker,
+            "OmniStoppedGoalChecker 不应再依赖 rot_stopped_velocity")
+    for node in ("bt_navigator", "local_costmap", "global_costmap", "behavior_server"):
         section = cfg[node]
         section = section.get(node, section)["ros__parameters"]
-        _assert(section["robot_base_frame"] == "base_link_fake",
-                f"{node}.robot_base_frame 必须是 base_link_fake")
+        _assert(section["robot_base_frame"] == "gimbal_yaw_fake",
+                f"{node}.robot_base_frame 必须是 gimbal_yaw_fake")
+
+    # 定位链：/odometry 与 TF 的机器人参考系都必须是真实云台，且不经过关节角。
+    scan = cfg["sensor_scan_generation"]["ros__parameters"]
+    _assert(scan["robot_base_frame"] == "gimbal_yaw",
+            "sensor_scan_generation.robot_base_frame 必须是 gimbal_yaw")
+    _assert(scan["cache_robot_base_transform"] is True,
+            "云台系必须缓存固定外参（lidar -> gimbal_yaw），否则关节角仍会进 /odometry")
+    _assert(scan["publish_robot_base_tf"] is True,
+            "LIO/GICP 模式必须直接发 odom -> gimbal_yaw（不能发 odom -> base_link）")
+    for node in ("loam_interface", "zlio_bridge"):
+        section = cfg[node]["ros__parameters"]
+        _assert(section["base_frame"] == "gimbal_yaw",
+                f"{node}.base_frame 必须是 gimbal_yaw")
+        _assert(section["ground_frame"] == "base_link",
+                f"{node}.ground_frame 必须是 base_link（把 odom 的 z 原点拉回地面）")
 
 
 def test_old_chain_config_is_rejected():
@@ -232,10 +258,10 @@ def test_old_chain_config_is_rejected():
 
 
 def test_inconsistent_command_frame_is_rejected():
-    """参数文件说 base_link、launch 说 base_link_fake（或反过来）必须直接失败。"""
+    """参数文件说 gimbal_yaw_fake、launch 说 base_link（或反过来）必须直接失败。"""
     module = _load_launch_module()
     _, context, _, functions = _make_context(module, {"params_file": str(FAKEYAW_PARAMS)})
-    # 伪造：参数文件是 fakeyaw 的（command_frame=base_link_fake），但 launch 传 base_link。
+    # 伪造：参数文件是云台系 fakeyaw 的（command_frame=gimbal_yaw_fake），但 launch 传 base_link。
     context.launch_configurations["command_frame"] = "base_link"
     try:
         _run_speed_chain_check(functions, context)

@@ -12,51 +12,59 @@
 #     即"控制器硬净空 0.38 + 0.02"——本链要保证规划器不生成为贴边路径；
 #     代价是 0.40 > 0.38，起点格子可能被判障碍（见 recovery 段 ★ 说明）；
 #     两份 costmap 的 inflation_radius 取 0.5（main 是 global 0.7 / local 0.1）。
-#   * 仍保持 fakeyaw 专属（不要从 minco 那份照抄）：robot_base_frame=base_link_fake
+#   * 仍保持 fakeyaw 专属（不要从 minco 那份照抄）：robot_base_frame=gimbal_yaw_fake
 #     （bt_navigator / global_costmap / local_costmap / behavior_server 四处）、
-#     FollowPath.command_frame/fake_base_frame=base_link_fake、yaw_policy.mode=se2、
-#     general_goal_checker=StoppedGoalChecker(+rot_stopped_velocity)、spin_request.*、
-#     fake_vel_transform 段，以及两份 costmap 的 inflation_radius（本链自调 0.5）。
+#     FollowPath.base_frame=gimbal_yaw、command_frame/fake_base_frame=gimbal_yaw_fake、
+#     yaw_policy.mode=xy_only、general_goal_checker=OmniStoppedGoalChecker、
+#     spin_request.*、fake_vel_transform 段，以及两份 costmap 的 inflation_radius（本链自调 0.5）。
 #
-#   * 速度链路变成：
+# 【2026-11-12 仿真云台系】与实车链（config/real/nav2_params_srm_minco_fakeyaw.yaml）对齐：
+#   * 导航的"车"从底盘（base_link）换成云台（gimbal_yaw）：odom -> gimbal_yaw 只依赖
+#     固定外参（livox -> gimbal_yaw），不经过云台关节角；TF 树反过来
+#     （URDF gimbal_is_root:=true，由 srm_sim.launch.py 按 velocity_command_frame 传）。
+#   * 导航**只出平移**（yaw_policy.mode=xy_only）：底盘 wz 由决策层发 rotation_cmd，
+#     在 srm_cmd_mux 里合成，**完全和导航解耦**（MINCO 的 wz 权限为 0）。
+#   * 速度链路：
 #
-#       MINCO（base_link_fake 系，输出 vx/vy/wz）
-#         └─ cmd_vel_nav_fake ─► fake_vel_transform（发 base_link -> base_link_fake TF，
-#                                并把平移速度一次性转到真实 base_link 系；wz 原样透传）
-#             └─ cmd_vel_nav_body ─► srm_cmd_mux ─► cmd_vel_sim
+#       MINCO（gimbal_yaw_fake 系，只出 vx/vy）
+#         └─ cmd_vel_nav_fake ─► fake_vel_transform（发 gimbal_yaw -> gimbal_yaw_fake TF，
+#                                并把平移速度一次性转到真实云台系）
+#             └─ cmd_vel_nav_body ─► srm_cmd_mux ◄─ rotation_cmd（决策层底盘 wz）
+#                                     └─ cmd_vel_sim ─► 适配器 ─► Gazebo
+#                                        （插件按云台关节角把 vx/vy 旋到底盘执行）
 #
 #     Nav2 的输出话题是 `cmd_vel_nav_fake`，mux 的输入是 `cmd_vel_nav_body` ——
 #     两者必须与 launch 参数 `cmd_vel_nav_topic` / mux `nav_topic` 一一对应，
 #     nav_srm_simulation_launch.py 在启动时会核对并打印这条链。
-#   * 导航参考系（robot_base_frame）统一为 **base_link_fake**：该系与 odom 平行、
-#     朝向稳定，底盘自转不会带动代价地图与路径（方案 §3.1）。
-#     传感器外参、里程计 child_frame_id、Gazebo 执行器仍然是真实 base_link。
-#   * `FollowPath.command_frame: base_link_fake`：MINCO 输出 odom 对齐的平移速度，
+#   * 导航参考系（robot_base_frame）统一为 **gimbal_yaw_fake**：该系与 odom 平行、
+#     朝向稳定，云台/底盘自转都不会带动代价地图与路径（方案 §3.1）。
+#     传感器外参、里程计 child_frame_id、Gazebo 执行器是真实云台 gimbal_yaw。
+#   * `FollowPath.command_frame: gimbal_yaw_fake`：MINCO 输出 odom 对齐的平移速度，
 #     **不再**提前乘一次 R(-psi) —— 唯一的坐标转换在 fake_vel_transform 里做，
 #     两边都做就是「重复旋转」（psi≈pi/2 时前进变侧移，方案 §5 三类错误之一）。
-#   * `FollowPath.yaw_policy.mode: se2`：MPC 拥有角速度权限，航向参考只来自路径切线；
-#     独立自转请求在该模式下被拒绝（`rejected_spin_request_count` 必须为 0）。
-#   * 目标检查器换成 Nav2 的 `StoppedGoalChecker` 并**显式设置 `rot_stopped_velocity`**：
-#     导航拥有 wz 之后，「停稳」必须把角速度算进去，只检查平动的 OmniStoppedGoalChecker
-#     不再作为本配置的验收检查器（方案 §4.1.5）。
+#   * `FollowPath.yaw_policy.mode: xy_only`：导航不控自转；自转请求在该模式下被拒绝
+#     （`rejected_spin_request_count` 会增长，属预期）。
+#   * 目标检查器换成只看平移的 `srm27_nav_plugins::OmniStoppedGoalChecker`：
+#     小陀螺时到点后底盘可能仍在转，带 rot_stopped_velocity 的 StoppedGoalChecker
+#     永远判不了到点（方案 §4.2）。
 #   * 角速度限幅的**权威层**是 config/simulation/speed_limits.yaml 的
 #     `srm_cmd_mux.wz_max`（mux 是 cmd_vel_sim 前最后一道钳位，并有
-#     `nav_wz_clamped_count` 计数）。控制器/平滑器的 max_angular_* 仍由
-#     `controller_server@minco` / `velocity_smoother@minco` 给出（5.0 rad/s），
-#     它们必须 ≥ mux，否则上游会先被吃掉。
+#     `nav_wz_clamped_count` 计数）。导航那一路的 yaw 在 `velocity_smoother@fakeyaw`
+#     里钳 0（"导航漏出 wz"的上游闸）。
 #   * 本文件里**不写**任何已迁移到 speed_limits.yaml 的限幅键（limits.*、
 #     velocity_smoother 的上下界、behavior_server 的转动限幅），
 #     写了会与覆盖层冲突并直接报错（scripts/srm_speed_limits.py 的冲突检查）。
 #
-# 定位链仍使用真实 base_link（loam_interface / sensor_scan_generation / small_gicp /
-# slam_toolbox 的 base_frame 不变）：雷达与里程计都装在真实底盘上，让定位去跟随
-# 「不转的假底盘」会把自转从观测里抹掉。
+# 定位链：GT/LIO/zlio 的机器人参考系也是 gimbal_yaw（sensor_scan_generation /
+# loam_interface / zlio_bridge 的 base_frame），ground_frame=base_link 把 odom 的
+# z 原点拉回地面。GICP/SLAM 那两段不在本次范围内（仍用 base_link）。
 #
-# 跑法（先用真值里程计在空场验证，方案 §5 P2）：
-#   ./script/start_sim_nav.sh --fakeyaw --wz-source nav -w srm_empty
+# 跑法：
+#   ./script/start_sim_nav.sh -m 227_1111
+#   ./script/start_sim_nav.sh --chassis-spin 1.0     # 决策层小陀螺（mux 消费）
 # 或：
 #   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
-#     params_file:=<本文件绝对路径> use_fakeyaw_transform:=True
+#     params_file:=<本文件绝对路径> command_frame:=gimbal_yaw_fake
 #
 # 回退：**没有旧链路可回退**了。2026-10-19 独立自转链（rotation_controller /
 # rotation_test_sender / rotation_velocity）已删除，`wz` 只由导航（上位机）产生，
@@ -196,7 +204,13 @@ loam_interface:
     state_estimation_topic: "aft_mapped_to_init"       # 状态估计输入话题
     registered_scan_topic: "cloud_registered"          # 配准点云输入话题
     odom_frame: "odom"                                  # 里程计坐标系
-    base_frame: "base_link"                        # 机器人底盘坐标系（对齐用的安装角从这里读）
+    # 2026-11-12 仿真云台系（与实车链 §4.7 同一理由）：开机第一帧拍一次
+    # `base_frame <- lidar` 的快照。用 base_link 时快照混进"开机那一刻的关节角"，
+    # 云台一转 odom 的朝向就整体转歪；改成 gimbal_yaw 后只剩固定外参。
+    base_frame: "gimbal_yaw"                            # 云台系（对齐用的安装角从这里读）
+    # 云台比地面高 chassis_top(0.268 m)：把 odom 的 z 原点拉回地面，下游 z 阈值不用改。
+    # 留空 = 不补偿（旧链/仿真旧行为）。
+    ground_frame: "base_link"
     lidar_frame: "front_mid360"                         # 激光雷达坐标系
     # Gazebo is planar; prevent Point-LIO's unobservable vertical attitude
     # drift from moving the simulated robot or cloud.
@@ -204,14 +218,10 @@ loam_interface:
     #   base_frame 填雷达帧后，这里的 planarize 会把**倾斜的雷达系**当成底盘压平，
     #   实测反而引入 -58° 的 yaw 偏差（真值 0° vs 导航 -56~-60°）。
     #   关掉它：让 sensor_scan_generation 用实时 TF（含安装外参+云台关节）一次算清。
-    # ★ 2026-11-04 实测标定（真值 vs /odometry，反复量了 7 次）：
-    #   base_frame=base_link + planarize_pose=True  -> 车头朝向偏 +158.4°
-    #   base_frame=front_mid360 + planarize=True    -> 偏 -59.9°
-    #   base_frame=front_mid360 + planarize=False   -> 偏 -59.9°
-    #   base_frame=base_link  + planarize=False     -> 偏 -0.7° ✅（当前配置）
-    #   planarize 会把"倾斜的雷达系"（roll30°/yaw63° 安装）当底盘压平，
-    #   yaw 被拉偏几十度，进而让点云地图与栅格地图整体错开一个大角度。
-    #   关掉后，安装外参与云台关节只由下游 sensor_scan_generation 的实时 TF 算一次。
+    # ★ 2026-11-04 实测标定（当时 base_frame=base_link）：planarize 会把"倾斜的雷达系"
+    #   （roll30°/yaw63° 安装）当底盘压平，yaw 被拉偏几十度，点云地图与栅格图整体错开。
+    #   2026-11-12 云台系后 base_frame=gimbal_yaw：快照只含固定外参，仍然关掉 planarize，
+    #   安装外参只由下游 sensor_scan_generation 的固定 TF 算一次。
     planarize_pose: False
 
 # ZLIO 前端桥接（方案 §4 / §7.2）：把 ZLIO 的局部 IMU 系位姿与点云改写成 odom 系，
@@ -222,8 +232,10 @@ zlio_bridge:
     use_sim_time: True
     # 输出父帧必须与 sensor_scan_generation.odometry_msg.frame_id 一致（都是 odom）。
     odom_frame: "odom"
-    # 查 T(base_frame ← lidar_frame) 用的车体帧：odom 的轴向 = 出生时的 base_link（契约 C3）。
-    base_frame: "base_link"
+    # 2026-11-12 仿真云台系：与 loam_interface 同理由，base_frame 改为 gimbal_yaw，
+    # 开机快照只含固定外参；ground_frame 把 odom 的 z 原点拉回地面。
+    base_frame: "gimbal_yaw"
+    ground_frame: "base_link"
     # ⚠ 填的是 **ZLIO 的 body_frame**，不是雷达驱动的 frame：仿真里两者同名
     #   （IMU 与雷达同 link）。实车要填 livox_imu —— 填成 livox_frame 不会报错，
     #   只会让 T_off 少/多一个固定外参，表现为整体位置偏 4.4 cm、姿态恒定偏差。
@@ -285,12 +297,18 @@ sensor_scan_generation:
   ros__parameters:
     use_sim_time: True                                  # 是否使用仿真时钟
     lidar_frame: "front_mid360"                         # 输入雷达坐标系
-    base_frame: "base_link"                        # 底盘坐标系
-    # Ground-truth simulation publishes a planar odom -> base_link TF;
-    # there is no gimbal_yaw chain in Gazebo.
-    robot_base_frame: "base_link"                  # 机器人运动参考坐标系
+    base_frame: "base_link"                        # 底盘坐标系（只用于 z 补偿/对照）
+    # 2026-11-12 仿真云台系：导航的"车"是云台，odom -> gimbal_yaw 只依赖固定外参
+    # （livox -> gimbal_yaw），不经过关节角。GT 模式由真值里程计发布这条 TF
+    # （publish_tf: False，见 simulation_ground_truth_odometry）；LIO/GICP 模式由本节点发布。
+    robot_base_frame: "gimbal_yaw"                  # 机器人运动参考坐标系（云台）
+    # 关节角不进 /odometry：lidar -> gimbal_yaw 是固定外参，开机查一次即可。
+    cache_robot_base_transform: True
+    # 直接发 odom -> gimbal_yaw（不再发 odom -> base_link，否则 base_link 有两个父节点）。
+    # GT 模式下 publish_tf=False，这两个开关不生效；LIO/GICP 模式才真正发 TF。
+    publish_robot_base_tf: True
     # simulation_ground_truth_odometry is the single owner of odom ->
-    # base_link.  A second publisher here would make the chassis twitch.
+    # gimbal_yaw in GT mode. A second publisher here would make the robot twitch.
     publish_tf: False
     # odometry 语义修复（方案 §2.3）：
     #   * 位姿差分使用消息采样时间差，而不是回调到达时间差；
@@ -470,19 +488,19 @@ slam_toolbox:
     minimum_distance_penalty: 0.5                         # 最小距离惩罚
     use_response_expansion: true                          # 是否扩展匹配响应
 
-# SRM 仿真导航参数（fakeyaw 迁移变体）：
-#   * robot_base_frame = base_link_fake（fake_vel_transform 动态发布 base_link ->
-#     base_link_fake，yaw = -psi）。导航链路输出 vx、vy、wz，其中 wz 由本控制器
-#     与导航行为（恢复行为、BT）产生，经 fake 转换与 mux 直达底盘。
+# SRM 仿真导航参数（fakeyaw 迁移变体，2026-11-12 云台系）：
+#   * robot_base_frame = gimbal_yaw_fake（fake_vel_transform 动态发布
+#     gimbal_yaw -> gimbal_yaw_fake，yaw = -psi）。导航链路**只出 vx/vy**（xy_only）；
+#     wz 由决策层 rotation_cmd 在 mux 里合成，完全和导航解耦。
 #   * 速度出口为 cmd_vel_nav_fake（fake_vel_transform 输入），转换后成为
 #     cmd_vel_nav_body（mux 的 nav_topic），由 mux 写成 cmd_vel_sim。
-#   * 雷达帧、扫描频率、点云处理与定位参数保持原有配置（定位仍用真实 base_link）。
+#   * 定位的机器人参考系是真实云台 gimbal_yaw（GT/LIO/zlio 一致）。
 
 bt_navigator:
   ros__parameters:
     use_sim_time: True                                  # 是否使用仿真时钟
     global_frame: map                                   # 全局坐标系
-    robot_base_frame: base_link_fake              # 导航机器人坐标系（fakeyaw：朝向稳定）
+    robot_base_frame: gimbal_yaw_fake             # 导航机器人坐标系（云台系 fakeyaw：朝向稳定）
     odom_topic: odometry                                # 输入里程计话题
     bt_loop_duration: 10                                # 行为树循环周期（毫秒）
     default_server_timeout: 100                         # 默认动作服务器超时（毫秒）
@@ -556,14 +574,12 @@ controller_server:
       required_movement_radius: 0.5                     # 要求移动的最小半径（米）
       movement_time_allowance: 10.0                      # 允许不移动的最长时间（秒）
     # 终点必须按「已停稳」验收：SimpleGoalChecker 只检查位姿，不能保证到达时速度为零。
-    # ⚠ 迁移配置**必须**用带 rot_stopped_velocity 的检查器（方案 §4.1.5）：
-    #   导航拥有 wz 之后，「到达」这件事包含角速度 —— 用只检查平动的
-    #   OmniStoppedGoalChecker 会让「车还在原地转」也被判成功，于是底盘带着残余 wz
-    #   进入下一个目标。这里换成 Nav2 自带的 StoppedGoalChecker 并显式给出角速度阈值。
-    #   例外: 小陀螺（--yaw-mode spin）时 launch 会把它改写回 OmniStoppedGoalChecker
-    #   —— 持续自转是操作手要的驻车状态，判停只看平移（launch/nav_srm_simulation_launch.py）。
+    # 2026-11-12 仿真云台系：导航只出平移（yaw_policy.mode=xy_only），底盘 wz 由决策层
+    # rotation_cmd -> srm_cmd_mux 给，**不归导航管**。到点时底盘可能仍在自转（小陀螺驻车），
+    # 用带 rot_stopped_velocity 的 StoppedGoalChecker 永远判不了到点，所以换回只看平移的
+    # OmniStoppedGoalChecker（与实车链 config/real 一致）。
     general_goal_checker:
-      plugin: "nav2_controller::StoppedGoalChecker"
+      plugin: "srm27_nav_plugins::OmniStoppedGoalChecker"
       stateful: True                                    # 是否保存目标检查状态
       # 平面位置容差（米）：与实车统一为 0.50，同时也是终点急停的进入半径。
       # 顺带修掉了原来的一处不自洽 —— 本文件原先 xy_goal_tolerance(0.15) 小于
@@ -579,23 +595,21 @@ controller_server:
       #   实测 8 分钟刷了 46 次、一次都没到点。0.10 留 1.6 倍余量；
       #   同一次修复还在 odometry 适配器里加了「位姿静止即清零 twist」的一致性闸门。
       trans_stopped_velocity: 0.10                      # 判定停稳的平移速度阈值（米/秒）
-      # 角速度停稳阈值（弧度/秒）。它检查的是**里程计里的真实底盘 yaw 速率**（不是 fake
-      # 系的），所以即使 fake 系不转、底盘真的在转，也会被判「没停稳」——这正是迁移后
-      # 需要的语义：导航拥有 wz 就必须证明自己把车停住了。
-      rot_stopped_velocity: 0.05                        # 判定停稳的角速度阈值（弧度/秒）
+      # 不写 rot_stopped_velocity：OmniStoppedGoalChecker 只看平移。底盘 wz 归决策层，
+      # 导航到点时底盘可能仍在自转（小陀螺驻车），角速度不属于导航的验收范围。
 
     # MINCO + MPC 局部规划控制器（wz 迁移配置）。
     # model=velocity_integrator（z=[x,y,yaw], u=[vx,vy,wz]）、two_pass_reference 关闭。
     FollowPath:
       plugin: "srm27_minco_controller::MincoMpcController"
       planning_frame: odom                              # 局部规划坐标系（连续 odom）
-      base_frame: base_link                             # 真实车体系（里程计/fake TF 的父）
-      # 速度命令所在坐标系（方案 §3.2、§4.1.3）：base_link_fake 与 odom 平行，
+      base_frame: gimbal_yaw                            # 真实车体系（云台；里程计/fake TF 的父）
+      # 速度命令所在坐标系（方案 §3.2、§4.1.3）：gimbal_yaw_fake 与 odom 平行，
       # 控制器因此输出 odom 对齐的平移速度，坐标转换只由 fake_vel_transform 做一次。
       # ⚠ 必须与 fake_vel_transform.fake_robot_base_frame 完全一致；写成第三个名字会在
       #   configure 阶段直接报错（不允许「到底转不转一次」成为隐含约定）。
-      command_frame: base_link_fake
-      fake_base_frame: base_link_fake                   # fake 系名字（校验 command_frame 用）
+      command_frame: gimbal_yaw_fake
+      fake_base_frame: gimbal_yaw_fake                  # fake 系名字（校验 command_frame 用）
       odom_topic: odometry                              # 状态适配输入话题
       replan_frequency: 10.0                            # 后台重规划频率（Hz）
       planning_horizon: 3.0                             # 局部路径截取视野（米），与 8 m 局部地图配套
@@ -717,19 +731,17 @@ controller_server:
         enforce_input_change: True                      # 是否施加输入差分约束
 
       yaw_policy:                                       # 航向策略
-        # se2 = 迁移模式（方案 §4.1.1）：MPC 拥有角速度权限，航向参考只来自路径切线
-        # （不引入任何「独立自转请求」），到点后冻结航向参考；回退用 mode: xy_only。
-        # 小陀螺（阶段二）由 start_sim_nav.sh --yaw-mode spin 把 mode 改写为 spin：
-        # 自转请求经 rotation_cmd -> MINCO setSpinRequest 直接进线（独立自转链已删除）。
-        mode: se2                                       # 导航拥有 wz：MPC 输出角速度
+        # 2026-11-12 仿真云台系（与实车链一致）：导航只出平移，**不控自转**。
+        # 底盘 wz 由决策层发 rotation_cmd -> srm_cmd_mux（不经过本控制器）。
+        # xy_only 下 MPC 的角速度权限为 0；se2（导航追切线）在云台系下没有意义。
+        mode: xy_only                                   # 导航只出平移：wz 归决策层
         stop_rotation_on_goal: True                     # 到点后停止自转参考
         narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
 
-      # 自转请求进线（阶段二小陀螺）：SPIN 模式下每一拍喂给航向策略；其余模式
-      # 只缓存不进线（并计入 rejected_spin_request_count）。
-      # 2026-10-19：独立自转链已删除，请求由上位机直接发到本话题（geometry_msgs/Twist
-      # 的 angular.z），不再经过 rotation_controller → rotation_velocity。
+      # 自转请求进线：xy_only 下**只缓存不进线**（并计入 rejected_spin_request_count），
+      # 真正的自转由 srm_cmd_mux 的 spin_topic 消费同一话题。保留这段只为：
+      #   1) 与实车链参数面一致；2) 将来回退到 spin 模式做 A/B 对照。
       # 手动控制: script/spin_control.sh on <rad/s> / off / status。
       spin_request:
         topic: rotation_cmd                             # 请求话题（相对命名空间）
@@ -835,7 +847,7 @@ local_costmap:
       update_frequency: 10.0                              # 代价地图更新频率（Hz）
       publish_frequency: 5.0                              # 代价地图发布频率（Hz）
       global_frame: odom                                  # 局部地图坐标系
-      robot_base_frame: base_link_fake              # 机器人坐标系（fakeyaw：朝向稳定）
+      robot_base_frame: gimbal_yaw_fake             # 机器人坐标系（云台系 fakeyaw：朝向稳定）
       rolling_window: true                                # 是否使用跟随机器人移动的窗口
       width: 8                                             # 覆盖 3 m 视野、车身与末端制动延伸
       height: 8                                            # 局部地图高度（米）
@@ -885,7 +897,7 @@ global_costmap:
       update_frequency: 5.0                               # 全局地图更新频率（Hz）
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
-      robot_base_frame: base_link_fake              # 机器人坐标系（fakeyaw：朝向稳定）
+      robot_base_frame: gimbal_yaw_fake             # 机器人坐标系（云台系 fakeyaw：朝向稳定）
       robot_radius: 0.40                                   # 机器人圆形碰撞半径（米）；= 控制器硬净空 0.38 + 0.02 余量（⚠ 0.40 > 0.38 的坑见下方 recovery 段 ★ 1）
       resolution: 0.05                                    # 地图分辨率（米）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
@@ -984,7 +996,7 @@ behavior_server:
       plugin: "nav2_behaviors/AssistedTeleop"             # 辅助遥控插件
     local_frame: odom                                      # 局部行为坐标系
     global_frame: map                                      # 全局行为坐标系
-    robot_base_frame: base_link_fake                 # 机器人坐标系（fakeyaw：朝向稳定）
+    robot_base_frame: gimbal_yaw_fake                 # 机器人坐标系（云台系 fakeyaw：朝向稳定）
     transform_tolerance: 0.1                               # TF变换容差（秒）
     simulate_ahead_time: 2.0                               # 行为碰撞前向模拟时间（秒）
     # 自转限幅（max_rotational_vel / min_rotational_vel / rotational_acc_lim）已移到
@@ -1040,26 +1052,39 @@ waypoint_follower:
 fake_vel_transform:
   ros__parameters:
     use_sim_time: True
-    transform_mode: nav_se2                    # 迁移模式：导航拥有 wz，不做自转叠加
-    robot_base_frame: base_link                # 真实底盘（TF 父）
-    fake_robot_base_frame: base_link_fake      # 与 odom 平行的虚拟底盘（TF 子）
+    transform_mode: nav_se2                    # 迁移模式：不做自转叠加；平移只转一次
+    # 2026-11-12 仿真云台系：导航的"车"是云台，odom 的 yaw = 云台 yaw。
+    # 所以 fake 系挂在 gimbal_yaw 下，转出去的平移方向是**云台系** —— 与下位机
+    # "按云台的『前』执行 vx/vy" 一致。
+    robot_base_frame: gimbal_yaw               # 真实云台系（TF 父）
+    fake_robot_base_frame: gimbal_yaw_fake     # 与 odom 平行的虚拟云台（TF 子）
     odom_topic: odometry                       # psi 的唯一来源（真值/Point-LIO/GICP/SLAM）
     input_cmd_vel_topic: cmd_vel_nav_fake      # 导航输出（fake 系）
-    output_cmd_vel_topic: cmd_vel_nav_body     # 转换后的车体系速度（mux 的 nav_topic）
+    output_cmd_vel_topic: cmd_vel_nav_body     # 转换后的云台系速度（mux 的 nav_topic）
     # 超过这个年龄没有里程计就输出零速、并停止更新 fake TF（方案 §4.2）：
     # 0.25 s ≈ 真值里程计(50 Hz)/Point-LIO(50~100 Hz) 的 12~25 个周期，既能吸收单帧
     # 抖动，又不会让「定位已经死了车还在跑」。
     odom_timeout: 0.60
     cmd_spin_topic: cmd_spin                   # 迁移模式下收到非零值只告警、只计数
     diagnostics_period: 0.5
-    # ---- yaw 外推（2026-11-06）----
-    # 转换要用"指令真正生效那一刻"的航向：yaw(now+d) = yaw_odom(stamp) + ∫[stamp−d → now] wz_cmd。
-    # wz 取 mux 的输出（底盘真正执行的那条，已钳位/超时清零），不取本节点的输入。
-    # 全部用仿真时间（节点时钟 + odom.header.stamp）；墙钟只用于 odom_timeout 判死。
-    chassis_cmd_vel_topic: cmd_vel_sim         # 外推的 wz 来源 = mux 输出
-    actuation_delay: 0.02                      # 指令→底盘执行的延迟（**仿真秒**），需标定
+    # ---- yaw 外推（2026-11-12 云台系）----
+    # 云台系下不能再积分"下发给底盘的 wz"：底盘 wz 不改变云台朝向（那是决策层的
+    # rotation_cmd，不经过本节点）。改用云台自己的实测角速度：
+    #   imu         = Mid-360 IMU 角速度（livox/imu，装在云台上 → 云台相对地面）
+    #   gimbal_rate = 下位机回传的陀螺仪转速（仿真里没有串口，保留给实车）
+    #   cmd_wz      = 老做法（导航拥有 wz 的时代），只留给旧链路回归
+    # 仿真里 IMU 由 Gazebo 直接给出，符号与安装姿态一致，不需要实车 §8.1 的符号标定。
+    # 积分区间仍是 [odom_stamp − actuation_delay, now]，全部用仿真时间。
+    yaw_rate_source: "imu"
+    imu_topic: "livox/imu"
+    imu_target_frame: "gimbal_yaw"             # 角速度旋到云台 z 轴（雷达斜装 roll 30°）
+    gimbal_rate_topic: "gimbal_yaw_rate"       # 仿真暂无发布者；yaw_rate_source=gimbal_rate 时才会订阅
+    gimbal_rate_timeout: 0.1
+    actuation_delay: 0.05                      # 指令→底盘执行的延迟（**仿真秒**），随实车链同值
     wz_history_window: 1.0                     # 指令历史保留时长（秒），够覆盖 odom 年龄即可
     yaw_debug_topic: yaw_debug                 # 外推结果的高频出口，示波用（Vector3: 预测/odom/积分）
+    # 老的"积分下发 wz"源：只有 yaw_rate_source=cmd_wz 时才订阅（空串 = 不订阅）。
+    chassis_cmd_vel_topic: ""
 
 velocity_smoother:
   ros__parameters:
@@ -1067,12 +1092,11 @@ velocity_smoother:
     smoothing_frequency: 20.0                              # 速度平滑频率（Hz）
     scale_velocities: False                                # 超限时是否按比例缩放各速度分量
     feedback: "OPEN_LOOP"                                 # 平滑器反馈方式：开环
-    # 速度上下界与加速度上限已移到 config/simulation/speed_limits.yaml 的
-    # velocity_smoother@minco 段（唯一来源）。按分量钳位（scale_velocities: False），
-    # 斜向合速度由 srm_cmd_mux.v_max 兜底；yaw 分量现在是**真实生效**的导航 wz 通路
-    # （max_velocity[2] 2026-11-06 起 = 8.5 rad/s），因此它必须 ≥ 控制器角速度上限、
-    # 并 ≥ mux 的 wz_max（三层同档）。
-    # 这一层低于控制器上限时会把提速整个吃掉——改档位请在 speed_limits.yaml 里一起改。
+    # 速度上下界与加速度上限已移到 config/simulation/speed_limits.yaml
+    # （velocity_smoother@minco + @fakeyaw 叠加段，唯一来源）。按分量钳位
+    # （scale_velocities: False），斜向合速度由 srm_cmd_mux.v_max 兜底。
+    # 2026-11-12 云台系：yaw 分量在 @fakeyaw 段被钳 0（导航只出平移，底盘 wz 只走
+    # mux 的 rotation_cmd），这一层同时是"导航漏出 wz"的最后一道上游闸。
     odom_topic: "odometry"                                # 里程计反馈话题
     odom_duration: 0.1                                     # 里程计数据有效时长（秒）
     deadband_velocity: [0.0, 0.0, 0.0]                     # 速度死区[x,y,yaw]

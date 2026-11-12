@@ -172,9 +172,9 @@ Theta* 全局规划 ──► SimpleSmoother ──► MINCO-MPC（或 OmniPID�
                                             │
                                             v
                      ╔══════════════════════════════════════════════════╗
-                     ║ 迁移链（默认，导航拥有 wz / 参考系 base_link_fake）║
+                     ║ 迁移链（默认，云台系 / 导航只出平移，wz 归决策层）║
                      ║  cmd_vel_nav_fake → fake_vel_transform(nav_se2)   ║
-                     ║   → cmd_vel_nav_body → srm_cmd_mux                ║
+                     ║   → cmd_vel_nav_body → srm_cmd_mux ◄─ rotation_cmd║
                      ║   → cmd_vel_chassis → srm27_nav_protocol → 串口    ║
                      ╚══════════════════════════════════════════════════╝
                      ╔══════════════════════════════════════════════════╗
@@ -184,25 +184,33 @@ Theta* 全局规划 ──► SimpleSmoother ──► MINCO-MPC（或 OmniPID�
                      ╚══════════════════════════════════════════════════╝
                                                                    │
                                                                    v
-                                               下位机 C 板（执行 vx/vy/wz）
+                                               下位机 C 板（按云台执行 vx/vy，wz 转底盘）
 ```
 
-迁移链的四个要点（细节见 [`docs/仿真链迁移实车实施记录(ai).md`](./docs/仿真链迁移实车实施记录%28ai%29.md)）：
+迁移链的四个要点（细节见 [`docs/云台系改造实施记录(ai).md`](./docs/云台系改造实施记录%28ai%29.md) 与
+[`docs/仿真云台系改造实施记录(ai).md`](./docs/仿真云台系改造实施记录%28ai%29.md)）：
 
-1. **导航参考系 = `base_link_fake`**（与 odom 平行、朝向稳定）：底盘自转不会拖着代价地图和路径一起转；
+1. **导航参考系 = `gimbal_yaw_fake`**（与 odom 平行、朝向稳定）：`odom → gimbal_yaw` 只依赖
+   固定外参（`livox → gimbal_yaw`），不经过云台关节角；TF 树反过来
+   （URDF `gimbal_is_root:=true`，`gimbal_yaw → base_link` 只给 RViz）；
 2. **MINCO 输出 odom 对齐的平移速度**，唯一一次 `R(-yaw)` 在 `fake_vel_transform`（`nav_se2`）里做；
    控制器与转换器都做就是"重复旋转"（车头 ≈ 90° 时前进变侧移）；
-3. **`wz` 由上位机（导航）拥有**：`yaw_policy.mode=se2`（跟路径切线）或 `spin`（小陀螺，
-   `rotation_cmd` 请求直接进 MINCO）。旧链是 `xy_only`，smoother 的 yaw 界被钳成 0；
-4. **`srm_cmd_mux` 是 `cmd_vel_chassis` 的唯一发布者**：负责限幅、导航超时清零与
+3. **`wz` 与导航完全解耦**：`yaw_policy.mode=xy_only`（导航只出平移），底盘 wz 由决策层发
+   `rotation_cmd`，在 `srm_cmd_mux` 里合成；`se2` 在云台系下没有意义（导航的 yaw 是云台，
+   wz 转的是底盘）；
+4. **`srm_cmd_mux` 是 `cmd_vel_chassis` 的唯一发布者**：负责限幅、双输入超时清零与
    `stop_all`/`resume_all` 软件闸。速度限幅仍只有一处：`config/real/speed_limits.yaml`
-   （`@fakeyaw` 段放开 smoother 的 yaw，`srm_cmd_mux` 段给出 `wz_max`）。
+   （`@fakeyaw` 段把 smoother 的 yaw 钳 0，`srm_cmd_mux` 段给出 `wz_max`）。
 
-⚠ 云台自转（仿真里的 `--gimbal-spin`）**实车暂不支持**：云台由下位机驱动，当前协议不回传
-云台关节角，上位机无法把云台角从 `base_link` yaw 里剥掉。协议补齐后可用
-`--gimbal-joint-topic` 接入（中继节点转成 `/joint_states`）。
+⚠ 云台自转（仿真 `--gimbal-spin`；实车由下位机驱动、协议 0x0010 回传关节角/陀螺仪转速）
+已支持：关节角经 `gimbal_joint_state_relay` 进 `/joint_states`，导航不再受它影响。
 
 ### 3.2 仿真链路
+
+> **2026-11-12 更新**：仿真导航已改为**云台系 + 决策层 wz**（与实车链同构）：
+> 导航参考系 `gimbal_yaw_fake`、只出平移、`rotation_cmd → srm_cmd_mux`、仿真执行端按云台系
+> 解释 vx/vy。下文 2026-10 的 `rotation_test_sender/rotation_velocity` 图与旧限幅（0.5 m/s）
+> **已过时**，现行链路见 [`docs/仿真云台系改造实施记录(ai).md`](./docs/仿真云台系改造实施记录%28ai%29.md)。
 
 传感器来源与执行方式与实车不同：Gazebo 提供点云与真值，速度经合成后由自有插件执行。
 
@@ -253,16 +261,18 @@ Nav2 controller ─ cmd_vel_nav ─┐
 
 ### 3.3 坐标系（TF 链）
 
-**实车**（SRM 自建模型，`config/real/nav2_params_srm.yaml`）
+**实车**（SRM 自建模型，`config/real/nav2_params_srm_minco_fakeyaw.yaml`；2026-11-08 起云台系）
 
 ```text
-map ──► odom ──► base_link ──┬─► gimbal_yaw ──► livox_frame ──► livox_imu
-                             ├─► livox_scan
-                             └─► wheel_front_left / rear_left / front_right / rear_right
+map ──► odom ──► gimbal_yaw ──┬─► livox_frame ──► livox_imu
+                              ├─► livox_scan
+                              └─► base_link（云台关节角）──► wheel_*
 ```
 
-- `odom → base_link`：`sensor_scan_generation` 发布（`planarize`：z=0、roll=pitch=0，只留 yaw）
-- `map → odom`：由定位方式决定，见 §5.3（四种方式互斥）
+- `odom → gimbal_yaw`：`sensor_scan_generation` 直接发布（`publish_robot_base_tf`，
+  `livox → gimbal_yaw` 是固定外参，不经过关节角）；`map → odom` 由定位方式决定，见 §5.3
+- `gimbal_yaw → base_link`：`robot_state_publisher` + `gimbal_joint_state_relay`
+  （下位机回传的关节角），**只给 RViz 显示底盘**；断了导航不受影响
 - `base_link → *`：`robot_state_publisher` 发布的静态外参，模型来自**唯一**的
   `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`，由
   `srm27_nav_bringup/scripts/srm_robot_description.py` 展开（建图/导航/独立调试三条
@@ -273,14 +283,17 @@ map ──► odom ──► base_link ──┬─► gimbal_yaw ──► livo
   对齐 = 底盘与云台零位对齐，云台一转蓝标记就相对红标记错开。模型用
   `show_rotation_marks:=false` 展开时这两条 link 不生成（仿真 SDF 不受影响）。
 
-**仿真**（SRM 生成模型，`config/simulation/nav2_params_srm.yaml`）
+**仿真**（SRM 生成模型，`config/simulation/nav2_params_srm_fakeyaw.yaml`；2026-11-12 起云台系）
 
 ```text
-map ──► odom ──► base_link ──┬─► gimbal_yaw ──► front_mid360
-                             └─► wheel_front_left / rear_left / front_right / rear_right
+map ──► odom ──► gimbal_yaw ──┬─► front_mid360
+                              ├─► gimbal_yaw_fake（fake_vel_transform，导航参考系）
+                              └─► base_link ──► wheel_*（关节角只在这条边上）
 ```
 
-- `base_link` 是与实际底盘刚性固定的坐标系，**随底盘自转**，仿真与实车都用它做导航速度参考系。
+- 导航的"车"是 `gimbal_yaw`：`odom → gimbal_yaw` 只依赖固定外参（`livox → gimbal_yaw`），
+  不经过云台关节角；`gimbal_yaw_fake` 与 odom 平行、朝向稳定，供 Nav2 / 代价地图使用。
+- `base_link` 仍与底盘刚性固定、**随底盘自转**，但只用于 RViz 显示与点云自车过滤（`ground_frame`）。
 - `chassis_mark` / `gimbal_mark`：与实车同一份 URDF 生成，同样是**纯显示**叶子 frame
   （仿真用的 SDF 由 `model_builder.build_sdf()` 生成，Gazebo 是按 visual 上材质，所以
   那三块标记直接画在 `base_link` / `gimbal_yaw` 上，不多出 link）。

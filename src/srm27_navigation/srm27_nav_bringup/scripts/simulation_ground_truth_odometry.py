@@ -70,20 +70,28 @@ def load_lidar_extrinsic():
 
     外参只在几何 YAML 里定义一次，避免这里再写一份硬编码数值与模型漂移。
     读取失败时回退到 SRM 的当前安装值，并打印告警。
+
+    同时返回云台基座面相对地面的高度（``chassis_top``）：云台系导航时
+    ``base_frame`` 是 ``gimbal_yaw``，odom 原点要落在地面而不是云台平面，
+    这个高度就是补偿量。
     """
     fallback = {
         "link_name": "front_mid360",
         "xyz": [0.12081, -0.056721, 0.346388],
         "rpy": [0.523598776, 0.0, 1.099557429],
+        "chassis_top": 0.26805,
     }
     try:
         from srm27_robot_description import load_geometry
 
-        lidar = load_geometry()["lidar"]
+        geometry = load_geometry()
+        lidar = geometry["lidar"]
+        chassis = geometry["chassis"]
         return {
             "link_name": lidar["link_name"],
             "xyz": [float(value) for value in lidar["xyz"]],
             "rpy": [float(value) for value in lidar["rpy"]],
+            "chassis_top": float(chassis["center_z"]) + float(chassis["length"]) / 2.0,
         }
     except Exception as error:  # noqa: BLE001 - 回退必须给出可见原因
         print(
@@ -97,17 +105,38 @@ def load_lidar_extrinsic():
 class SimulationGroundTruthOdometry(Node):
     def __init__(self):
         super().__init__("simulation_ground_truth_odometry")
-        # 导航速度参考系：SRM 使用真实随底盘自转的 base_link。
+        # 导航速度参考系：
+        #   base_link（旧链，底盘系）；gimbal_yaw（云台系，odom -> gimbal_yaw）。
         self.base_frame = self.declare_parameter("base_frame", "base_link").value
         lidar_extrinsic = load_lidar_extrinsic()
         self.lidar_frame = self.declare_parameter(
             "lidar_frame", lidar_extrinsic["link_name"]
         ).value
-        # base_link -> 雷达外参位姿。
+        # 云台相对地面（云台基座面）的高度。云台系导航时 odom 原点必须仍在地面：
+        # 真值里程计给的是云台位姿，直接用会把 odom 的 z=0 抬到云台平面，地面变成
+        # z=-0.268，代价地图的绝对 z 阈值随之整体偏移（实车链用 ground_frame 解决）。
+        # -1 = 自动：base_frame 是云台时取几何 YAML 的 chassis_top，否则 0。
+        self.base_height = float(self.declare_parameter("base_height", -1.0).value)
+        if self.base_height < 0.0:
+            self.base_height = (
+                float(lidar_extrinsic["chassis_top"])
+                if self.base_frame != "base_link"
+                else 0.0
+            )
+        # base_frame -> 雷达外参位姿。
         # **优先用 TF**（robot_state_publisher 从唯一 URDF 发出，云台角一变它自动跟着变）；
         # 几何 YAML 只作兜底：TF 还没起来时用同一批数值，保证启动第一帧不空转。
+        # 几何 YAML 的 lidar_xyz 是 base_link -> 雷达；base_frame 换成云台时要把
+        # 底盘顶面以上的那段高度扣掉（激光装在云台上，gimbal_yaw -> 雷达 不含它）。
+        fallback_xyz = tuple(lidar_extrinsic["xyz"])
+        if self.base_frame != "base_link":
+            fallback_xyz = (
+                fallback_xyz[0],
+                fallback_xyz[1],
+                fallback_xyz[2] - float(lidar_extrinsic["chassis_top"]),
+            )
         self.fallback_base_to_lidar = (
-            tuple(lidar_extrinsic["xyz"]),
+            fallback_xyz,
             rpy_to_quaternion(*lidar_extrinsic["rpy"]),
         )
         self.base_to_lidar = self.fallback_base_to_lidar
@@ -191,11 +220,21 @@ class SimulationGroundTruthOdometry(Node):
                 if now_ns - self.zero_pose_since < self.zero_pose_grace_ns:
                     return
             # 里程计原点 = 出生位置 + 出生航向；roll/pitch 不进入原点定义，因此 odom 系
-            # 始终重力对齐（z 轴竖直），高度基准就是出生点地面高度，不会被强制归零。
-            self.initial_pose = (world_position, rpy_to_quaternion(0.0, 0.0, yaw))
+            # 始终重力对齐（z 轴竖直）。
+            # 云台系（base_frame=gimbal_yaw）时，消息里的位姿是云台，原点仍要落在地面：
+            # 把云台高度 base_height 从 z 里扣掉，否则地面会变成 z=-0.268，代价地图的
+            # 绝对 z 阈值整体偏移（实车链用 loam_interface 的 ground_frame 做同一件事）。
+            origin_position = (
+                world_position[0],
+                world_position[1],
+                world_position[2] - self.base_height,
+            )
+            self.initial_pose = (origin_position, rpy_to_quaternion(0.0, 0.0, yaw))
             self.get_logger().info(
                 "Ground-truth odometry origin initialized: "
-                f"z={world_position[2]:.3f} m, yaw={math.degrees(yaw):.1f} deg"
+                f"z={origin_position[2]:.3f} m (base_frame={self.base_frame}, "
+                f"base_height={self.base_height:.3f} m), "
+                f"yaw={math.degrees(yaw):.1f} deg"
             )
 
         # Use the node's ROS clock for every derived message.  Gazebo bridge
@@ -262,7 +301,8 @@ class SimulationGroundTruthOdometry(Node):
         # sensor_scan_generation consumes a lidar pose together with the cloud.
         # Publish the same stable pose with the lidar child frame so this path
         # works without Point-LIO/loam_interface in simulation odometry mode.
-        # 外参取自 srm27_robot_description 的几何 YAML（base_link -> front_mid360），
+        # 外参取自 srm27_robot_description 的几何 YAML（base_frame -> 雷达；
+        # 云台系下是 gimbal_yaw -> front_mid360，固定外参），
         # 由完整三维底盘位姿组合而成：底盘一旦有 roll/pitch，只有三维组合才正确。
         lidar_transform = TransformStamped()
         lidar_transform.header = transform.header
@@ -280,11 +320,14 @@ class SimulationGroundTruthOdometry(Node):
         self.lidar_odom_publisher.publish(lidar_odom)
 
     def _base_to_lidar(self):
-        """当前 base_link -> 雷达的位姿（**相对量，含云台转角**）。
+        """当前 base_frame -> 雷达的位姿（**相对量**）。
 
-        雷达装在云台上，所以这个位姿不是常量：云台一转它就变。因此每帧都查一次
-        TF（静态/动态都支持），而不是像以前那样缓存成固定外参。
-        TF 不可用时退回几何 YAML 的零位外参（启动初期/未起 robot_state_publisher）。
+        base_frame=base_link（旧链）：雷达装在云台上，这个位姿随云台转角变化，
+        每帧查一次 TF，不能缓存。
+        base_frame=gimbal_yaw（云台系）：雷达与云台同刚体，这段是固定外参，
+        仍然走 TF（静态/动态都支持），行为一致、不用分支。
+        TF 不可用时退回几何 YAML 的零位外参（启动初期/未起 robot_state_publisher；
+        云台系会扣掉云台高度，见 __init__）。
         """
         try:
             transform = self.tf_buffer.lookup_transform(
@@ -301,7 +344,8 @@ class SimulationGroundTruthOdometry(Node):
             return self.fallback_base_to_lidar
         if not self.tf_extrinsic_ok:
             self.get_logger().info(
-                f"base_link -> {self.lidar_frame} 改用 TF（跟随云台角）"
+                f"{self.base_frame} -> {self.lidar_frame} 改用 TF"
+                f"（{'跟随云台角' if self.base_frame == 'base_link' else '固定外参'}）"
             )
             self.tf_extrinsic_ok = True
         translation = transform.translation

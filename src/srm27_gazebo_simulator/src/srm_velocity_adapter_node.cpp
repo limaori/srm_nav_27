@@ -14,8 +14,10 @@
 
 /// \brief SRM 仿真速度执行适配器。
 ///
-/// 订阅 ROS 侧的最终速度命令 cmd_vel_sim（geometry_msgs/msg/Twist，车体系），
+/// 订阅 ROS 侧的最终速度命令 cmd_vel_sim（geometry_msgs/msg/Twist），
 /// 校验后转换为 Gazebo Transport 的 Twist 发给 SRM 自有底盘速度执行插件。
+/// 本节点**不解释坐标系**（原样转发）：由插件按 SDF 的 command_in_gimbal_frame 决定
+/// 是"车体系"还是"云台系"（后者按云台关节角把 vx/vy 旋到底盘；仿真导航入口传 gimbal）。
 ///
 /// 职责边界：
 ///   * 只做校验、转发和超时清零；不合成速度、不做限幅、不加轮速 PID。

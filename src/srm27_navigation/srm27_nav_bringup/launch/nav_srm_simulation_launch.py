@@ -14,30 +14,31 @@
 
 """SRM 仿真导航入口。
 
-数据流（**唯一**链路：fakeyaw 迁移，`wz` 由上位机即导航栈拥有）::
+数据流（**唯一**链路：fakeyaw 迁移 + 云台系，`wz` 与导航完全解耦）::
 
-    MINCO/Nav2（base_link_fake）──cmd_vel_nav_fake──► fake_vel_transform
-        ──cmd_vel_nav_body──► srm_cmd_mux ──cmd_vel_sim──► 适配器
+    MINCO/Nav2（gimbal_yaw_fake，只出 vx/vy）──cmd_vel_nav_fake──► fake_vel_transform
+        ──cmd_vel_nav_body──► srm_cmd_mux ◄── rotation_cmd（决策层底盘 wz）
+                                  └──cmd_vel_sim──► 适配器 ──► Gazebo
+                                                     （插件按云台关节角把 vx/vy 旋到底盘）
 
-2026-10-19：独立自转链（`rotation_test_sender → rotation_controller →
-rotation_velocity → mux`）已删除。`wz` 只由导航产生，本入口不再有
-`wz_control_mode` 开关，也不再有"导航只给平移、wz 来自自转链"的旧基线：
-没有 fakeyaw 转换就没有合法的仿真导航链路（`use_fakeyaw_transform:=False`
-会直接报错）。手动自转（小陀螺）走 `--yaw-mode spin` + `script/spin_control.sh`，
-请求进 MINCO，`wz` 仍由导航输出。
+2026-11-12：仿真与实车链对齐（云台系）。导航的"车"是云台 `gimbal_yaw`：
+`odom -> gimbal_yaw` 只依赖固定外参，TF 树反过来（URDF `gimbal_is_root:=true`）。
+导航**只出平移**（`yaw_policy.mode=xy_only`），底盘 `wz` 由决策层发
+`rotation_cmd`，在 `srm_cmd_mux` 里合成 —— 不经过 MINCO，也不经过平滑器。
+云台系导航必须走 fakeyaw 转换（`use_fakeyaw_transform:=False` 会直接报错）。
 
 两个开关必须与参数文件一致，本入口按 `params_file` 的文件名给出默认值，并在启动时
 核对/打印最终速度链：
 
 * `use_fakeyaw_transform`：是否启用 fake_vel_transform（唯一链路，必须为 True）。
-* `command_frame`：MINCO 的速度命令坐标系；本链路是 `base_link_fake`。
+* `command_frame`：MINCO 的速度命令坐标系；本链路是 `gimbal_yaw_fake`。
 
 其余约定：
 
 * 复用现有点云转换、地形分析、定位与 Nav2 启动链路。机器人参考系统一为
-  base_link_fake（与 odom 平行、朝向稳定）；定位与里程计仍用真实 base_link。
+  gimbal_yaw_fake（与 odom 平行、朝向稳定）；定位与里程计用真实云台 gimbal_yaw。
 * 速度出口由 `cmd_vel_nav_topic` 决定，再由 srm_cmd_mux 合成 cmd_vel_sim；底盘执行由
-  srm27_gazebo_simulator 的 SRM 速度插件负责。
+  srm27_gazebo_simulator 的 SRM 速度插件负责（`velocity_command_frame:=gimbal`）。
 * 通过 start_simulation / start_chassis_control 选择是否由本入口一并拉起仿真与
   底盘控制链路；默认由 script/start_sim_nav.sh 分标签页启动。
 
@@ -45,7 +46,7 @@ rotation_velocity → mux`）已删除。`wz` 只由导航产生，本入口不�
   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \\
     map:=.../rmuc_2025_tunnel.yaml
 
-  # wz 迁移链路（空场 + 真值里程计）
+  # 云台系迁移链路（空场 + 真值里程计）
   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \\
     params_file:=.../nav2_params_srm_fakeyaw.yaml
 """
@@ -143,13 +144,14 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
         # 会被自转拖着转），所以这里直接失败而不是退回旧行为。
         raise RuntimeError(
             "use_fakeyaw_transform=False 已不支持：独立自转链（rotation_controller / "
-            "rotation_velocity）已删除，wz 只由导航产生，仿真导航必须走 fakeyaw 迁移链。"
+            "rotation_velocity）已删除，仿真导航必须走 fakeyaw 迁移链。"
             "请用 params_file:=.../nav2_params_srm_fakeyaw.yaml。"
         )
-    if command_frame != "base_link_fake":
+    if command_frame != "gimbal_yaw_fake":
         raise RuntimeError(
-            f"fakeyaw 链上 command_frame 必须是 base_link_fake，实际是 {command_frame!r}："
+            f"fakeyaw 链上 command_frame 必须是 gimbal_yaw_fake，实际是 {command_frame!r}："
             "速度必须先由 fake_vel_transform 转一次，控制器再转一次就是重复旋转。"
+            "（2026-11-12 云台系：导航参考系是云台，不再是 base_link_fake。）"
         )
     try:
         import yaml
@@ -197,15 +199,16 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
             raise RuntimeError(
                 "参数文件里 FollowPath.command_frame="
                 f"{configured} 与 launch 的 command_frame={command_frame} 不一致："
-                "两者必须同时是 base_link_fake（fake_vel_transform 转一次），"
+                "两者必须同时是 gimbal_yaw_fake（fake_vel_transform 转一次），"
                 "否则会重复旋转或完全不旋转。"
             )
     messages.append(
-        "[速度链] 导航 → fakeyaw 转换（wz 由导航/上位机拥有，独立自转链已删除）:\n"
+        "[速度链] 导航 → fakeyaw 转换（云台系；导航只出平移，wz 归决策层）:\n"
         f"    Nav2[{cmd_vel_nav_topic}] → fake_vel_transform"
-        f"[{mux_nav_topic}] → srm_cmd_mux → cmd_vel_sim → Gazebo\n"
-        "    TF owner: odom->base_link = 定位/真值里程计；"
-        "base_link->base_link_fake = fake_vel_transform"
+        f"[{mux_nav_topic}] → srm_cmd_mux ◄─ rotation_cmd（决策层 wz）"
+        " → cmd_vel_sim → Gazebo\n"
+        "    TF owner: odom->gimbal_yaw = 定位/真值里程计；"
+        "gimbal_yaw->gimbal_yaw_fake = fake_vel_transform"
     )
 
     messages.append(
@@ -251,7 +254,7 @@ def generate_launch_description():
     start_chassis_control = LaunchConfiguration("start_chassis_control")
 
     # 空场调试用的真值里程计：三种定位模式都不启用时，由仿真真值提供
-    # odom -> base_link。三种定位模式下由 Point-LIO / GICP / SLAM 提供。
+    # odom -> gimbal_yaw。三种定位模式下由 Point-LIO / GICP / SLAM 提供。
     use_ground_truth_odometry = PythonExpression([
         "not ", slam, " and not ", use_pcd_localization,
         " and not ", use_lio_odometry,
@@ -259,17 +262,22 @@ def generate_launch_description():
 
     # mux 的 nav_topic 固定是 fake 转换器的输出（唯一链路）。
     mux_nav_topic = PythonExpression(["'", FAKEYAW_MUX_TOPIC, "'"])
+    # 决策层底盘自转输入（只取 angular.z）：与实车链同一个话题名。
+    mux_spin_topic = LaunchConfiguration("mux_spin_topic")
 
-    # 航向策略（阶段二小陀螺进线，方案 §4.1.2）：yaw_mode=auto 时按链路推导 ——
-    # 本链路恒为 se2（导航拥有 wz）；显式 spin 表示外部自转请求经 rotation_cmd
-    # 直接进 MINCO setSpinRequest（独立自转链已删除，没有中间节点）。
+    # 航向策略（2026-11-12 云台系）：导航**只出平移**，底盘 wz 由决策层
+    # rotation_cmd -> srm_cmd_mux 给，完全和导航解耦。
+    #   mux_spin_topic 非空（默认 rotation_cmd）-> 固定 xy_only：mux 的 nav 输入
+    #     永远忽略 angular.z，se2/spin 在本入口不可能生效。
+    #   mux_spin_topic 留空（单输入回退旧行为）-> 才按 yaw_mode run（A/B 对照用）。
     yaw_mode_arg = LaunchConfiguration("yaw_mode")
     effective_yaw_mode = PythonExpression([
-        "'", yaw_mode_arg, "' if '", yaw_mode_arg, "' != 'auto' else 'se2'",
+        "'xy_only' if '", mux_spin_topic, "' != '' else ('",
+        yaw_mode_arg, "' if '", yaw_mode_arg, "' not in ('auto', 'se2') "
+        "else 'xy_only')",
     ])
 
-    # 云台自转：auto = 跟随航向策略（spin -> 2.0 rad/s，其它 -> 0）。
-    # 这样即使直接用 ros2 launch 起（不经 start_sim_nav.sh），小陀螺也一定转。
+    # 云台自转：auto = 跟随航向策略（仅在 mux 单输入 + spin 的 A/B 下 = 2.0，其余 0）。
     gimbal_rate_arg = LaunchConfiguration("gimbal_spin_rate")
     effective_gimbal_rate = PythonExpression([
         "'2.0' if ('", gimbal_rate_arg, "' == 'auto' and '", effective_yaw_mode,
@@ -277,12 +285,11 @@ def generate_launch_description():
         gimbal_rate_arg, "')",
     ])
 
-    # 判停器与航向策略必须配套：spin 模式下车到点仍在自转（小陀螺驻车），
-    # StoppedGoalChecker 的角速度判停永远不会通过，必须换成只看平移的
-    # OmniStoppedGoalChecker；非 spin 时保持迁移链/旧链路各自的文件值。
+    # 判停器：导航只出平移（xy_only），到点时底盘可能仍在自转（决策层小陀螺驻车），
+    # 带角速度判停的 StoppedGoalChecker 永远判不了到点 —— 一律用只看平移的
+    # OmniStoppedGoalChecker（与实车链一致）。
     effective_goal_checker = PythonExpression([
-        "'srm27_nav_plugins::OmniStoppedGoalChecker' if '", yaw_mode_arg,
-        "' == 'spin' else 'nav2_controller::StoppedGoalChecker'",
+        "'srm27_nav_plugins::OmniStoppedGoalChecker'",
     ])
 
     # 点云转换节点使用的参数：与旧入口一致，按命名空间 root_key 重写 use_sim_time。
@@ -324,6 +331,9 @@ def generate_launch_description():
         condition=IfCondition(start_simulation),
         launch_arguments={
             "gimbal_spin_rate": effective_gimbal_rate,
+            # 云台系：vx/vy 按云台系解释（插件按关节角旋到底盘），真值里程计发 odom->gimbal_yaw。
+            "velocity_command_frame": "gimbal",
+            "odom_link": "gimbal_yaw",
         }.items(),
     )
 
@@ -351,7 +361,9 @@ def generate_launch_description():
         # Keep this lightweight adapter off the high-rate /clock subscription.
         parameters=[
             {"use_sim_time": False},
-            {"base_frame": "base_link"},
+            # 云台系导航：真值里程计发布 odom -> gimbal_yaw（与导航参考系一致）。
+            # z 由节点按云台高度（chassis_top）补偿回地面，下游 z 阈值不用改。
+            {"base_frame": "gimbal_yaw"},
         ],
         remappings=[("/tf", "tf"), ("/tf_static", "tf_static")],
     )
@@ -439,6 +451,9 @@ def generate_launch_description():
             ),
             # mux 的输入就是 fake_vel_transform 的输出（唯一链路）。
             "nav_topic": mux_nav_topic,
+            # 决策层底盘自转（只取 angular.z）：与实车链同名同义。仿真里
+            # --chassis-spin / script/spin_control.sh 发的就是这个话题。
+            "spin_topic": mux_spin_topic,
         }.items(),
     )
 
@@ -464,9 +479,9 @@ def generate_launch_description():
             "yaw_mode",
             default_value="auto",
             description=(
-                "MINCO 航向策略：auto=按链路推导（迁移链 se2 / 旧链路 xy_only）；"
-                "spin=外部自转请求进线（阶段二小陀螺，配合 script/spin_control.sh）；"
-                "se2 / xy_only 为显式指定。spin 时判停器自动换成 OmniStoppedGoalChecker"
+                "MINCO 航向策略：云台系固定 xy_only（导航只出平移，底盘 wz 走 "
+                "rotation_cmd -> srm_cmd_mux）。只有把 mux_spin_topic 留空（单输入回退）"
+                "时才按本参数跑，用于 A/B 对照；判停器一律 OmniStoppedGoalChecker"
             ),
         )
     )
@@ -622,12 +637,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "command_frame",
             default_value=PythonExpression([
-                "'base_link_fake' if ", fakeyaw_default, " else 'base_link'",
+                "'gimbal_yaw_fake' if ", fakeyaw_default, " else 'base_link'",
             ]),
             description=(
                 "MINCO 速度命令坐标系。base_link = 控制器做一次 R(-psi)；"
-                "base_link_fake = 输出 odom 对齐的平移速度，由 fake_vel_transform 做唯一转换。"
+                "gimbal_yaw_fake = 输出 odom 对齐的平移速度，由 fake_vel_transform 做唯一转换。"
                 "必须与参数文件里的 FollowPath.command_frame 一致（不一致会直接报错）。"
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "mux_spin_topic",
+            default_value="rotation_cmd",
+            description=(
+                "srm_cmd_mux 的第二路输入：决策层底盘自转（只取 angular.z）。"
+                "与实车链同名同义；留空 = 单输入（旧行为，导航同时拥有 wz）。"
             ),
         )
     )
@@ -680,7 +705,7 @@ def generate_launch_description():
             context,
             context.launch_configurations.get("params_file", ""),
             context.launch_configurations.get("use_fakeyaw_transform", "True"),
-            context.launch_configurations.get("command_frame", "base_link_fake"),
+            context.launch_configurations.get("command_frame", "gimbal_yaw_fake"),
             context.launch_configurations.get("cmd_vel_nav_topic", ""),
             # 用与 include 完全同一个替换求值，避免"核对的是另一套表达式"。
             # perform_substitutions 只接受替换列表，单个替换要先归一化。

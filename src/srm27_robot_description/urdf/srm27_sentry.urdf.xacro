@@ -113,6 +113,11 @@
        `chassis_to_gimbal_yaw`（所以 srm27_nav_protocol 的 gimbal_joint_sign 用 +1.0）。
        默认 false = 原来的方向（根是 base_link），仿真与旧配置行为完全不变。 -->
   <xacro:arg name="gimbal_is_root"    default="false"/>
+  <!-- 反转树以后，关节角的**来源**决定轴方向：
+       实车：下位机回传的是"底盘相对云台"（+1，默认）；
+       仿真：Gazebo /joint_states 给的是"云台相对底盘"（SDF 关节方向），
+             反转 URDF 里同一个关节值要反号，填 -1 才能让底盘朝向正确。 -->
+  <xacro:arg name="gimbal_axis_sign"  default="1.0"/>
 
   <!-- 几何（默认值 = CAD 实测；model_builder 会用几何 YAML 的值覆盖，保证 SDF/URDF 同源） -->
   <xacro:arg name="chassis_radius"    default="0.2743"/>
@@ -435,7 +440,7 @@
       <parent link="${gimbal_joint_parent}"/>
       <child link="${gimbal_joint_child}"/>
       <origin xyz="0 0 ${gimbal_joint_z}" rpy="0 0 0"/>
-      <axis xyz="0 0 1"/>
+      <axis xyz="0 0 $(arg gimbal_axis_sign)"/>
       <limit lower="${-PI}" upper="${PI}" effort="30" velocity="10"/>
       <dynamics damping="0.2" friction="0.1"/>
     </joint>

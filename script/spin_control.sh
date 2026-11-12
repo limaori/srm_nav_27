@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # 手动控制小陀螺（阶段二，方案 §4.1.2 的自转请求进线）。
 #
-# 原理: 本脚本向 /<ns>/rotation_cmd 发转速请求 -> MINCO(yaw_policy.mode=spin)
-#       setSpinRequest -> 导航输出 wz -> fake_vel_transform -> srm_cmd_mux -> 底盘。
-#       停发超过 spin_request.timeout(默认 0.25 s) 后 MINCO 按撤回处理，车停止自转。
+# 原理: 本脚本向 /<ns>/rotation_cmd 发转速请求。
+#   2026-11-12 起（云台系，仿真 / 实车同一套）：
+#       rotation_cmd -> srm_cmd_mux(spin_topic，只取 angular.z) -> cmd_vel_sim/chassis
+#       与导航**完全解耦**：请求不进 MINCO（xy_only 会拒绝并计数），停发
+#       mux 的 spin_timeout(默认 0.25 s) 后车停止自转；没有导航目标时也照转。
+#   旧链（yaw_policy.mode=spin，仅 A/B 回退时）：
+#       rotation_cmd -> MINCO setSpinRequest -> 导航输出 wz -> fake -> mux -> 底盘。
 #
 # 2026-10-19: 独立自转链（rotation_controller / rotation_velocity）已删除，请求由
-#       上位机直接进 MINCO。原来的 wz_max(2.0) 限幅改由本脚本在本地下发前钳位
-#       （--max-wz，默认 2.0；MINCO / mux 侧仍有各自的 wz 上限兜底）。
-#       wz 始终由导航产生，符合"上位机控制 wz"的唯一权威。
+#       上位机直接发。原来的 wz_max(2.0) 限幅改由本脚本在本地下发前钳位
+#       （--max-wz，默认 2.0；mux 的 wz_max / wz_ramp 仍会兜底）。
 #
 # 前置:
-#   1) 导航栈用小陀螺模式启动:  ./script/start_sim_nav.sh --yaw-mode spin ...
-#      (yaw_mode=se2 时请求会被航向策略忽略，车不会转 —— 这是迁移契约，不是故障)
+#   1) 导航栈已经起来（仿真 / 实车脚本的默认 xy_only 即可，不需要 --yaw-mode spin）。
 #   2) 在已 source install/setup.bash 的终端运行 (或设 SRM27_WS_DIR)。
 #
 # 用法:
@@ -24,12 +26,12 @@
 #           SPIN_MAX_WZ (默认 2.0 rad/s)
 #           SPIN_CMD_TOPIC  自转请求发到哪个话题。默认 <ns>/rotation_cmd ——
 #           start_sim_nav.sh --chassis-spin 与 start_real_nav.sh --chassis-spin 用的都是它
-#           （MINCO 在听）。
+#           （云台系：srm_cmd_mux 在听；旧 spin 模式：MINCO 也在听）。
 #           start_sim_slam.sh --chassis-spin 会把它指到 <ns>/cmd_vel_nav_fake：
-#           建图栈没有 MINCO（rotation_cmd 无人订阅），只能从 fakeyaw 链入口注入，
-#           经 fake_vel_transform -> srm_cmd_mux -> cmd_vel_sim 到底盘。
-#           注意 status 的 1)/3) 段是 rotation_cmd 专用（MINCO 参数与诊断），
-#           换话题后那两段只作对照。
+#           建图栈没有 MINCO / mux（rotation_cmd 无人订阅），只能从 fakeyaw 链入口注入，
+#           经 fake_vel_transform 到底盘。
+#           注意 status 的 1)/3) 段是 MINCO 专用（它的参数与诊断）；云台系下 MINCO
+#           只会拒绝自转请求，**真实执行看第 4 段**（mux 输出 / 里程计）。
 #           SPIN_EXEC_TOPIC 执行端话题（status 第 4 段用）。默认自动识别：
 #           有 cmd_vel_sim（仿真）就用它，否则用 cmd_vel_chassis（实车）。
 set -euo pipefail
@@ -110,15 +112,16 @@ case "$cmd" in
     elif [ "$subs" = "0" ]; then
       cat <<WARN
 [警告] ${CMD_TOPIC} 现在**没有任何订阅者**，请求发出去也没人听。常见原因：
-        · MINCO 的 spin_request.topic 不是 rotation_cmd（用 -c minco 或 -p …minco.yaml 时
-          会退回代码默认值 rotation_velocity）
+        · 云台系链路里 mux 的 spin_topic 不是 rotation_cmd
+          （srm_chassis_control.launch.py / nav_srm_simulation_launch.py 的 mux_spin_topic）
+        · 旧 spin 模式里 MINCO 的 spin_request.topic 不是 rotation_cmd
         · 话题指错了（SPIN_CMD_TOPIC=${CMD_TOPIC}）
         · 命名空间不一致（本脚本 ROBOT_NS='${NS}'，空串=根命名空间）
         · 栈和本终端不在同一个 ROS_DOMAIN_ID
        逐条确认: $0 status
 WARN
     else
-      echo "[提示] ${CMD_TOPIC} 订阅者 ${subs} 个（MINCO / fake_vel_transform 在听）。停止: $0 off"
+      echo "[提示] ${CMD_TOPIC} 订阅者 ${subs} 个（云台系: srm_cmd_mux；旧 spin 模式: MINCO）。停止: $0 off"
     fi
     ;;
   off)
@@ -134,7 +137,7 @@ WARN
     echo "===== 1) 模式与话题（决定请求会不会被消费） ====="
     echo "  请求话题               = ${CMD_TOPIC}"
     if [ "$CMD_TOPIC" != "$(_t rotation_cmd)" ]; then
-      echo "  （自定义话题：MINCO 只订阅 rotation_cmd，下面两项仅作对照）"
+      echo "  （自定义话题：mux 的 spin_topic / MINCO 的 spin_request.topic 才是 rotation_cmd，下面仅作对照）"
     fi
     # nav2 节点在机器人命名空间下（/red_standard_robot1/controller_server）；根命名空间的
     # 部署才用 /controller_server。两种都试，否则永远"读不到"。
@@ -153,8 +156,8 @@ WARN
       mode=""; topic=""
     fi
     wzmax="$(timeout 8 ros2 param get "$(_t srm_cmd_mux)" wz_max 2>/dev/null | sed 's/^Double value is: //' || true)"
-    echo "  yaw_policy.mode        = ${mode:-<读不到>}   # 必须 spin"
-    echo "  spin_request.topic     = ${topic:-<读不到>}   # 必须 rotation_cmd"
+    echo "  yaw_policy.mode        = ${mode:-<读不到>}   # 云台系应为 xy_only（MINCO 不消费自转）"
+    echo "  spin_request.topic     = ${topic:-<读不到>}   # 与 mux 的 spin_topic 都应为 rotation_cmd"
     echo "  srm_cmd_mux.wz_max     = ${wzmax:-<读不到>}"
 
     echo "===== 2) 请求是否真的发出去了 ====="
@@ -162,23 +165,23 @@ WARN
     subs_info="$(timeout 5 ros2 topic info "$CMD_TOPIC" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
     echo "${subs_info:-查不到}"
     if [ "${subs_info:-0}" = "0" ]; then
-      echo "  ⚠ 没人在听。检查 MINCO 是不是在听旧话题名:"
+      echo "  ⚠ 没人在听。检查 mux 的 spin_topic 与 MINCO 的 spin_request.topic 是不是旧话题名:"
       for alt in rotation_velocity; do
         alt_subs="$(timeout 5 ros2 topic info "$(_t "${alt}")" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
         [ -n "${alt_subs:-}" ] && [ "${alt_subs:-0}" != "0" ] \
-          && echo "    $(_t "${alt}") 订阅者 ${alt_subs} 个 ← MINCO 在这里听着（spin_request.topic 没配成 rotation_cmd）"
+          && echo "    $(_t "${alt}") 订阅者 ${alt_subs} 个 ← 有节点在旧话题上听着"
       done
-      echo "  也确认 Nav2 是否在跑: ros2 node list | grep -E 'controller_server|planner_server|bt_navigator'"
+      echo "  也确认 Nav2 是否在跑: ros2 node list | grep -E 'controller_server|planner_server|bt_navigator|srm_cmd_mux'"
     fi
     timeout 3 ros2 topic echo "$CMD_TOPIC" --once 2>/dev/null | grep -A3 "^angular" || echo "  (无发布 —— 请求未发出，或 $0 on 的后台进程已死)"
 
-    echo "===== 3) MINCO 有没有消费（目标状态看这里） ====="
+    echo "===== 3) MINCO 有没有消费（云台系下应显示拒绝；真实执行看第 4 段） ====="
     timeout 4 ros2 topic echo "$(_t FollowPath/diagnostics)" --once 2>/dev/null \
       | grep -A1 -E "key: (yaw_mode|spin_request|spin_request_fresh|applied_wz|rejected_spin_request_count|planning_result|stop_reason)" \
       | grep -E "key:|value:" | paste - - | sed 's/key: //; s/[[:space:]]*value: /=/' | sed 's/^/  /' \
-      || echo "  (诊断未收到 —— 没目标时控制器不跑，或 yaw_mode 不是 spin)"
+      || echo "  (诊断未收到 —— 没目标时控制器不跑；云台系下这里不作为执行依据)"
 
-    echo "===== 4) 三层速度（wz 应逐层相同、非零） ====="
+    echo "===== 4) 三层速度（云台系: nav 两层 wz=0，执行层 = 请求值） ====="
     # 执行端话题：仿真叫 cmd_vel_sim，实车叫 cmd_vel_chassis（串口节点订阅的话题）。
     # 没显式给 SPIN_EXEC_TOPIC 时按"谁能查到就用谁"自动识别，两种部署都能直接跑。
     exec_topic="${SPIN_EXEC_TOPIC:-}"

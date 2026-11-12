@@ -25,6 +25,7 @@
 #include <ignition/gazebo/Model.hh>
 #include <ignition/gazebo/Util.hh>
 #include <ignition/gazebo/components/AngularVelocity.hh>
+#include <ignition/gazebo/components/JointPosition.hh>
 #include <ignition/gazebo/components/JointVelocity.hh>
 #include <ignition/gazebo/components/JointVelocityCmd.hh>
 #include <ignition/gazebo/components/LinearVelocity.hh>
@@ -64,6 +65,13 @@ class SrmVelocitySystemPrivate
   /// \brief 底盘 link 实体。
   public: ignition::gazebo::Entity chassisLink{
     ignition::gazebo::kNullEntity};
+
+  /// \brief 真值里程计使用的 link 实体（默认 = 底盘；云台系导航时填 gimbal_yaw）。
+  public: ignition::gazebo::Entity odomLink{
+    ignition::gazebo::kNullEntity};
+
+  /// \brief 真值里程计 link 的名字（只用于日志与 child_frame_id）。
+  public: std::string odomLinkName{"base_link"};
 
   /// \brief 模型实体。
   public: ignition::gazebo::Entity modelEntity{
@@ -122,6 +130,16 @@ class SrmVelocitySystemPrivate
   /// \brief 云台是否由外部（ROS 话题 + gz JointController）驱动。
   /// true 时本插件**完全不碰**云台关节，避免两个所有者互相覆盖。
   public: bool gimbalExternalDriver{false};
+
+  /// \brief 输入速度（vx/vy）是否按**云台系**解释。
+  ///
+  /// true = 相当于实车下位机：MCU 接收的是云台系 vx/vy（导航云台系改造后的协议），
+  /// 执行前按云台关节角把平移旋到底盘系；wz 始终是底盘角速度，不旋转。
+  /// false（默认）= 旧行为，vx/vy 直接按底盘 link 系执行。
+  public: bool commandInGimbalFrame{false};
+
+  /// \brief 云台关节角组件缺失时只告警一次。
+  public: bool gimbalFrameFallbackLogged{false};
 };
 
 //////////////////////////////////////////////////
@@ -218,6 +236,44 @@ void SrmVelocitySystem::Configure(
     }
   }
 
+  // 输入速度坐标系：云台系导航时，vx/vy 是"云台前/左"，执行前要按云台关节角
+  // 旋到底盘 link 系（等价于实车下位机按云台执行）；wz 始终是底盘角速度，不转。
+  if (_sdf && _sdf->HasElement("command_in_gimbal_frame"))
+  {
+    this->dataPtr->commandInGimbalFrame =
+        _sdf->Get<bool>("command_in_gimbal_frame");
+  }
+  if (this->dataPtr->commandInGimbalFrame &&
+      this->dataPtr->gimbalJoint == ignition::gazebo::kNullEntity)
+  {
+    ignerr << "SrmVelocitySystem: command_in_gimbal_frame=true 但找不到云台关节 ["
+           << gimbalJointName << "]，vx/vy 将按底盘系执行（云台系导航会跑偏）。"
+           << std::endl;
+  }
+
+  // 真值里程计的输出 link：默认底盘；云台系导航填 gimbal_yaw（odom -> gimbal_yaw）。
+  auto odomLinkName = chassisLinkName;
+  if (_sdf && _sdf->HasElement("odom_link"))
+  {
+    odomLinkName = _sdf->Get<std::string>("odom_link");
+  }
+  this->dataPtr->odomLinkName = odomLinkName;
+  this->dataPtr->odomLink = this->dataPtr->chassisLink;
+  if (odomLinkName != chassisLinkName)
+  {
+    const auto resolved = model.LinkByName(_ecm, odomLinkName);
+    if (resolved == ignition::gazebo::kNullEntity)
+    {
+      ignerr << "SrmVelocitySystem 找不到里程计 link [" << odomLinkName
+             << "]，回退到底盘 [" << chassisLinkName << "]。" << std::endl;
+      this->dataPtr->odomLinkName = chassisLinkName;
+    }
+    else
+    {
+      this->dataPtr->odomLink = resolved;
+    }
+  }
+
   const auto resolvedCommandTopic = modelName + "/" + commandTopic;
   const auto resolvedOdomTopic = modelName + "/" + odomTopic;
 
@@ -231,11 +287,15 @@ void SrmVelocitySystem::Configure(
 
   this->dataPtr->odomFrameId = modelName + "/odom";
   this->dataPtr->odomChildFrameId = modelName + "/" +
-      ignition::common::replaceAll(chassisLinkName, "::", "/");
+      ignition::common::replaceAll(this->dataPtr->odomLinkName, "::", "/");
 
   ignmsg << "SrmVelocitySystem 已就绪: 底盘 [" << chassisLinkName
-         << ", 车体系速度], 订阅 [" << resolvedCommandTopic << "], 发布 ["
-         << resolvedOdomTopic << "], 命令超时 "
+         << ", "
+         << (this->dataPtr->commandInGimbalFrame ? "云台系 vx/vy（按关节角旋到底盘）"
+                                                 : "车体系速度")
+         << "], 订阅 [" << resolvedCommandTopic << "], 发布 ["
+         << resolvedOdomTopic << "], 里程计 link ["
+         << this->dataPtr->odomLinkName << "], 命令超时 "
          << this->dataPtr->commandTimeout << " s" << std::endl;
 }
 
@@ -277,6 +337,31 @@ void SrmVelocitySystem::PreUpdate(
     _ecm.CreateComponent(
         this->dataPtr->chassisLink,
         ignition::gazebo::components::AngularVelocity());
+  }
+  // 里程计 link 与底盘不同（云台系导航）时，同样保证这三个组件存在。
+  if (this->dataPtr->odomLink != ignition::gazebo::kNullEntity &&
+      this->dataPtr->odomLink != this->dataPtr->chassisLink)
+  {
+    if (!_ecm.Component<ignition::gazebo::components::WorldPose>(
+            this->dataPtr->odomLink))
+    {
+      _ecm.CreateComponent(
+          this->dataPtr->odomLink, ignition::gazebo::components::WorldPose());
+    }
+    if (!_ecm.Component<ignition::gazebo::components::LinearVelocity>(
+            this->dataPtr->odomLink))
+    {
+      _ecm.CreateComponent(
+          this->dataPtr->odomLink,
+          ignition::gazebo::components::LinearVelocity());
+    }
+    if (!_ecm.Component<ignition::gazebo::components::AngularVelocity>(
+            this->dataPtr->odomLink))
+    {
+      _ecm.CreateComponent(
+          this->dataPtr->odomLink,
+          ignition::gazebo::components::AngularVelocity());
+    }
   }
 
   // 暂停时不推进，物理引擎也不会积分；直接清空缓存，恢复后必须重新收到命令
@@ -336,9 +421,9 @@ void SrmVelocitySystem::PreUpdate(
           this->dataPtr->chassisLink)->Data();
 
   // Gazebo 的 SetLinearVelocity / SetAngularVelocity 接受的就是 Link 坐标系
-  // （车体系）速度，因此合成指令不需要再做世界系转换；转换只能做一次，
-  // 这里刻意不做任何旋转。z 平移与 roll/pitch 角速度保留物理结果，
-  // 不给正常平面运动额外施加持续旋转。
+  // （车体系）速度，因此合成指令不需要再做世界系转换；转换只能做一次。
+  // 唯一可能发生的旋转是"云台系 -> 底盘系"（command_in_gimbal_frame），它模拟
+  // 实车下位机按云台的"前"执行 vx/vy；wz 始终是底盘角速度，不参与旋转。
   const double vx = std::isfinite(targetVel.linear().x())
       ? targetVel.linear().x() : 0.0;
   const double vy = std::isfinite(targetVel.linear().y())
@@ -346,8 +431,36 @@ void SrmVelocitySystem::PreUpdate(
   const double wz = std::isfinite(targetVel.angular().z())
       ? targetVel.angular().z() : 0.0;
 
+  double vxBody = vx;
+  double vyBody = vy;
+  if (this->dataPtr->commandInGimbalFrame &&
+      this->dataPtr->gimbalJoint != ignition::gazebo::kNullEntity)
+  {
+    auto *jointPos =
+        _ecm.Component<ignition::gazebo::components::JointPosition>(
+            this->dataPtr->gimbalJoint);
+    if (jointPos == nullptr || jointPos->Data().empty())
+    {
+      if (!this->dataPtr->gimbalFrameFallbackLogged)
+      {
+        this->dataPtr->gimbalFrameFallbackLogged = true;
+        ignwarn << "SrmVelocitySystem: 云台关节角不可用，vx/vy 暂按底盘系执行。"
+                << std::endl;
+      }
+    }
+    else
+    {
+      // v_body = Rz(theta) · v_gimbal，theta = 云台相对底盘的关节角（+z，右正）。
+      const double theta = jointPos->Data()[0];
+      const double c = std::cos(theta);
+      const double s = std::sin(theta);
+      vxBody = c * vx - s * vy;
+      vyBody = s * vx + c * vy;
+    }
+  }
+
   chassisLink.SetLinearVelocity(
-      _ecm, ignition::math::Vector3d(vx, vy, linearVel.Z()));
+      _ecm, ignition::math::Vector3d(vxBody, vyBody, linearVel.Z()));
   chassisLink.SetAngularVelocity(
       _ecm, ignition::math::Vector3d(
           angularVel.X(), angularVel.Y(), wz));
@@ -431,15 +544,14 @@ void SrmVelocitySystemPrivate::UpdateOdometry(
   {
     return;
   }
+  const auto odomLink = this->odomLink == ignition::gazebo::kNullEntity
+      ? this->chassisLink : this->odomLink;
   const auto poseComp =
-      _ecm.Component<ignition::gazebo::components::WorldPose>(
-          this->chassisLink);
+      _ecm.Component<ignition::gazebo::components::WorldPose>(odomLink);
   const auto linearVelComp =
-      _ecm.Component<ignition::gazebo::components::LinearVelocity>(
-          this->chassisLink);
+      _ecm.Component<ignition::gazebo::components::LinearVelocity>(odomLink);
   const auto angularVelComp =
-      _ecm.Component<ignition::gazebo::components::AngularVelocity>(
-          this->chassisLink);
+      _ecm.Component<ignition::gazebo::components::AngularVelocity>(odomLink);
   if (!poseComp || !linearVelComp || !angularVelComp)
   {
     return;

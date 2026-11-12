@@ -34,11 +34,14 @@
 #   |--------------------------|-----------|------------|--------------------------|
 #   | 控制器平移上限           | 1.50      | 2.60       | 最直接的"油门"（合速度） |
 #   | 控制器平移加速度上限     | 无        | 7.00       | Omni 由平滑器承担        |
-#   | 控制器角速度 / 角加速度  | 1.00      | 8.50 / 25.0| se2 下 MPC 角速度权限生效 |
-#   | 平滑器 max_velocity      | 1.50      | 2.60 / 8.50| [x,y,yaw]，按分量钳位    |
-#   | 平滑器 max_accel         | 3.00      | 7.00 / 25.0| [x,y,yaw]                |
+#   | 控制器角速度 / 角加速度  | 1.00      | 8.50 / 25.0| xy_only 下导航 wz 权限为 0 |
+#   | 平滑器 max_velocity      | 1.50      | 2.60 / 8.50| @fakeyaw 再钳 yaw=0      |
+#   | 平滑器 max_accel         | 3.00      | 7.00 / 25.0| @fakeyaw 再钳 yaw=0      |
 #   | mux v_max（合速度）      | 2.60      | 2.60       | cmd_vel_sim 前最后一道钳位 |
-#   | mux wz_max               | 8.50      | 8.50       | 同上                     |
+#   | mux wz_max               | 8.50      | 8.50       | 决策层 rotation_cmd 的唯一上限闸 |
+#   ⚠ 2026-11-12 仿真云台系：导航只出平移（xy_only）。`velocity_smoother@fakeyaw`
+#     把 yaw 界钳 0（导航漏出 wz 的上游闸）；底盘 wz 只来自 mux 的 spin_topic
+#     （rotation_cmd），由 mux 的 wz_max / wz_ramp 约束，不经过控制器与平滑器。
 #   ⚠ Omni 变体仍留在 1.5 档（`--omni` 入口已删除，它只剩建图/回退用途）；
 #     mux 段是两个变体共用的，所以 mux 的上限按 MINCO 的档位给 —— 对 Omni 无害
 #     （它的控制器/平滑器自己就钳在 1.5）。
@@ -110,6 +113,21 @@ velocity_smoother@minco:
     min_velocity: [-2.6, -2.6, -8.5]    # 最小速度[x,y,yaw]
     max_accel: [7.0, 7.0, 25.0]         # 最大加速度[x,y,yaw]（= 底盘能力）
     max_decel: [-7.0, -7.0, -25.0]      # 最大减速度[x,y,yaw]
+
+# -----------------------------------------------------------------------------
+# 迁移链（fakeyaw，`config/simulation/nav2_params_srm_fakeyaw.yaml`）
+# 叠加在 `velocity_smoother@minco` 之上：平移档不动，只钉住"导航这一路不许出 wz"。
+# -----------------------------------------------------------------------------
+velocity_smoother@fakeyaw:
+  ros__parameters:
+    # 2026-11-12 仿真云台系（与实车链 config/real 对齐）：导航只出平移，yaw 界钳 0。
+    # 底盘 wz 改由**决策层**发 rotation_cmd，在 srm_cmd_mux 里合进输出，不经过平滑器。
+    # 这一层是"导航漏出 wz"的最后一道上游闸：平滑器任何 yaw 都会被削成 0，
+    # mux 还会再忽略一次并计数告警。
+    max_velocity: [2.6, 2.6, 0.0]
+    min_velocity: [-2.6, -2.6, 0.0]
+    max_accel: [7.0, 7.0, 0.0]
+    max_decel: [-7.0, -7.0, 0.0]
 
 # -----------------------------------------------------------------------------
 # 速度合成 mux（合并进 srm27_chassis_control/config/srm_chassis_control.yaml）
