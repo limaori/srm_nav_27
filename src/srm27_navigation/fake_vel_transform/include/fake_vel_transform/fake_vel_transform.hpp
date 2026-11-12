@@ -231,6 +231,8 @@ private:
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   /// \brief 指令下发到底盘真正执行的延迟（仿真秒）；仿真里估计 10~30 ms，需标定。
   double actuation_delay_{0.02};
+  /// \brief 执行端 vx/vy 参考系相对 /odometry yaw 的固定偏移（度）。0 = 原行为。
+  double yaw_offset_deg_{0.0};
   double wz_history_window_{1.0};
   /// \brief 最近一条里程计的时间戳（仿真时间，来自 header.stamp）。
   rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};

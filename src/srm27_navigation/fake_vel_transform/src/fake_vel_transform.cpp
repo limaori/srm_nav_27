@@ -97,6 +97,12 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->declare_parameter<std::string>("imu_topic", "livox/imu");
   this->declare_parameter<std::string>("imu_target_frame", "gimbal_yaw");
   this->declare_parameter<double>("gimbal_rate_timeout", 0.1);
+  // 2026-11-12（实车标定）：执行端 vx/vy 的参考系与 /odometry 的 yaw 之间差一个固定角。
+  // 实测（frame_probe.py 两跑，云台 63.4° 与 16.4°）：世界运动方向 = ψ_odom + 65°，
+  // 与云台角度无关；63° 正是雷达安装角的 yaw（gimbal_yaw->livox_imu 的 RPY 第三项）。
+  // 取非零时，下发前多转 -offset，把底盘实际执行的方向对回 odom。
+  // 只影响速度转换；`gimbal_yaw->gimbal_yaw_fake` 的 TF 仍是 odom 对齐（yaw 不变）。
+  this->declare_parameter<double>("yaw_offset_deg", 0.0);
 
   std::string mode_text;
   this->get_parameter("transform_mode", mode_text);
@@ -119,6 +125,12 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->get_parameter("imu_topic", imu_topic_);
   this->get_parameter("imu_target_frame", imu_target_frame_);
   this->get_parameter("gimbal_rate_timeout", gimbal_rate_timeout_);
+  this->get_parameter("yaw_offset_deg", yaw_offset_deg_);
+  if (!std::isfinite(yaw_offset_deg_) || std::abs(yaw_offset_deg_) > 180.0) {
+    RCLCPP_FATAL(get_logger(), "yaw_offset_deg 必须是 [-180, 180] 内的有限值，收到 %f",
+      yaw_offset_deg_);
+    throw std::invalid_argument("yaw_offset_deg out of range");
+  }
 
   if (mode_text == "nav_se2") {
     mode_ = Mode::kNavSe2;
@@ -247,7 +259,8 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
       "FakeVelTransform 已启动 (nav_se2): TF %s -> %s, odom=%s, 速度 [%s] -> [%s], "
       "odom 超时 %.3f s（墙钟）, wz 逐条透传，无自转叠加。\n"
       "  yaw 外推: 推算源=%s（%s）, 生效延迟 d=%.3f s（仿真秒）, 积分窗口 %.2f s, "
-      "实测转速断流门限 %.2f s; 外推用节点时钟(use_sim_time=%s) + odom.stamp，不用墙钟。",
+      "实测转速断流门限 %.2f s; 外推用节点时钟(use_sim_time=%s) + odom.stamp，不用墙钟。\n"
+      "  执行端参考系偏移 yaw_offset_deg=%.2f°（0=原行为；实车按 frame_probe 标定）",
       robot_base_frame_.c_str(), fake_robot_base_frame_.c_str(), odom_topic_.c_str(),
       input_cmd_vel_topic_.c_str(), output_cmd_vel_topic_.c_str(), odom_timeout_,
       yaw_rate_source_name_.c_str(),
@@ -255,7 +268,7 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
       (yaw_rate_source_ == YawRateSource::kGimbalRate ? gimbal_rate_topic_.c_str() :
       imu_topic_.c_str()),
       actuation_delay_, wz_history_window_, gimbal_rate_timeout_,
-      this->get_parameter("use_sim_time").as_bool() ? "true" : "false");
+      this->get_parameter("use_sim_time").as_bool() ? "true" : "false", yaw_offset_deg_);
   } else {
     local_plan_sub_filter_.subscribe(this, local_plan_topic_);
     local_plan_sub_filter_.registerCallback(
@@ -689,7 +702,8 @@ void FakeVelTransform::publishTransformedVelocity(const geometry_msgs::msg::Twis
   }
 
   const PlanarVelocity v_fake{_cmd.linear.x, _cmd.linear.y, _cmd.angular.z};
-  const PlanarVelocity v_base = fakeToRobotBase(v_fake, yaw);
+  // 执行端参考系修正（默认 0 = 原行为）。
+  const PlanarVelocity v_base = fakeToRobotBase(v_fake, yaw + yaw_offset_deg_ * M_PI / 180.0);
 
   geometry_msgs::msg::Twist out;
   out.linear.x = v_base.vx;
