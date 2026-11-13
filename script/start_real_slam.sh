@@ -66,6 +66,11 @@
 #       --use-sim-time          使用 /clock (回放 bag 时用, 默认 False)
 #       --lio-frontend <point_lio|zlio>  里程计前端（**默认 zlio**）；
 #                               zlio = frontend/zlio_node + zlio_bridge（与导航链一致）
+#       --scan-cloud <raw|registered>  2D 栅格用哪路点云（默认 **raw**）
+#                               raw = /livox/lidar/pointcloud（~20k 点/帧，720 个方位格覆盖 ~600，
+#                                     矮台阶/薄栏杆能进图；代价：未做运动去畸变）
+#                               registered = registered_scan（已去畸变，但只有 ~1.7k 点/帧、
+#                                     覆盖 ~264 格，薄/矮障碍常被相邻射线当空闲刷掉）
 #       --save-pcd              退出时落盘累积点云（point_lio 自己写，zlio 由 zlio_bridge 写）
 #       --save-pcd-path <路径>  自定义落盘路径，默认 src/srm27_navigation/point_lio/PCD/scans.pcd
 #       --rviz / --no-rviz      是否启动 RViz (默认启动)
@@ -80,7 +85,7 @@
 # 环境变量 (同名参数均可由环境变量给默认值):
 #   SAVE_MAP_NAME MAP_OUT_DIR FORCE_SAVE WAIT_FOR_SLAM PARAMS_FILE LIDAR_CONFIG_FILE
 #   RECORD_BAG BAG_NAME BAG_DERIVED BAG_OUT_DIR BAG_TOPICS BAG_MIN_FREE_GB BAG_FINALIZE_WAIT
-#   LIDAR_XYZ LIDAR_RPY START_LIDAR USE_SIM_TIME SAVE_PCD
+#   LIDAR_XYZ LIDAR_RPY START_LIDAR USE_SIM_TIME SAVE_PCD SCAN_CLOUD
 #   USE_RVIZ USE_CHASSIS USE_JOY JOY_DEV
 #   MAPPING_EXTRA_ARGS  额外透传给 real_mapping_launch.py 的参数, 例如
 #                       "scan_cloud_topic:=/livox/lidar/pointcloud" (2D 扫描改用原始点云)
@@ -168,6 +173,10 @@ PCD_SAVE_PATH_CLI="${PCD_SAVE_PATH_CLI:-}"
 # 里程计/配准点云前端：zlio（默认，与 start_real_nav.sh 一致）或 point_lio（回退）。
 LIO_FRONTEND="${LIO_FRONTEND:-zlio}"
 ZLIO_CONFIG="${ZLIO_CONFIG:-}"
+# 2D 栅格吃哪路点云：raw（默认，原始 ~20k 点/帧）或 registered（LIO 的 ~1.7k 点/帧）。
+# 原因见 real_mapping_launch.py 的 scan_cloud_topic：稀疏云会让相邻射线把薄/矮障碍刷成空闲。
+# 留空 = 按是否起雷达决定（起雷达 raw；--no-lidar 回放时只能 registered）。
+SCAN_CLOUD="${SCAN_CLOUD:-}"
 
 PARAMS_FILE="${PARAMS_FILE:-}"
 LIDAR_CONFIG_FILE="${LIDAR_CONFIG_FILE:-}"
@@ -660,6 +669,7 @@ while [ $# -gt 0 ]; do
     --save-pcd-path) PCD_SAVE_PATH_CLI="${2:?--save-pcd-path 需要路径}"; shift 2 ;;
     --lio-frontend)  LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"; shift 2 ;;
     --zlio-config)   ZLIO_CONFIG="${2:?--zlio-config 需要路径}"; shift 2 ;;
+    --scan-cloud)    SCAN_CLOUD="${2:?--scan-cloud 需要 raw|registered}"; shift 2 ;;
     --rviz)          USE_RVIZ=1; shift ;;
     --no-rviz)       USE_RVIZ=0; shift ;;
     --chassis)       USE_CHASSIS=1; shift ;;
@@ -742,6 +752,18 @@ fi
 case "$LIO_FRONTEND" in
   point_lio|zlio) ;;
   *) echo "[错误] --lio-frontend 只支持 point_lio / zlio, 收到: $LIO_FRONTEND" >&2; exit 2 ;;
+esac
+# 2D 栅格的点云来源。raw = 雷达原始云（密，矮/薄障碍能进图；未去畸变），
+# registered = LIO 输出的 registered_scan（已去畸变，但只有 ~1.7k 点/帧）。
+# 没显式给就按是否起雷达决定：--no-lidar 回放时 bag 里只有 CustomMsg，没有
+# /livox/lidar/pointcloud，只能退回 registered_scan。
+if [ -z "$SCAN_CLOUD" ]; then
+  if [ "$START_LIDAR" = "1" ]; then SCAN_CLOUD=raw; else SCAN_CLOUD=registered; fi
+fi
+case "$SCAN_CLOUD" in
+  raw)        SCAN_CLOUD_TOPIC="/livox/lidar/pointcloud" ;;
+  registered) SCAN_CLOUD_TOPIC="registered_scan" ;;
+  *) echo "[错误] --scan-cloud 只支持 raw / registered, 收到: $SCAN_CLOUD" >&2; exit 2 ;;
 esac
 if [ -z "$ZLIO_CONFIG" ]; then
   ZLIO_CONFIG="$PKG_DIR/config/real/zlio_mid360.yaml"
@@ -844,11 +866,13 @@ MAPPING_CMD="$MAPPING_CMD start_lidar:=$(bool_arg "$START_LIDAR")"
 MAPPING_CMD="$MAPPING_CMD use_sim_time:=$CLOCK_ARG"
 MAPPING_CMD="$MAPPING_CMD use_rviz:=$(bool_arg "$USE_RVIZ")"
 MAPPING_CMD="$MAPPING_CMD save_pcd:=$(bool_arg "$SAVE_PCD")"
+# 2D 栅格的点云来源 (--scan-cloud, 默认 raw)。换回 LIO 的稀疏云: --scan-cloud registered
+MAPPING_CMD="$MAPPING_CMD scan_cloud_topic:=$(q "$SCAN_CLOUD_TOPIC")"
 
-# 透传额外的 launch 参数, 例如换 2D 扫描的点云来源 (矮台阶/薄栏杆扫不出来时):
-#   MAPPING_EXTRA_ARGS="scan_cloud_topic:=/livox/lidar/pointcloud" ./script/start_real_slam.sh
-# 默认 registered_scan 只有 ~1.7k 点/帧 (720 个方位格覆盖 ~264);
-# 原始点云 ~20k 点/帧, 覆盖 ~598 格, 代价是没做运动去畸变。
+# 透传额外的 launch 参数, 例如临时换 2D 扫描的点云来源:
+#   MAPPING_EXTRA_ARGS="scan_cloud_topic:=registered_scan" ./script/start_real_slam.sh
+# 默认 raw 是原始点云 (~20k 点/帧, 720 个方位格覆盖 ~598); registered_scan 只有 ~1.7k 点
+# (覆盖 ~264), 矮台阶/薄栏杆会被相邻射线刷成空闲。
 if [ -n "${MAPPING_EXTRA_ARGS:-}" ]; then
   MAPPING_CMD="$MAPPING_CMD $MAPPING_EXTRA_ARGS"
 fi
