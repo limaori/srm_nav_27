@@ -551,5 +551,8 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 ```
 ### 实车测试(zlio，底盘不转)
 ```bash
-./script/start_real_nav.sh -m 227_1111 --controller minco --no-reloc --chassis-spin 0.0
+./script/start_real_nav.sh -m 227_1113 --controller minco --no-reloc --chassis-spin 0.000000000000001
+```
+```bash
+./script/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio
 ```

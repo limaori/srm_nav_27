@@ -38,7 +38,7 @@ import sys
 PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PACKAGE_ROOT, "scripts"))
 
-from zlio_bridge import _Rigid  # noqa: E402  （只用到其中的纯数学部分）
+from zlio_bridge import _Rigid, _quat_inverse, _quat_rotate  # noqa: E402
 
 
 def _assert(condition, message):
@@ -167,6 +167,114 @@ def test_planarize_uses_mount_not_t_off():
     )
 
 
+def test_pose_body_offset_cancels_the_residual():
+    """`pose_body_offset_xyz` 的语义与**符号**（2026-11-13 加，实车云台自转画圈）。
+
+    症状：前端在"云台绕偏轴自转"时给出的位姿带一个**随体**常量偏置 c_true，于是
+    `odom→gimbal_yaw` 画一个半径 = |残差| 的圆（实测 0.145~0.150 m）。本参数把该偏置
+    从**发布出去的位姿**上右乘减掉：
+
+        pose_pub = pose · T(c_corr)          c_corr = −R_Aᵀ · 残差(水平)
+
+    钉住三件事：
+
+    1. 不补偿时 `pose·A⁻¹` 的平移画半径为 |d| 的圆；
+    2. 用上面那个 c_corr 后圆消失（< 1 mm）—— **符号反了会加倍**（这是最容易错的）；
+    3. 补偿确实会移动"发布出去的位姿"（所以点云要不要跟着动，由
+       `pose_body_offset_apply_to_cloud` 决定；默认 true = 一起动，链条才自洽）。
+    """
+    mount_true = (
+        _Rigid(quat_from_rpy(math.radians(-30.0), 0.0, math.radians(63.0)),
+               (0.12081, -0.056721, 0.346388))
+        * _Rigid(t=(0.011, 0.02329, -0.04412))   # livox_frame -> livox_imu（URDF 的 −extrinsic_T）
+    )
+    ground = _Rigid(t=(0.0, 0.0, 0.26805))
+    c_true = (-0.10, -0.09, 0.0)                 # 前端"随体偏置"的真值
+    first = mount_true * _Rigid(t=c_true)        # 首帧（云台 0 位）前端给的位姿
+    t_off = ground * mount_true * first.inverse()
+
+    count = 72
+    angles = [2.0 * math.pi * i / count for i in range(count)]
+
+    def body(phi):
+        return _Rigid(quat_from_rpy(0.0, 0.0, phi), (0.0, 0.0, 0.0)) * first
+
+    def published(phi, correction):
+        pose = t_off * body(phi) * _Rigid(t=correction)
+        return pose * mount_true.inverse()
+
+    def lock(points):
+        """锁相分量 d = mean(R(−φ)·(p − 质心))；整圈采样时质心即圆心。"""
+        mean_x = sum(p[0] for p in points) / len(points)
+        mean_y = sum(p[1] for p in points) / len(points)
+        d = [0.0, 0.0]
+        for (x, y, _), phi in zip(((p[0] - mean_x, p[1] - mean_y, 0.0) for p in points), angles):
+            cos_a, sin_a = math.cos(-phi), math.sin(-phi)
+            d[0] += cos_a * x - sin_a * y
+            d[1] += sin_a * x + cos_a * y
+        return (d[0] / len(points), d[1] / len(points))
+
+    raw_points = [published(phi, (0.0, 0.0, 0.0)).t for phi in angles]
+    residual = lock(raw_points)
+    residual_radius = math.hypot(residual[0], residual[1])
+    _assert(residual_radius > 0.10,
+            f"不补偿时应当画一个明显的圆，实测半径 {residual_radius:.4f} m")
+
+    # 工具打印的就是这个式子：c_corr = −R_Aᵀ·[d, 0]
+    body_vector = _quat_rotate(_quat_inverse(mount_true.q), (residual[0], residual[1], 0.0))
+    correction = (-body_vector[0], -body_vector[1], -body_vector[2])
+    fixed_points = [published(phi, correction).t for phi in angles]
+    fixed = lock(fixed_points)
+    fixed_radius = math.hypot(fixed[0], fixed[1])
+    _assert(fixed_radius < 1e-3,
+            f"按 −R_Aᵀ·d 补偿后残差应≈0，实测 {fixed_radius:.4f} m")
+
+    wrong = [published(phi, (-correction[0], -correction[1], -correction[2])).t
+             for phi in angles]
+    wrong_radius = math.hypot(*lock(wrong))
+    _assert(wrong_radius > residual_radius * 1.5,
+            f"符号反了残差应当变大（实测 {wrong_radius:.4f} m），说明这个符号不能随手改")
+
+    # 修正确实改变了"发布出去的位姿"（所以必须只作用在位姿上，点云另走 cloud_pose）
+    shift = math.dist(published(0.0, (0.0, 0.0, 0.0)).t, published(0.0, correction).t)
+    _assert(shift > 0.05, f"补偿应当移动发布出去的位姿（实测只动了 {shift:.4f} m）")
+
+
+def test_mapping_and_nav_share_the_same_pose_body_offset():
+    """建图与导航必须用同一条 zlio_bridge 补偿链。
+
+    地图是"点云 + 位姿"一起建出来的：如果建图时没补随体偏置、导航时补了（或反过来，
+    或补偿值不同），地图里固化的那部分和导航实时补掉的那部分会打架 —— 表现就是
+    定位在 map 里整体偏/转一个常量，`--no-reloc` 下尤其明显。
+
+    偏移量表达在**雷达/IMU 体坐标系**，与 base_frame 选谁无关，所以两份配置必须逐项一致。
+    """
+    import yaml
+
+    real_dir = os.path.join(PACKAGE_ROOT, "config", "real")
+
+    def offset(name, required):
+        with open(os.path.join(real_dir, name), encoding="utf-8") as stream:
+            document = yaml.safe_load(stream)
+        section = (document.get("zlio_bridge") or {}).get("ros__parameters")
+        if section is None:
+            _assert(not required, f"{name} 缺少 zlio_bridge 段")
+            return ([0.0, 0.0, 0.0], True)
+        return (
+            [float(v) for v in section.get("pose_body_offset_xyz", [0.0, 0.0, 0.0])],
+            bool(section.get("pose_body_offset_apply_to_cloud", True)),
+        )
+
+    nav_offset, nav_cloud = offset("nav2_params_srm_minco_fakeyaw.yaml", required=True)
+    map_offset, map_cloud = offset("mapping_params.yaml", required=True)
+    _assert(nav_offset == map_offset,
+            f"建图与导航的 pose_body_offset_xyz 不一致：nav={nav_offset} mapping={map_offset}")
+    _assert(nav_cloud == map_cloud,
+            f"建图与导航的 pose_body_offset_apply_to_cloud 不一致：nav={nav_cloud} "
+            f"mapping={map_cloud}")
+    _assert(nav_cloud, "apply_to_cloud=false 只适合 A/B 诊断，不该作为建图/导航的正式配置")
+
+
 def main():
     tests = [
         test_first_frame_pose_is_identity,
@@ -174,6 +282,8 @@ def main():
         test_relative_motion_is_unaffected,
         test_epoch_anchor_stays_continuous_with_non_identity_r0,
         test_planarize_uses_mount_not_t_off,
+        test_pose_body_offset_cancels_the_residual,
+        test_mapping_and_nav_share_the_same_pose_body_offset,
     ]
     for test in tests:
         test()

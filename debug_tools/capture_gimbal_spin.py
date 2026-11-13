@@ -44,7 +44,9 @@ RViz 里那根箭头只能看出"转没转"。本工具把三路同时录下来�
 新树（`child_frame_id = gimbal_yaw`，实车）:  s_base 对 raw 的斜率 + 三条附加判据
   ================================  ============================================
   s_base_vs_raw ≈ 1 且残差恒定       PASS：定位位姿被完整继承，关节角没混进来
-  xy 跨度 < 2 cm、|v| < 0.03 m/s     PASS 的另一半：云台绕轴转不该让车"走"
+  锁相残差半径 < --residual-tol      PASS 的另一半：云台绕轴转不该让车"走"
+      （默认 0.04 m；⚠ 别设成 0.02：前端自己估到的绕轴平移只有物理臂长的
+        60%~92%，外参完全正确也会剩 2~5 cm。外参对不对要用"点云 vs 实物"验）
   s_base_vs_raw ≈ 1 − Δθ/Δraw       FAIL：还有一处把关节角减掉了（旧逻辑/旧配置）
   s_base_vs_raw ≈ 0                 FAIL：`odom -> gimbal_yaw` 没跟云台转
                                     （TF 反转没生效，或 /odometry 还是底盘位姿）
@@ -150,11 +152,26 @@ class Collector:
         # 下位机回传的车速（独立于 LIO，用来确认"车真的没动"）
         self.board_cmd = None
         self.raw_yaw = self.base_yaw = self.joint_yaw = None
+        # 完整四元数（w,x,y,z）：只有 yaw 的话，30° 斜装会让"xy 投影半径"本身带歧义，
+        # 事后复算外参必须靠四元数（CSV 里新增了 rq*/bq* 四列）。
+        self.raw_quat = self.base_quat = None
+        self.raw_child = None
         self.raw_stamp = self.base_stamp = self.joint_stamp = None
         self.counts = {topic: 0 for topic in RAW_CANDIDATES + BASE_CANDIDATES}
         self.counts[JOINT_TOPIC] = 0
         self.counts[JOINT_FALLBACK_TOPIC] = 0
         self._warned_joint_name = False
+        # TF：只为了在采集结束时量一次"模型里的臂杆" T(base_child <- 雷达)（静态外参），
+        # 判读要拿它当"物理上应有的臂长"。查不到不影响采集，只是判读少一个参照。
+        self.tf_buffer = None
+        self.tf_listener = None
+        try:
+            from tf2_ros import Buffer, TransformListener
+
+            self.tf_buffer = Buffer()
+            self.tf_listener = TransformListener(self.tf_buffer, self.node)
+        except Exception:  # noqa: BLE001 - 没装 tf2_ros 时降级
+            self.tf_buffer = None
         # raw 到达时回调一次：用"雷达算法的输出"当采样时钟，比固定定时器干净
         # （定时器和 10 Hz 里程计不同步时会出现"这拍没新数据、下拍跳两步"的锯齿）。
         self.on_raw = None
@@ -195,7 +212,10 @@ class Collector:
             if age < 2.0:
                 return
         setattr(self, which + "_topic", topic)
-        setattr(self, which + "_yaw", yaw_of(msg.pose.pose.orientation))
+        orientation = msg.pose.pose.orientation
+        setattr(self, which + "_yaw", yaw_of(orientation))
+        setattr(self, which + "_quat",
+                (orientation.w, orientation.x, orientation.y, orientation.z))
         setattr(self, which + "_stamp", self._stamp())
         position = msg.pose.pose.position
         if which == "base":
@@ -205,6 +225,7 @@ class Collector:
             self.base_twist = (twist.x, twist.y)
         else:
             self.raw_pose = (position.x, position.y)
+            self.raw_child = msg.child_frame_id
         if which == "raw" and self.on_raw is not None:
             self.on_raw()
 
@@ -245,6 +266,41 @@ class Collector:
     def ready(self):
         return None not in (self.raw_yaw, self.base_yaw, self.joint_yaw)
 
+    def mount(self):
+        """量一次模型里的 T(base_child <- 雷达)（静态外参）；拿不到返回 None。
+
+        返回 ``(rot 3x3 行主序 list, trans 3 元组)``。它和 zlio_bridge /
+        sensor_scan_generation 用的是**同一条** TF，所以判读里的"模型臂长"就是运行时
+        真正在用的那个数（不再写死 0.1335）。
+        """
+        if self.tf_buffer is None:
+            print("[警告] 没有 tf2_ros，量不到模型外参（判读里「模型臂长」会缺失）", file=sys.stderr)
+            return None
+        if not self.base_child or not self.raw_child:
+            print("[警告] 还没拿到 base/raw 的 child_frame_id，量不到模型外参", file=sys.stderr)
+            return None
+        if self.base_child == self.raw_child:
+            # base 锁到了 /lidar_odometry（child=雷达帧）时两者同名，量出来是单位变换，
+            # 报"臂长 0"只会误导 —— 直接说量不到。
+            print("[警告] base 用的是雷达位姿（child=%s），量不到臂杆；请用 /odometry"
+                  % self.base_child, file=sys.stderr)
+            return None
+        from rclpy.time import Time as RosTime
+
+        try:
+            stamped = self.tf_buffer.lookup_transform(
+                self.base_child, self.raw_child, RosTime())
+        except Exception as error:  # noqa: BLE001 - 查不到只是判读少一个参照
+            print("[警告] 量 T(%s ← %s) 失败: %s" % (self.base_child, self.raw_child, error),
+                  file=sys.stderr)
+            return None
+        translation = stamped.transform.translation
+        rotation = stamped.transform.rotation
+        return (
+            quat_to_matrix((rotation.w, rotation.x, rotation.y, rotation.z)),
+            (translation.x, translation.y, translation.z),
+        )
+
     def spin_once(self, timeout=0.02):
         self.rclpy.spin_once(self.node, timeout_sec=timeout)
 
@@ -265,7 +321,69 @@ def _corr(a, b):
     return float(np.corrcoef(a, b)[0, 1])
 
 
-def analyse(samples):
+def quat_to_matrix(q):
+    """(w, x, y, z) -> 3x3 行主序 list（判读用，不依赖 numpy）。"""
+    w, x, y, z = [float(v) for v in q]
+    norm = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    return [
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ]
+
+
+def _locked_vector(points, theta, center=None):
+    """把 xy 轨迹按云台转角 θ 做**锁相分解**，返回 (锁相分量 d, 锁相残差 rms, 平均半径)。
+
+    车不动、云台绕轴转时，任何"跟着云台转"的向量都满足
+
+        p(θ) = c₀ + R(−θ)·d          （云台世界 yaw φ = −θ）
+
+    `d` 就是那个常量向量，表达在 **θ=0 的云台系**（= 模型里的 gimbal_yaw 零位系）；
+    `c₀` 是圆的圆心（与"车有没有真的动"无关的那部分常量）。
+
+    ⚠ 不能"先减质心再平均"：云台只往返扫一段时，质心不在圆心，振幅会被吃掉
+    （2026-11-13 实测：±0.6 rad 的往返扫掠上，先减质心只剩 12% 的振幅）。所以这里
+    把 c₀ 和 d 一起做一次线性最小二乘 —— 对"转满圈"和"只扫一段"都成立。
+    """
+    import numpy as np
+
+    points = np.asarray(points, dtype=float)
+    theta = np.asarray(theta, dtype=float)
+    if center is not None:
+        delta = points - np.asarray(center, dtype=float)
+        c0 = np.asarray(center, dtype=float)
+    else:
+        rows = np.zeros((2 * points.shape[0], 4))
+        rhs = np.zeros(2 * points.shape[0])
+        for index, (point, angle) in enumerate(zip(points, theta)):
+            cos_a, sin_a = math.cos(-angle), math.sin(-angle)
+            rows[2 * index] = (1.0, 0.0, cos_a, -sin_a)
+            rows[2 * index + 1] = (0.0, 1.0, sin_a, cos_a)
+            rhs[2 * index:2 * index + 2] = point
+        solution, *_ = np.linalg.lstsq(rows, rhs, rcond=None)
+        c0 = solution[:2]
+        delta = points - c0
+    rotated = None if center is None else np.array([
+        [math.cos(-angle) * delta[i, 0] - math.sin(-angle) * delta[i, 1],
+         math.sin(-angle) * delta[i, 0] + math.cos(-angle) * delta[i, 1]]
+        for i, angle in enumerate(theta)
+    ])
+    if rotated is None:
+        d = np.asarray(solution[2:])
+    else:
+        d = rotated.mean(axis=0)
+    residual = delta - np.array([
+        [math.cos(-angle) * d[0] - math.sin(-angle) * d[1],
+         math.sin(-angle) * d[0] + math.cos(-angle) * d[1]]
+        for angle in theta
+    ])
+    rms = float(np.linalg.norm(residual, axis=1).std())
+    return np.asarray(d), rms, float(np.linalg.norm(delta, axis=1).mean())
+
+
+def analyse(samples, mount=None):
     """用逐样本增量做回归，得到 s_base / s_raw；对"转过去再转回来"同样有效。"""
     import numpy as np
 
@@ -325,6 +443,18 @@ def analyse(samples):
         used["base_xy_span"] = float(np.max(np.linalg.norm(poses - poses[0], axis=1)))
         centre = poses.mean(axis=0)
         used["base_xy_radius"] = float(np.mean(np.linalg.norm(poses - centre, axis=1)))
+        # ---- 锁相分解（判"平移"只看这一组；xy 跨度/圆拟合半径都太粗）----
+        theta_pts = np.unwrap(
+            np.array([s["theta"] for s in samples if s.get("bx") is not None]),
+            period=2 * np.pi,
+        )
+        c_base, rms_base, mean_base = _locked_vector(poses, theta_pts)
+        used["base_locked_xy"] = (float(c_base[0]), float(c_base[1]))
+        used["base_locked_radius"] = float(np.linalg.norm(c_base))
+        used["base_locked_azimuth_deg"] = float(
+            np.degrees(np.arctan2(c_base[1], c_base[0])))
+        used["base_locked_rms"] = rms_base
+        used["base_locked_mean_radius"] = mean_base
         # 与云台相位是否"锁相"：圆心相对向量的角度 vs 云台转过的角度。
         # 斜率≈±1 说明它在跟着云台画圆（LIO 漏掉了绕轴平移）；
         # 斜率≈0 或散乱说明是漂移/噪声。
@@ -358,6 +488,17 @@ def analyse(samples):
     if len(rawpts) > 1:
         c = rawpts.mean(axis=0)
         used["raw_xy_radius"] = float(np.mean(np.linalg.norm(rawpts - c, axis=1)))
+        # 锁相分解：|c| = 前端**自己**估到的臂长（与任何外参无关，靠转角锁相测出来）
+        theta_raw = np.unwrap(
+            np.array([s["theta"] for s in samples if s.get("rx") is not None]),
+            period=2 * np.pi,
+        )
+        c_raw, rms_raw, _ = _locked_vector(rawpts, theta_raw)
+        used["raw_locked_xy"] = (float(c_raw[0]), float(c_raw[1]))
+        used["raw_locked_radius"] = float(np.linalg.norm(c_raw))
+        used["raw_locked_azimuth_deg"] = float(
+            np.degrees(np.arctan2(c_raw[1], c_raw[0])))
+        used["raw_locked_rms"] = rms_raw
         rel = rawpts - c
         phase = np.degrees(np.unwrap(np.arctan2(rel[:, 1], rel[:, 0])))
         phi0 = np.degrees(-theta) - np.degrees(-theta[0])
@@ -371,13 +512,28 @@ def analyse(samples):
         used["raw_xy_phase_slope"] = None
     boards = [float(np.hypot(s["cvx"], s["cvy"])) for s in samples if s.get("cvx") is not None]
     used["board_v_max"] = max(boards) if boards else None
-    # 累积转角比：比逐样本回归稳健得多（不受采样/时间戳抖动影响）。
+    # 累积转角比：⚠ 端点比值在"转过去再转回来"时毫无意义（净转角≈0 → 比值 ±50），
+    # 改成**行程比** Σ|d_base|/Σ|d_raw|：单方向时与端点比值等价，往返时仍然有效
+    # （两者都按 1:1 跟随时，往返的 |增量| 之和也相等）。
     raw_total = float(raw[-1] - raw[0])
     base_total = float(base[-1] - base[0])
     theta_total = float(theta[-1] - theta[0])
     used["raw_total_deg"] = np.degrees(raw_total)
     used["base_total_deg"] = np.degrees(base_total)
-    used["rot_ratio"] = (base_total / raw_total) if abs(raw_total) > 1e-6 else None
+    rot_ratio_net = (base_total / raw_total) if abs(raw_total) > 1e-6 else None
+    used["rot_ratio_net"] = rot_ratio_net
+    travel_raw = float(np.sum(np.abs(d_raw)))
+    travel_base = float(np.sum(np.abs(d_base)))
+    # 单方向转：用**端点比**（Σ|d| 会被雷达 30° 斜装带来的 yaw 非线性和采样噪声抬高，
+    #   2026-11-13 实测抬了 8%，把本来 PASS 的判成 FAIL）；
+    # 往返转：端点比 ≈ 0/0 无意义，只能用行程比（此时两者按 1:1 跟随，|增量| 之和也相等）。
+    net_ratio = (abs(raw_total) / travel_raw) if travel_raw > 1e-9 else 0.0
+    if net_ratio >= 0.5:
+        used["rot_ratio"] = rot_ratio_net
+        used["rot_ratio_kind"] = "net"
+    else:
+        used["rot_ratio"] = (travel_base / travel_raw) if travel_raw > 1e-9 else rot_ratio_net
+        used["rot_ratio_kind"] = "travel"
     used["raw_per_theta"] = (raw_total / theta_total) if abs(theta_total) > 1e-6 else None
 
     residual = np.degrees(raw - theta - base)  # 应当是一条水平线
@@ -390,6 +546,31 @@ def analyse(samples):
     used["raw_dev_deg"] = float(np.degrees(np.max(np.abs(raw - raw[0]))))
     used["corr_raw"] = _corr(d_raw, d_theta)
     used["corr_base"] = _corr(d_base, d_theta)
+    # ---- 外参（模型里的臂杆）：从 TF 量一次，用来区分"外参错"和"前端错" ----
+    # 残差 c_base = a_前端 − a_外参（都在云台零位系里）。所以：
+    #   * |c_base| 就是两者的失配量；单看采集**分不出**是谁错（2026-11-13 的教训）；
+    #   * 但把 a_前端 = a_外参 + c_base 反解出来，就能和前端的绕轴半径（raw 锁相 |c|）对照，
+    #     也能直接算出"要补偿多少"给 zlio_bridge 的 pose_body_offset_xyz。
+    if mount is not None:
+        rot, trans = mount
+        used["arm_model_xyz"] = [float(v) for v in trans]
+        used["arm_model_radius"] = float(math.hypot(trans[0], trans[1]))
+        used["arm_model_azimuth_deg"] = float(
+            math.degrees(math.atan2(trans[1], trans[0])))
+        if "base_locked_xy" in used:
+            d = np.array([used["base_locked_xy"][0], used["base_locked_xy"][1], 0.0])
+            # pose_pub = pose · T(offset)：令 odom→gimbal_yaw 的锁相分量归零
+            #   ⇒ offset = −R_Aᵀ · 残差(水平)   （R_A = T(云台←雷达) 的旋转）
+            offset = -np.asarray(rot).T @ d
+            used["suggested_offset"] = [float(v) for v in offset]
+            a_lio = np.array([trans[0], trans[1], 0.0]) + d
+            model_r = used["arm_model_radius"]
+            if model_r > 1e-6:
+                used["arm_lio_ratio"] = float(np.linalg.norm(a_lio[:2]) / model_r)
+                used["arm_angle_deg"] = float(np.degrees(np.arctan2(
+                    trans[0] * a_lio[1] - trans[1] * a_lio[0],
+                    trans[0] * a_lio[0] + trans[1] * a_lio[1])))
+
     used["samples"] = samples
     return used
 
@@ -411,9 +592,17 @@ def _verdict_gimbal_tree(stats, tol_deg):
     xy_span = stats.get("base_xy_span")
     v_max = stats.get("base_v_max")
     # 判据提前算：列表和早退分支都要用。
-    # 累积转角比才是可靠判据（逐样本回归斜率在 15°/样本的采样下会被噪声衰减）。
+    # 2026-11-13：平移判据从"xy 跨度 < 0.02 m"换成**锁相残差半径**。老判据在这套链上
+    # 根本达不到 —— 就算外参完全正确，前端自己的绕轴平移误差（实测只估到物理臂长的
+    # 60%~92%）也会留下 0.02~0.06 m 的残差。阈值默认 0.04 m，可用 --residual-tol 调。
+    residual_r = stats.get("base_locked_radius")
+    tol = float(stats.get("residual_tol", 0.04))
     pose_ok = rot_ratio is not None and abs(rot_ratio - 1.0) <= 0.03
-    motion_ok = (xy_span is None or xy_span < 0.02) and (v_max is None or v_max < 0.03)
+    if residual_r is not None:
+        motion_ok = residual_r < tol
+    else:
+        # 旧 CSV（没有锁相值）：退回老判据，只做参考
+        motion_ok = (xy_span is None or xy_span < 0.02) and (v_max is None or v_max < 0.03)
 
     lines = [
         "  树: odom -> %s（**新树：云台就是车**）" % stats.get("base_child"),
@@ -421,28 +610,41 @@ def _verdict_gimbal_tree(stats, tol_deg):
         "底盘静止、只转云台时对 θ 是 -1）" % s_raw,
         "  s_base_vs_raw= %+.2f   （逐样本回归，仅供参考；多圈旋转下会被采样抖动衰减）"
         % (s_br if s_br is not None else float("nan")),
-        "  累积转角比 base/raw = %+.4f   （**判据**：应 ≈ 1，容差 0.03）"
-        % (rot_ratio if rot_ratio is not None else float("nan")),
+        "  转角比 base/raw = %+.4f（%s；**判据**：应 ≈ 1，容差 0.03）"
+        % (rot_ratio if rot_ratio is not None else float("nan"),
+           "端点比" if stats.get("rot_ratio_kind") == "net" else "行程比"),
         "  残差 raw-base 摆动 %.1f°（**正常就该摆动**：raw 是雷达 yaw、base 是云台 yaw，"
         "雷达斜装 30°）" % resid_span,
         "  云台累计转角 %.1f°，raw 最大偏移 %.1f°（odom 的偏移应当与它同量级："
         "%.1f°）" % (stats["travel_deg"], stats["raw_dev_deg"], stats["base_dev_deg"]),
     ]
     if stats.get("raw_xy_radius") is not None:
-        lines.append("  raw LIO 的雷达平移半径 %.4f m（物理上应为 %.4f m；"
-                     "≈0 就是 LIO 把雷达当成原地转）"
-                     % (stats["raw_xy_radius"], 0.1335))
+        if stats.get("raw_locked_radius") is not None:
+            lines.append("  前端自己的绕轴臂长 %.4f m（锁相 rms %.4f m；模型臂长 %s）"
+                         % (stats["raw_locked_radius"],
+                            stats.get("raw_locked_rms", float("nan")),
+                            ("%.4f m" % stats["arm_model_radius"])
+                            if stats.get("arm_model_radius") is not None else "未知"))
+        else:
+            lines.append("  raw LIO 的雷达平移半径 %.4f m（≈0 就是 LIO 把雷达当成原地转）"
+                         % stats["raw_xy_radius"])
     if stats.get("board_v_max") is not None:
         lines.append("  下位机 /chassis_speed 的车速峰值 %.3f m/s（车其实没动时应≈0）"
                      % stats["board_v_max"])
+    if stats.get("base_locked_radius") is not None:
+        lines.append("  odom->gimbal_yaw **锁相残差** %.4f m（判据 < %.3f m），方位 %+.0f°，"
+                     "锁相 rms %.4f m"
+                     % (stats["base_locked_radius"], tol,
+                        stats.get("base_locked_azimuth_deg", float("nan")),
+                        stats.get("base_locked_rms", float("nan"))))
     if xy_span is not None:
-        lines.append("  odom->gimbal_yaw 的 xy 跨度 %.3f m（判据 < 0.02 m）" % xy_span)
-        lines.append("  其中圆拟合半径 %.3f m，与云台相位斜率 %s"
-                     % (stats.get("base_xy_radius") or float("nan"),
+        lines.append("  参考：xy 跨度 %.3f m / 圆拟合半径 %.3f m / 相位斜率 %s"
+                     % (xy_span, stats.get("base_xy_radius") or float("nan"),
                         ("%+.2f" % stats["xy_phase_slope"])
                         if stats.get("xy_phase_slope") is not None else "nan"))
     if v_max is not None:
-        lines.append("  /odometry 线速度峰值 %.3f m/s（判据 < 0.03 m/s）" % v_max)
+        lines.append("  /odometry 线速度峰值 %.3f m/s（≈ ω×锁相残差，与残差判据等价；"
+                     "不单独判）" % v_max)
 
     if xy_span is None or v_max is None:
         if pose_ok:
@@ -504,45 +706,46 @@ def _verdict_gimbal_tree(stats, tol_deg):
         ]
 
     if not motion_ok:
-        radius = stats.get("base_xy_radius")
-        slope = stats.get("xy_phase_slope")
         detail = [
-            "[结论] FAIL：yaw 对了，但车的平移不干净（xy 跨度 %.3f m / 线速度 %.3f m/s）。"
-            % (xy_span if xy_span is not None else float("nan"),
-               v_max if v_max is not None else float("nan")),
+            "[结论] FAIL：yaw 对了，但 odom->gimbal_yaw 还在画圈"
+            "（锁相残差 %.3f m，阈值 %.3f m）。"
+            % (residual_r if residual_r is not None else float("nan"), tol),
         ]
-        raw_r = stats.get("raw_xy_radius")
-        if raw_r is not None and raw_r < 0.05 and radius is not None \
-                and 0.10 <= radius <= 0.17:
+        if stats.get("base_locked_xy") is not None:
+            detail.append(
+                "       残差向量（云台零位系）(%+.3f, %+.3f) m，方位 %+.0f°，锁相 rms %.3f m"
+                % (stats["base_locked_xy"][0], stats["base_locked_xy"][1],
+                   stats.get("base_locked_azimuth_deg", float("nan")),
+                   stats.get("base_locked_rms", float("nan"))))
+        if stats.get("raw_locked_radius") is not None:
+            detail.append(
+                "       前端自己估到的绕轴臂长 %.3f m（锁相 rms %.3f m）"
+                % (stats["raw_locked_radius"], stats.get("raw_locked_rms", float("nan"))))
+        if stats.get("arm_model_radius") is not None:
+            detail.append(
+                "       模型里的臂长 %.3f m、方位 %+.0f°；残差与模型臂差 %+.0f°"
+                % (stats["arm_model_radius"],
+                   stats.get("arm_model_azimuth_deg", float("nan")),
+                   stats.get("arm_angle_deg", float("nan"))))
+        detail += [
+            "       ⚠ 残差 = |a_前端 − a_外参|，**单凭本采集分不出**是外参错还是前端错。",
+            "       两步定性（顺序别反）：",
+            "       ① 验外参：停车对着墙/箱子，RViz 固定帧 odom，看 /sensor_scan 里的墙与",
+            "          实物的方位是否一致；一致 ⇒ 外参对，残差属于前端。",
+            "       ② 验前端：同模型下换 --lio-frontend point_lio 再采一次，圆变了就是前端的。",
+        ]
+        if stats.get("suggested_offset") is not None:
+            off = stats["suggested_offset"]
             detail += [
-                "       病根已定位：raw LIO 的雷达平移半径只有 %.4f m（物理上应 0.1335 m）"
-                % raw_r,
-                "       —— LIO 在「云台绕偏轴旋转」时把雷达当成了原地转，平移整个丢了。",
-                "       odom→gimbal 的圆心差就是那 0.1337 m 的偏轴距离被漏掉的后果。",
-                "       这与本方案无关，是 LIO 的平移可观测性问题（方案 §7 风险 1）。",
-            ]
-            if stats.get("board_v_max") is not None and stats["board_v_max"] < 0.05:
-                detail.append(
-                    "       下位机车速峰值 %.3f m/s，佐证车确实没动 ⇒ 假运动来自里程计。"
-                    % stats["board_v_max"])
-            return 1, lines + detail
-        if radius is not None and 0.10 <= radius <= 0.17 and slope is not None \
-                and abs(abs(slope) - 1.0) <= 0.35:
-            detail += [
-                "       形状: 半径 %.3f m 的**圆**、且与云台转角锁相 —— 正好等于雷达偏轴"
-                % radius,
-                "       距离 0.1335 m。说明 LIO 只估到了旋转、**没估到雷达绕云台轴的平移**",
-                "       （或外参平移没生效）。降速到 60°/s 再测一次：若圆消失 → 是 LIO",
-                "       在这个转速下的平移可观测性问题；若圆仍在 → 查 sensor_scan_generation",
-                "       的 lidar->robot 外参（应带 0.12/-0.06/0.078 的平移）。",
-            ]
-        else:
-            detail += [
-                "       形状: 不是干净的圆（半径 %s、相位斜率 %s）—— 更像 LIO 平移漂移/跳变。"
-                % (("%.3f m" % radius) if radius is not None else "nan",
-                   ("%+.2f" % slope) if slope is not None else "nan"),
-                "       先降速到 60°/s 复测；仍漂就查 LIO 参数（点云/IMU 时间戳、",
-                "       filter_size_surf、饱和保护）—— 这正是方案 §7 的风险 1。",
+                "       若①已确认外参正确：把残差当作前端的随体偏置补掉（位姿+点云一起改，",
+                "       链条自洽、避障不受影响；但点云相对旧地图会变 ⇒ 要重跑一次建图，",
+                "       或先用 --reloc 让 GICP 重新对齐）—— 加到实车 nav2 参数的 zlio_bridge 段：",
+                "         pose_body_offset_xyz: [%.4f, %.4f, %.4f]" % (off[0], off[1], off[2]),
+                "       ⚠ 先多跑 2~3 次确认稳定（2026-11-13 两次实测：前端臂 0.104@+152° /",
+                "         0.125@+156° ⇒ 稳定，差异是 LIO 自身幅度噪声）；散得很开就别补，去修前端。",
+                "       ⚠ 别设 pose_body_offset_apply_to_cloud=false 当长期配置：那只改位姿，",
+                "         障碍物会相对车位姿永久偏 |offset|（≈0.3 m、随车头转），会破坏避障。",
+                "       改完再采一次，锁相残差应 < %.3f m。" % tol,
             ]
         return 1, lines + detail
 
@@ -767,6 +970,11 @@ def main():
                         help="底盘 yaw 允许偏移（只用于结论里那句话）")
     parser.add_argument("--min-travel-deg", type=float, default=15.0,
                         help="云台累计转角门槛，低于它不出结论")
+    parser.add_argument("--residual-tol", type=float, default=0.04,
+                        help="锁相残差半径的通过阈值（米），默认 0.04。别设成 0.02："
+                             "前端自己估到的绕轴平移只有物理臂长的 60%%~92%%，"
+                             "外参完全正确也会剩 2~5 cm；外参对不对要用"
+                             "「点云 vs 实物」单独验。")
     parser.add_argument("--bag", action="store_true", help="同时录 rosbag（事后可复算）")
     parser.add_argument("--no-plot", action="store_true", help="不出图（车上没图形界面）")
     parser.add_argument("--headless", action="store_true", help="强制不弹窗")
@@ -842,7 +1050,11 @@ def main():
         csv_log = CsvLog(
             base_path.with_suffix(".csv"),
             ("t", "theta_deg", "raw_deg", "base_deg", "residual_deg",
-             "base_x", "base_y", "base_vx", "base_vy", "raw_x", "raw_y"),
+             "base_x", "base_y", "base_vx", "base_vy", "raw_x", "raw_y",
+             # 四元数（2026-11-13 加）：只有 yaw 时，30° 斜装会让"xy 投影半径"带歧义，
+             # 事后复算外参/随体偏置必须靠完整姿态。
+             "raw_qw", "raw_qx", "raw_qy", "raw_qz",
+             "base_qw", "base_qx", "base_qy", "base_qz"),
         )
         if args.bag:
             bag = start_bag(base_path.with_suffix(""), args.rate)
@@ -855,6 +1067,16 @@ def main():
         min_gap = 0.5 / args.rate
         state = {"last": -1e9, "next_status": t0 + 2.0}
 
+        state_mount = {"last": -1e9, "value": None}
+
+        def grab_mount():
+            """采集中周期性抓一次静态外参（T(base<-雷达)）：收尾那一刻查经常已经晚了。"""
+            now = time.monotonic()
+            if state_mount["value"] is not None or now - state_mount["last"] < 2.0:
+                return
+            state_mount["last"] = now
+            state_mount["value"] = collector.mount()
+
         def take_sample():
             now = time.monotonic()
             if now - state["last"] < min_gap or not collector.ready():
@@ -865,6 +1087,10 @@ def main():
                 "theta": collector.joint_yaw,
                 "raw": collector.raw_yaw,
                 "base": collector.base_yaw,
+                # 采样当时用的是哪条话题：base 会在 /lidar_odometry -> /odometry 之间切换，
+                # 切换前后的样本语义不同（雷达位姿 vs 云台位姿），统计时必须按最终话题过滤。
+                "bt": collector.base_topic,
+                "rt": collector.raw_topic,
             }
             if collector.base_pose is not None:
                 sample["bx"], sample["by"] = collector.base_pose
@@ -872,6 +1098,10 @@ def main():
                 sample["bvx"], sample["bvy"] = collector.base_twist
             if collector.raw_pose is not None:
                 sample["rx"], sample["ry"] = collector.raw_pose
+            if collector.raw_quat is not None:
+                sample["rq"] = collector.raw_quat
+            if collector.base_quat is not None:
+                sample["bq"] = collector.base_quat
             if collector.board_cmd is not None:
                 sample["cvx"], sample["cvy"] = collector.board_cmd
             sample["residual"] = wrap(sample["raw"] - sample["theta"] - sample["base"])
@@ -889,8 +1119,11 @@ def main():
                     "%.5f" % sample.get("bvy", float("nan")),
                     "%.5f" % sample.get("rx", float("nan")),
                     "%.5f" % sample.get("ry", float("nan")),
-                )
+                ) + tuple("%.6f" % v for v in (
+                    sample.get("rq", (float("nan"),) * 4) + sample.get("bq", (float("nan"),) * 4)
+                ))
             )
+            grab_mount()
             if now >= state["next_status"]:
                 state["next_status"] = now + 2.0
                 print(
@@ -922,6 +1155,16 @@ def main():
             "base_child": collector.base_child,
             "counts": dict(collector.counts),
         }
+        # 收尾时量一次静态外参 T(gimbal_yaw <- 雷达)：判读要用"模型臂长"当参照，
+        # 并据此算出建议的 pose_body_offset_xyz。查不到只是少这一块，不影响结论。
+        try:
+            # 静态 TF 要等订阅匹配上（实测 0.2 s 不够，2~3 s 才稳）
+            deadline_mount = time.monotonic() + 3.0
+            while time.monotonic() < deadline_mount:
+                collector.spin_once(0.02)
+            meta["mount"] = state_mount["value"] or collector.mount()
+        except Exception:  # noqa: BLE001
+            meta["mount"] = None
         try:
             collector.shutdown()
         except Exception:  # noqa: BLE001 关闭失败不该影响出结论
@@ -948,12 +1191,23 @@ def _demo_samples():
 
 
 def _finish(args, samples, base_path, meta, _unused, demo=False):
-    stats = analyse(samples)
+    # ⚠ 按**最终**话题过滤：采集早期 base 可能还锁在 /lidar_odometry（雷达位姿），
+    # 那几拍的 yaw/xy 语义完全不同，混进来会把 travel/net/锁相全带偏（2026-11-13 实测：
+    # 端点比 0.913、行程比 1.084，其实是被早期 lidar 位姿污染的）。
+    final_base = meta.get("base_topic")
+    final_raw = meta.get("raw_topic")
+    kept = [s for s in samples
+            if (s.get("bt") in (None, final_base)) and (s.get("rt") in (None, final_raw))]
+    if len(kept) != len(samples):
+        print("  注意: %d/%d 个样本用的是切换前的话题（%s/%s），已剔除"
+              % (len(samples) - len(kept), len(samples), final_raw, final_base), flush=True)
+    stats = analyse(kept, meta.get("mount"))
     if stats is not None:
         stats["raw_topic"] = meta.get("raw_topic", "?")
         stats["base_topic"] = meta.get("base_topic", "?")
         stats["joint_topic"] = meta.get("joint_topic", "?")
         stats["base_child"] = meta.get("base_child") or "base_link"
+        stats["residual_tol"] = float(getattr(args, "residual_tol", 0.04))
     rc, lines = verdict(stats, args.tol_deg, args.min_travel_deg)
 
     print("", flush=True)

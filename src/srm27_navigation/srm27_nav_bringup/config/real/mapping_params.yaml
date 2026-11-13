@@ -44,6 +44,15 @@ loam_interface:
     lidar_frame: livox_imu
     planarize_pose: false
 
+# 建图链路也要用**同一套** zlio_bridge 补偿：地图必须和导航用同一条链条建出来，
+# 否则"导航补掉的随体偏置"和"地图里已固化的那一半"会打架（2026-11-13）。
+# ⚠ 这里的值和 config/real/nav2_params_srm_minco_fakeyaw.yaml 的 zlio_bridge 段
+#   **必须逐项一致**（有回归测试钉住）；原因/症状见那边的注释。
+zlio_bridge:
+  ros__parameters:
+    pose_body_offset_xyz: [0.009, -0.226, -0.130]
+    pose_body_offset_apply_to_cloud: True
+
 sensor_scan_generation:
   ros__parameters:
     lidar_frame: livox_imu

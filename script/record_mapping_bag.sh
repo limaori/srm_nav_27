@@ -61,7 +61,8 @@
 #   - 必须在建图链路(至少雷达驱动)起来之后再录; 脚本自己会等 /livox/lidar, 但如果
 #     雷达一直没起来, 等满 --wait 秒会**照样开始录**并给出警告 (不会静默丢数据)。
 #   - 结束方式只有一种是对的: Ctrl+C 或 SIGINT。rosbag2 是在退出时才写
-#     metadata.yaml 的, kill -9 会让这次录制整体作废 (脚本退出时会检查这个文件)。
+#     metadata.yaml 的, kill -9 会留下"数据在、元数据不在"的包。脚本退出时会检查;
+#     真缺了会**自动**用 ros2 bag reindex 补出来 (只读 db3), 不必整趟重录。
 #   - 录 `/livox/lidar` 带上了 livox_ros_driver2 的**自定义消息类型**, 回放前要
 #     source 本工作空间的 install/setup.bash, 否则 ros2 bag 认不出类型。
 # =============================================================
@@ -333,7 +334,27 @@ if [ -f "$OUT_DIR/metadata.yaml" ]; then
   echo "  ros2 bag play $(q "$OUT_DIR") --clock --topics /livox/lidar /livox/imu"
   echo "  ros2 launch srm27_nav_bringup real_mapping_launch.py start_lidar:=False use_sim_time:=True save_pcd:=True"
 else
-  echo "[录包] 警告: $OUT_DIR/metadata.yaml 缺失 → 这次录制不完整 (多半是被强杀了)。" >&2
-  echo "[录包] 目录里的 db3 无法作为 rosbag 回放, 需要重录。" >&2
-  exit 1
+  echo "[录包] 警告: $OUT_DIR/metadata.yaml 缺失 → 这次录制没有正常收尾 (多半是被强杀的)。" >&2
+  db3_count="$(find "$OUT_DIR" -maxdepth 1 -name '*.db3' | wc -l)"
+  if [ "$db3_count" -lt 1 ]; then
+    echo "[录包] 目录里一个 db3 都没有 → 这次什么都没录到, 只能重录。" >&2
+    exit 1
+  fi
+  # 数据在、元数据不在是能救的: reindex 只读 db3, 产物只有 metadata.yaml。
+  echo "[录包] 数据还在, 用 ros2 bag reindex 补 metadata.yaml (只读 db3, 不改数据)..." >&2
+  if ros2_run timeout 300 ros2 bag reindex "$OUT_DIR" >/dev/null 2>&1 \
+     && [ -s "$OUT_DIR/metadata.yaml" ]; then
+    # Humble 的 reindex 会把 storage_identifier 留成空串; 补成实际值 (这里只有 db3)。
+    if find "$OUT_DIR" -maxdepth 1 -name '*.db3' -print -quit | grep -q .; then
+      sed -i 's/^\( *\)storage_identifier: *""/\1storage_identifier: sqlite3/' "$OUT_DIR/metadata.yaml"
+    fi
+    size="$(du -sh "$OUT_DIR" 2>/dev/null | cut -f1)"
+    echo "[录包] 已补出 metadata.yaml: $OUT_DIR ($size, $db3_count 个 db3) → 这个包可以回放。" >&2
+    echo "[录包] 被强杀时还在内存里的最后几秒没落地; 下一趟请 Ctrl+C 一次或 ./script/start_real_slam.sh --stop。" >&2
+    echo "[录包] 离线重建 PCD: ./script/build_pcd_from_bag.sh --bag $(q "$OUT_DIR")"
+  else
+    echo "[录包] 补 metadata 也失败 (db3 可能正写到一半坏了) → 这个包只能重录。" >&2
+    echo "[录包] 事后仍可再试: ros2 bag reindex $(q "$OUT_DIR")" >&2
+    exit 1
+  fi
 fi

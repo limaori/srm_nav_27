@@ -98,6 +98,9 @@ def launch_setup(context):
     # pointcloud_to_laserscan / slam_toolbox 全部照旧（bridge 的输出沿用
     # registered_scan / lidar_odometry 原名）。
     use_zlio = lio_frontend == "zlio"
+    # 2D 扫描的输入点云：默认 registered_scan（LIO 去畸变后的稀疏云）；想抓矮/薄障碍
+    # 可传 scan_cloud_topic:=/livox/lidar/pointcloud（原始 ~20k 点/帧）。
+    scan_cloud_topic = LaunchConfiguration("scan_cloud_topic").perform(context)
     gimbal_joint_topic = LaunchConfiguration("gimbal_joint_topic").perform(context)
     # 云台按真关节(与仿真一致)。没有回传角时用 constant 暂位 0 度, 见下方 relay 节点。
     gimbal_input_type = "float32" if gimbal_joint_topic else "constant"
@@ -240,7 +243,7 @@ def launch_setup(context):
                     "max_height": 1.00 - position[2],
                 },
             ],
-            remappings=[("cloud_in", "registered_scan")],
+            remappings=[("cloud_in", scan_cloud_topic)],
         ),
         Node(
             package="slam_toolbox",
@@ -312,6 +315,13 @@ def generate_launch_description():
             "zlio_config",
             str(bringup_dir / "config/real/zlio_mid360.yaml"),
             "ZLIO 算法参数（只在 lio_frontend:=zlio 时生效）",
+        ),
+        (
+            "scan_cloud_topic",
+            "registered_scan",
+            "喂给 pointcloud_to_laserscan 的点云。默认 registered_scan（LIO 输出、已去畸变，"
+            "但降采样到 ~1.7k 点/帧：720 个方位格只覆盖 ~264 个，矮台阶/薄栏杆会被相邻射线"
+            "当空闲刷掉）。改成 /livox/lidar/pointcloud 可覆盖 ~598 格，代价是没做运动去畸变。",
         ),
         (
             "gimbal_joint_topic",

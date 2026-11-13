@@ -82,6 +82,8 @@
 #   RECORD_BAG BAG_NAME BAG_DERIVED BAG_OUT_DIR BAG_TOPICS BAG_MIN_FREE_GB BAG_FINALIZE_WAIT
 #   LIDAR_XYZ LIDAR_RPY START_LIDAR USE_SIM_TIME SAVE_PCD
 #   USE_RVIZ USE_CHASSIS USE_JOY JOY_DEV
+#   MAPPING_EXTRA_ARGS  额外透传给 real_mapping_launch.py 的参数, 例如
+#                       "scan_cloud_topic:=/livox/lidar/pointcloud" (2D 扫描改用原始点云)
 #   OPEN_MODE(tab|window) TERMINAL DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
@@ -407,7 +409,7 @@ stop_mapping() {
     done
     if [ -n "$(matching_pids "$BAG_RECORDER_PATTERN")" ]; then
       echo "[警告] 录包进程 ${BAG_FINALIZE_WAIT} 秒内没退完, 下面会被强制结束。" >&2
-      echo "[警告] 被强杀的 bag 缺 metadata.yaml 无法回放; 用 ls 检查 bag 目录再决定是否重录。" >&2
+      echo "[警告] 被强杀的 bag 会缺 metadata.yaml; 事后用 ./script/build_pcd_from_bag.sh 可自动补 (ros2 bag reindex), 尾部几秒可能缺。" >&2
     else
       echo "[停止] 录包进程已收尾 (等待 ${waited} 秒)。"
     fi
@@ -433,7 +435,7 @@ stop_mapping() {
     if [ -f "$bag_dir/metadata.yaml" ]; then
       printf '[停止] 录包完整: %s (%s)\n' "$bag_dir" "$(du -sh "$bag_dir" 2>/dev/null | cut -f1)"
     else
-      printf '[停止] 警告: %s 缺 metadata.yaml, 这个包无法回放。\n' "$bag_dir" >&2
+      printf '[停止] 警告: %s 缺 metadata.yaml; build_pcd_from_bag.sh 会自动补 (ros2 bag reindex), 不必重录。\n' "$bag_dir" >&2
     fi
   done
 }
@@ -842,6 +844,14 @@ MAPPING_CMD="$MAPPING_CMD start_lidar:=$(bool_arg "$START_LIDAR")"
 MAPPING_CMD="$MAPPING_CMD use_sim_time:=$CLOCK_ARG"
 MAPPING_CMD="$MAPPING_CMD use_rviz:=$(bool_arg "$USE_RVIZ")"
 MAPPING_CMD="$MAPPING_CMD save_pcd:=$(bool_arg "$SAVE_PCD")"
+
+# 透传额外的 launch 参数, 例如换 2D 扫描的点云来源 (矮台阶/薄栏杆扫不出来时):
+#   MAPPING_EXTRA_ARGS="scan_cloud_topic:=/livox/lidar/pointcloud" ./script/start_real_slam.sh
+# 默认 registered_scan 只有 ~1.7k 点/帧 (720 个方位格覆盖 ~264);
+# 原始点云 ~20k 点/帧, 覆盖 ~598 格, 代价是没做运动去畸变。
+if [ -n "${MAPPING_EXTRA_ARGS:-}" ]; then
+  MAPPING_CMD="$MAPPING_CMD $MAPPING_EXTRA_ARGS"
+fi
 
 # 底盘串口节点固定在根命名空间, 订阅全局 /cmd_vel_chassis。
 CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"

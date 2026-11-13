@@ -17,6 +17,7 @@
 #   ./script/build_pcd_from_bag.sh --bag log_diag/mapping_bag_227_1011_20261011_181809
 #   ./script/build_pcd_from_bag.sh --bag <目录> --name site01 --force
 #   ./script/build_pcd_from_bag.sh --no-mapframe         # 只重建, 不转系
+#   ./script/build_pcd_from_bag.sh --bag <目录> --no-reindex   # 缺 metadata.yaml 也别动它
 #   ./script/build_pcd_from_bag.sh -n                    # 只打印将执行的命令, 不真跑
 #
 # 参数:
@@ -29,12 +30,13 @@
 #       --map-yaml <路径>    转系用的栅格图 yaml (默认 maps/<名字>/<名字>.yaml)
 #       --startup-wait <秒>  最多等 point_lio 起来的秒数 (默认 60)
 #       --pcd-wait <秒>      最多等 Point-LIO 退出并写完 PCD 的秒数 (默认 180)
+#       --no-reindex         缺 metadata.yaml 时不自动重建 (默认自动; 只读 db3)
 #   -n, --check              只打印将执行的命令, 不启动任何东西
 #   -h, --help               显示本帮助
 #
 # 环境变量 (同名参数均可由环境变量给默认值):
 #   BAG_FILE BAG_NAME PCD_OUT_DIR PCD_BAG_RATE STARTUP_WAIT PCD_WAIT FORCE_PCD
-#   TO_MAPFRAME MAP_YAML_OVERRIDE BAG_TOPICS SRM27_WS_DIR
+#   TO_MAPFRAME MAP_YAML_OVERRIDE BAG_TOPICS REINDEX_BAG SRM27_WS_DIR
 #
 # 说明:
 #   - 链路参数与实车建图**完全一致**(同一份 mapping_params.yaml), 只是不起雷达驱动
@@ -42,14 +44,18 @@
 #     当时若开 --save-pcd 会得到的**同一份东西** —— 这正是录包的意义。
 #   - 只回放 /livox/lidar + /livox/imu: 链路自己会发 odom->base_link 与
 #     base_link->livox_frame, 回放包里的 /tf 会和它抢同一条 TF。
+#   - 包缺 metadata.yaml (Ctrl+C 按两次 / 关标签页 / kill -9 收尾) 时**自动**就地跑
+#     ros2 bag reindex 补出来: 它只读 db3, 产物只有目录里那个 metadata.yaml, 数据不动
+#     (1.2 GB 的包实测 0.3 秒)。不想让脚本动手就加 --no-reindex。
+#     正在录的包不碰: 检测到 ros2 bag record 会直接拒绝。
 #   - 跑之前必须没有别的建图链路在跑 (两个 point_lio 抢同一条 TF); 脚本会检查并拒绝。
 #   - 旧的 point_lio/PCD/scans.pcd 会被改名成 scans_<改动时间>.pcd 保住, 不会静默覆盖。
 #   - 产出两份到 maps/pcd/:
 #       <名字>.pcd           Point-LIO 的 camera_init 系 (原始件)
 #       <名字>_mapframe.pcd  pgm 地图系 (成品, --reloc 用这份)
 #     第二份由 script/pcd_to_mapframe.py **自动接着做** (默认开, --no-mapframe 关):
-#     camera_init 与地图系差约 90° (雷达相对 base_link 装了 -90°), 不转就去 --reloc,
-#     车会被定位到错姿态上而 GICP 不会报错 —— 所以这一步不该靠人记。
+#     camera_init 与地图系差一个固定位姿 (雷达相对 base_link: yaw 63°、roll -30°), 不转就去
+#     --reloc, 车会被定位到错姿态上而 GICP 不会报错 —— 所以这一步不该靠人记。
 #     地图 yaml (maps/<名字>/<名字>.yaml) 不存在时只告警, 并给出事后手动转的命令。
 # =============================================================
 
@@ -79,11 +85,13 @@ PCD_BAG_RATE="${PCD_BAG_RATE:-1.0}"
 STARTUP_WAIT="${STARTUP_WAIT:-60}"
 PCD_WAIT="${PCD_WAIT:-180}"
 FORCE_PCD="${FORCE_PCD:-0}"
-# 重建完是否接着转成地图系 (默认转): 不转就 --reloc 会差 90°, 而 GICP 不会报错,
+# 重建完是否接着转成地图系 (默认转): 不转就 --reloc 会差一个固定位姿, 而 GICP 不会报错,
 # 所以这一步不该靠人记。地图 yaml 不存在 (还没 --save) 时只告警, 并给出事后手动转的命令。
 TO_MAPFRAME="${TO_MAPFRAME:-1}"
 MAP_YAML_OVERRIDE="${MAP_YAML_OVERRIDE:-}"
 BAG_TOPICS="${BAG_TOPICS:-/livox/lidar /livox/imu}"
+# 缺 metadata.yaml 时自动补 (ros2 bag reindex): 只读 db3, 只写 metadata.yaml 一个文件。
+REINDEX_BAG="${REINDEX_BAG:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # 回放链路的进程名 (方括号包首字符, 免得 pgrep 匹配到本脚本自己的命令行)。
@@ -129,6 +137,7 @@ while [ $# -gt 0 ]; do
     --map-yaml)      MAP_YAML_OVERRIDE="${2:?--map-yaml 需要 yaml 路径}"; shift 2 ;;
     --startup-wait)  STARTUP_WAIT="${2:?--startup-wait 需要秒数}"; shift 2 ;;
     --pcd-wait)      PCD_WAIT="${2:?--pcd-wait 需要秒数}"; shift 2 ;;
+    --no-reindex)    REINDEX_BAG=0; shift ;;
     -n|--check)      DRY_RUN=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
@@ -170,34 +179,162 @@ if [ ! -d "$BAG_FILE" ]; then
 fi
 BAG_FILE="$(readlink -f "$BAG_FILE")"
 
-if [ ! -f "$BAG_FILE/metadata.yaml" ]; then
-  cat >&2 <<EOF
-[错误] $BAG_FILE 里没有 metadata.yaml, 这个包无法回放。
-[错误] rosbag2 只在收到 SIGINT 收尾时才写它: Ctrl+C 按两次、直接关标签页、kill -9
-[错误] 都会留下这种"数据在、元数据不在"的包。
-[提示] 若只是缺元数据(目录里 .db3 非空), 用下面这条救回来 (只读 db3, 不改数据):
-[提示]   ros2 bag reindex $(q "$BAG_FILE")
+# ---------- 正在录的包不碰 ----------
+# 录包中的 db3 还在长、metadata.yaml 要到收尾才写。这时补元数据等于给半成品盖章,
+# 回放也只是读到一半的数据 —— 两头都错, 所以直接拒绝。
+# pattern 带前导 /: 真进程的 cmdline 是
+#   /usr/bin/python3 /opt/ros/humble/bin/ros2 bag record ...
+# 而"命令行里只是提了一句 ros2 bag record"的 shell/编辑器/grep 没有那个 /,
+# 用 '[r]os2 bag record' 会把它们也算成在录包 (实测踩过)。
+if pgrep -u "$(id -u)" -f '/[r]os2 bag record' >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+[错误] 现在有 ros2 bag record 在跑, 这个包还没收尾 (数据还在长)。
+[提示] 先在录包那个终端 Ctrl+C 一次 (只按一次), 或 ./script/start_real_slam.sh --stop,
+[提示] 等目录里出现 metadata.yaml 之后再回来重建 PCD。
 EOF
   exit 1
 fi
 
-# ---------- 读包元数据: 时长 + 话题 ----------
-BAG_INFO="$(python3 - "$BAG_FILE/metadata.yaml" <<'PYEOF'
-import sys, yaml
-info = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))["rosbag2_bagfile_information"]
-duration = info.get("duration", {}).get("nanoseconds", 0) / 1e9
-topics = {}
-for entry in info.get("topics_with_message_count", []):
-    meta = entry["topic_metadata"]
-    topics[meta["name"]] = (meta["type"], entry["message_count"])
-print("%.1f" % duration)
+# ---------- 读包信息: metadata.yaml, 缺了就地重建 ----------
+# 输出两段: 第 1 行 "<状态>|<时长秒>", 之后每行 "<话题>|<类型>|<条数>"。
+# 状态 ok = metadata.yaml 可用; missing/broken = 缺或写了半截 (此时时长/话题是从 db3
+# 只读统计的, 用来报错和 -n 预演); error = 连 db3 都读不出来。
+read_bag_info() {
+  python3 - "$BAG_FILE" <<'PYEOF'
+import glob, os, sqlite3, sys
+
+bag = sys.argv[1]
+meta = os.path.join(bag, "metadata.yaml")
+
+
+def from_metadata(path):
+    import yaml
+    info = yaml.safe_load(open(path, encoding="utf-8"))["rosbag2_bagfile_information"]
+    topics = {}
+    for entry in info.get("topics_with_message_count", []):
+        m = entry["topic_metadata"]
+        topics[m["name"]] = (m["type"], entry["message_count"])
+    return info.get("duration", {}).get("nanoseconds", 0) / 1e9, topics
+
+
+def from_db3():
+    """只读扫 db3: metadata.yaml 没了也要能说清包里到底有什么。"""
+    files = sorted(glob.glob(os.path.join(bag, "*.db3")))
+    if not files:
+        return None
+    topics = {}
+    lo = hi = None
+    for path in files:
+        con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+        try:
+            for name, typ, count in con.execute(
+                    "SELECT t.name, t.type, COUNT(*) FROM messages m "
+                    "JOIN topics t ON t.id = m.topic_id GROUP BY m.topic_id"):
+                prev = topics.get(name)
+                topics[name] = (typ, (prev[1] if prev else 0) + count)
+            first, last = con.execute(
+                "SELECT MIN(timestamp), MAX(timestamp) FROM messages").fetchone()
+        finally:
+            con.close()
+        if first is not None:
+            lo = first if lo is None else min(lo, first)
+            hi = last if hi is None else max(hi, last)
+    if lo is None:
+        return None
+    return (hi - lo) / 1e9, topics
+
+
+status, duration, topics = "ok", 0.0, {}
+if not os.path.isfile(meta) or os.path.getsize(meta) == 0:
+    status = "missing"
+else:
+    try:
+        duration, topics = from_metadata(meta)
+    except Exception as exc:
+        status = "broken"
+        sys.stderr.write("metadata.yaml 解析失败: %s\n" % exc)
+
+if status != "ok":
+    try:
+        fallback = from_db3()
+    except Exception:
+        fallback = None
+    if fallback is None:
+        print("error|0")
+        sys.exit(0)
+    duration, topics = fallback
+
+print("%s|%.1f" % (status, duration))
 for name, (typ, count) in sorted(topics.items()):
     print("%s|%s|%d" % (name, typ, count))
 PYEOF
-)" || { echo "[错误] 解析 $BAG_FILE/metadata.yaml 失败。" >&2; exit 1; }
+}
 
-BAG_DURATION="$(printf '%s\n' "$BAG_INFO" | head -n 1)"
+BAG_INFO="$(read_bag_info)" || { echo "[错误] 读 $BAG_FILE 失败。" >&2; exit 1; }
+META_STATUS="$(printf '%s\n' "$BAG_INFO" | head -n 1 | cut -d'|' -f1)"
+BAG_DURATION="$(printf '%s\n' "$BAG_INFO" | head -n 1 | cut -d'|' -f2)"
 BAG_TOPIC_LINES="$(printf '%s\n' "$BAG_INFO" | tail -n +2)"
+
+if [ "$META_STATUS" = "error" ]; then
+  echo "[错误] $BAG_FILE 里没有可读的 .db3: 它不像一个录包目录, 或者数据已经坏了。" >&2
+  exit 1
+fi
+
+REINDEXED=0
+if [ "$META_STATUS" != "ok" ]; then
+  if [ "$META_STATUS" = "missing" ]; then
+    WHY="没有 metadata.yaml"
+  else
+    WHY="metadata.yaml 读不出来 (多半是收尾时只写了一半)"
+  fi
+  echo "[预处理] $BAG_FILE: $WHY" >&2
+  echo "[预处理] rosbag2 只在收到 SIGINT 收尾时才写它: Ctrl+C 按两次、关标签页、kill -9 都会缺。" >&2
+  echo "[预处理] 数据本身还在 (上面已只读扫过 db3), 补元数据即可, 不用重录。" >&2
+
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "[--check] 真跑时会先执行 (只读 db3, 产物只有 metadata.yaml):" >&2
+    echo "[--check]   ros2 bag reindex $(q "$BAG_FILE")" >&2
+    echo "[--check] 下面的时长/话题是从 db3 只读统计的, 可用于预演。" >&2
+  elif ! is_true "$REINDEX_BAG"; then
+    echo "[错误] --no-reindex: 没有 metadata.yaml 就没法 ros2 bag play。" >&2
+    echo "[提示] 去掉 --no-reindex 让脚本补, 或手动: ros2 bag reindex $(q "$BAG_FILE")" >&2
+    exit 1
+  else
+    # 先把半截的 metadata.yaml 挪走: 留着它, reindex 会照着坏文件去选存储插件。
+    if [ -e "$BAG_FILE/metadata.yaml" ]; then
+      BROKEN_META="$BAG_FILE/metadata.yaml.broken_$(date +%Y%m%d_%H%M%S)"
+      mv "$BAG_FILE/metadata.yaml" "$BROKEN_META"
+      echo "[预处理] 半截的 metadata.yaml 已改名保留: $(basename "$BROKEN_META")" >&2
+    fi
+    if [ ! -w "$BAG_FILE" ]; then
+      echo "[错误] $BAG_FILE 不可写, reindex 没地方落 metadata.yaml。" >&2
+      exit 1
+    fi
+    echo "[预处理] ros2 bag reindex 重建 metadata.yaml (只读 db3, 数据不动)..."
+    if ! ros2_run timeout 600 ros2 bag reindex "$BAG_FILE"; then
+      echo "[错误] ros2 bag reindex 失败, 这个包补不回来。" >&2
+      echo "[错误] 常见原因: 录制被打断时 db3 正写到一半 —— 那是数据本身坏了, 不只是缺元数据。" >&2
+      echo "[提示] 这种只能重录; 这一趟没有可用输入, 不往下跑。" >&2
+      exit 1
+    fi
+    BAG_INFO="$(read_bag_info)"
+    META_STATUS="$(printf '%s\n' "$BAG_INFO" | head -n 1 | cut -d'|' -f1)"
+    BAG_DURATION="$(printf '%s\n' "$BAG_INFO" | head -n 1 | cut -d'|' -f2)"
+    BAG_TOPIC_LINES="$(printf '%s\n' "$BAG_INFO" | tail -n +2)"
+    if [ "$META_STATUS" != "ok" ]; then
+      echo "[错误] reindex 跑完了, metadata.yaml 仍不可用 ($META_STATUS), 不往下跑。" >&2
+      exit 1
+    fi
+    # Humble 的 reindex 会把 storage_identifier 留成空串; 空值只是"回退到默认插件"
+    # (这里恰好是 sqlite3 才放得动)。补上实际值, 免得别的工具按空值选错插件。
+    if find "$BAG_FILE" -maxdepth 1 -name '*.db3' -print -quit | grep -q .; then
+      sed -i 's/^\( *\)storage_identifier: *""/\1storage_identifier: sqlite3/' "$BAG_FILE/metadata.yaml"
+    fi
+    REINDEXED=1
+    echo "[预处理] 已补出 metadata.yaml: ${BAG_DURATION} 秒, $(printf '%s\n' "$BAG_TOPIC_LINES" | grep -c '|') 个话题, 可以回放。"
+    echo "[预处理] 强杀时丢的是内存里最后几秒缓存; 剩下这些点云仍然能用, 介意就重录。"
+  fi
+fi
 
 bag_has_topic() { printf '%s\n' "$BAG_TOPIC_LINES" | cut -d'|' -f1 | grep -qx "$1"; }
 
@@ -235,6 +372,17 @@ if [ "$BAG_NAME" != "${BAG_NAME//[!A-Za-z0-9_.-]/}" ]; then
   exit 2
 fi
 
+# --name 给的是"地图名"; _mapframe 是脚本自己加的后缀。传 227_1113_mapframe 会得到
+# 227_1113_mapframe.pcd + 227_1113_mapframe_mapframe.pcd, 而且 maps/227_1113_mapframe/
+# 不存在, 转系只能告警跳过。名字里的意图一眼可辨, 直接按意图纠正 —— 别让人跑完
+# 6 分钟才发现产物名字不对。
+if is_true "$TO_MAPFRAME" && [ "$BAG_NAME" != "${BAG_NAME%_mapframe}" ] \
+   && [ -n "${BAG_NAME%_mapframe}" ]; then
+  echo "[提示] --name $BAG_NAME 结尾的 _mapframe 是多余的: 脚本会自己产出 <名字>_mapframe.pcd"
+  echo "[提示] 按 $BAG_NAME 去掉后缀处理 -> ${BAG_NAME%_mapframe}"
+  BAG_NAME="${BAG_NAME%_mapframe}"
+fi
+
 OUT_PCD="$PCD_OUT_DIR/$BAG_NAME.pcd"
 
 # ---------- 组装命令 ----------
@@ -256,6 +404,9 @@ RUN_LOG="$LOG_DIR/build_pcd_${BAG_NAME}_${RUN_TAG}.log"
 # ---------- 摘要 ----------
 echo "================= 从 rosbag 重建 PCD ================="
 echo "  录包目录  : $BAG_FILE"
+if [ "$REINDEXED" = "1" ]; then
+  echo "  元数据    : 刚自动补出 (原包缺 metadata.yaml, 被强杀收尾; 尾部几秒可能缺)"
+fi
 echo "  时长      : ${BAG_DURATION} 秒 (按 ${PCD_BAG_RATE} 倍速回放)"
 echo "  回放话题  : ${REPLAY_TOPICS[*]}"
 echo "  输出      : $OUT_PCD"
@@ -266,18 +417,20 @@ echo "======================================================"
 
 if [ "$DRY_RUN" = "1" ]; then
   echo
-  echo "[--check] 仅解析, 不启动。将要执行的步骤:"
+  echo "[--check] 仅解析, 不启动、不改任何文件。将要执行的步骤:"
+  echo "  0) (仅当缺 metadata.yaml) ros2 bag reindex $(q "$BAG_FILE")   # 只读 db3, 只补 metadata.yaml"
   echo "  1) 备份已存在的 $BUILT_PCD -> $PCD_DIR_BUILD/scans_<改动时间>.pcd"
   echo "  2) (source $SETUP_FILE) $LAUNCH_CMD"
   echo "     日志 -> $RUN_LOG   等 /point_lio 订阅上 /livox/lidar + /livox/imu (最多 ${STARTUP_WAIT} 秒)"
   echo "  3) (source $SETUP_FILE) $PLAY_CMD"
   echo "  4) SIGINT 给 point_lio, 收掉回放链路"
-  echo "  5) 校验 $BUILT_PCD 后移动到 $OUT_PCD"
+  echo "  5) 校验 $BUILT_PCD 完整性"
+  echo "  6) 移动到 $OUT_PCD"
   if is_true "$TO_MAPFRAME"; then
-    echo "  6) 转成地图系 -> ${OUT_PCD%.pcd}_mapframe.pcd"
+    echo "  7) 转成地图系 -> ${OUT_PCD%.pcd}_mapframe.pcd"
     echo "     python3 script/pcd_to_mapframe.py --pcd $OUT_PCD --map ${MAP_YAML_OVERRIDE:-$WS_DIR/maps/$BAG_NAME/$BAG_NAME.yaml}"
   else
-    echo "  6) [--no-mapframe] 跳过转系, 只留 camera_init 系原始件"
+    echo "  7) [--no-mapframe] 跳过转系, 只留 camera_init 系原始件"
   fi
   echo
   echo "解析完成, 未启动任何进程。"
@@ -344,13 +497,13 @@ if [ -f "$BUILT_PCD" ]; then
     n=$((n + 1))
   done
   mv "$BUILT_PCD" "$OLD_KEEP"
-  echo "[1/6] 旧的 scans.pcd 已保到 $(basename "$OLD_KEEP")"
+  echo "[1/7] 旧的 scans.pcd 已保到 $(basename "$OLD_KEEP")"
 else
-  echo "[1/6] Point-LIO 落盘目录是空的, 不需要备份。"
+  echo "[1/7] Point-LIO 落盘目录是空的, 不需要备份。"
 fi
 
 # ---------- 2) 起回放链路 ----------
-echo "[2/6] 起回放链路 (start_lidar:=False use_sim_time:=True save_pcd:=True)..."
+echo "[2/7] 起回放链路 (start_lidar:=False use_sim_time:=True save_pcd:=True)..."
 # 用 subshell 里 source 再 exec, 这样 $! 就是 ros2 launch 本身, 信号能直达。
 set +e
 ( set +u; source "$SETUP_FILE" >/dev/null 2>&1; exec ros2 launch srm27_nav_bringup real_mapping_launch.py \
@@ -390,7 +543,7 @@ echo "      /point_lio 已就绪且已订阅点云/IMU (等待 ${waited} 秒)。
 sleep 2
 
 # ---------- 3) 放包 ----------
-echo "[3/6] 放包 (约 ${BAG_DURATION} 秒, ${PCD_BAG_RATE} 倍速)..."
+echo "[3/7] 放包 (约 ${BAG_DURATION} 秒, ${PCD_BAG_RATE} 倍速)..."
 (
   set +u
   # shellcheck disable=SC1091
@@ -400,7 +553,7 @@ echo "[3/6] 放包 (约 ${BAG_DURATION} 秒, ${PCD_BAG_RATE} 倍速)..."
 
 # ---------- 4) 收尾 ----------
 # 先直接给 point_lio SIGINT: 只有它走正常退出流程才会写 PCD (和实车 --stop 同一招)。
-echo "[4/6] 收尾: 通知 point_lio 退出并落盘..."
+echo "[4/7] 收尾: 通知 point_lio 退出并落盘..."
 sleep 2
 pkill -INT -u "$(id -u)" -f "$POINTLIO_PATTERN" 2>/dev/null || true
 kill -INT "$LAUNCH_PID" 2>/dev/null || true
@@ -429,7 +582,7 @@ fi
 echo "      point_lio 已退出, PCD 已写出 (等待 ${waited} 秒)。"
 
 # ---------- 5) 校验 ----------
-echo "[5/6] 校验 PCD 完整性..."
+echo "[5/7] 校验 PCD 完整性..."
 if ! python3 - "$BUILT_PCD" <<'PYEOF'
 import re, sys
 path = sys.argv[1]
@@ -463,12 +616,13 @@ then
 fi
 
 # ---------- 6) 落地 ----------
-echo "[6/6] 移动到 $OUT_PCD"
+echo "[6/7] 移动到 $OUT_PCD"
 mv "$BUILT_PCD" "$OUT_PCD"
 
 # ---------- 7) 接着转成地图系 ----------
-# 不转就没法用: camera_init 系与 pgm 地图系差约 90° (雷达相对 base_link 装了 -90°),
+# 不转就没法用: camera_init 系与 pgm 地图系差一个固定位姿 (雷达 yaw 63°、roll -30°),
 # 直接 --reloc 车会被定位到错姿态而 GICP 不报错。这一步默认做, 别让人靠记忆。
+# 装歪的 roll 由 pcd_to_mapframe.py 按 --level-mount 自动摆正 (只按平面拟合会差 0.15 m)。
 MAP_YAML="${MAP_YAML_OVERRIDE:-$WS_DIR/maps/$BAG_NAME/$BAG_NAME.yaml}"
 MAPFRAME_PCD="${OUT_PCD%.pcd}_mapframe.pcd"
 MAPFRAME_OK=0
@@ -510,7 +664,7 @@ else
   $OUT_PCD  ($(du -h "$OUT_PCD" | cut -f1))
   链路日志: $RUN_LOG
 
-下一步 — 转成地图系 (不转直接 --reloc 车会被定位到差约 90° 的姿态上, 而 GICP 不会报错):
+下一步 — 转成地图系 (不转直接 --reloc 车会被定位到错姿态上, 而 GICP 不会报错):
   python3 script/pcd_to_mapframe.py \\
       --pcd $OUT_PCD \\
       --map $MAP_YAML

@@ -85,7 +85,22 @@ ZLIO 在输入中断后会自己换代冷启动（`coordinated_reset: false`）�
 ====
 `odom_frame` / `base_frame` / `lidar_frame` / `frame_topic` / `session_topic` /
 `planarize_pose`（默认关，平面化只在 `sensor_scan_generation` 做一次）/ `tf_timeout` /
-`anchor_on_epoch_change`（A/B 复现用开关）/ `epoch_topic`（诊断）。
+`anchor_on_epoch_change`（A/B 复现用开关）/ `epoch_topic`（诊断）/
+`pose_body_offset_xyz`（前端随体偏置补偿，默认 `[0,0,0]` = 关，见下）。
+
+`pose_body_offset_xyz`：ZLIO 在"云台绕偏轴自转"这种高角速度场景下，估出来的雷达平移带
+一个**随体**常量偏置 —— 云台转一圈，`odom→gimbal_yaw` 就画一个半径等于该偏置的圆
+（2026-11-13 实测 0.145~0.150 m）。该值把偏置从**对外发布的位姿**上右乘减掉：
+
+    pose_pub = pose · T(offset)
+
+作用范围由 `pose_body_offset_apply_to_cloud` 决定（默认 true = 位姿和点云一起改）：
+整条链变成正确的，且点云与车位姿的相对几何仍是外参 A（避障/代价地图不受影响）；
+代价是点云相对**旧地图**的位置变了（旧图按带误差的链条建的）⇒ 要重跑一次建图，或用
+`--reloc` 让 GICP 重新对齐。设成 false 只改位姿，旧图配准不变，但障碍物会相对车位姿
+永久偏 |offset|（≈0.26 m 且随车头转）⇒ 会破坏避障，**只适合做 A/B 诊断**。
+取值不用手算：`debug_tools/capture_gimbal_spin.py` 会把建议值直接打印成
+`pose_body_offset_xyz: [x, y, z]`。默认全零时本节点行为与改造前逐位一致。
 
 输出字段
 ========
@@ -296,6 +311,24 @@ class ZlioBridge(Node):
         self.declare_parameter("frame_topic", "zlio/frame")
         self.declare_parameter("session_topic", "zlio/session")
         self.declare_parameter("planarize_pose", False)
+        # 前端随体偏置补偿（米，雷达/IMU 体坐标系，2026-11-13）。
+        # 语义：ZLIO 在"云台绕偏轴自转"这种高角速度场景下，估出来的雷达平移带一个
+        # **随体**常量偏置 —— 云台转一圈，`odom→gimbal_yaw` 就画一个半径等于该偏置的圆
+        # （2026-11-13 实测 0.15~0.26 m，而外参本身已被"点云 vs 实物"对照证实是对的）。
+        # 补偿方式：把该偏置从位姿上右乘减掉
+        #     pose_corrected = pose · T(offset)
+        # 两种作用范围（`pose_body_offset_apply_to_cloud`）：
+        #   true（默认）= **位姿和点云一起改**。整条链变成"正确"的：云台自转时车不再画圈，
+        #       且点云与车位姿仍然自洽（相对几何 = 外参 A，完全不变）⇒ 避障/代价地图不受影响。
+        #       代价：点云相对**旧地图**的位置会变（旧图是用带误差的链条建的）⇒ 需要重跑一次
+        #       建图，或者用 `--reloc` 让 GICP 重新对齐。
+        #   false（**只做诊断**）= 只改位姿，点云仍按未补偿的位姿变换。旧图配准不变，但
+        #       障碍物相对车位姿会永久偏 |offset|（≈0.26 m、随车头转）⇒ 会破坏避障，
+        #       只用来做"症结是不是它"的 A/B。
+        # 取值：跑一次 `debug_tools/capture_gimbal_spin.py`，它会把建议值直接打印成
+        #   `pose_body_offset_xyz: [x, y, z]`，粘过来即可；默认 [0,0,0] = 不补偿。
+        self.declare_parameter("pose_body_offset_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter("pose_body_offset_apply_to_cloud", True)
         self.declare_parameter("tf_timeout", 0.5)
         self.declare_parameter("anchor_on_epoch_change", True)
         self.declare_parameter("epoch_topic", "zlio_bridge/epoch")
@@ -330,6 +363,17 @@ class ZlioBridge(Node):
         frame_topic = str(self.get_parameter("frame_topic").value)
         session_topic = str(self.get_parameter("session_topic").value)
         self.planarize_pose = bool(self.get_parameter("planarize_pose").value)
+        raw_offset = self.get_parameter("pose_body_offset_xyz").value
+        try:
+            values = [float(v) for v in raw_offset]
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"pose_body_offset_xyz 需要 3 个数, 收到 {raw_offset!r}") from error
+        if len(values) != 3 or not all(math.isfinite(v) for v in values):
+            raise ValueError(f"pose_body_offset_xyz 需要 3 个有限数, 收到 {raw_offset!r}")
+        # 全零 = 关闭（保持与改造前逐位一致，不做多余乘算）
+        self.pose_body_offset = None if not any(values) else _Rigid(t=values)
+        self.pose_body_offset_apply_to_cloud = bool(
+            self.get_parameter("pose_body_offset_apply_to_cloud").value)
         self.tf_timeout = float(self.get_parameter("tf_timeout").value)
         self.anchor_on_epoch_change = bool(
             self.get_parameter("anchor_on_epoch_change").value
@@ -412,6 +456,18 @@ class ZlioBridge(Node):
             f"发布 registered_scan + lidar_odometry (child={self.lidar_frame}); "
             f"planarize_pose={self.planarize_pose}, "
             f"anchor_on_epoch_change={self.anchor_on_epoch_change}"
+            + (
+                f", pose_body_offset_xyz=({self.pose_body_offset.t[0]:+.4f}, "
+                f"{self.pose_body_offset.t[1]:+.4f}, {self.pose_body_offset.t[2]:+.4f})"
+                "（位姿+点云一起改：链条自洽，但旧地图需重建或用 --reloc）"
+                if self.pose_body_offset is not None
+                and self.pose_body_offset_apply_to_cloud
+                else (
+                    "（⚠ 只改位姿：障碍物会相对车位姿偏 |offset|，仅供 A/B 诊断）"
+                    if self.pose_body_offset is not None
+                    else ""
+                )
+            )
         )
 
     # -- 日志节流（sim time 下也能用；rclpy 的 throttle 依赖 wall clock 与版本）------
@@ -607,7 +663,12 @@ class ZlioBridge(Node):
             # 已经不是安装外参了。
             pose = (pose * self.mount.inverse()).planar() * self.mount
 
-        self._publish(msg, pose, stamp)
+        # 前端随体偏置补偿：把 `odom→gimbal_yaw` 上那个半径 0.15~0.26 m 的圆减掉。
+        # 默认位姿+点云一起改（链条自洽、避障不受影响）；`apply_to_cloud=false` 只改位姿，
+        # 仅供 A/B 诊断 —— 见参数注释里的取舍。
+        pose_pub = pose if self.pose_body_offset is None else pose * self.pose_body_offset
+        cloud_pose = pose_pub if self.pose_body_offset_apply_to_cloud else pose
+        self._publish(msg, pose_pub, stamp, cloud_pose=cloud_pose)
 
     # -- 关键数学 --------------------------------------------------------------
     def _capture_offset(self, stamp):
@@ -695,7 +756,7 @@ class ZlioBridge(Node):
         self.epoch_pub.publish(epoch_msg)
 
     # -- 输出 ------------------------------------------------------------------
-    def _publish(self, msg: FrontendFrame, pose: _Rigid, stamp: Time):
+    def _publish(self, msg: FrontendFrame, pose: _Rigid, stamp: Time, cloud_pose=None):
         odometry = Odometry()
         odometry.header.stamp = msg.odometry.header.stamp
         odometry.header.frame_id = self.odom_frame
@@ -716,13 +777,16 @@ class ZlioBridge(Node):
         stamped.header.stamp = msg.odometry.header.stamp
         stamped.header.frame_id = self.odom_frame
         stamped.child_frame_id = self.lidar_frame
-        stamped.transform.translation.x = pose.t[0]
-        stamped.transform.translation.y = pose.t[1]
-        stamped.transform.translation.z = pose.t[2]
-        stamped.transform.rotation.w = pose.q[0]
-        stamped.transform.rotation.x = pose.q[1]
-        stamped.transform.rotation.y = pose.q[2]
-        stamped.transform.rotation.z = pose.q[3]
+        # 点云用 cloud_pose（= 未做 pose_body_offset 补偿的原始 pose）：
+        # 补偿只修"发布出去的位姿"，不能把点云一起挪，否则旧地图/先验 PCD 的配准会变。
+        cloud_pose = pose if cloud_pose is None else cloud_pose
+        stamped.transform.translation.x = cloud_pose.t[0]
+        stamped.transform.translation.y = cloud_pose.t[1]
+        stamped.transform.translation.z = cloud_pose.t[2]
+        stamped.transform.rotation.w = cloud_pose.q[0]
+        stamped.transform.rotation.x = cloud_pose.q[1]
+        stamped.transform.rotation.y = cloud_pose.q[2]
+        stamped.transform.rotation.z = cloud_pose.q[3]
 
         try:
             cloud = do_transform_cloud(msg.cloud, stamped)

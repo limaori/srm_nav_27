@@ -5,10 +5,10 @@
 ------------
 Point-LIO 落盘的 scans.pcd (以及 script/build_pcd_from_bag.sh 产出的 maps/pcd/<名字>.pcd)
 是以 **camera_init** (建图起点雷达系) 表达的; 而 Nav2 的地图系是 pgm 栅格图的坐标系,
-两者相差一个**固定的平面旋转**——雷达相对 base_link 的 yaw 不是 0(见 launch 的
-lidar_rpy)。CAD 实测的安装角是 yaw = 1.099557429 rad = 63°(旧外参是 -90°),
-所以换模型后这个偏移量必须重新由数据求出(本脚本本来就是搜索出来的, 不写死):
-实测旧配置 227_1011 差 -90.00°。直接把这个点云喂给 --reloc, 车会被定位到差一个
+两者相差一个**固定的刚体变换**——雷达相对 base_link 的 yaw 不是 0(见 launch 的
+lidar_rpy), 装歪时还带 roll/pitch(见下一节)。CAD 实测的安装角是 yaw = 1.099557429 rad
+= 63°(旧外参是 -90°), 所以换模型后这个偏移量必须重新由数据求出(本脚本本来就是搜索出来的,
+不写死): 实测旧配置 227_1011 差 -90.00°。直接把这个点云喂给 --reloc, 车会被定位到差一个
 yaw 的姿态上,
 **而 GICP 自己不会报错**(见 config/real/nav2_params_srm.yaml 里 small_gicp_relocalization
 那段的"情况一/情况二"警告)。
@@ -16,6 +16,16 @@ yaw 的姿态上,
 本工具离线把这个变换求出来、烘进点云, 输出**与输入同目录的 <名字>_mapframe.pcd**
 (原始件不动, 两种点云靠名字区分系别), 头部按仓库既有约定(见 pcd/real/srm_site_01.pcd)
 标注坐标系与所用变换。名字 + 头部注释是两道防线: 工具靠头部识破"已经转过了", 防止再转一次。
+
+雷达装歪时 (2026-11-13 补)
+--------------------------
+Point-LIO 的 camera_init 是**建图起点那一帧 IMU 的姿态系**, 不是重力水平系。本机雷达装在
+云台上, CAD 外参 roll = -30°、yaw = 63°(见 MOUNT_RPY), 于是整份点云是斜的: 地板是 30° 的
+斜面, z 跨度被拉到 10 m。只拟合平面 (yaw, dx, dy) 在这种数据上永远差 0.1 m 以上 ——
+不是地图坏了, 也不是点云坏了, 是模型少了一维。
+所以拟合前先按安装外参把点云**摆正**(绕 x -30° + 平移), 再做平面搜索, 输出 = 平面变换 ∘ 摆正。
+实测 227_1113: 摆正前中位 0.150 m(被拒), 摆正后 0.024 m / 84% 在 0.1 m 内。
+--level-mount auto(默认)只在 |roll| 或 |pitch| > 2° 时摆正, 水平安装的车行为不变。
 
 怎么求变换
 ----------
@@ -66,6 +76,30 @@ except ImportError:  # pragma: no cover
 # 判定门限 (米): 参照已对正的 srm_site_01 是 0.026 m。
 GOOD_MEDIAN = 0.05      # 低于它算"对上了"
 ACCEPT_MEDIAN = 0.10    # 高于它直接拒绝输出
+
+# base_link -> 雷达 (livox_frame) 的安装外参, 来自唯一模型 CAD; 与 real_mapping_launch.py
+# 里 pointcloud_to_laserscan 的切片高度同源。roll 是 -30°(2026-11-13 用静止比力反推确认)。
+MOUNT_XYZ = (0.12081, -0.056721, 0.346388)
+MOUNT_RPY = (-0.523598776, 0.0, 1.099557429)
+
+# 安装角超过它就认为"点云不是水平系", 需要先摆正 (auto 模式的判据)。
+LEVEL_TILT_DEG = 2.0
+
+
+def mount_matrix() -> np.ndarray:
+    """base_link -> 雷达系的 4x4 安装变换: 平移 + URDF 的 Rz(yaw)Ry(pitch)Rx(roll)。"""
+    roll, pitch, yaw = MOUNT_RPY
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    T = np.eye(4)
+    T[:3, :3] = [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ]
+    T[:3, 3] = MOUNT_XYZ
+    return T
 
 
 def read_pgm(path: str) -> np.ndarray:
@@ -287,19 +321,14 @@ def mounting_hint() -> str:
     rpy 的 roll 是 **-30°**（2026-11-13 实测修正，之前写成 +30°）：
     静止时 /livox/imu 的比力 (0.028, -0.500, 0.866) g 反推 roll = -30°。
     符号只影响绕 x 的 60°，平面量（yaw / 平移）不受影响，但两边必须一致。
+
+    注意: 平面量只是这份文件里的**一项**信息; 真正的拟合要用完整的 mount_matrix()
+    (roll/pitch 也参与) —— 详见文件头"雷达装歪时"。
     """
-    xyz = (0.12081, -0.056721, 0.346388)
-    rpy = (-0.523598776, 0.0, 1.099557429)
-    cr, sr = math.cos(rpy[0]), math.sin(rpy[0])
-    cp, sp = math.cos(rpy[1]), math.sin(rpy[1])
-    cy, sy = math.cos(rpy[2]), math.sin(rpy[2])
-    r = np.array([
-        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-        [-sp, cp * sr, cp * cr],
-    ])
+    r = mount_matrix()[:3, :3]
     yaw = math.degrees(math.atan2(r[1, 0], r[0, 0]))
-    return "挂载外参 lidar_xyz/rpy 的平面量: yaw %.2f°, 平移 (%.3f, %.3f) m" % (yaw, xyz[0], xyz[1])
+    return "挂载外参 lidar_xyz/rpy 的平面量: yaw %.2f°, 平移 (%.3f, %.3f) m" % (
+        yaw, MOUNT_XYZ[0], MOUNT_XYZ[1])
 
 
 def main(argv=None) -> int:
@@ -310,7 +339,13 @@ def main(argv=None) -> int:
     parser.add_argument("--map", required=True, help="目标栅格图 yaml (maps/<名字>/<名字>.yaml)")
     parser.add_argument("--out", help="输出 pcd 路径; 省略 = 与输入同目录的 <名字>_mapframe.pcd")
     parser.add_argument("--z-band", nargs=2, type=float, default=[0.3, 2.0],
-                        metavar=("LO", "HI"), help="参与对齐的高度带 (默认 0.3 2.0), 用来排掉地面/天花板")
+                        metavar=("LO", "HI"),
+                        help="参与对齐的高度带 (默认 0.3 2.0), 用来排掉地面/天花板; "
+                             "点云被 --level-mount 摆正后, 它就是离地高度")
+    parser.add_argument("--level-mount", choices=("auto", "on", "off"), default="auto",
+                        help="先按雷达安装外参摆正点云再做平面搜索 (默认 auto: "
+                             "|roll| 或 |pitch| > %.0f° 才摆正, off = 老行为)"
+                             % LEVEL_TILT_DEG)
     parser.add_argument("--sample", type=int, default=1200, help="搜索用采样点数 (默认 1200)")
     parser.add_argument("--yaw-range", type=float, default=180.0, help="粗搜索 yaw 范围 ±度 (默认 180)")
     parser.add_argument("--coarse-step", type=float, default=10.0, help="粗搜索 yaw 步长 度 (默认 10)")
@@ -364,12 +399,26 @@ def main(argv=None) -> int:
         print("[提示] 确认要强行再转: 加 --force。", file=sys.stderr)
         return 1
 
+    # camera_init 是建图起点 IMU 的姿态系, 不是水平系。雷达装歪 (roll/pitch ≠ 0) 时
+    # 整份点云是斜的, 平面 (yaw+平移) 拟合天生差 0.1 m 以上 —— 先按安装外参摆正,
+    # 再做平面搜索。最终的 z 也在这里一次算好 (之后只动 x/y)。
+    level = None
+    if args.level_mount != "off":
+        tilt = math.degrees(max(abs(MOUNT_RPY[0]), abs(MOUNT_RPY[1])))
+        if args.level_mount == "on" or tilt > LEVEL_TILT_DEG:
+            level = mount_matrix()
+            src = arr[:, :3].astype(np.float64)
+            arr[:, :3] = (src @ level[:3, :3].T + level[:3, 3]).astype(np.float32)
+
     print("输入点云  : %s (%d 点, %d 字段)%s"
           % (args.pcd, info["points"], len(fields),
              "  [已是地图系]" if already else "  [camera_init 系]"))
     print("目标栅格  : %s -> %s (%dx%d @%.3f m, 占据格 %d)"
           % (args.map, os.path.basename(pgm_path), shape[0], shape[1], resolution, len(grid)))
     print("  " + mounting_hint())
+    if level is not None:
+        print("  已按安装外参摆正点云: roll %.1f°, pitch %.1f° (camera_init 是建图起点 IMU"
+              " 姿态系, 雷达装歪时点云是斜的)" % (math.degrees(MOUNT_RPY[0]), math.degrees(MOUNT_RPY[1])))
     print("输出      : %s%s" % (out, "  <-- 与输入同一个文件 (--out 指到了输入自身)" if in_place else ""))
 
     z = arr[:, 2]
@@ -433,6 +482,10 @@ def main(argv=None) -> int:
         "alignment: median nn distance %.4f m, %.1f%% within 0.1 m, %d points"
         % (median, inlier * 100, info["points"]),
     ]
+    if level is not None:
+        notes.insert(2, "leveled by mount extrinsic first: roll %.1f deg, pitch %.1f deg, "
+                        "xyz (%.3f, %.3f, %.3f) m"
+                     % (math.degrees(MOUNT_RPY[0]), math.degrees(MOUNT_RPY[1]), *MOUNT_XYZ))
     # 先写临时文件 -> 回读复核 -> 通过才原子替换。就地覆盖时这一步尤其重要:
     # 输入就是唯一的原始件, 写坏了就没有第二份可退。
     tmp = write_pcd_tmp(out, out_arr, fields, notes)
