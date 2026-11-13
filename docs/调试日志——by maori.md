@@ -553,6 +553,16 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 ```bash
 ./script/start_real_nav.sh -m 227_1113 --controller minco --no-reloc --chassis-spin 0.000000000000001
 ```
+### 实车slam+pcd流程
 ```bash
-./script/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio
+./script/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio   # point-lio建图
+
+./script/start_real_slam.sh --record-bag --bag-name 地图名                            # z-lio建图
+
+# 另起终端
+./script/start_real_slam.sh --save 地图名
+
+./script/start_real_slam.sh --stop
+
+./script/build_pcd_from_bag.sh --name pcd地图名                                       # 重建pcd地图，转map系的
 ```
