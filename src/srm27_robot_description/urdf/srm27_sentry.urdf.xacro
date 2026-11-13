@@ -72,9 +72,18 @@
         本文件会自己把 z 折算到当前根坐标系下。
         雷达的 parent 是 gimbal_yaw，所以实际 origin 会自动换算成"相对云台"的量
         （z 减去底盘顶面 0.26805）。换云台也换不到这个数：它只跟云台零位有关。
-    lidar_roll / lidar_pitch / lidar_yaw   弧度            默认 30° / 0 / 63°
+    lidar_roll / lidar_pitch / lidar_yaw   弧度            默认 -30° / 0 / 63°
+        ⚠ roll 的**符号是实测的**：车静止时 /livox/imu 的比力 = "世界上方向在雷达系
+          里的表达" = (0.028, -0.500, 0.866) g，反推 roll = asin(-0.500) = -30°。
+          2026-11-13 之前这里写的是 +30°，与实测差 60°：
+            * Point-LIO 的 rot_init 把 60° 误差吸收进它自己的世界系（R_0 = Rx(-60°)），
+              所以 cloud_registered 看着是对的，但 /odometry 的航向一直带 ~17.8° 的
+              常数偏置（map->gimbal_yaw 的 yaw 在出生点就能量到 17.8°，实测）；
+            * ZLIO 前端会把首帧位姿 R_0 显式抵消（zlio_bridge 的 T_off = M·R_0⁻¹），
+              模型错 60° 就直接体现成**整片点云歪 60°**（2026-11-13 的两张 RViz 对比图）。
         ⚠ 这个 roll 会直接决定 Point-LIO 的重力方向（real_mapping_launch.py 按
-          lidar_rpy 现算 gravity）。改这里必须同时改 nav2 参数里的 gravity。
+          lidar_rpy 现算 gravity）。改这里必须同时改 nav2 参数里的 gravity ——
+          test/test_point_lio_gravity_matches_model.py 会在两边不一致时直接报错。
     lidar_radius       米                                 默认 0.014（黑点半径）
     lidar_post_length  米                                 默认 0.0783（示意支架，0=不画）
     use_yaw            true | false                        默认 true（画云台包络）
@@ -140,7 +149,7 @@
   <xacro:arg name="lidar_link_name"   default="livox_frame"/>
   <xacro:arg name="lidar_mass"        default="0.25"/>
   <xacro:arg name="lidar_xyz"         default="0.12081 -0.056721 0.346388"/>
-  <xacro:arg name="lidar_roll"        default="0.523598776"/>
+  <xacro:arg name="lidar_roll"        default="-0.523598776"/>
   <xacro:arg name="lidar_pitch"       default="0"/>
   <xacro:arg name="lidar_yaw"         default="1.099557429"/>
   <xacro:arg name="lidar_radius"      default="0.014"/>

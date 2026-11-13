@@ -543,3 +543,13 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 # 直接给路径 / 看原始 700 万点 / 换坐标系
 ./script/show_pcd.sh maps/pcd/227_1111_mapframe.pcd
 ```
+# 2026-11-13
+### 实车测试(变速小陀螺)
+```bash
+./script/start_real_nav.sh -m 227_1111 --controller minco --no-reloc --lio-frontend point_lio \
+    --chassis-spin-sine --spin-max 10 --spin-min 5 --spin-period 1.5
+```
+### 实车测试(zlio，底盘不转)
+```bash
+./script/start_real_nav.sh -m 227_1111 --controller minco --no-reloc --chassis-spin 0.0
+```

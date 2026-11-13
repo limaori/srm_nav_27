@@ -419,3 +419,95 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 | yaw 外推 `actuation_delay` | 未标定，实车默认关闭 |
 | `srm_cmd_mux` 的 `stop_all` | 只是上位机侧软件闸，**不是急停**；物理急停永远是第一手段 |
 | 制动/延迟辨识 | `safety.braking_deceleration`、`mpc.command_lookahead` 仍是占位值，见 `docs/minco实车迁移实施记录(ai).md` 的待辨识清单 |
+
+---
+
+## 10. 2026-11-13：雷达安装角 roll 符号写反（zlio 点云整片歪 60° 的真因）
+
+### 10.1 现象
+
+同一车位先后起 `--lio-frontend zlio` 与 `point_lio`（其余参数相同、`--no-reloc`、
+`map->odom` 静态 0）。RViz 同一份配置、同一 Fixed Frame=`map`：
+
+| | zlio（错） | point_lio（对） |
+| --- | --- | --- |
+| `terrain_map_ext` | 整片"立起来"、散布 135 px、点数 ≈2× | 贴地薄带、散布 64 px |
+| `sensor_scan` | 远端一大片"格子"铺到画面上缘 | 只在带子上方一小片 |
+| 结论 | 看图像是点云被整体绕水平轴转了 | 正常 |
+
+### 10.2 定位（新增 `script/check_lio_mount_consistency.py`）
+
+拿**静止时 IMU 的比力**当唯一物理基准（比力方向 = "世界上方向在雷达系里的表达"），
+三边对账（旧模型、point_lio 在跑时的实测输出）：
+
+```
+[IMU  ] |a|=0.9927, 比力=(+0.0278, -0.5005, +0.8653)  => 实测 roll = -30.04°
+[TF   ] gimbal_yaw ← livox_imu  rpy=(30.00, 0.00, 63.00)°
+[LIO  ] /lidar_odometry         rpy=(-29.78, -1.67, 63.96)°
+[CLOUD] 地面法向与 +z 夹角 1.64°
+TF ↔ IMU : 60.06°  **不一致**
+LIO ↔ IMU: 0.28°   OK
+```
+
+即：**URDF（和 nav2 里的 gravity）写的是 +30°，实车真实安装是 -30°**，差 60°；
+而 Point-LIO 发出来的雷达姿态反而是对的（-29.78°）。两种前端对同一个模型误差的
+反应完全不同：
+
+* `point_lio`：`rot_init` 用 `mapping.gravity` 把世界系扶正，`R_0 = Rx(-60°)` 把模型
+  误差吸收进自己的世界系，再经 `loam_interface` 的 `T_base←lidar` 左乘，点云落地正好
+  等于**真实**安装外参 → 云是对的。代价是 `/odometry` 被整体左乘一个常数
+  `B = M·R_0·M⁻¹`：实测 `map->gimbal_yaw` 在出生点就是 **yaw 17.82° / (0.067,-0.028) m**
+  （云台关节角仅 -2.2°，车没动），与 60° 模型误差的解析值 18.5° 吻合。
+* `zlio`：`zlio_bridge` 的 `T_off = TF(gimbal_yaw←livox_imu)·R_0⁻¹` 把首帧位姿显式
+  抵消掉，模型误差**没有任何环节吸收** → 整片 `registered_scan`/`terrain_map_ext`
+  就是 `M_wrong`（roll +30°）而不是真实的 roll -30°，歪 60°。
+
+所以"第一张（zlio）不对、第二张（point_lio）对"不是前端算法好坏，而是**模型错了**：
+point_lio 把它藏起来了，zlio 把它露出来了。
+
+### 10.3 修复
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro` | `lidar_roll` 默认 `0.523598776` → **`-0.523598776`**；注释写清实测依据 |
+| `config/real/nav2_params_srm_minco_fakeyaw.yaml`（默认链）<br>`config/real/nav2_params_srm_minco.yaml`（minco 旧链）<br>`config/real/nav2_params_srm.yaml`（omni 旧链） | `point_lio.mapping.gravity` / `gravity_init` 的 y 分量 `-4.905…` → **`+4.905…`** |
+| `config/real/zlio_mid360.yaml`、`script/pcd_to_mapframe.py` | 注释/平面提示同步（ZLIO 这份只写模长，符号错了它自己发现不了） |
+| `config/srm27_sentry_geometry.yaml` | **不改**（Gazebo 世界按 +30° 自洽建的），只加注释说明"实车 -30° / 仿真 +30° 是两个数，别混" |
+| 新增 `test/test_point_lio_gravity_matches_model.py` | xacro 的 `lidar_roll/pitch` 与三份实车 params 的 gravity 必须由同一公式算出（<1e-6），任一边改单边就红 |
+| 新增 `script/check_lio_mount_consistency.py` | 实车只读对账：TF / `/lidar_odometry` / `/sensor_scan` 三边 vs IMU 实测，超 2° 退出码 1 |
+
+改完 `install/` 不用重编（`urdf`、`config/real` 都是软链），但**必须重启**才生效
+（`robot_description` 是启动时展开的，point_lio 的 gravity 也是启动时读的）。
+
+### 10.4 重启后应看到
+
+1. `python3 script/check_lio_mount_consistency.py` 三行全 OK（TF ↔ IMU 应为 ~0°，
+   `/lidar_odometry` 的 roll 仍是 -30° 左右 —— 那是真实安装姿态，不是错误）。
+2. `tf2_echo map livox_imu` 的 roll 从 `+30°` 变成 `-30°`。
+3. **点云不变**：`M·R_0` 前后恒等于 `Rz(63°)Rx(-30°)`，所以 point_lio 的
+   `registered_scan`/`terrain_map_ext` 与地图的对齐关系不变。
+4. **`/odometry` 变了**：出生点从 `yaw≈17.8° / (0.067,-0.028) m` 回到 `0`。
+   这是修正，不是回归；但**起步点位姿的约定要复核**：如果现场是靠"停车位置 = map 原点"
+   来对图的，物理上要把车按新航向摆正（或在 `--map-to-odom X Y YAW` 里给回那 17.8°），
+   否则地图里的车头朝向会比以前偏 ~18°。
+
+### 10.5 实车验收（2026-11-13 15:0x，重启后 zlio 前端）
+
+```
+[IMU  ] |a|=0.9927, 比力=(+0.0278, -0.5005, +0.8653)  => 实测 roll=-30.05° pitch=-1.59°
+[TF   ] gimbal_yaw ← livox_imu  xyz=(+0.127,-0.048,+0.028) rpy=(-30.00, -0.00, 63.00)°
+[LIO  ] /lidar_odometry         rpy=(-30.01, -0.00, 63.00)°
+[CLOUD] /sensor_scan 3006 点, 地面法向与 +z 夹角 0.87°
+TF ↔ IMU : 1.59° OK    LIO ↔ IMU : 1.59° OK    地面 ↔ +z : 0.87° OK   → 退出码 0
+```
+
+对照修复前：`TF ↔ IMU 60.06°`（TF +30° / IMU -30°）、`LIO rpy=(-29.78,…)`。
+现在 **TF 与 LIO 互相只差 0.01°**，两者与 IMU 的 1.59° 残差全部在 **pitch** 上
+（模型 `lidar_pitch=0`，实测 -1.59°，即车/雷达在出生态有一个约 1.6° 的俯仰）；
+roll 已经对齐到 0.05°。这 1.59° 如果在**不同车位重复出现**，才说明是安装俯仰，
+可以再补 `lidar_pitch=-0.0277`；如果在不同车位变化，那是地面坡度，不要往模型里塞。
+
+`livox_imu` 的 TF 平移从 `(0.088,-0.028,0.052)` 变成 `(0.127,-0.048,0.028)` 是**预期**的：
+`livox_imu` 是"雷达原点在 IMU 系里 = −extrinsic_T"，这个 4.4 cm 的偏移会跟着安装角旋转，
+按 `Rz(63°)Rx(-30°)·(0.011,0.02329,-0.04412)` + 雷达原点算出来正是
+`(0.1275,-0.0478,0.0285)`，与实测一致。

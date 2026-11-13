@@ -146,12 +146,18 @@ point_lio:
       plane_thr: 0.1
       match_s: 81.0
       ivox_grid_resolution: 0.5                         # SRM
-      # 由 real_mapping_launch.py 按 lidar_rpy = (0.523598776, 0.0, 1.099557429) 算出:
+      # 由 real_mapping_launch.py 按 lidar_rpy = (-0.523598776, 0.0, 1.099557429) 算出:
       #   gravity = 9.81 * [sin(pitch), -cos(pitch)sin(roll), -cos(pitch)cos(roll)]
       # 量纲与 point_lio 基线一致（基线为 [0,0,-9.810]），不是单位向量。
-      # 改动雷达安装角时必须同步重算这两个值。
-      gravity: [ 0.0, -4.905000003412736, -8.495709209154999 ]
-      gravity_init: [ 0.0, -4.905000003412736, -8.495709209154999 ]
+      # ⚠ roll 是 **-30°**（与 URDF 的 lidar_roll 同号），不是 +30°：车静止时
+      #   /livox/imu 的比力 (0.028, -0.500, 0.866) g 就是"世界上方向在雷达系里的表达"，
+      #   反推 roll = asin(-0.500) = -30°。写反的后果（2026-11-13 定位）：
+      #     point_lio 的 rot_init 把 60° 误差吸收进世界系（点云看着正常，但 /odometry
+      #     的航向带 ~17.8° 常数偏置）；zlio 会显式抵消 R_0，于是整片点云歪 60°。
+      # 改动雷达安装角时必须同步重算这两个值
+      # （test/test_point_lio_gravity_matches_model.py 会在两边不一致时直接报错）。
+      gravity: [ 0.0, 4.905000003412736, -8.495709209154999 ]
+      gravity_init: [ 0.0, 4.905000003412736, -8.495709209154999 ]
       extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
       extrinsic_R: [ 1.0, 0.0, 0.0,
                      0.0, 1.0, 0.0,

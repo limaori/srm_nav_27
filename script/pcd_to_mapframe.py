@@ -282,9 +282,14 @@ def write_pcd_tmp(path: str, arr: np.ndarray, fields: list, note_lines: list) ->
 
 
 def mounting_hint() -> str:
-    """把 launch 里的挂载外参算成平面量, 供与实测值对照。"""
+    """把 launch 里的挂载外参算成平面量, 供与实测值对照。
+
+    rpy 的 roll 是 **-30°**（2026-11-13 实测修正，之前写成 +30°）：
+    静止时 /livox/imu 的比力 (0.028, -0.500, 0.866) g 反推 roll = -30°。
+    符号只影响绕 x 的 60°，平面量（yaw / 平移）不受影响，但两边必须一致。
+    """
     xyz = (0.12081, -0.056721, 0.346388)
-    rpy = (0.523598776, 0.0, 1.099557429)
+    rpy = (-0.523598776, 0.0, 1.099557429)
     cr, sr = math.cos(rpy[0]), math.sin(rpy[0])
     cp, sp = math.cos(rpy[1]), math.sin(rpy[1])
     cy, sy = math.cos(rpy[2]), math.sin(rpy[2])

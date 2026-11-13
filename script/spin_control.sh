@@ -19,6 +19,9 @@
 #
 # 用法:
 #   script/spin_control.sh on <rad/s>     恒速自转, 如: script/spin_control.sh on 2.0
+#   script/spin_control.sh sine <max> <min> <period>
+#                                         正弦自转: wz(t)=mid+amp*sin(2*pi*t/T)
+#                                         例: spin_control.sh sine 0.5 -0.3 4
 #   script/spin_control.sh off            停止自转（撤回请求）
 #   script/spin_control.sh status         查看请求/实际转速/进线状态
 #
@@ -42,6 +45,8 @@ NS_PREFIX=""
 [ -n "$NS" ] && NS_PREFIX="/${NS}"
 #: 把"相对名"补成带命名空间的绝对话题名。
 _t() { printf '%s/%s' "$NS_PREFIX" "$1"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD_TOPIC="${SPIN_CMD_TOPIC:-$(_t rotation_cmd)}"
 MAX_WZ="${SPIN_MAX_WZ:-2.0}"
@@ -122,6 +127,39 @@ case "$cmd" in
 WARN
     else
       echo "[提示] ${CMD_TOPIC} 订阅者 ${subs} 个（云台系: srm_cmd_mux；旧 spin 模式: MINCO）。停止: $0 off"
+    fi
+    ;;
+  sine)
+    smax="${2:?用法: spin_control.sh sine <max> <min> <period>}"
+    smin="${3:?用法: spin_control.sh sine <max> <min> <period>}"
+    speriod="${4:?用法: spin_control.sh sine <max> <min> <period>}"
+    for v in "$smax" "$smin" "$speriod"; do
+      case "$v" in ''|*[!0-9.eE+-]*) echo "[错误] 参数必须是数字: $v" >&2; exit 2 ;; esac
+      awk -v x="$v" 'BEGIN{ exit !(x == x + 0) }' \
+        || { echo "[错误] 参数必须是数字: $v" >&2; exit 2; }
+    done
+    awk -v p="$speriod" 'BEGIN{ exit !(p > 0.0) }' \
+      || { echo "[错误] period 必须 > 0 秒: $speriod" >&2; exit 2; }
+    awk -v a="$smax" -v b="$smin" 'BEGIN{ exit !(a >= b) }' \
+      || { echo "[错误] max 必须 >= min: $smax < $smin" >&2; exit 2; }
+    cmax="$(_clamp "$smax")"
+    cmin="$(_clamp "$smin")"
+    _ws_setup
+    stop_publisher
+    _sine_log="${TMPDIR:-/tmp}/srm27_spin_sine_${NS:-root}.log"
+    nohup python3 "$SCRIPT_DIR/spin_sine.py" --ns "$NS" --topic "$CMD_TOPIC" \
+      --max "$cmax" --min "$cmin" --period "$speriod" >"$_sine_log" 2>&1 &
+    echo $! > "$PID_FILE"
+    subs="$(timeout 5 ros2 topic info "$CMD_TOPIC" 2>/dev/null | sed -n 's/^Subscription count: //p' || true)"
+    echo "[自转] 正弦请求已发布到 ${CMD_TOPIC} (PID $(cat "$PID_FILE")):"
+    echo "        max ${cmax} / min ${cmin} rad/s, T ${speriod}s, 日志 ${_sine_log}"
+    if [ -z "${subs:-}" ]; then
+      echo "[警告] 查不到 ${CMD_TOPIC} 的订阅者 —— 栈没起 / 域不同 / ros2 daemon 缓存旧信息。"
+    elif [ "$subs" = "0" ]; then
+      echo "[警告] ${CMD_TOPIC} 现在没有任何订阅者（云台系下应由 srm_cmd_mux 消费）。"
+      echo "       逐条确认: $0 status"
+    else
+      echo "[提示] ${CMD_TOPIC} 订阅者 ${subs} 个。停止: $0 off"
     fi
     ;;
   off)

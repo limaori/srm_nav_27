@@ -103,6 +103,8 @@
 #       --prior-pcd-manifest <路径>   仿真专用, 实车只提示忽略
 #       --yaw-mode <auto|xy_only>    MINCO 航向策略（实车默认 xy_only；se2/spin 会被告警/拒绝）
 #       --chassis-spin [rad/s] / --no-chassis-spin   底盘小陀螺（默认 2.0 rad/s）
+#       --chassis-spin-sine [max] [--spin-min <min>] [--spin-period <s>]
+#                               正弦小陀螺: wz(t)=mid+amp*sin(2*pi*t/T)，默认 max 0.3 / min -0.3 / T 4
 #       --gimbal-spin [rad/s] / --no-gimbal-spin
 #                               **实车不执行**：云台由下位机驱动、上位机无指令通道;
 #                               参数被接受只为命令行一致（详见下方"云台"说明）。
@@ -140,6 +142,14 @@
 #       --chassis-spin [rad/s]  底盘小陀螺（默认 2.0, 负值反向）:
 #                               ⚠ 首跑请架起车辆或用 0.3 这种小转速先确认方向；
 #                               mux 的 wz_max 首跑限在 1.5 rad/s。
+#       --chassis-spin-sine [max]  正弦小陀螺（与 --chassis-spin 互斥）:
+#                               wz(t) = (max+min)/2 + (max-min)/2 * sin(2*pi*t/T)
+#                               --chassis-spin-sine 后可跟正峰值（负峰值取相反数）；
+#                               --spin-max / --spin-min / --spin-period 分别改正峰值、
+#                               负峰值(默认 -0.3)、周期(默认 4 s)。脚本启动时下发，
+#                               停转: ./script/spin_control.sh off；手工等价命令:
+#                                 ./script/spin_control.sh sine <max> <min> <period>
+#                               ⚠ 与恒速一样：首跑请架起车辆或守物理急停。
 #       --gimbal-joint-topic <话题>
 #                               云台关节角回传话题 (std_msgs/Float32 或 JointState)。
 #                               gimbal_joint_state_relay 常驻 (TF 树需要)，给出话题时走
@@ -281,6 +291,12 @@ CHASSIS_SPIN_WZ="${CHASSIS_SPIN_WZ:-}"
 CHASSIS_SPIN_DEFAULT="2.0"
 CHASSIS_SPIN_CLI_GIVEN=0
 if [ -n "${CHASSIS_SPIN_WZ}" ]; then CHASSIS_SPIN_CLI_GIVEN=1; fi
+# 正弦自转 (--chassis-spin-sine): wz(t) = mid + amp*sin(2*pi*t/T),
+#   mid=(max+min)/2, amp=(max-min)/2；峰值与周期都可调（脚本层先钳到 ±SPIN_MAX_WZ）。
+CHASSIS_SPIN_SINE="${CHASSIS_SPIN_SINE:-0}"
+SPIN_SINE_MAX="${SPIN_SINE_MAX:-0.3}"
+SPIN_SINE_MIN="${SPIN_SINE_MIN:--0.3}"
+SPIN_SINE_PERIOD="${SPIN_SINE_PERIOD:-4.0}"
 # Nav2 就绪后再下发自转请求, 等多久 (秒)。
 CHASSIS_SPIN_READY_TIMEOUT="${CHASSIS_SPIN_READY_TIMEOUT:-120}"
 
@@ -652,6 +668,17 @@ while [ $# -gt 0 ]; do
                         CHASSIS_SPIN_WZ="$CHASSIS_SPIN_DEFAULT"; shift
                       fi ;;
     --no-chassis-spin) CHASSIS_SPIN_WZ="0"; CHASSIS_SPIN_CLI_GIVEN=1; shift ;;
+    # --chassis-spin-sine 也可带一个数值: 正峰值(负峰值取相反数), 其余用默认。
+    --chassis-spin-sine)
+                      CHASSIS_SPIN_SINE=1; CHASSIS_SPIN_CLI_GIVEN=1
+                      if [ $# -ge 2 ] && is_spin_rate "$2"; then
+                        SPIN_SINE_MAX="$2"; SPIN_SINE_MIN="$(awk -v v="$2" 'BEGIN{printf "%.6f", -v}')"; shift 2
+                      else
+                        shift
+                      fi ;;
+    --spin-max)       SPIN_SINE_MAX="${2:?--spin-max 需要数值 (rad/s)}"; shift 2 ;;
+    --spin-min)       SPIN_SINE_MIN="${2:?--spin-min 需要数值 (rad/s)}"; shift 2 ;;
+    --spin-period)    SPIN_SINE_PERIOD="${2:?--spin-period 需要周期 (秒)}"; shift 2 ;;
     # 与 start_sim_nav.sh 同名同义（可带数值）。⚠ 实车不执行，见文件头与下方提示。
     --gimbal-spin)
                       GIMBAL_SPIN_CLI_GIVEN=1
@@ -717,8 +744,33 @@ if [ "$YAW_MODE" = "auto" ]; then
   YAW_MODE="xy_only"
 fi
 
+# 正弦自转的参数校验（--chassis-spin-sine）。
+if [ "$CHASSIS_SPIN_SINE" = "1" ]; then
+  if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ a=(v<0)?-v:v; exit !(a > 0) }'; then
+    echo "[错误] --chassis-spin 与 --chassis-spin-sine 只能二选一。" >&2; exit 2
+  fi
+  for _v in "$SPIN_SINE_MAX" "$SPIN_SINE_MIN" "$SPIN_SINE_PERIOD"; do
+    case "$_v" in
+      ''|*[!0-9.eE+-]*) echo "[错误] --spin-max/--spin-min/--spin-period 必须是数字: $_v" >&2; exit 2 ;;
+    esac
+    if ! awk -v v="$_v" 'BEGIN{ exit !(v == v + 0) }'; then
+      echo "[错误] --spin-max/--spin-min/--spin-period 必须是数字: $_v" >&2; exit 2
+    fi
+  done
+  if ! awk -v p="$SPIN_SINE_PERIOD" 'BEGIN{ exit !(p > 0.0) }'; then
+    echo "[错误] --spin-period 必须 > 0 秒，收到 ${SPIN_SINE_PERIOD}" >&2; exit 2
+  fi
+  if ! awk -v a="$SPIN_SINE_MAX" -v b="$SPIN_SINE_MIN" 'BEGIN{ exit !(a >= b) }'; then
+    echo "[错误] --spin-max(${SPIN_SINE_MAX}) 必须 >= --spin-min(${SPIN_SINE_MIN})" >&2; exit 2
+  fi
+  _mid="$(awk -v a="$SPIN_SINE_MAX" -v b="$SPIN_SINE_MIN" 'BEGIN{printf "%.3f", (a+b)/2}')"
+  _amp="$(awk -v a="$SPIN_SINE_MAX" -v b="$SPIN_SINE_MIN" 'BEGIN{printf "%.3f", (a-b)/2}')"
+  echo "[提示] 正弦自转：wz(t) = ${_mid} + ${_amp}*sin(2*pi*t/${SPIN_SINE_PERIOD})"
+  echo "[提示]   首跑请架起车辆或守物理急停，先确认方向与增益。"
+fi
+
 # 没给 --chassis-spin 就是不自转（默认行为）。
-if [ "$CHASSIS_SPIN_CLI_GIVEN" = "1" ] && [ -z "$CHASSIS_SPIN_WZ" ]; then
+if [ "$CHASSIS_SPIN_CLI_GIVEN" = "1" ] && [ -z "$CHASSIS_SPIN_WZ" ] && [ "$CHASSIS_SPIN_SINE" != "1" ]; then
   CHASSIS_SPIN_WZ="$CHASSIS_SPIN_DEFAULT"
 fi
 CHASSIS_SPIN_WZ="${CHASSIS_SPIN_WZ:-0}"
@@ -1603,8 +1655,11 @@ echo "  速度链路    : $VEL_CHAIN"
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   echo "  wz 归属     : 决策层 rotation_cmd → srm_cmd_mux   航向策略: $YAW_DESC"
   echo "  速度限幅    : $SPEED_LIMITS_FILE"
-  if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
-    echo "  底盘自转    : 关 (要转加 --chassis-spin [rad/s], 缺省 2.0; 首跑建议 0.3)"
+  if [ "$CHASSIS_SPIN_SINE" = "1" ]; then
+    echo "  底盘自转    : 正弦 max $SPIN_SINE_MAX / min $SPIN_SINE_MIN rad/s, T=${SPIN_SINE_PERIOD}s (Nav2 就绪后自动下发)"
+    echo "                停转: ./script/spin_control.sh off   (mux wz_max 仍会钳住峰值)"
+  elif awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
+    echo "  底盘自转    : 关 (要转加 --chassis-spin [rad/s] 或 --chassis-spin-sine, 首跑建议 0.3)"
   else
     echo "  底盘自转    : $CHASSIS_SPIN_WZ rad/s (Nav2 就绪后自动下发 rotation_cmd)"
     echo "                mux wz_max 会在这一层钳住 (当前 1.0 rad/s, 见 speed_limits.yaml)"
@@ -1745,13 +1800,19 @@ done
 # 所以：停转 ./script/spin_control.sh off，查看 ./script/spin_control.sh status。
 # ⚠ 与导航解耦：导航没目标时**照样**能原地转（两路输入各自计时），这不再是故障判据。
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
-   && awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 1 : 0 }'; then
+   && { [ "$CHASSIS_SPIN_SINE" = "1" ] \
+        || awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 1 : 0 }'; }; then
   if [ -n "$NAMESPACE" ]; then
     SPIN_TOPIC="/$NAMESPACE/rotation_cmd"
   else
     SPIN_TOPIC="/rotation_cmd"
   fi
-  SPIN_ABS="$(awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ printf "%.3f", (v < 0) ? -v : v }')"
+  if [ "$CHASSIS_SPIN_SINE" = "1" ]; then
+    SPIN_ABS="$(awk -v a="$SPIN_SINE_MAX" -v b="$SPIN_SINE_MIN" 'BEGIN{
+      x=(a<0)?-a:a; y=(b<0)?-b:b; printf "%.3f", (x>y)?x:y }')"
+  else
+    SPIN_ABS="$(awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ printf "%.3f", (v < 0) ? -v : v }')"
+  fi
   echo "[底盘自转] 等 Nav2 就绪（${SPIN_TOPIC} 有订阅者，最长 ${CHASSIS_SPIN_READY_TIMEOUT}s）..."
   _spin_deadline=$(( $(date +%s) + CHASSIS_SPIN_READY_TIMEOUT ))
   _spin_subs=""
@@ -1766,7 +1827,18 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
     echo "[警告] ${CHASSIS_SPIN_READY_TIMEOUT}s 内没等到 ${SPIN_TOPIC} 的订阅者（srm_cmd_mux 还没起来？）" >&2
     echo "       仍会启动发布器：等 Nav2 上线后请求会自动被消费。" >&2
   fi
-  if ROBOT_NS="$NAMESPACE" SPIN_MAX_WZ="$SPIN_ABS" \
+  if [ "$CHASSIS_SPIN_SINE" = "1" ]; then
+    if ROBOT_NS="$NAMESPACE" SPIN_MAX_WZ="$SPIN_ABS" \
+       "$SCRIPT_DIR/spin_control.sh" sine "$SPIN_SINE_MAX" "$SPIN_SINE_MIN" "$SPIN_SINE_PERIOD"; then
+      printf '底盘自转  : 正弦 max %s / min %s rad/s, T=%ss 已下发 (50 Hz)；停转: %s/spin_control.sh off\n' \
+        "$SPIN_SINE_MAX" "$SPIN_SINE_MIN" "$SPIN_SINE_PERIOD" "$SCRIPT_DIR"
+      if awk -v a="$SPIN_ABS" -v m="1.5" 'BEGIN{ exit !(a > m) }'; then
+        echo "[提示] 峰值 ${SPIN_ABS} rad/s 超过 mux 的 wz_max(首跑 1.5)，实际会被限幅。"
+      fi
+    else
+      echo "[警告] spin_control.sh sine 失败，底盘不会自转。" >&2
+    fi
+  elif ROBOT_NS="$NAMESPACE" SPIN_MAX_WZ="$SPIN_ABS" \
      "$SCRIPT_DIR/spin_control.sh" on "$CHASSIS_SPIN_WZ"; then
     printf '底盘自转  : %s rad/s 已下发 (20 Hz)；停转: %s/spin_control.sh off\n' \
       "$CHASSIS_SPIN_WZ" "$SCRIPT_DIR"
