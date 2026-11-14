@@ -305,9 +305,9 @@ backend 默认打开了一大批没有消费方的输出（`config/backend.yaml`
 ### C1 地图体系分裂：一套 PGM 一套 PCD bundle，`map` 的原点定义不同
 
 本仓库的地图是 **slam_toolbox 产出的 2D PGM + posegraph**
-（`maps/227_1011/` 下有 `.pgm/.yaml/.posegraph/.data`；`script/start_real_slam.sh` 的"存图"一段写明
+（`maps/227_1011/` 下有 `.pgm/.yaml/.posegraph/.data`；`scripts/bringup/start_real_slam.sh` 的"存图"一段写明
 `/slam_toolbox/save_map` 与 `serialize_map` **各写一半**，两个合起来才是完整地图），
-点云是 point_lio 的 `camera_init` 系 `scans.pcd`，再由 `script/pcd_to_mapframe.py`
+点云是 point_lio 的 `camera_init` 系 `scans.pcd`，再由 `scripts/mapping/pcd_to_mapframe.py`
 求一个平面变换烘到地图系。
 
 `backend` 要的是**关键帧地图包**：`keyframes.txt` + `clouds/` + 描述子数据文件
@@ -366,7 +366,7 @@ backend 默认打开了一大批没有消费方的输出（`config/backend.yaml`
 
 如果照抄 default 起节点，`prior_map` 会相对**当前 shell 的 cwd** 解析。`backend.launch.py`
 还会在 `prior_map.enabled` 且目录不存在时**直接抛异常**。本仓库的所有入口都是
-`script/*.sh` + launch，cwd 是仓库根；迁入后必须全部改成绝对路径，否则就是
+`scripts/*.sh` + launch，cwd 是仓库根；迁入后必须全部改成绝对路径，否则就是
 "在 A 目录能起、在 B 目录起不来"。
 
 ### C5 测试体量与 CI 时间
@@ -399,7 +399,7 @@ ScanContext/G-PROBE 双描述子、UWB 在线标定、Schur 条件数退化检�
 | 云台 | 设计核心（第 ③ 层） | 不存在这个概念 |
 
 实施方案 §1.1 那条"`--lio` 分支里 `map→odom` 必须保持恒等"的约定
-（`script/start_sim_nav.sh` 里就是这么注释的），与 backend"map→odom 是估计量"是
+（`scripts/bringup/start_sim_nav.sh` 里就是这么注释的），与 backend"map→odom 是估计量"是
 **互斥的两套世界观**。迁 backend 不是"多一个节点"，是**换一层的主人**。
 
 ### D2 上游对"刚性安装"的隐含假设贯穿始终
@@ -436,7 +436,7 @@ ScanContext/G-PROBE 双描述子、UWB 在线标定、Schur 条件数退化检�
 
 ### 档 1：只迁 `backend`，不迁 `bringup` / `livox_ros_driver2`
 
-`bringup` 的价值只在于"一键起前后端"，而本仓库的入口是 `script/*.sh` + 分级 launch，
+`bringup` 的价值只在于"一键起前后端"，而本仓库的入口是 `scripts/*.sh` + 分级 launch，
 再加一层通用名的 `bringup`（A4）收益很低、混淆成本很高。
 `livox_ros_driver2` 迁不进来（A1）。所以这一档是"迁 backend 时的默认形态"。
 

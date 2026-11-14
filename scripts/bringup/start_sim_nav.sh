@@ -15,7 +15,7 @@
 #   **wz 与导航完全解耦**: 导航只出平移 (yaw_policy.mode=xy_only)。底盘真实 yaw
 #   由决策层发 rotation_cmd, 在 srm_cmd_mux 里合成 —— 不经过 MINCO, 也不经过平滑器。
 #   小陀螺用 --chassis-spin [rad/s] (缺省 2.0): 脚本自动把请求发到 rotation_cmd,
-#   由 mux 消费; 停发 0.25 s 即停转。也可以直接 script/spin_control.sh on <rad/s>。
+#   由 mux 消费; 停发 0.25 s 即停转。也可以直接 scripts/manual/spin_control.sh on <rad/s>。
 #   导航的"车"是云台: odom->gimbal_yaw 只依赖固定外参, TF 树反过来
 #   (URDF gimbal_is_root:=true, 关节轴反号以匹配 Gazebo /joint_states)。
 #
@@ -36,9 +36,9 @@
 #   否则多个节点会争抢 map->odom。
 #
 #   初始重定位 (GICP):
-#   ./script/start_sim_nav.sh                                    # 默认: Gazebo 真值里程计 (纯控制链路调试)
-#   ./script/start_sim_nav.sh --lio                              # 纯 LIO 里程计, 默认前端 = ZLIO
-#   ./script/start_sim_nav.sh --lio --lio-frontend point_lio \
+#   ./scripts/bringup/start_sim_nav.sh                                    # 默认: Gazebo 真值里程计 (纯控制链路调试)
+#   ./scripts/bringup/start_sim_nav.sh --lio                              # 纯 LIO 里程计, 默认前端 = ZLIO
+#   ./scripts/bringup/start_sim_nav.sh --lio --lio-frontend point_lio \
 #       -w rmuc_2025 -m rmuc_2025                                # 回退: 前端换回 Point-LIO (A/B 对照)
 #     --lio 与 --gicp 互斥: --lio 用 LIO 出 odom->gimbal_yaw, map->odom 保持静态;
 #     --gicp 用 LIO + 先验点云重定位 (需要 PCD)。
@@ -51,23 +51,23 @@
 #     出生点有偏移, 用 --init-pose 直接给 map->odom 初值 (方案 §5 的 T_M_O_init)。
 #
 # 用法:
-#   ./script/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认)
-#   ./script/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
-#   ./script/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
-#   ./script/start_sim_nav.sh                                  # 默认: 云台系导航, 底盘与云台都不转
-#   ./script/start_sim_nav.sh --chassis-spin                   # 底盘小陀螺 2.0 rad/s (mux 消费)
-#   ./script/start_sim_nav.sh --gimbal-spin                    # 云台自转 -1.0 rad/s (底盘不转)
-#   ./script/start_sim_nav.sh --chassis-spin --gimbal-spin     # 两个一起: 底盘 2.0 + 云台 -1.0
-#   ./script/start_sim_nav.sh --chassis-spin 3.0 --gimbal-spin 1.5   # 自己给转速
-#   ./script/start_sim_nav.sh --yaw-mode xy_only                # 显式导航只出平移 (默认)
-#   ./script/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
-#   ./script/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
-#   ./script/start_sim_nav.sh --no-rviz                         # 只跑仿真 + 导航
-#   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
+#   ./scripts/bringup/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认)
+#   ./scripts/bringup/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
+#   ./scripts/bringup/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
+#   ./scripts/bringup/start_sim_nav.sh                                  # 默认: 云台系导航, 底盘与云台都不转
+#   ./scripts/bringup/start_sim_nav.sh --chassis-spin                   # 底盘小陀螺 2.0 rad/s (mux 消费)
+#   ./scripts/bringup/start_sim_nav.sh --gimbal-spin                    # 云台自转 -1.0 rad/s (底盘不转)
+#   ./scripts/bringup/start_sim_nav.sh --chassis-spin --gimbal-spin     # 两个一起: 底盘 2.0 + 云台 -1.0
+#   ./scripts/bringup/start_sim_nav.sh --chassis-spin 3.0 --gimbal-spin 1.5   # 自己给转速
+#   ./scripts/bringup/start_sim_nav.sh --yaw-mode xy_only                # 显式导航只出平移 (默认)
+#   ./scripts/bringup/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
+#   ./scripts/bringup/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
+#   ./scripts/bringup/start_sim_nav.sh --no-rviz                         # 只跑仿真 + 导航
+#   ./scripts/bringup/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
 #       --map /abs/prior.yaml                                   # 用 GICP 初始重定位
-#   ./script/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
+#   ./scripts/bringup/start_sim_nav.sh --gicp --prior-pcd /abs/prior.pcd \
 #       --init-pose "0,0,0,0,0,0.5236"                          # 手动给 map->odom 初值
-#   DRY_RUN=1 ./script/start_sim_nav.sh                         # 只打印将执行的命令
+#   DRY_RUN=1 ./scripts/bringup/start_sim_nav.sh                         # 只打印将执行的命令
 #
 # 参数:
 #   -w, --world   <name>      rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
@@ -121,8 +121,8 @@
 #                                   rotation_cmd -> srm_cmd_mux（spin_topic）, **不进 MINCO**,
 #                                   与导航完全解耦: 没有导航目标时底盘也会转。
 #                                   **不加这个参数 = 底盘不转**(默认行为)。
-#                                   脚本在导航栈就绪后自动调 script/spin_control.sh on；
-#                                   停转: script/spin_control.sh off（停发 0.25 s 即停）。
+#                                   脚本在导航栈就绪后自动调 scripts/manual/spin_control.sh on；
+#                                   停转: scripts/manual/spin_control.sh off（停发 0.25 s 即停）。
 #       --no-chassis-spin           等价于 --chassis-spin 0 (显式关掉, 覆盖环境变量)。
 #       --gimbal-spin [rad/s]       云台自转角速度: 给了就让云台连同其上的雷达恒速自转,
 #                                   不给数值时**默认 -1.0 rad/s**(负值=反向)。
@@ -158,7 +158,7 @@
 #   OPEN_MODE(tab|window|direct) TERMINAL ROBOT_NS USE_COMPOSITION DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
-#   - 启动前会自动依次跑 script/kill_nav.sh、script/kill_gzb.sh、script/kill_rviz.sh,
+#   - 启动前会自动依次跑 scripts/bringup/kill_nav.sh、scripts/bringup/kill_gzb.sh、scripts/bringup/kill_rviz.sh,
 #     清掉上次遗留的 Nav2 导航栈 / Gazebo / RViz。注意: 上一次仿真还在跑时也会被清掉
 #     (而不是像以前那样 "[跳过] 已检测到正在运行的 ..."), 目的是保证每次都是干净的一套
 #     仿真 + 导航。**导航栈必须一起重启**: costmap 的膨胀半径等参数只在节点 configure
@@ -211,7 +211,7 @@ YAW_MODE_CLI_GIVEN="${YAW_MODE_CLI_GIVEN:-0}"  # 1 = 命令行显式给过 --yaw
 
 # 底盘自转 (小陀螺) 角速度 rad/s：留空 = 不自转；--chassis-spin 不带数值时用 2.0。
 # 请求走 rotation_cmd -> srm_cmd_mux（spin_topic）-> cmd_vel_sim，
-# 与手动的 script/spin_control.sh 完全同一条链路（同一话题、同一 PID 文件）。
+# 与手动的 scripts/manual/spin_control.sh 完全同一条链路（同一话题、同一 PID 文件）。
 CHASSIS_SPIN_WZ="${CHASSIS_SPIN_WZ:-}"
 if [ -n "$CHASSIS_SPIN_WZ" ]; then CHASSIS_SPIN_GIVEN=1; fi
 CHASSIS_SPIN_GIVEN="${CHASSIS_SPIN_GIVEN:-0}"  # 1 = 用户显式指定过（含环境变量）
@@ -353,8 +353,8 @@ case "$YAW_MODE" in
     echo "[错误] 云台系下不再支持 --yaw-mode se2：" >&2
     echo "       导航的 yaw 是云台，wz 转的是底盘，se2（导航用 wz 追切线）在语义上不成立。" >&2
     echo "[提示] 底盘自转请改由决策层发 rotation_cmd（mux 消费）：" >&2
-    echo "         ./script/start_sim_nav.sh --chassis-spin 0.5" >&2
-    echo "         script/spin_control.sh on 0.5     # 运行中手动改转速" >&2
+    echo "         ./scripts/bringup/start_sim_nav.sh --chassis-spin 0.5" >&2
+    echo "         scripts/manual/spin_control.sh on 0.5     # 运行中手动改转速" >&2
     exit 2
     ;;
   *) echo "[错误] --yaw-mode 只支持 auto / xy_only / spin / se2" >&2; exit 2 ;;
@@ -702,7 +702,7 @@ if [ "$LIO_FRONTEND" = "zlio" ] && [ "$USE_LIO_ODOMETRY" != "true" ]; then
   if [ "$LIO_FRONTEND_CLI_GIVEN" = "1" ]; then
     echo "[错误] --lio-frontend zlio 需要 --lio: ZLIO 只在纯 LIO 链路启用。" >&2
     echo "       --gicp 暂不接入 ZLIO（方案 §10：small_gicp 那一侧只差放宽条件，尚未做）。" >&2
-    echo "       用法: ./script/start_sim_nav.sh --lio" >&2
+    echo "       用法: ./scripts/bringup/start_sim_nav.sh --lio" >&2
     exit 2
   fi
   LIO_FRONTEND="point_lio"
@@ -770,7 +770,7 @@ if [ "$USE_GICP" = "true" ]; then
   if [ -z "$PRIOR_PCD_FILE" ]; then
     echo "[错误] --gicp 需要 --prior-pcd <先验点云 PCD>" >&2
     echo "[提示] 仓库里 pcd/simulation 目前只有 readme, 需要先建图 (slam:=True), 或用" >&2
-    echo "       script/pcd_to_mapframe.py 把建图产物处理成 GICP 要的坐标系后放进该目录。" >&2
+    echo "       scripts/mapping/pcd_to_mapframe.py 把建图产物处理成 GICP 要的坐标系后放进该目录。" >&2
     exit 1
   fi
   PRIOR_PCD_FILE="$(resolve_prior_pcd "$PRIOR_PCD_FILE")" || exit 1
@@ -945,7 +945,7 @@ cleanup_orphaned_gazebo() {
 # Gazebo (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的仿真抢 /clock、抢
 # RViz 窗口; Nav2 导航栈不清掉则更隐蔽 —— launch 会被下面的 start_once 判为"已在运行"
 # 而跳过, 于是节点继续用**旧参数**(膨胀半径/限速都是 configure 期读的)跑。
-# 跳过本步骤: PREKILL=0 ./script/start_sim_nav.sh
+# 跳过本步骤: PREKILL=0 ./scripts/bringup/start_sim_nav.sh
 prekill_leftovers() {
   if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "[dry-run] 跳过启动前清理 (kill_nav.sh / kill_gzb.sh / kill_rviz.sh)。"
@@ -1176,16 +1176,16 @@ cat <<EOF
 小陀螺 (wz 与导航解耦: rotation_cmd -> srm_cmd_mux, 不进 MINCO):
   启动时加 --chassis-spin [rad/s]      # 脚本自动下发 (缺省 2.0), 无需手动
   只在启动后手动改转速/停转:
-  ./script/spin_control.sh on 2.0      # 恒速自转 2.0 rad/s
-  ./script/spin_control.sh status      # 查看请求/实际转速
-  ./script/spin_control.sh off         # 撤回请求 (停发 0.25 s 即停转)
+  ./scripts/manual/spin_control.sh on 2.0      # 恒速自转 2.0 rad/s
+  ./scripts/manual/spin_control.sh status      # 查看请求/实际转速
+  ./scripts/manual/spin_control.sh off         # 撤回请求 (停发 0.25 s 即停转)
 
 急停 (清零并保持零速):
   ros2 service call /${ROBOT_NS}/srm_cmd_mux/stop_all std_srvs/srv/Trigger
   ros2 service call /${ROBOT_NS}/srm_cmd_mux/resume_all std_srvs/srv/Trigger
 
 清理残留:
-  ./script/kill_gzb.sh && ./script/kill_rviz.sh
+  ./scripts/bringup/kill_gzb.sh && ./scripts/bringup/kill_rviz.sh
 EOF
 
 cat <<EOF
@@ -1208,8 +1208,9 @@ cat <<EOF
 "决策层请求 wz"(rotation_cmd.angular.z)、"mux 最终 wz"(cmd_vel_sim.angular.z)、
 "里程计实际 wz"(odometry.twist.angular.z), 不能只看 Gazebo 模型是否转动。
 
-P0 自检 (不需要 Gazebo):
-  python3 script/check_wz_fakeyaw_chain.py
+P0 自检 (不需要 Gazebo): 用 ros2 topic echo 确认
+  cmd_vel_nav_fake.angular.z 恒 0、rotation_cmd / cmd_vel_sim 的 angular.z
+  与 odometry.twist.angular.z 一致。
 EOF
 
 # 只有真的跑 MINCO 才打印这段自检: 换控制器最容易出的错是"以为换了, 其实参数文件没选对"。
@@ -1221,7 +1222,7 @@ MINCO 自检 (仿真, 按顺序确认):
        ros2 param get /${ROBOT_NS}/controller_server FollowPath.plugin
        期望: srm27_minco_controller::MincoMpcController
        若显示 Omni, 说明参数文件选错了 (--controller minco 会自动选对文件; 但若旧进程还在,
-       也会看到旧值 —— 那种情况先 ./script/kill_nav.sh)。
+       也会看到旧值 —— 那种情况先 ./scripts/bringup/kill_nav.sh)。
   2) 轨迹真的算出来了:
        ros2 topic hz /${ROBOT_NS}/FollowPath/minco_trajectory
        ros2 topic hz /${ROBOT_NS}/FollowPath/mpc_prediction
@@ -1269,7 +1270,7 @@ MINCO 脱困自检 (脱困判定 / 脱困路径规划 / 脱困成功判定):
        做法: 改 config/simulation/nav2_params_srm_minco.yaml 里
          FollowPath.recovery.fail_threshold: 2      # 更容易进脱困
          FollowPath.recovery.stuck_clearance: 0.60   # 不必贴到 0.25 m 才算卡死
-       然后 ./script/kill_nav.sh && ./script/start_sim_nav.sh --controller minco
+       然后 ./scripts/bringup/kill_nav.sh && ./scripts/bringup/start_sim_nav.sh --controller minco
        (本脚本默认启动前就会自己杀一遍导航栈, 直接重跑也行。)
        看到链路通了再把这两个值改回 5 / 0.25 复验一遍 —— 正式值才是交付状态。
   f) 两条脱困链路的分工 (不是互相打架, 是先后兜底):
@@ -1285,7 +1286,7 @@ fi  # if [ "${BANNER_DONE:-0}" = "0" ] —— --verify-spin 不打印交互提�
 # =============================================================
 # 底盘自转（小陀螺）自动下发 —— 只有给了 --chassis-spin 才走这里
 #
-# 用法契约与手动的 script/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
+# 用法契约与手动的 scripts/manual/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
 #
 #   rotation_cmd --20 Hz--> srm_cmd_mux(spin_topic, 只取 angular.z) --> cmd_vel_sim --> Gazebo
 #
@@ -1295,7 +1296,7 @@ fi  # if [ "${BANNER_DONE:-0}" = "0" ] —— --verify-spin 不打印交互提�
 #   * 停发 0.25 s（mux 的 spin_timeout）即视为停转。
 #
 # 所以：
-#   * 停转: ./script/spin_control.sh off      查看: ./script/spin_control.sh status
+#   * 停转: ./scripts/manual/spin_control.sh off      查看: ./scripts/manual/spin_control.sh status
 #   * 请求靠 20 Hz 持续发布保持"新鲜"，mux 超时即撤销自转；
 # 没给 --chassis-spin 时这里什么都不做（默认不转）。
 # =============================================================
@@ -1352,7 +1353,7 @@ fi
 # 启动后自动：等栈就绪 -> 上位机发自转请求 -> 用 ComputePathToPose 探测可达目标 ->
 # 下发 NavigateToPose -> 断言「导航只出平移(fake/body wz=0) / mux 的 wz 跟随请求 /
 # 边转边走 / 到点成功 / 撤回即停」-> 清理。退出码: 0 = 全通过, 1 = 有用例失败, 3 = 启动超时。
-# 只验证不清理: VERIFY_KEEP=1 ./script/start_sim_nav.sh --verify-spin
+# 只验证不清理: VERIFY_KEEP=1 ./scripts/bringup/start_sim_nav.sh --verify-spin
 # =============================================================
 if [ "$VERIFY_SPIN" = "1" ] && [ "$DRY_RUN" = "1" ]; then
   echo "[dry-run] --verify-spin 需要真实启动 Stack，dry-run 下跳过断言。"
@@ -1751,7 +1752,7 @@ PYCHECK
     echo "[验证] 结果: FAIL ❌（看上面 [FAIL] 项与 .sim_run/ 日志）"
   fi
   if [ "$VERIFY_KEEP" = "1" ]; then
-    echo "[验证] VERIFY_KEEP=1：仿真与导航栈继续运行；手动清理: ./script/kill_nav.sh && ./script/kill_gzb.sh"
+    echo "[验证] VERIFY_KEEP=1：仿真与导航栈继续运行；手动清理: ./scripts/bringup/kill_nav.sh && ./scripts/bringup/kill_gzb.sh"
   else
     verify_cleanup
   fi

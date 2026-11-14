@@ -1,7 +1,7 @@
 # 仿真 `--lio` 前端替换 ZLIO 实施记录
 
 > 对应方案：[仿真LIO前端替换Z-LIO实施方案(ai).md](../design/仿真LIO前端替换Z-LIO实施方案%28ai%29.md)
-> 对应入口：`./script/start_sim_nav.sh --lio --lio-frontend zlio`
+> 对应入口：`./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio`
 > 记录日期：2026-11-05
 
 ---
@@ -73,7 +73,7 @@
 | `srm27_nav_bringup/CMakeLists.txt` | `install(PROGRAMS ...)` 加 `scripts/zlio_bridge.py`、`scripts/imu_saturation_guard.py`；`BUILD_TESTING` 的 `foreach` 加 `test_lio_frontend_wiring` |
 | `srm27_nav_bringup/package.xml` | 新增 `exec_depend`: `frontend`、`localization_interfaces`（`tf2_sensor_msgs` 本来就有） |
 | `config/simulation/nav2_params_srm_fakeyaw.yaml` | 新增 `zlio_bridge:` 段（方案 §7.2）与 `imu_saturation_guard:` 段，每个键都带注释；`point_lio` / `loam_interface` 两段**保留不动** |
-| `script/start_sim_nav.sh` | ① 新增 `--lio-frontend {point_lio\|zlio}`（环境变量 `LIO_FRONTEND`）<br>② 校验：非法值直接退出；`zlio` 但没有 `--lio`（或走 `--gicp`）直接退出并打印正确用法<br>③ `--lio` 分支把 `odometry_frontend:=${LIO_FRONTEND}` 拼进 `NAV_EXTRA_ARGS`<br>④ 启动检查：选 `zlio` 时要求 `frontend` 已构建，否则给出 `colcon build` 命令<br>⑤ 启动横幅区分两种前端<br>⑥ 文件头用法/参数说明补 `--lio-frontend` |
+| `scripts/bringup/start_sim_nav.sh` | ① 新增 `--lio-frontend {point_lio\|zlio}`（环境变量 `LIO_FRONTEND`）<br>② 校验：非法值直接退出；`zlio` 但没有 `--lio`（或走 `--gicp`）直接退出并打印正确用法<br>③ `--lio` 分支把 `odometry_frontend:=${LIO_FRONTEND}` 拼进 `NAV_EXTRA_ARGS`<br>④ 启动检查：选 `zlio` 时要求 `frontend` 已构建，否则给出 `colcon build` 命令<br>⑤ 启动横幅区分两种前端<br>⑥ 文件头用法/参数说明补 `--lio-frontend` |
 
 ### 2.3 明确**没有**动的东西（与方案 §6.3 对齐）
 
@@ -590,7 +590,7 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
   --packages-select localization_interfaces frontend
 
 # 全链路：ZLIO 出 odom->base_link
-./script/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025
 
 # 排障用的原始输出（未修正、仅观察）
 ros2 topic echo /red_standard_robot1/zlio/lidar_odometry --once
@@ -603,7 +603,7 @@ ros2 topic echo /red_standard_robot1/zlio_bridge/epoch      # 换代时才会出
 
 1. 运行期：`--lio --lio-frontend point_lio`（或干脆不给 `--lio-frontend`）
 2. 构建期：不装 `frontend` / `localization_interfaces`，其余照旧（zlio 的启动条件不成立）
-3. 代码期：把 `script/start_sim_nav.sh` 的 `LIO_FRONTEND="${LIO_FRONTEND:-point_lio}"` 与
+3. 代码期：把 `scripts/bringup/start_sim_nav.sh` 的 `LIO_FRONTEND="${LIO_FRONTEND:-point_lio}"` 与
    三个 launch 文件里 `odometry_frontend` 的默认值改回 `point_lio` 即回到迁移前
 
 ### 6.3 默认值已经切成 `zlio`（2026-11-05，按需求）
@@ -615,7 +615,7 @@ ros2 topic echo /red_standard_robot1/zlio_bridge/epoch      # 换代时才会出
 
 | 位置 | 现在的值 | 说明 |
 |---|---|---|
-| `script/start_sim_nav.sh` | `LIO_FRONTEND="${LIO_FRONTEND:-zlio}"` | 用户实际入口 |
+| `scripts/bringup/start_sim_nav.sh` | `LIO_FRONTEND="${LIO_FRONTEND:-zlio}"` | 用户实际入口 |
 | `launch/nav_srm_simulation_launch.py` | `default_value="zlio"` | 仿真入口（直接 `ros2 launch` 也走 ZLIO） |
 | `launch/nav_simulation_launch.py` | 透传 + `default_value="zlio"` | 薄封装入口保持一致 |
 | `launch/sim_slam_launch.py` | **显式** `odometry_frontend: "point_lio"` | 建图链路固定 Point-LIO（方案 §10 边界），否则会撞上 `nav2_stack_launch` 的 slam+zlio 校验 |
@@ -686,9 +686,9 @@ ros2 topic echo /red_standard_robot1/zlio_bridge/epoch      # 换代时才会出
 
 | 阶段 | 命令 | 判据（方案 §8.3~§8.5） |
 |---|---|---|
-| P2 | `./script/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025` | 起步 `map→base_link` yaw 与真值差 < 3°（`./script/check_yaw_sources.py --duration 15`）；静置 60 s 位移 < 0.1 m；直行 5 m 位移倍数 0.9~1.1；`terrain_map_ext` 有输出且 `obstacle_scan` 正常；无 "multiple parents" / `TF_OLD_DATA`；**`ros2 node list` 里没有 `loam_interface`** |
+| P2 | `./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025` | 起步 `map→base_link` yaw 与真值差 < 3°（`./scripts/diagnostics/check_yaw_sources.py --duration 15`）；静置 60 s 位移 < 0.1 m；直行 5 m 位移倍数 0.9~1.1；`terrain_map_ext` 有输出且 `obstacle_scan` 正常；无 "multiple parents" / `TF_OLD_DATA`；**`ros2 node list` 里没有 `loam_interface`** |
 | P3 | 同一世界/出生点/目标点，分别 `--lio-frontend point_lio` 与 `zlio` | 位移夸大倍数（`user_test_log/lio_*.csv` 累积比；Point-LIO 基线 6.5×/8.0×/10.7×）、`check_yaw_sources.py --spin 2.0` 航向误差、**`registered_scan` 点数/帧**（见 §5.1）、CPU |
-| P4 | `./script/start_sim_nav.sh --lio --lio-frontend zlio --yaw-mode spin` | `T_off` 捕获时云台仍锁定 → 起步 yaw 误差与 P2 同档；2 rad/s 自转下航向误差不差于 Point-LIO；云台转起来后 `lidar_odometry` 频率不掉 |
+| P4 | `./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio --yaw-mode spin` | `T_off` 捕获时云台仍锁定 → 起步 yaw 误差与 P2 同档；2 rad/s 自转下航向误差不差于 Point-LIO；云台转起来后 `lidar_odometry` 频率不掉 |
 
 P2 期间建议额外看两个日志：
 `zlio_bridge` 的 `已捕获 T(base_link←front_mid360)`（确认抓到的是零位安装外参）与
@@ -699,7 +699,7 @@ P2 期间建议额外看两个日志：
 ```
 # ── 终端 A：起栈（已默认 ZLIO，不用再给 --lio-frontend）
 cd ~/srm_nav_27
-./script/start_sim_nav.sh --lio -w rmuc_2025 -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh --lio -w rmuc_2025 -m rmuc_2025
 
 # ── 终端 B：示波（先跑一条 90 s 的基线，出图 + CSV）
 ./debug_tools/plot_lio_gt_yaw.py --zlio --duration 90 --headless
@@ -725,7 +725,7 @@ rviz2   # 或用 ros2 topic pub / action 发目标
 | 4 | 地形/避障有没有掉 | `ros2 topic hz /red_standard_robot1/terrain_map_ext`、`ros2 topic hz /red_standard_robot1/obstacle_scan` | §5.1 的点数变少会不会影响到避障 |
 | 5 | 只有一份 `odom→base_link` | `ros2 node list | grep -c loam_interface`（应为 0）+ `ros2 run tf2_tools view_frames` | 确认 `loam_interface` 没和 bridge 抢话题；确认 TF 树没有多父 |
 | 6 | 机器占用一屏 | `./debug_tools/system_monitor.py --text --once` | ZLIO 的 CPU 代价（和 Point-LIO 的那一屏对比，`定位/里程计` 那一行） |
-| 7 | 航向独立校验（可选） | `./script/check_yaw_sources.py --duration 15`、自转时 `--spin 2.0` | 起步 yaw 误差（判据 < 3°），与方案 §8.3 的口径对齐 |
+| 7 | 航向独立校验（可选） | `./scripts/diagnostics/check_yaw_sources.py --duration 15`、自转时 `--spin 2.0` | 起步 yaw 误差（判据 < 3°），与方案 §8.3 的口径对齐 |
 
 > 1 和 2 是**必需**的；3~7 有就更好。最省事的采集方式：跑完把 `user_test_log/` 里那几个文件
 > 直接发我，再贴两个终端日志的尾部 50 行。

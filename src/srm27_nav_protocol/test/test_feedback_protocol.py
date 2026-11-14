@@ -23,7 +23,7 @@
 * 新旧帧不区分 → 下位机还没升级时（16 字节）把 CRC 字节当成云台转速读出来；
 * 小端当大端 → 速度变成 1e-38 或天文数字。
 
-本测试用**独立实现**的组帧/解析（`script/test_chassis_speed_feedback.py`，与 C++ 节点
+本测试用**独立实现**的组帧/解析（`scripts/test/test_chassis_speed_feedback.py`，与 C++ 节点
 是两套代码）互相校验；不启动 ROS、不需要串口。
 """
 

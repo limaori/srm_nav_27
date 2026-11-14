@@ -39,7 +39,7 @@ from pathlib import Path
 #: 本文件在 <ws>/src/srm27_navigation/srm27_nav_bringup/test/ 下。
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PACKAGE_ROOT.parents[2]
-SCRIPT_DIR = WORKSPACE_ROOT / "script"
+SCRIPT_DIR = WORKSPACE_ROOT / "scripts" / "bringup"
 SIM_SCRIPT = SCRIPT_DIR / "start_sim_nav.sh"
 REAL_SCRIPT = SCRIPT_DIR / "start_real_nav.sh"
 

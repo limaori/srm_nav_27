@@ -62,7 +62,7 @@ srm_cmd_mux ◄── rotation_cmd（决策层底盘自转，只取 angular.z）
 | 实车建图 | `./scripts/bringup/start_real_slam.sh` | `real_mapping_launch.py`（别名 `real_mapping_entry_launch.py`） |
 | 仿真建图 | `./scripts/bringup/start_sim_slam.sh` | `sim_slam_launch.py`（别名 `sim_slam_entry_launch.py`） |
 
-旧路径 `./script/start_*.sh` 仍可用（`script → scripts` 兼容链接）。
+旧路径 `./scripts/start_*.sh` 仍可用（`script → scripts` 兼容链接）。
 完整默认值、参数文件、速度出口与 launch 状态见
 [`docs/architecture/launch_matrix.md`](docs/architecture/launch_matrix.md)。
 
@@ -163,7 +163,7 @@ maps/
 ```text
 ~/srm_nav_27_data/           # SRM27_DATA_DIR 可覆盖
 ├── bags/                    # 建图录包 mapping_bag_*
-├── diagnostics/             # capture/check/日志/CSV
+├── diagnostics/             # 建图/运行日志
 ├── generated_pcd/point_lio/ # Point-LIO 累积点云 scans.pcd
 ├── experiments/             # 实验原始数据（按日期/实验名）
 ├── plots/                   # 最终图表
@@ -175,17 +175,14 @@ maps/
 - 源码包 `point_lio/PCD/` 只保留说明文件；不要再往里面堆 PCD。
 - 同一实验长期只保留：一份原始数据 + 一份最终图表 + 一份结论说明 + 元数据。
 
-## 兼容路径
+## 路径约定
 
-为不影响现场命令，以下旧路径保留：
+- **脚本**：只使用 `scripts/<group>/<name>`；旧的 `script/` 和 `scripts/<name>` 快捷链接
+  已删除。例如 `./scripts/bringup/start_real_nav.sh`。
+- **launch**：根目录 `<name>_launch.py` 仍是 canonical，旧
+  `ros2 launch srm27_nav_bringup <name>_launch.py` 不变；分组目录放唯一前缀名的别名
+  （`real_nav_srm_real_launch.py`、`sim_slam_entry_launch.py` 等）。
+- **config**：`config/{real,simulation}/<name>` 仍保留指向 `current|legacy/<name>` 的
+  兼容符号链接；参数内容只有一份。
 
-- `script/` → `scripts/`；
-- `scripts/<name>` → `scripts/<group>/<name>`；
-- launch 根目录 `<name>_launch.py` 仍是 canonical，分组目录放唯一前缀名的别名
-  （`real_nav_srm_real_launch.py`、`sim_slam_entry_launch.py` 等）；旧
-  `ros2 launch srm27_nav_bringup <name>_launch.py` 不变；
-- `srm27_nav_bringup/config/{real,simulation}/<name>` → `current|legacy/<name>`。
-
-新代码、新文档请使用分组路径。确认现场脚本全部切换后，可在下一轮删除兼容链接/旧名，
-并同步更新 `test_cli_parity.py`、`test_fakeyaw_*_wiring.py`、`test_lio_frontend_wiring.py`
-中的路径常量。
+新代码、新文档请使用上述分组路径。

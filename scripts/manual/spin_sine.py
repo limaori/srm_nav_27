@@ -11,8 +11,8 @@
 # 停发超过 mux 的 spin_timeout(0.25 s) 后底盘自动停转；本脚本退出前还会补一条零速。
 #
 # 直接用法（一般由 spin_control.sh sine / start_real_nav.sh --chassis-spin-sine 调起）:
-#   ./script/spin_sine.py --max 0.5 --min -0.3 --period 4
-#   ./script/spin_sine.py --max 0.5 --min -0.5 --period 4 --duration 20
+#   ./scripts/manual/spin_sine.py --max 0.5 --min -0.3 --period 4
+#   ./scripts/manual/spin_sine.py --max 0.5 --min -0.5 --period 4 --duration 20
 # =============================================================
 
 import argparse

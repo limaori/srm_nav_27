@@ -1,6 +1,6 @@
 # 仿真 `--lio` 链路把 Point-LIO 前端换成 ZLIO 实施方案
 
-> 对应入口：`./script/start_sim_nav.sh --lio`
+> 对应入口：`./scripts/bringup/start_sim_nav.sh --lio`
 > 目标：`--lio` 时 `odom → base_link` 由 **ZLIO（z-localization 的 `frontend` 包）** 产生，
 > `map → odom` 仍是静态恒等，地形/导航/fakeyaw/速度链路**一行不改**。
 >
@@ -49,8 +49,8 @@ nav2_stack_launch          use_lio_odometry 透传下去
 
 - `start_point_lio_node`，条件 `use_pcd_localization or use_lio_odometry`
 - `start_static_transform_node`，条件 `not use_pcd_localization` → `map → odom` 静态恒等
-  （`map_to_odom_*` 在本链路恒为 0：`script/start_sim_nav.sh` 只在 `--gicp` 分支里由
-  `read_spawn` 推导初值，`--lio` 分支一个都不给；`script/start_sim_nav.sh` 里
+  （`map_to_odom_*` 在本链路恒为 0：`scripts/bringup/start_sim_nav.sh` 只在 `--gicp` 分支里由
+  `read_spawn` 推导初值，`--lio` 分支一个都不给；`scripts/bringup/start_sim_nav.sh` 里
   "地图是以出生点为原点建的、LIO 的 odom 原点同样是出生点 → map→odom 必须保持恒等"
   这段注释就是这个约定的出处）
 
@@ -418,7 +418,7 @@ zlio/session
 | `launch/nav2_stack_launch.py` | 透传 `odometry_frontend` 给 `localization_launch.py` 和 `navigation_launch.py` | |
 | `launch/navigation_launch.py` | ① 新增 `odometry_frontend` launch arg<br>② `loam_interface` 的 condition 从 `IfCondition(has_odometry_source)` 改为 `... and frontend == point_lio`<br>③ composable 分支同样处理（`Node` 与 `LoadComposableNodes` 是两条独立路径，**两处都要改**，见下） | 其余（terrain remap、sensor_scan_generation、fake_vel_transform）**一行不动** |
 | `launch/nav_srm_simulation_launch.py` | ① 声明 `odometry_frontend`（默认 `point_lio`）<br>② 透传给 `nav2_stack_launch.py` | `gimbal_spin_gate` 不用改（它订阅的就是 `lidar_odometry`） |
-| `script/start_sim_nav.sh` | ① 新增 `--lio-frontend {point_lio\|zlio}`（缺省见 §8.0）<br>② `--lio` 分支把 `odometry_frontend:=...` 拼进 `NAV_EXTRA_ARGS`<br>③ 启动横幅（`printf '定位方式 ...'`）区分两种前端 | |
+| `scripts/bringup/start_sim_nav.sh` | ① 新增 `--lio-frontend {point_lio\|zlio}`（缺省见 §8.0）<br>② `--lio` 分支把 `odometry_frontend:=...` 拼进 `NAV_EXTRA_ARGS`<br>③ 启动横幅（`printf '定位方式 ...'`）区分两种前端 | |
 
 **注意 `navigation_launch.py` 里 `loam_interface` 有两条独立的启动路径，两处都要加条件**：
 
@@ -427,7 +427,7 @@ zlio/session
 | `:157-168` | `Node(...)`（非组合） | `IfCondition(has_odometry_source)` |
 | `:417-429` | `LoadComposableNodes`（组合，`plugin="loam_interface::LoamInterfaceNode"`） | `PythonExpression([use_composition, " and (", has_odometry_source, ")"])` |
 
-`use_composition` 两条入口的默认值不同：`script/start_sim_nav.sh` 传 `use_composition:=False`
+`use_composition` 两条入口的默认值不同：`scripts/bringup/start_sim_nav.sh` 传 `use_composition:=False`
 （`USE_COMPOSITION="${USE_COMPOSITION:-False}"`），而 `nav2_stack_launch.py` 的声明缺省是 `True`
 （直接 `ros2 launch` 时生效）。**所以两条路径都可能被走到，必须同时改。**
 漏改一条的后果是"`loam_interface` 仍在跑，和 `zlio_bridge` 抢 `registered_scan`"——
@@ -506,7 +506,7 @@ zlio_bridge:
 | P4 通过后 | `zlio` | 按需求把 `--lio` 的缺省切成 ZLIO；`--lio-frontend point_lio` 作为回退开关保留 |
 
 > **2026-11-05 实际状态**：已按需求把仿真链缺省切成 `zlio`
-> （`script/start_sim_nav.sh` 与 `nav_srm_simulation_launch.py`），但 **P2~P4 的验收还没跑过** ——
+> （`scripts/bringup/start_sim_nav.sh` 与 `nav_srm_simulation_launch.py`），但 **P2~P4 的验收还没跑过** ——
 > 也就是说"默认值已切换"是工程决定，不是"ZLIO 已经证明更好"。导航栈/实车入口的缺省仍是
 > `point_lio`（实车 ZLIO 参数不同，见 §10）。细节见实施记录 §6.3。
 
@@ -547,14 +547,14 @@ zlio_bridge:
 ### 8.3 P2 —— 全链路 `--lio`（1 天）
 
 ```bash
-./script/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio -w rmuc_2025 -m rmuc_2025
 ```
 
 **判据**
 
 | 项 | 判据 | 工具 |
 |---|---|---|
-| 起步不偏 | 出生时 `map→base_link` 的 yaw 与真值差 < 3° | `./script/check_yaw_sources.py --duration 15` |
+| 起步不偏 | 出生时 `map→base_link` 的 yaw 与真值差 < 3° | 原 `check_yaw_sources.py --duration 15`（已删除） |
 | 静态不漂 | 静置 60 s 位移 < 0.1 m | `terrain_map` 与真值轨迹 |
 | 直行不错位 | 直行 5 m，位移倍数 0.9~1.1 | 见 §8.4 |
 | 避障不失效 | `terrain_analysis` 有输出、`obstacle_scan` 正常 | `ros2 topic hz .../terrain_map_ext` |
@@ -568,7 +568,7 @@ zlio_bridge:
 | 指标 | 采集方式 | 当前 Point-LIO 基线 |
 |---|---|---|
 | 位移夸大倍数 | `user_test_log/lio_*.csv` 里 `lio_x/gt` 累积比 | 仿真历史值 6.5× / 8.0× / 10.7×（见 `nav2_params_srm_fakeyaw.yaml:96-100` 注释） |
-| 航向误差（自转时最敏感） | `script/check_yaw_sources.py --spin 2.0` | 参考 `user_test_log/lio_yaw_*.csv` 现有档 |
+| 航向误差（自转时最敏感） | 原 `check_yaw_sources.py --spin 2.0`（已删除） | 参考 `user_test_log/lio_yaw_*.csv` 现有档 |
 | `registered_scan` 点数/帧 | `ros2 topic hz` + 一次 `echo` 数点 | `filter_size_map: 0.3` 下的量 |
 | CPU | `top -H` / `ros2 run ...` 的耗时日志 | — |
 
@@ -577,7 +577,7 @@ zlio_bridge:
 ### 8.5 P4 —— 云台自转下的稳定性（半天）
 
 ```bash
-./script/start_sim_nav.sh --lio --lio-frontend zlio --yaw-mode spin
+./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio --yaw-mode spin
 ```
 
 **背景**：`start_sim_nav.sh` 在 `--lio` 时把 `GIMBAL_DRIVER` 切成 `external`，
@@ -587,7 +587,7 @@ zlio_bridge:
 **判据**
 
 - `T_off` 捕获时云台仍锁定 → 起步 yaw 误差不受自转影响（与 P2 同量级）
-- 2 rad/s 自转下 `check_yaw_sources.py` 的误差与 Point-LIO 同档或更好
+- 2 rad/s 自转下，原先由 `check_yaw_sources.py`（已删除）评估的航向误差应与 Point-LIO 同档或更好
 - 云台开始转之后 `lidar_odometry` 频率不掉
 
 ⚠️ ZLIO 初始化不要求静止（这是它的设计目标），所以**不需要**为了它去改 `gimbal_spin_gate`；

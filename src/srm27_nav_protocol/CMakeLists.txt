@@ -73,7 +73,7 @@ install(DIRECTORY
 
 # 反馈帧协议回归（0x0010 底盘速度包）：不需要串口/ROS，纯 python。
 # 用 **独立实现** 的组帧/解析与 C++ 节点互相校验（CRC 覆盖范围、按 cmd_id 分派、
-# 槽位跳过、长度自检、seq 回绕）。参考实现在 script/test_chassis_speed_feedback.py。
+# 槽位跳过、长度自检、seq 回绕）。参考实现在 scripts/test/test_chassis_speed_feedback.py。
 if(BUILD_TESTING)
   find_package(ament_cmake_test REQUIRED)
   ament_add_test(test_feedback_protocol

@@ -3,7 +3,7 @@
 日期：2026-11-12
 对应实车改造：[`docs/云台系改造实施记录(ai).md`](云台系改造实施记录%28ai%29.md)（2026-11-08 实车链）
 状态：**已实施并验证**（单元/回归 46 项通过；无头 Gazebo 冒烟；`--verify-spin` 端到端 PASS）。
-仿真入口：`script/start_sim_nav.sh`。
+仿真入口：`scripts/bringup/start_sim_nav.sh`。
 
 ---
 
@@ -92,7 +92,7 @@ Nav2 / MINCO（gimbal_yaw_fake，xy_only，只出 vx/vy）
 * GT 里程计参数 `base_frame:=gimbal_yaw`；`start_simulation:=true` 时给 `srm_sim.launch.py`
   传 `velocity_command_frame:=gimbal odom_link:=gimbal_yaw`。
 
-### 3.6 启动脚本（`script/start_sim_nav.sh`）
+### 3.6 启动脚本（`scripts/bringup/start_sim_nav.sh`）
 
 * 默认航向策略 `xy_only`；`auto -> xy_only`；`spin -> 按 xy_only 跑并提示`；`se2` 直接拒绝
   （云台系下导航的 yaw 是云台、wz 转的是底盘）。
@@ -107,7 +107,7 @@ Nav2 / MINCO（gimbal_yaw_fake，xy_only，只出 vx/vy）
 
 | 文件 | 改动 |
 | --- | --- |
-| `script/spin_control.sh` | 文档与 `status` 文案改为"云台系由 mux 消费；旧 spin 模式才由 MINCO 消费"；三层速度段说明 nav 两层 wz=0、执行层 = 请求值 |
+| `scripts/manual/spin_control.sh` | 文档与 `status` 文案改为"云台系由 mux 消费；旧 spin 模式才由 MINCO 消费"；三层速度段说明 nav 两层 wz=0、执行层 = 请求值 |
 | `test/test_fakeyaw_launch_wiring.py` | 断言改为云台系：`gimbal_yaw_fake`、`gimbal_yaw`/`gimbal_yaw_fake`、`xy_only`、`OmniStoppedGoalChecker`、`spin_topic=rotation_cmd`、`sensor_scan_generation`/`loam_interface`/`zlio_bridge` 的云台系与 `ground_frame` |
 
 ---
@@ -139,7 +139,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q \
 
 ```bash
 SRM27_GAZEBO_LOCK_FILE=/tmp/srm27_gazebo.lock \
-OPEN_MODE=direct ./script/start_sim_nav.sh --verify-spin \
+OPEN_MODE=direct ./scripts/bringup/start_sim_nav.sh --verify-spin \
   -w rmuc_2025 -m rmuc_2025 --no-gui --no-rviz
 ```
 

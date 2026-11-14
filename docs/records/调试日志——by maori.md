@@ -155,7 +155,7 @@ eog + pgm地图地址
 ##### 修改方式:
 gimp + pgm地图地址
 左边栏套索图标，框取多边形，取消抗锯齿，点击上边栏编辑，以前景颜色填充（白色），Enter确认，然后导出即可完成修改
-### 手动导航果冻版本仿真./script/start_oneclick.sh
+### 手动导航果冻版本仿真./scripts/start_oneclick.sh
 ##### 第一个终端：启动gazebo
 ```bash
 source install/setup.bash
@@ -164,7 +164,7 @@ ros2 launch rmu_gazebo_simulator bringup_sim.launch.py
 ``` 
 ##### 第二个终端：启动rviz
 ```bash
-source install/setup.bashscript/*.sh
+source install/setup.bashscripts/*.sh
 
 ros2 launch pb2025_nav_bringup rm_navigation_simulation_launch.py world:=rmuc_2025 map:=/home/srm/pb2025_sentry_ws/src/pb2025_sentry_nav/pb2025_nav_bringup/map/simulation/rmuc_2025_tunnel.yaml slam:=False use_pcd_localization:=False use_rviz:=True
 
@@ -198,7 +198,7 @@ nuc的IP：192.168.1.101
 自己的电脑IP配成：192.168.1.100
 ### 关于导航的理解（定位 / 重定位）
 
-定位拆成两段：`odom -> base`（script/*.sh里程计给的）+ `map -> odom`（重定位给的）。
+定位拆成两段：`odom -> base`（scripts/*.sh里程计给的）+ `map -> odom`（重定位给的）。
 建图(`slam:=True`)产出两张地图：`slam_toolbox` 生成 PGM 二维栅格图（给 Nav2 规划），`point_lio` 生成 PCD 三维先验点云（给重定位用）。
 
 比赛时 `slam:=False`。
@@ -223,25 +223,25 @@ z 稳定、roll/pitch 不变 -> 不漂移
 # 2026-9-6
 ### 一键启动slam建图脚本
 ```bash
-bash ./script/start_slam.sh
+bash ./scripts/start_slam.sh
 ```
 ### 一键启动手动导航脚本
 ```bash
-bash ./script/start_nav.sh
+bash ./scripts/start_nav.sh
 ```
 ### 一键清理后台gazebo进程
 ```bash
-bash ./script/kill_gzb.sh
+bash ./scripts/bringup/kill_gzb.sh
 ```
 
 # 2026-9-8
 ### 一键清理后台rviz进程
 ```bash
-bash ./script/kill_rviz.sh
+bash ./scripts/bringup/kill_rviz.sh
 ```
 ### 一键启动重定位仿真（基于先验 PCD）
 ```bash
-bash ./script/start_nav_reloc.sh
+bash ./scripts/start_nav_reloc.sh
 ```
 ### 修改代码后如何生效
 `source install/setup.bash` **只是设置环境变量，不会加载/编译新代码**。
@@ -261,7 +261,7 @@ colcon build --packages-select small_gicp_relocalization --symlink-install \
 ##### 启动
 ```bash
 source install/setup.bash
-python3 script/publish_pcd.py
+python3 scripts/publish_pcd.py
 ```
 ##### rviz
 左侧 Add → By topic → PointCloud2，Topic 选 prior_map
@@ -299,8 +299,8 @@ lio同时用到点云和imu数据
 # 2026-9-11
 ### 实车导航启动脚本
 ```bash
-bash script/start_real_nav.sh --lio # 只有point-lio定位
-bash script/start_real_nav.sh --lio --no-chassis # 不发串口消息
+bash scripts/bringup/start_real_nav.sh --lio # 只有point-lio定位
+bash scripts/bringup/start_real_nav.sh --lio --no-chassis # 不发串口消息
 ```
 
 ### 和底盘通信通不上
@@ -311,7 +311,7 @@ sudo chmod 666 /dev/ttyACM0
 # 2026-9-13
 ### 启动小角落导航
 ```bash
-bash ./script/start_real_nav.sh --lio -m xiaojiaoluo0913 --map-to-odom 0.0 0.0 0.0
+bash ./scripts/bringup/start_real_nav.sh --lio -m xiaojiaoluo0913 --map-to-odom 0.0 0.0 0.0
 ```
 ### rviz设置多目标点
 在rviz左下角nav2的设置，点waypoint那个，然后设置完多个目标点后点start
@@ -324,7 +324,7 @@ bash ./script/start_real_nav.sh --lio -m xiaojiaoluo0913 --map-to-odom 0.0 0.0 0
 # 2026-9-14
 ### 重新扫了个图
 ```bash
-bash ./script/start_real_nav.sh --lio -m xjl0914 --map-to-odom 0.0 0.0 0.0
+bash ./scripts/bringup/start_real_nav.sh --lio -m xjl0914 --map-to-odom 0.0 0.0 0.0
 ```
 
 # 2026-9-16
@@ -352,7 +352,7 @@ bash ./script/start_real_nav.sh --lio -m xjl0914 --map-to-odom 0.0 0.0 0.0
 # 2026-9-26
 ### TEB实车测试
 ```bash
-bash /home/srm/pb2025_sentry_ws/script/start_real_nav.sh --lio -m 227_0916 --map-to-odom 0.0 0.0 0.0
+bash /home/srm/pb2025_sentry_ws/scripts/bringup/start_real_nav.sh --lio -m 227_0916 --map-to-odom 0.0 0.0 0.0
 ```
 # 2026-10-2
 ### 雷达内外参
@@ -395,18 +395,18 @@ nomachine和todesk一起开的时候，拔nomachine网线的时候todesk关掉�
 
 ### 1006建圖腳本
 ```bash
-./script/start_real_slam.sh                #开始扫图
-./script/start_real_slam.sh --save 227_1006  #另起终端，扫完之后存地图到maps文件夹
+./scripts/bringup/start_real_slam.sh                #开始扫图
+./scripts/bringup/start_real_slam.sh --save 227_1006  #另起终端，扫完之后存地图到maps文件夹
 ```
 
 ### 存路径点
 1.先起导航栈
 ```bash
-./script/start_real_nav.sh
+./scripts/bringup/start_real_nav.sh
 ```
 2.另起终端：
 ```bash
-./script/start_waypoints.sh --save-file missions/文件名.yaml --record-only
+./scripts/bringup/start_waypoints.sh --save-file missions/文件名.yaml --record-only
 ```
 3.点publish point,选点，终端会有“记下航点 #1: (1.00, -1.00, yaw 0.00) [map]  共 1 个”
 4.另起终端保存：
@@ -416,13 +416,13 @@ ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
 
 ### 跑存好的路径点
 ```bash
-./script/start_waypoints.sh --file missions/文件名.yaml
+./scripts/bringup/start_waypoints.sh --file missions/文件名.yaml
 ```
 
 # 2026-10-7
 ### 1006仿真脚本
 ```bash
-script/start_sim_nav.sh -w srm_empty -m 227_1006
+scripts/bringup/start_sim_nav.sh -w srm_empty -m 227_1006
 ```
 -w参数是gazebo世界名 
 -m参数是地图名
@@ -431,30 +431,30 @@ script/start_sim_nav.sh -w srm_empty -m 227_1006
 ### 两种局部规划器/控制器仿真测试
 ##### 启动omnipid(空gzb世界+rmuc2025地图)
 ```bash
-./script/start_sim_nav.sh -w srm_empty -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh -w srm_empty -m rmuc_2025
 ```
 ##### 启动minco+mpc(空gzb世界+rmuc2025地图)
 ```bash
-./script/start_sim_nav.sh -w srm_empty -m rmuc_2025 \
+./scripts/bringup/start_sim_nav.sh -w srm_empty -m rmuc_2025 \
   -p /home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
   --rotation-mode stop
   ```
 # 2026-10-9
 ### 路径点变途径点模式
 ```bash
-./script/start_waypoints.sh --file missions/227_1006_waypoint1.yaml --pass-through
+./scripts/bringup/start_waypoints.sh --file missions/227_1006_waypoint1.yaml --pass-through
 ```
 # 2026-10-11
 ### slam建图录制rosbag
 ```bash
-./script/start_real_slam.sh --record-bag --bag-name 地图名
+./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名
 # 另起终端
-./script/start_real_slam.sh --save 地图名
-./script/start_real_slam.sh --stop
+./scripts/bringup/start_real_slam.sh --save 地图名
+./scripts/bringup/start_real_slam.sh --stop
 ```
 ### 通过rosbag重建pcd（默认读最新的rosbag，且自动转到map系）
 ```bash
-./script/build_pcd_from_bag.sh --name pcd地图名
+./scripts/mapping/build_pcd_from_bag.sh --name pcd地图名
 ```
 ### 可视化pcd
 ```bash
@@ -471,7 +471,7 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 ### 实车启动导航脚本（默认minco+mpc+初始gicp重定位）
 ```bash
-./script/start_real_nav.sh -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
+./scripts/bringup/start_real_nav.sh -m 地图名 --prior-pcd PCD地图名(注意要用mapframe)
 ```
 ### 记得改完代码要source install/setup.bash更新！！！
 
@@ -485,11 +485,11 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 ### 启动minco仿真
 ```bash
-./script/start_sim_nav.sh -w srm_empty -m 227_1011 --controller minco
+./scripts/bringup/start_sim_nav.sh -w srm_empty -m 227_1011 --controller minco
 ```
 ### 启动实车
 ```bash
-./script/start_real_nav.sh -m 227_1011 --controller minco --prior-pcd 227_1011_mapframe
+./scripts/bringup/start_real_nav.sh -m 227_1011 --controller minco --prior-pcd 227_1011_mapframe
 ```
 
 # 2026-11-5
@@ -504,10 +504,10 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 ### 1105脚本参数
 ```bash
-./script/start_sim_nav.sh                            # 两个都不转
-./script/start_sim_nav.sh --chassis-spin             # 底盘 2.0
-./script/start_sim_nav.sh --gimbal-spin              # 云台 -1.0
-./script/start_sim_nav.sh --chassis-spin 3 --gimbal-spin 0.5   # 自己给转速
+./scripts/bringup/start_sim_nav.sh                            # 两个都不转
+./scripts/bringup/start_sim_nav.sh --chassis-spin             # 底盘 2.0
+./scripts/bringup/start_sim_nav.sh --gimbal-spin              # 云台 -1.0
+./scripts/bringup/start_sim_nav.sh --chassis-spin 3 --gimbal-spin 0.5   # 自己给转速
 ```
 # 2026-11-8
 ### 示波速度
@@ -520,56 +520,56 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 ```
 ### 启动实车
 ```bash
-./script/start_real_nav.sh -m 227_1108 --controller minco --no-reloc
+./scripts/bringup/start_real_nav.sh -m 227_1108 --controller minco --no-reloc
 ```
 ### 迁移完后启动实车(point-lio)
 ```bash
-./script/start_real_nav.sh -m 227_1108 --controller minco --no-reloc \
+./scripts/bringup/start_real_nav.sh -m 227_1108 --controller minco --no-reloc \
   --lio-frontend point_lio --no-gimbal-joint-topic
 ```
 
 # 2026-11-9
 ### 串口控制下位机脚本
 ```bash
-./script/test_chassis_serial.py --duration 1.0 --vx 0.25
+./scripts/test/test_chassis_serial.py --duration 1.0 --vx 0.25
 ```
 
 # 2026-11-11
 ### 可视化PCD修复
 ```bash
 # 最常用：自动找 maps/pcd/227_1111_mapframe.pcd，并连 RViz 一起起
-./script/show_pcd.sh 227_1111 --rviz
+./scripts/mapping/show_pcd.sh 227_1111 --rviz
 
 # 直接给路径 / 看原始 700 万点 / 换坐标系
-./script/show_pcd.sh maps/pcd/227_1111_mapframe.pcd
+./scripts/mapping/show_pcd.sh maps/pcd/227_1111_mapframe.pcd
 ```
 # 2026-11-13
 ### 实车测试(变速小陀螺)
 ```bash
-./script/start_real_nav.sh -m 227_1111 --controller minco --no-reloc --lio-frontend point_lio \
+./scripts/bringup/start_real_nav.sh -m 227_1111 --controller minco --no-reloc --lio-frontend point_lio \
     --chassis-spin-sine --spin-max 10 --spin-min 5 --spin-period 1.5
 ```
 ### 实车测试(zlio，底盘不转)
 ```bash
-./script/start_real_nav.sh -m 227_1113 --controller minco --no-reloc --chassis-spin 0.000000000000001
+./scripts/bringup/start_real_nav.sh -m 227_1113 --controller minco --no-reloc --chassis-spin 0.000000000000001
 ```
 ### 实车slam+pcd流程
 ```bash
-./script/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio   # point-lio建图
+./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio   # point-lio建图
 
-./script/start_real_slam.sh --record-bag --bag-name 地图名                            # z-lio建图
+./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名                            # z-lio建图
 
 # 另起终端
-./script/start_real_slam.sh --save 地图名
+./scripts/bringup/start_real_slam.sh --save 地图名
 
-./script/start_real_slam.sh --stop
+./scripts/bringup/start_real_slam.sh --stop
 
-./script/build_pcd_from_bag.sh --name pcd地图名                                       # 重建pcd地图，转map系的
+./scripts/mapping/build_pcd_from_bag.sh --name pcd地图名                                       # 重建pcd地图，转map系的
 ```
 # 2026-11-13
 ### 实车测试
 ```bash 
-./script/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin 0.000000000000001
+./scripts/bringup/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin 0.000000000000001
 
-./script/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin-sine --spin-max 6  --spin-min 2 --spin-period 1.5
+./scripts/bringup/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin-sine --spin-max 6  --spin-min 2 --spin-period 1.5
 ```

@@ -1,1 +1,0 @@
-manual/waypoint_mission.py

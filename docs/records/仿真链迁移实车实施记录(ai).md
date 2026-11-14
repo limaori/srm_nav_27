@@ -1,6 +1,6 @@
 # 仿真链迁移实车实施记录
 
-> 本文由 AI 生成，记录 2026-11-06 把仿真已验证的导航链（`script/start_sim_nav.sh
+> 本文由 AI 生成，记录 2026-11-06 把仿真已验证的导航链（`scripts/bringup/start_sim_nav.sh
 > --chassis-spin`：MINCO + fakeyaw + `srm_cmd_mux` + 小陀螺 + ZLIO）迁移到**实车**的
 > 改动、设计取舍、上电验收步骤与已知缺口。方案层面的背景见
 > [`wz控制迁移导航与fakeyaw仿真实施方案.md`](../design/wz控制迁移导航与fakeyaw仿真实施方案.md)，
@@ -70,9 +70,9 @@
 | `launch/nav2_stack_launch.py` | 透传 `zlio_config` 与 ZLIO 输入接线（`zlio_input_type/lidar_topic/imu_topic/imu_acceleration_scale/body_frame`） |
 | `launch/localization_launch.py` | ZLIO 的输入接线由写死改为 launch 参数（仿真/实车不同） |
 | `scripts/srm_minco_real_preflight.py` | 识别 fakeyaw profile；判停器按链期望相反判定；新增 `check_fakeyaw_chain`（参考系统一、`nav_se2`、话题自环、`odom_timeout`、`spin_request`、yaw 外推）；限速层新增 mux 校验 |
-| `script/spin_control.sh` | 支持根命名空间（`ROBOT_NS=""`，实车默认）；status 的执行端话题自动识别 `cmd_vel_sim`/`cmd_vel_chassis` |
-| `script/start_real_nav.sh` | MINCO 默认改走迁移链入口；新增 `--yaw-mode` / `--chassis-spin` / `--lio-frontend` / `--zlio-config` / `--mux` / `--gimbal-joint-topic` / `--speed-limits`；**参数面与 `start_sim_nav.sh` 对齐**（见 §4.6）；Nav2 就绪后自动下发小陀螺；摘要与自检按链打印 |
-| `script/kill_nav.sh` | 入口匹配加入 `nav_srm_real_launch`；孤儿兜底加入 `cmd_mux` / `fake_vel_transform_node` / `zlio*` / `imu_saturation_guard` / `gimbal_joint_state_relay` |
+| `scripts/manual/spin_control.sh` | 支持根命名空间（`ROBOT_NS=""`，实车默认）；status 的执行端话题自动识别 `cmd_vel_sim`/`cmd_vel_chassis` |
+| `scripts/bringup/start_real_nav.sh` | MINCO 默认改走迁移链入口；新增 `--yaw-mode` / `--chassis-spin` / `--lio-frontend` / `--zlio-config` / `--mux` / `--gimbal-joint-topic` / `--speed-limits`；**参数面与 `start_sim_nav.sh` 对齐**（见 §4.6）；Nav2 就绪后自动下发小陀螺；摘要与自检按链打印 |
+| `scripts/bringup/kill_nav.sh` | 入口匹配加入 `nav_srm_real_launch`；孤儿兜底加入 `cmd_mux` / `fake_vel_transform_node` / `zlio*` / `imu_saturation_guard` / `gimbal_joint_state_relay` |
 | `test/test_speed_limits.py` / `test/test_lio_frontend_wiring.py` | 覆盖 `@fakeyaw` 叠加与 profile 判定；ZLIO 参数改为求值替换后断言 |
 | `test/test_cli_parity.py` | 守住"仿真脚本的每个参数实车都能解析"（含 `--gicp`/`--init-pose` 的语义映射与实车专有参数不被误删） |
 
@@ -89,7 +89,7 @@
 | `srm27_nav_protocol/include/packet_typedef.hpp` | `ID_CHASSIS_SPEED = 0x0010`、`ReceiveChassisSpeedData`（25 B，`static_assert` 钉死帧长与数据段偏移） |
 | `srm27_nav_protocol/src/srm27_nav_protocol.cpp` | 按 `cmd_id` 分派新增 `0x0010`；长度自检、`NaN/Inf` 丢弃、失联/恢复告警；发布 `/chassis_speed`（`TwistStamped`）与 `/chassis_yaw_deg`（`Float32`，度） |
 | `srm27_nav_protocol/config/srm27_nav_protocol.yaml` | 新增 `publish_chassis_speed` / `chassis_speed_topic` / `chassis_yaw_topic` / `chassis_speed_frame` / `chassis_speed_timeout_sec` |
-| `script/test_chassis_speed_feedback.py` | 反馈帧工具：`--self-test`（CRC/帧长自检）、`--device`（只读监听统计）、`--pty`（无硬件时造伪串口喂帧，端到端验证 ROS 节点） |
+| `scripts/test/test_chassis_speed_feedback.py` | 反馈帧工具：`--self-test`（CRC/帧长自检）、`--device`（只读监听统计）、`--pty`（无硬件时造伪串口喂帧，端到端验证 ROS 节点） |
 | `srm27_nav_protocol/test/test_feedback_protocol.py` | 协议级回归：CRC 参考向量、CRC16 覆盖 `cmd_id`、轮转 + 槽位跳过、坏帧恢复、断帧、长度自检、`seq` 回绕 |
 | `docs/导航通信协议-下位机接口说明.md` | §4.2 补 `0x0010`；新增 §4.3（10 ms 槽位轮转 / 必须按 `cmd_id` 分派）与 §4.4（上位机实现状态与话题）；示例帧与速查表同步 |
 | `CMakeLists.txt` | 安装 `gimbal_joint_state_relay.py`；注册 `test_fakeyaw_real_wiring` |
@@ -106,7 +106,7 @@
 * `cmd_vel_chassis` 只有一个发布者，"谁在给速度"不再需要靠 `ros2 topic info` 现场推断；
 * `wz_max` 这一层钳位**独立于**控制器与串口，是首跑验证 wz 时的第一道闸；
 * `stop_all` / `resume_all` 是上位机侧唯一能"清零并保持"的软件手段
-  （串口节点没有急停服务，见 `script/start_real_nav.sh` 顶部）。
+  （串口节点没有急停服务，见 `scripts/bringup/start_real_nav.sh` 顶部）。
 
 代价是多一个 200 Hz 节点与 0.3 s 导航超时；两者都在仿真实测过，风险可接受。
 
@@ -252,7 +252,7 @@ base_link yaw = 云台世界 yaw − 云台关节角
 2. 底盘静止、只转云台：`ros2 run tf2_ros tf2_echo odom base_link` 的 yaw **应基本不动**
    （这是"关节角接对了"的判据）；
 3. 云台固定、只让底盘自转：`base_link` yaw 应真实变化；
-4. 两者同时转：`script/check_yaw_sources.py` 的"两源转角差"仍在容差内。
+4. 两者同时转：`scripts/diagnostics/check_yaw_sources.py` 的"两源转角差"仍在容差内。
 
 **协议侧已经补齐**（2026-11-08）：`0x0010` 第 4 个 float32 是 `chassis_to_gimbal_yaw`
 （底盘相对云台、度、(-180,180]），上位机取反换成弧度后发 `/gimbal_joint_angle`，
@@ -275,7 +275,7 @@ colcon build --symlink-install --packages-select \
 source install/setup.bash
 
 # 链路口径只解析、不启动
-./script/start_real_nav.sh -n --no-reloc
+./scripts/bringup/start_real_nav.sh -n --no-reloc
 
 # 限速分层自检（哪一层卡住速度）
 python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py
@@ -293,7 +293,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
 ### S1 不含 wz 的链路（`xy_only` 对照）
 
 ```bash
-./script/start_real_nav.sh --yaw-mode xy_only --no-joy
+./scripts/bringup/start_real_nav.sh --yaw-mode xy_only --no-joy
 ```
 
 判据：
@@ -309,7 +309,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
 
 ```bash
 # 轮子离地，或至少留人守物理急停
-./script/start_real_nav.sh --yaw-mode spin --chassis-spin 0.3
+./scripts/bringup/start_real_nav.sh --yaw-mode spin --chassis-spin 0.3
 ```
 
 判据：
@@ -328,7 +328,7 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 ### S3 se2 首次闭环（场地空旷）
 
 ```bash
-./script/start_real_nav.sh --no-joy
+./scripts/bringup/start_real_nav.sh --no-joy
 ```
 
 判据：`/FollowPath/diagnostics` 的 `planning_result=success`、`minimum_clearance>0`；
@@ -338,7 +338,7 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 ### S4 小陀螺导航（边转边走）
 
 ```bash
-./script/start_real_nav.sh --chassis-spin 1.0     # 建议先 1.0，不要直接 2.0
+./scripts/bringup/start_real_nav.sh --chassis-spin 1.0     # 建议先 1.0，不要直接 2.0
 ```
 
 判据：
@@ -352,7 +352,7 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 ### S5 ZLIO A/B（可选）
 
 ```bash
-./script/start_real_nav.sh --lio-frontend zlio --no-joy
+./scripts/bringup/start_real_nav.sh --lio-frontend zlio --no-joy
 ```
 
 判据：
@@ -379,9 +379,9 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 
 | 想回到… | 做法 |
 | --- | --- |
-| 实车旧链（导航不控自转，不经 mux） | `./script/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml`（或 `-c omni` 回到 Omni） |
-| 不串 mux（排查用，车可能不动） | `./script/start_real_nav.sh --no-mux` |
-| 导航不控自转但保留新参考系 | `./script/start_real_nav.sh --yaw-mode xy_only` |
+| 实车旧链（导航不控自转，不经 mux） | `./scripts/bringup/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml`（或 `-c omni` 回到 Omni） |
+| 不串 mux（排查用，车可能不动） | `./scripts/bringup/start_real_nav.sh --no-mux` |
+| 导航不控自转但保留新参考系 | `./scripts/bringup/start_real_nav.sh --yaw-mode xy_only` |
 | 定位回 Point-LIO | 去掉 `--lio-frontend zlio`（默认就是 point_lio） |
 | 解除 wz 首跑限速 | 改 `config/real/speed_limits.yaml` 的 `srm_cmd_mux.wz_max` 与 `velocity_smoother@fakeyaw` 的 yaw 值，**重启**导航栈（两者都没有动态回调） |
 
@@ -435,7 +435,7 @@ ros2 topic echo /cmd_vel_chassis --once      # wz 相同，且不超过 mux.wz_m
 | `sensor_scan` | 远端一大片"格子"铺到画面上缘 | 只在带子上方一小片 |
 | 结论 | 看图像是点云被整体绕水平轴转了 | 正常 |
 
-### 10.2 定位（新增 `script/check_lio_mount_consistency.py`）
+### 10.2 定位（新增 `scripts/diagnostics/check_lio_mount_consistency.py`）
 
 拿**静止时 IMU 的比力**当唯一物理基准（比力方向 = "世界上方向在雷达系里的表达"），
 三边对账（旧模型、point_lio 在跑时的实测输出）：
@@ -471,17 +471,17 @@ point_lio 把它藏起来了，zlio 把它露出来了。
 | --- | --- |
 | `src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro` | `lidar_roll` 默认 `0.523598776` → **`-0.523598776`**；注释写清实测依据 |
 | `config/real/nav2_params_srm_minco_fakeyaw.yaml`（默认链）<br>`config/real/nav2_params_srm_minco.yaml`（minco 旧链）<br>`config/real/nav2_params_srm.yaml`（omni 旧链） | `point_lio.mapping.gravity` / `gravity_init` 的 y 分量 `-4.905…` → **`+4.905…`** |
-| `config/real/zlio_mid360.yaml`、`script/pcd_to_mapframe.py` | 注释/平面提示同步（ZLIO 这份只写模长，符号错了它自己发现不了） |
+| `config/real/zlio_mid360.yaml`、`scripts/mapping/pcd_to_mapframe.py` | 注释/平面提示同步（ZLIO 这份只写模长，符号错了它自己发现不了） |
 | `config/srm27_sentry_geometry.yaml` | **不改**（Gazebo 世界按 +30° 自洽建的），只加注释说明"实车 -30° / 仿真 +30° 是两个数，别混" |
 | 新增 `test/test_point_lio_gravity_matches_model.py` | xacro 的 `lidar_roll/pitch` 与三份实车 params 的 gravity 必须由同一公式算出（<1e-6），任一边改单边就红 |
-| 新增 `script/check_lio_mount_consistency.py` | 实车只读对账：TF / `/lidar_odometry` / `/sensor_scan` 三边 vs IMU 实测，超 2° 退出码 1 |
+| 新增 `scripts/diagnostics/check_lio_mount_consistency.py` | 实车只读对账：TF / `/lidar_odometry` / `/sensor_scan` 三边 vs IMU 实测，超 2° 退出码 1 |
 
 改完 `install/` 不用重编（`urdf`、`config/real` 都是软链），但**必须重启**才生效
 （`robot_description` 是启动时展开的，point_lio 的 gravity 也是启动时读的）。
 
 ### 10.4 重启后应看到
 
-1. `python3 script/check_lio_mount_consistency.py` 三行全 OK（TF ↔ IMU 应为 ~0°，
+1. `python3 scripts/diagnostics/check_lio_mount_consistency.py` 三行全 OK（TF ↔ IMU 应为 ~0°，
    `/lidar_odometry` 的 roll 仍是 -30° 左右 —— 那是真实安装姿态，不是错误）。
 2. `tf2_echo map livox_imu` 的 roll 从 `+30°` 变成 `-30°`。
 3. **点云不变**：`M·R_0` 前后恒等于 `Rz(63°)Rx(-30°)`，所以 point_lio 的

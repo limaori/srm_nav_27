@@ -40,9 +40,9 @@
 #     覆盖层里，靠本文件内容（fake_base_frame / transform_mode）自动命中。
 #
 # 用法（推荐直接走脚本，它会一并起雷达/车体 TF/底盘串口）：
-#   ./script/start_real_nav.sh                       # 默认就是本文件 + 迁移链（导航只出平移）
-#   ./script/start_real_nav.sh --chassis-spin 0.3    # 决策层小陀螺：rotation_cmd -> mux -> 底盘
-#   ./script/start_real_nav.sh --no-mux              # 不经 mux（出口 = fake 输出）
+#   ./scripts/bringup/start_real_nav.sh                       # 默认就是本文件 + 迁移链（导航只出平移）
+#   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3    # 决策层小陀螺：rotation_cmd -> mux -> 底盘
+#   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux（出口 = fake 输出）
 #
 # ⚠ 上电前必读
 #   1) 首次验证请把车架起来（轮子离地）或留人守物理急停：
@@ -886,7 +886,7 @@ controller_server:
       # srm_cmd_mux 的 rotation_cmd 直接给。保留本段是为了：
       #   1) 回退能力（把 yaw_policy.mode 改回 spin 就走老路）；
       #   2) 仿真回归（仿真仍是 spin 链）。
-      # 上位机直接发 geometry_msgs/Twist 的 angular.z（script/spin_control.sh）。
+      # 上位机直接发 geometry_msgs/Twist 的 angular.z（scripts/manual/spin_control.sh）。
       spin_request:
         topic: rotation_cmd                             # 请求话题（相对命名空间）
         timeout: 0.25                                   # 新鲜窗口（秒）；超时按撤回（停转）
@@ -949,7 +949,7 @@ controller_server:
         #   0.5 只用了半天又降到 0.2：18:09 实车跑（227_1111，起点离最近障碍只有 0.42 m）
         #   3 次脱困合计盲推 ≈2 m，单次 0.46~0.91 s，方向 -38°/+37°/+79° —— 车看着
         #   "完全不贴蓝线"主要就是这三段；这个场地里 1.0（以及 0.5）都只是更快推向下一面墙。
-        #   0.2 也是 script/start_real_nav.sh 里写的首次落地建议值（先确认方向对不对）。
+        #   0.2 也是 scripts/bringup/start_real_nav.sh 里写的首次落地建议值（先确认方向对不对）。
         #   窗口上限 = escape_speed x window_sec = 0.2 x 3.0 = **0.6 m**（1.0 时是 3.0 m）。
         #   ⚠ 不变的两条：脱困旁路 MPC 校验（方向只来自车周 0.40 m 环上的梯度/环形搜索，
         #     窗口跑满时方向早已过期）；脱困是主动给速度，急停只能靠物理按钮或断电。

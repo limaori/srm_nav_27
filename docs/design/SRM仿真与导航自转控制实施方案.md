@@ -214,7 +214,7 @@ srm27_gazebo_simulator/
 | `srm27_nav_bringup/config/simulation/nav2_params_srm.yaml`（新增） | 复用现有传感器和定位参数，调整 SRM frame、平移控制、自转隔离参数 |
 | `srm27_nav_bringup/launch/navigation_launch.py` | 将 fake_vel_transform 变为可选；给命令出口和 mux 留出配置，覆盖 composition 两条启动分支 |
 | 旧 SRM SDF 与启动配置 | 删除装甲、灯条、射击、云台及其控制器；替换旧底盘插件与对应桥接 |
-| `script/start_sim_nav.sh` | 改为 SRM 仿真入口，保留现有地图与定位模式选择，增加自转参数 |
+| `scripts/bringup/start_sim_nav.sh` | 改为 SRM 仿真入口，保留现有地图与定位模式选择，增加自转参数 |
 
 ## 7. 分阶段实施
 

@@ -1,1 +1,0 @@
-manual/spin_control.sh

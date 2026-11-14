@@ -60,8 +60,8 @@
 # z 原点拉回地面。GICP/SLAM 那两段不在本次范围内（仍用 base_link）。
 #
 # 跑法：
-#   ./script/start_sim_nav.sh -m 227_1111
-#   ./script/start_sim_nav.sh --chassis-spin 1.0     # 决策层小陀螺（mux 消费）
+#   ./scripts/bringup/start_sim_nav.sh -m 227_1111
+#   ./scripts/bringup/start_sim_nav.sh --chassis-spin 1.0     # 决策层小陀螺（mux 消费）
 # 或：
 #   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
 #     params_file:=<本文件绝对路径> command_frame:=gimbal_yaw_fake
@@ -742,7 +742,7 @@ controller_server:
       # 自转请求进线：xy_only 下**只缓存不进线**（并计入 rejected_spin_request_count），
       # 真正的自转由 srm_cmd_mux 的 spin_topic 消费同一话题。保留这段只为：
       #   1) 与实车链参数面一致；2) 将来回退到 spin 模式做 A/B 对照。
-      # 手动控制: script/spin_control.sh on <rad/s> / off / status。
+      # 手动控制: scripts/manual/spin_control.sh on <rad/s> / off / status。
       spin_request:
         topic: rotation_cmd                             # 请求话题（相对命名空间）
         timeout: 0.25                                   # 新鲜窗口（秒）；超时按撤回处理（停转）

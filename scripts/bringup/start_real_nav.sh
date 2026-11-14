@@ -70,25 +70,25 @@
 #   3) 底盘能动之后, 先在 RViz 用很小的目标点试一次, 确认车头方向/正负号都对。
 #
 # 用法:
-#   ./script/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
-#   ./script/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
-#   ./script/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
-#   ./script/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
-#   ./script/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
-#   ./script/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
-#   ./script/start_real_nav.sh --lio-frontend zlio   # 定位前端换 ZLIO (实车参数在 config/real)
-#   ./script/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
-#   ./script/start_real_nav.sh --prior-pcd /abs/map.pcd      # 指定重定位先验点云
-#   ./script/start_real_nav.sh --no-reloc                    # 不用重定位: LIO + 静态 map->odom, 不需要先验 PCD
-#   ./script/start_real_nav.sh -c omni                       # 换回 Omni 旧链 (fake_vel_transform legacy)
-#   ./script/start_real_nav.sh --slam                # 边建图边导航
-#   ./script/start_real_nav.sh --map-to-odom 0 0 0   # 指定起步位姿 (map 系, 弧度)
-#   ./script/start_real_nav.sh --no-rviz --no-joy    # 只起链路, 不开图形界面
-#   ./script/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
-#   ./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令, 不启动
-#   ./script/start_real_nav.sh --stop                # 先发零速, 再结束实车链路节点
+#   ./scripts/bringup/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
+#   ./scripts/bringup/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
+#   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
+#   ./scripts/bringup/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
+#   ./scripts/bringup/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
+#   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
+#   ./scripts/bringup/start_real_nav.sh --lio-frontend zlio   # 定位前端换 ZLIO (实车参数在 config/real)
+#   ./scripts/bringup/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
+#   ./scripts/bringup/start_real_nav.sh --prior-pcd /abs/map.pcd      # 指定重定位先验点云
+#   ./scripts/bringup/start_real_nav.sh --no-reloc                    # 不用重定位: LIO + 静态 map->odom, 不需要先验 PCD
+#   ./scripts/bringup/start_real_nav.sh -c omni                       # 换回 Omni 旧链 (fake_vel_transform legacy)
+#   ./scripts/bringup/start_real_nav.sh --slam                # 边建图边导航
+#   ./scripts/bringup/start_real_nav.sh --map-to-odom 0 0 0   # 指定起步位姿 (map 系, 弧度)
+#   ./scripts/bringup/start_real_nav.sh --no-rviz --no-joy    # 只起链路, 不开图形界面
+#   ./scripts/bringup/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
+#   ./scripts/bringup/start_real_nav.sh -n                    # 只解析并打印将执行的命令, 不启动
+#   ./scripts/bringup/start_real_nav.sh --stop                # 先发零速, 再结束实车链路节点
 #
-# 参数（参数面与 script/start_sim_nav.sh **对齐**：同名的参数两边同义、同一条命令两边都能跑）:
+# 参数（参数面与 scripts/bringup/start_sim_nav.sh **对齐**：同名的参数两边同义、同一条命令两边都能跑）:
 #
 #   ── 与 start_sim_nav.sh 同名同义 ─────────────────────────────────────────────
 #   -m, --map <名字|绝对路径>   地图名(在 maps/ 下解析)或 YAML 绝对路径; 缺省自动选择
@@ -147,8 +147,8 @@
 #                               --chassis-spin-sine 后可跟正峰值（负峰值取相反数）；
 #                               --spin-max / --spin-min / --spin-period 分别改正峰值、
 #                               负峰值(默认 -0.3)、周期(默认 4 s)。脚本启动时下发，
-#                               停转: ./script/spin_control.sh off；手工等价命令:
-#                                 ./script/spin_control.sh sine <max> <min> <period>
+#                               停转: ./scripts/manual/spin_control.sh off；手工等价命令:
+#                                 ./scripts/manual/spin_control.sh sine <max> <min> <period>
 #                               ⚠ 与恒速一样：首跑请架起车辆或守物理急停。
 #       --gimbal-joint-topic <话题>
 #                               云台关节角回传话题 (std_msgs/Float32 或 JointState)。
@@ -184,7 +184,7 @@
 #   OPEN_MODE(tab|window) TERMINAL LOG_LEVEL DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
-#   - 启动前会自动先跑一遍 script/kill_gzb.sh 和 script/kill_rviz.sh, 清掉上次
+#   - 启动前会自动先跑一遍 scripts/bringup/kill_gzb.sh 和 scripts/bringup/kill_rviz.sh, 清掉上次
 #     遗留的 Gazebo / RViz (不清会抢 /clock、抢 TF、抢 RViz 窗口)。清理失败只告警
 #     不阻断; 想完全跳过这一步用 PREKILL=0。
 #   - MINCO（迁移链）走 launch/nav_srm_real_launch.py：它在 nav2_stack 之上多做了三件事
@@ -204,7 +204,7 @@
 #       maps/<名字>_mapframe.pcd            已转地图系 (旧布局, 仍兼容)
 #       maps/pcd/<名字>_mapframe.pcd        已转地图系 (现行产品: build_pcd_from_bag.sh
 #                                          从录包重建出 maps/pcd/<名字>.pcd, 再用
-#                                          script/pcd_to_mapframe.py 转出 _mapframe 版)
+#                                          scripts/mapping/pcd_to_mapframe.py 转出 _mapframe 版)
 #       maps/pcd/<名字>.pcd                 Point-LIO camera_init 系原始件 (退路, 会告警)
 #       maps/<名字>.pcd
 #       <包>/pcd/real/<名字>.pcd
@@ -249,8 +249,8 @@ PKG_DIR="$(pick_dir "$PKG_INSTALL" "$PKG_SRC")"
 MAP_REAL_DIR="$PKG_DIR/map/real"
 MAP_SIM_DIR="$PKG_DIR/map/simulation"
 PCD_REAL_DIR="$PKG_DIR/pcd/real"
-# 实车先验点云的**主要落地点**: 由 script/build_pcd_from_bag.sh 从录包重建, 再用
-# script/pcd_to_mapframe.py 就地转成地图系 (每张图就这一份 <名字>.pcd, 名字即地图名)。
+# 实车先验点云的**主要落地点**: 由 scripts/mapping/build_pcd_from_bag.sh 从录包重建, 再用
+# scripts/mapping/pcd_to_mapframe.py 就地转成地图系 (每张图就这一份 <名字>.pcd, 名字即地图名)。
 PCD_MAPS_DIR="$WS_DIR/maps/pcd"
 SRC_MAP_REAL_DIR="$PKG_SRC/map/real"
 
@@ -731,8 +731,8 @@ if [ "$YAW_MODE" = "se2" ]; then
 [错误]   导航的 yaw 是**云台**（雷达定位直接给出），而下发的 wz 转的是**底盘**。
 [错误]   "导航用 wz 把云台对准路径切线"在物理上不成立，硬跑只会让底盘乱转。
 [提示] 底盘自转请改由**决策层**发 rotation_cmd（srm_cmd_mux 消费）：
-[提示]   script/spin_control.sh on 0.5     # 手动验证同一话题
-[提示]   ./script/start_real_nav.sh --chassis-spin 0.3   # 启动时自动下发
+[提示]   scripts/manual/spin_control.sh on 0.5     # 手动验证同一话题
+[提示]   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3   # 启动时自动下发
 EOF
   exit 2
 fi
@@ -819,7 +819,7 @@ if [ "$GIMBAL_SPIN_CLI_GIVEN" = "1" ]; then
   cat >&2 <<EOF
 [警告] 实车不执行 --gimbal-spin ${GIMBAL_SPIN_WZ} rad/s：云台由下位机驱动，上位机没有指令通道
 [警告]   （协议上→下只有 vx/vy/wz 12 字节，下→上只有比赛状态，没有云台转速/关节角字段）。
-[警告]   参数被接受只是为了与 ./script/start_sim_nav.sh 保持同一套命令行。
+[警告]   参数被接受只是为了与 ./scripts/bringup/start_sim_nav.sh 保持同一套命令行。
 [提示] 真正要处理的是"云台在转、上位机不知道角度"：
 [提示]   · 云台保持固定 → 什么都不用做（默认）；
 [提示]   · 下位机自己转云台且能回传关节角 → 加 --gimbal-joint-topic <话题>；
@@ -834,9 +834,9 @@ if [ "$VERIFY_SPIN" = "1" ]; then
 [错误] 实车不支持 --verify-spin：它会自动下发自转请求与导航目标、让车自己动起来，
 [错误]   而实车没有"无头沙箱"这层保护（仿真里它还会顺手清掉 Gazebo/Nav2）。
 [提示] 参数被接受只是为了命令行一致；实车请按文档人工分步验收：
-[提示]   ./script/start_real_nav.sh                                  # S1 平移链路（导航只出平移）
-[提示]   ./script/start_real_nav.sh --chassis-spin 0.3               # S2 方向/增益（架车）
-[提示]   ./script/start_real_nav.sh --chassis-spin 0.5               # S3 小陀螺导航
+[提示]   ./scripts/bringup/start_real_nav.sh                                  # S1 平移链路（导航只出平移）
+[提示]   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3               # S2 方向/增益（架车）
+[提示]   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.5               # S3 小陀螺导航
 [提示]   云台系改造的完整验收清单见 docs/导航改云台系与决策层小陀螺实施方案.md §6.2。
 EOF
   exit 2
@@ -1027,7 +1027,7 @@ if [ "$CONTROLLER" = "minco" ]; then
 [错误]   平移速度的 R(-yaw) 必须由 fake_vel_transform 做那一次；
 [错误]   关掉它 = 导航输出永远在"假车头方向"的系里，车会往错方向走且不报错。
 [提示] 确实想用"导航不控自转、命令系 base_link"的旧链，请显式指定参数文件：
-[提示]   ./script/start_real_nav.sh -p <绝对路径>/config/real/nav2_params_srm_minco.yaml
+[提示]   ./scripts/bringup/start_real_nav.sh -p <绝对路径>/config/real/nav2_params_srm_minco.yaml
 [提示]   （或用 -c omni 回到 Omni 旧链。）
 EOF
     exit 1
@@ -1079,7 +1079,7 @@ if [ "$CONTROLLER" = "omni" ] && [ "$CHASSIS_SPIN_CLI_GIVEN" = "1" ]; then
 [错误] Omni 旧链不支持小陀螺（--chassis-spin）：
 [错误]   Omni 参数文件里 yaw_policy/ spin_request 都按"导航不控自转"配置，
 [错误]   没有 MINCO 的 setSpinRequest 进线，请求发出去没人消费。
-[提示] 小陀螺请用 MINCO 迁移链（默认）：./script/start_real_nav.sh --chassis-spin
+[提示] 小陀螺请用 MINCO 迁移链（默认）：./scripts/bringup/start_real_nav.sh --chassis-spin
 EOF
   exit 2
 fi
@@ -1378,8 +1378,8 @@ if [ "$RELOC_ON" = "1" ]; then
     echo "[错误] 用 --prior-pcd <路径> 指定。" >&2
     echo "[错误] 注意: PCD 必须在地图坐标系下, Point-LIO camera_init 系的原始点云不能直接用。" >&2
     echo "[错误] 有录包的话可以先重建再转系:" >&2
-    echo "[错误]   ./script/build_pcd_from_bag.sh --name <名字>" >&2
-    echo "[错误]   python3 script/pcd_to_mapframe.py --pcd maps/pcd/<名字>.pcd --map maps/<名字>/<名字>.yaml" >&2
+    echo "[错误]   ./scripts/mapping/build_pcd_from_bag.sh --name <名字>" >&2
+    echo "[错误]   python3 scripts/mapping/pcd_to_mapframe.py --pcd maps/pcd/<名字>.pcd --map maps/<名字>/<名字>.yaml" >&2
     echo "[提示] 只是想先把链路跑起来 (用静态 map->odom): 加 --lio。" >&2
     exit 1
   fi
@@ -1658,7 +1658,7 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   echo "  速度限幅    : $SPEED_LIMITS_FILE"
   if [ "$CHASSIS_SPIN_SINE" = "1" ]; then
     echo "  底盘自转    : 正弦 max $SPIN_SINE_MAX / min $SPIN_SINE_MIN rad/s, T=${SPIN_SINE_PERIOD}s (Nav2 就绪后自动下发)"
-    echo "                停转: ./script/spin_control.sh off   (mux wz_max 仍会钳住峰值)"
+    echo "                停转: ./scripts/manual/spin_control.sh off   (mux wz_max 仍会钳住峰值)"
   elif awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
     echo "  底盘自转    : 关 (要转加 --chassis-spin [rad/s] 或 --chassis-spin-sine, 首跑建议 0.3)"
   else
@@ -1715,7 +1715,7 @@ open_term() {
 # ---------- 启动前清理残留 ----------
 # 每次启动前先跑一遍 kill_gzb.sh / kill_rviz.sh: 上一次异常退出留下的 Gazebo
 # (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的节点抢 /clock、抢 TF、
-# 抢 RViz 窗口。跳过本步骤: PREKILL=0 ./script/start_real_nav.sh
+# 抢 RViz 窗口。跳过本步骤: PREKILL=0 ./scripts/bringup/start_real_nav.sh
 prekill_leftovers() {
   if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "[dry-run] 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
@@ -1795,10 +1795,10 @@ for i in "${!STEP_TITLES[@]}"; do
 done
 
 # ---------- 底盘小陀螺（迁移链）：Nav2 就绪后自动下发 ----------
-# 契约与决策层、与手动的 script/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
+# 契约与决策层、与手动的 scripts/manual/spin_control.sh 完全一致（同一话题、同一 PID 文件）：
 #   rotation_cmd --20 Hz--> srm_cmd_mux(只取 angular.z) --> cmd_vel_chassis --> 串口
 #   （MINCO 在 xy_only 下不参与 wz；它的 spin_request 只是保留的旧入口。）
-# 所以：停转 ./script/spin_control.sh off，查看 ./script/spin_control.sh status。
+# 所以：停转 ./scripts/manual/spin_control.sh off，查看 ./scripts/manual/spin_control.sh status。
 # ⚠ 与导航解耦：导航没目标时**照样**能原地转（两路输入各自计时），这不再是故障判据。
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
    && { [ "$CHASSIS_SPIN_SINE" = "1" ] \
@@ -1872,7 +1872,7 @@ cat <<EOF
       ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"
   - srm27_nav_protocol 没有任何急停 service, 软件层面唯一的停车手段就是上面那条零速。
   - 一键停整条链路 (先发零速再结束进程):
-      ./script/start_real_nav.sh --stop
+      ./scripts/bringup/start_real_nav.sh --stop
 EOF
 
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
@@ -1884,10 +1884,10 @@ cat <<'EOF'
       超时保护，进程被 kill -9 / 掉电时它不生效。物理急停永远是第一手段。
 
   小陀螺 (请求经 rotation_cmd 直接进 MINCO，wz 仍由导航输出):
-    ./script/start_real_nav.sh --chassis-spin 0.3    # 首跑：小转速先确认方向
-    ./script/spin_control.sh on 1.0                  # 运行中改转速（需以 spin 模式启动）
-    ./script/spin_control.sh status                  # 查看请求/实际转速/三层速度
-    ./script/spin_control.sh off                     # 撤回请求（停转）
+    ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3    # 首跑：小转速先确认方向
+    ./scripts/manual/spin_control.sh on 1.0                  # 运行中改转速（需以 spin 模式启动）
+    ./scripts/manual/spin_control.sh status                  # 查看请求/实际转速/三层速度
+    ./scripts/manual/spin_control.sh off                     # 撤回请求（停转）
 
   云台: 实车由下位机驱动，协议暂无关节角回传 → 保持固定，或按文档接
     --gimbal-joint-topic <话题>（见 docs/仿真链迁移实车实施记录(ai).md）。
@@ -2052,6 +2052,6 @@ cat <<'EOF'
   先确认车头方向与正负号都对 (y 方向横移、原地转向是否与预期一致), 再放开跑。
 
 清理残留 (本条会结束实车链路节点, 含 RViz; 请不要在仿真同时运行时用):
-  ./script/start_real_nav.sh --stop
-  ./script/kill_rviz.sh
+  ./scripts/bringup/start_real_nav.sh --stop
+  ./scripts/bringup/kill_rviz.sh
 EOF

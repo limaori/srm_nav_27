@@ -40,7 +40,7 @@
 * 速度出口由 `cmd_vel_nav_topic` 决定，再由 srm_cmd_mux 合成 cmd_vel_sim；底盘执行由
   srm27_gazebo_simulator 的 SRM 速度插件负责（`velocity_command_frame:=gimbal`）。
 * 通过 start_simulation / start_chassis_control 选择是否由本入口一并拉起仿真与
-  底盘控制链路；默认由 script/start_sim_nav.sh 分标签页启动。
+  底盘控制链路；默认由 scripts/bringup/start_sim_nav.sh 分标签页启动。
 
 用法：
   ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \\
@@ -452,7 +452,7 @@ def generate_launch_description():
             # mux 的输入就是 fake_vel_transform 的输出（唯一链路）。
             "nav_topic": mux_nav_topic,
             # 决策层底盘自转（只取 angular.z）：与实车链同名同义。仿真里
-            # --chassis-spin / script/spin_control.sh 发的就是这个话题。
+            # --chassis-spin / scripts/manual/spin_control.sh 发的就是这个话题。
             "spin_topic": mux_spin_topic,
         }.items(),
     )

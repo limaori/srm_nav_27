@@ -37,24 +37,24 @@
 #      重影 = 雷达外参/时间戳不对, 这时建出来的图必然错。
 #
 # 用法:
-#   ./script/start_real_slam.sh                      # 起建图链路 (默认不含手柄)
-#   ./script/start_real_slam.sh --joy                 # 顺带起手柄 (推杆走车, 边走边建图)
-#   ./script/start_real_slam.sh --no-chassis          # 不起底盘串口 (车不打算动/已有别处起)
-#   ./script/start_real_slam.sh --no-rviz             # 无图形界面 (无头 NUC)
-#   ./script/start_real_slam.sh --save 227_1006       # 另开终端: 存图到 maps/227_1006/
-#   ./script/start_real_slam.sh --save site01 --force # 同名地图已存在时覆盖
-#   ./script/start_real_slam.sh --record-bag          # 建图同时录原始点云/IMU (事后可重建 PCD)
-#   ./script/start_real_slam.sh --record-bag --bag-name 227_1010 --bag-derived
-#   ./script/start_real_slam.sh -n                    # 只解析并打印将执行的命令, 不启动
-#   ./script/start_real_slam.sh --list-maps           # 列出工作区现有地图
-#   ./script/start_real_slam.sh --stop                # 先发零速, 再结束建图链路节点
+#   ./scripts/bringup/start_real_slam.sh                      # 起建图链路 (默认不含手柄)
+#   ./scripts/bringup/start_real_slam.sh --joy                 # 顺带起手柄 (推杆走车, 边走边建图)
+#   ./scripts/bringup/start_real_slam.sh --no-chassis          # 不起底盘串口 (车不打算动/已有别处起)
+#   ./scripts/bringup/start_real_slam.sh --no-rviz             # 无图形界面 (无头 NUC)
+#   ./scripts/bringup/start_real_slam.sh --save 227_1006       # 另开终端: 存图到 maps/227_1006/
+#   ./scripts/bringup/start_real_slam.sh --save site01 --force # 同名地图已存在时覆盖
+#   ./scripts/bringup/start_real_slam.sh --record-bag          # 建图同时录原始点云/IMU (事后可重建 PCD)
+#   ./scripts/bringup/start_real_slam.sh --record-bag --bag-name 227_1010 --bag-derived
+#   ./scripts/bringup/start_real_slam.sh -n                    # 只解析并打印将执行的命令, 不启动
+#   ./scripts/bringup/start_real_slam.sh --list-maps           # 列出工作区现有地图
+#   ./scripts/bringup/start_real_slam.sh --stop                # 先发零速, 再结束建图链路节点
 #
 # 参数:
 #       --save <名字>           保存当前地图到 maps/<名字>/ (要求建图链路正在跑)
 #       --out-dir <绝对路径>    存图输出目录, 默认 <工作空间>/maps/<名字>
 #       --wait <秒>             存图前最多等 slam_toolbox 服务出现的秒数 (默认 8; 0 = 不等)
 #       --force                 存图时允许覆盖已存在的同名地图文件
-#       --record-bag            建图同时录包 (另起标签页跑 script/record_mapping_bag.sh)
+#       --record-bag            建图同时录包 (另起标签页跑 scripts/mapping/record_mapping_bag.sh)
 #       --bag-name <名字>       录包目录名带上地图名, 建议与稍后 --save 的名字一致
 #       --bag-derived           录包时追加 /cloud_registered /aft_mapped_to_init /scan /map
 #       --bag-out-dir <绝对路径> 录包输出目录, 默认 ~/srm_nav_27_data/bags/mapping_bag_<名字|时间戳>
@@ -92,7 +92,7 @@
 #   OPEN_MODE(tab|window) TERMINAL DRY_RUN SRM27_WS_DIR PREKILL
 #
 # 说明:
-#   - 启动前会自动先跑一遍 script/kill_gzb.sh 和 script/kill_rviz.sh, 清掉上次
+#   - 启动前会自动先跑一遍 scripts/bringup/kill_gzb.sh 和 scripts/bringup/kill_rviz.sh, 清掉上次
 #     遗留的 Gazebo / RViz (不清会抢 /clock、抢 RViz 窗口)。清理失败只告警不阻断;
 #     想完全跳过这一步用 PREKILL=0。--save / --stop 分支不会触发这个清理。
 #   - 雷达驱动、车体 TF、Point-LIO、slam_toolbox 全在 real_mapping_launch.py 里,
@@ -110,8 +110,8 @@
 #       · zlio     : 由 zlio_bridge 累积 registered_scan 写（体素 0.10 m 降采样）。
 #     两者都在**建图起点系**（Point-LIO camera_init / ZLIO 的 odom），
 #     **不是**地图坐标系下的先验点云，直接拿给 --reloc 用会错位；
-#     需要先 python3 script/pcd_to_mapframe.py ... 转到地图坐标系。
-#   - --record-bag 另起一个标签页跑 script/record_mapping_bag.sh, 录
+#     需要先 python3 scripts/mapping/pcd_to_mapframe.py ... 转到地图坐标系。
+#   - --record-bag 另起一个标签页跑 scripts/mapping/record_mapping_bag.sh, 录
 #     /livox/lidar(CustomMsg, 含逐点 offset_time) + /livox/imu + /tf + /tf_static,
 #     约 240 MB/分钟 (Mid-360 满速)。这是唯一能事后重建三维 PCD 的原始数据:
 #     slam_toolbox 的 .posegraph/.data 只存二维位姿图, 里面没有点云, 事后转不出来。
@@ -201,7 +201,7 @@ WAIT_FOR_SLAM="${WAIT_FOR_SLAM:-8}"
 SLAM_NODE_NAME="slam_toolbox"
 SLAM_SERVICE="/slam_toolbox/save_map"
 
-# 建图同步录包: 由 script/record_mapping_bag.sh 承担, 这里只决定要不要起、起在哪。
+# 建图同步录包: 由 scripts/mapping/record_mapping_bag.sh 承担, 这里只决定要不要起、起在哪。
 # 录的是原始点云/IMU, 是事后重建三维 PCD 的唯一来源 (见文件头说明)。
 RECORD_BAG="${RECORD_BAG:-0}"
 BAG_NAME="${BAG_NAME:-}"
@@ -341,7 +341,7 @@ PY
 # ---------- 停止 ----------
 # 自身与祖先 PID: pkill -f 是按整条命令行匹配的, 若调用本脚本的那个 shell
 # 命令行里恰好含 "rviz2" / "pointlio_mapping" 之类的字样 (例如
-# `bash -c '...; ./script/start_real_slam.sh --stop'`), 直接 pkill 会把
+# `bash -c '...; ./scripts/bringup/start_real_slam.sh --stop'`), 直接 pkill 会把
 # 调用者自己一起杀掉。所以下面只按 PID 精确清理, 并跳过自身与全部祖先。
 ancestor_pids() {
   local pid="$$" parent
@@ -422,7 +422,7 @@ stop_mapping() {
     done
     if [ -n "$(matching_pids "$BAG_RECORDER_PATTERN")" ]; then
       echo "[警告] 录包进程 ${BAG_FINALIZE_WAIT} 秒内没退完, 下面会被强制结束。" >&2
-      echo "[警告] 被强杀的 bag 会缺 metadata.yaml; 事后用 ./script/build_pcd_from_bag.sh 可自动补 (ros2 bag reindex), 尾部几秒可能缺。" >&2
+      echo "[警告] 被强杀的 bag 会缺 metadata.yaml; 事后用 ./scripts/mapping/build_pcd_from_bag.sh 可自动补 (ros2 bag reindex), 尾部几秒可能缺。" >&2
     else
       echo "[停止] 录包进程已收尾 (等待 ${waited} 秒)。"
     fi
@@ -504,7 +504,7 @@ diagnose_slam_toolbox() {
 [错误]   $nodes
 [错误] 该服务由节点参数 use_map_saver 决定, 现在它不是 true (或加载的不是建图参数文件)。
 [错误] 检查: grep -n use_map_saver $(q "$MAP_PARAMS_DEFAULT")
-[错误] 正确做法是让建图链路自己加载这份参数: ./script/start_real_slam.sh
+[错误] 正确做法是让建图链路自己加载这份参数: ./scripts/bringup/start_real_slam.sh
 EOF
     return 0
   fi
@@ -522,9 +522,9 @@ EOF
 [错误] --save 只是调用在线服务, 把 slam_toolbox 内存里的位姿图写到磁盘,
 [错误] 它不会自己起链路, 也不能"离线"从旧地图里取数据。
 [错误] 先在另一个终端起链路并保持运行:
-[错误]   ./script/start_real_slam.sh --joy     # 带手柄, 推杆走车、边走边建图
+[错误]   ./scripts/bringup/start_real_slam.sh --joy     # 带手柄, 推杆走车、边走边建图
 [错误] 等 RViz 里地图开始连成片之后, 再回来执行:
-[错误]   ./script/start_real_slam.sh --save <名字>
+[错误]   ./scripts/bringup/start_real_slam.sh --save <名字>
 [错误] 自查: ros2 node list | grep $SLAM_NODE_NAME     # 应能看到 /$SLAM_NODE_NAME
 EOF
 }
@@ -644,7 +644,7 @@ save_map() {
   done
   echo
   echo "下一步:"
-  echo "  导航加载这张图: ./script/start_real_nav.sh -m $name"
+  echo "  导航加载这张图: ./scripts/bringup/start_real_nav.sh -m $name"
   echo "  续建图 (接着这张位姿图跑): 用 slam_toolbox 的 deserialize_map, 见 docs/调试日志——by maori.md"
 }
 
@@ -817,8 +817,8 @@ if process_running "$NAV_PATTERN"; then
   cat >&2 <<'EOF'
 [错误] 检测到导航栈正在运行 (nav2_stack_launch.py / nav_real_launch.py / start_real_nav.sh)。
 [错误] 建图与导航都会发布 map->odom, 同时跑会互相打架, RViz 里地图来回跳。
-[错误] 先停掉导航: ./script/start_real_nav.sh --stop
-[错误] 再起建图:   ./script/start_real_slam.sh
+[错误] 先停掉导航: ./scripts/bringup/start_real_nav.sh --stop
+[错误] 再起建图:   ./scripts/bringup/start_real_slam.sh
 EOF
   exit 1
 fi
@@ -881,7 +881,7 @@ MAPPING_CMD="$MAPPING_CMD save_pcd:=$(bool_arg "$SAVE_PCD")"
 MAPPING_CMD="$MAPPING_CMD scan_cloud_topic:=$(q "$SCAN_CLOUD_TOPIC")"
 
 # 透传额外的 launch 参数, 例如临时换 2D 扫描的点云来源:
-#   MAPPING_EXTRA_ARGS="scan_cloud_topic:=registered_scan" ./script/start_real_slam.sh
+#   MAPPING_EXTRA_ARGS="scan_cloud_topic:=registered_scan" ./scripts/bringup/start_real_slam.sh
 # 默认 raw 是原始点云 (~20k 点/帧, 720 个方位格覆盖 ~598); registered_scan 只有 ~1.7k 点
 # (覆盖 ~264), 矮台阶/薄栏杆会被相邻射线刷成空闲。
 if [ -n "${MAPPING_EXTRA_ARGS:-}" ]; then
@@ -990,7 +990,7 @@ open_term() {
 # ---------- 启动前清理残留 ----------
 # 每次启动前先跑一遍 kill_gzb.sh / kill_rviz.sh: 上一次异常退出留下的 Gazebo
 # (以及它的 /clock bridge) 和 RViz 不清掉, 会和这次启动的节点抢 /clock、抢 RViz
-# 窗口。跳过本步骤: PREKILL=0 ./script/start_real_slam.sh
+# 窗口。跳过本步骤: PREKILL=0 ./scripts/bringup/start_real_slam.sh
 prekill_leftovers() {
   if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "[dry-run] 跳过启动前清理 (kill_gzb.sh / kill_rviz.sh)。"
@@ -1070,9 +1070,9 @@ for i in "${!STEP_TITLES[@]}"; do
     if [ "$pattern" = "$MAPPING_PATTERN" ]; then
       echo "        RViz 是在这条 launch 里起的 (use_rviz:=True), 所以这里不会另起一个。"
       echo "        如果那个标签页已经关了 / RViz 崩了, 说明这是**残留的 launch 外壳**,"
-      echo "        先停干净再重来:  ./script/start_real_slam.sh --stop"
+      echo "        先停干净再重来:  ./scripts/bringup/start_real_slam.sh --stop"
     else
-      echo "        要先重起这一步:  ./script/start_real_slam.sh --stop"
+      echo "        要先重起这一步:  ./scripts/bringup/start_real_slam.sh --stop"
     fi
     continue
   fi
@@ -1087,11 +1087,11 @@ cat <<EOF
   - 位姿图在内存里, **不存就没了**: 建完先存图再关。
 
 存图 (建图链路保持运行, 另开终端执行):
-  ./script/start_real_slam.sh --save <名字>          # -> maps/<名字>/{pgm,yaml,posegraph,data}
-  ./script/start_real_slam.sh --save <名字> --force  # 同名已存在时覆盖
+  ./scripts/bringup/start_real_slam.sh --save <名字>          # -> maps/<名字>/{pgm,yaml,posegraph,data}
+  ./scripts/bringup/start_real_slam.sh --save <名字> --force  # 同名已存在时覆盖
 
 结束 (先发零速再停节点, 录包进程会先收尾再退):
-  ./script/start_real_slam.sh --stop
+  ./scripts/bringup/start_real_slam.sh --stop
 EOF
 
 if is_true "$RECORD_BAG"; then

@@ -193,7 +193,7 @@ slam:=True
 ```
 
 一键启动（Gazebo + 速度合成 + 导航 + RViz）推荐用
-[`script/start_sim_nav.sh`](../../script/start_sim_nav.sh)，自转测试模式见
+[`scripts/bringup/start_sim_nav.sh`](../../scripts/bringup/start_sim_nav.sh)，自转测试模式见
 [SRM 仿真与自转控制实现(ai)](../../docs/SRM仿真与自转控制实现(ai).md)。
 
 > [!NOTE]
@@ -285,7 +285,7 @@ use_robot_state_pub:=True
 自转不再有独立链路，两条途径都由导航输出 `wz`：
 
 * `--yaw-mode se2`（默认）：车头跟路径切线，角速度完全由 MINCO/MPC 决定。
-* `--yaw-mode spin`：小陀螺驻车自转 —— `script/spin_control.sh on <rad/s>` 把请求发到
+* `--yaw-mode spin`：小陀螺驻车自转 —— `scripts/manual/spin_control.sh on <rad/s>` 把请求发到
   `rotation_cmd`，MINCO 的 `spin_request` 直接进线（0.25 s 超时即停转），
   `wz` 仍由导航输出。`off` / `status` 用于停止与查看。
 

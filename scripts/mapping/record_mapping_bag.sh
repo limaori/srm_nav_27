@@ -33,12 +33,12 @@
 #     还要按 nav2_params_srm.yaml 里 small_gicp_relocalization 那段注释处理。
 #
 # 用法:
-#   ./script/record_mapping_bag.sh                          # 默认主题集, 目录名带时间戳
-#   ./script/record_mapping_bag.sh --map-name 227_1010      # 目录名带上地图名, 便于配对
-#   ./script/record_mapping_bag.sh --derived                # 追加派生话题 (体积翻倍)
-#   ./script/record_mapping_bag.sh --out-dir /abs/bag_dir   # 直接指定输出目录
-#   ./script/record_mapping_bag.sh --topics "/livox/lidar /livox/imu"   # 完全自定义
-#   ./script/record_mapping_bag.sh -n                       # 只打印将执行的命令
+#   ./scripts/mapping/record_mapping_bag.sh                          # 默认主题集, 目录名带时间戳
+#   ./scripts/mapping/record_mapping_bag.sh --map-name 227_1010      # 目录名带上地图名, 便于配对
+#   ./scripts/mapping/record_mapping_bag.sh --derived                # 追加派生话题 (体积翻倍)
+#   ./scripts/mapping/record_mapping_bag.sh --out-dir /abs/bag_dir   # 直接指定输出目录
+#   ./scripts/mapping/record_mapping_bag.sh --topics "/livox/lidar /livox/imu"   # 完全自定义
+#   ./scripts/mapping/record_mapping_bag.sh -n                       # 只打印将执行的命令
 #
 # 参数:
 #       --map-name <名字>       输出目录名带上地图名 (建议与稍后 --save 的名字一致)
@@ -351,8 +351,8 @@ else
     fi
     size="$(du -sh "$OUT_DIR" 2>/dev/null | cut -f1)"
     echo "[录包] 已补出 metadata.yaml: $OUT_DIR ($size, $db3_count 个 db3) → 这个包可以回放。" >&2
-    echo "[录包] 被强杀时还在内存里的最后几秒没落地; 下一趟请 Ctrl+C 一次或 ./script/start_real_slam.sh --stop。" >&2
-    echo "[录包] 离线重建 PCD: ./script/build_pcd_from_bag.sh --bag $(q "$OUT_DIR")"
+    echo "[录包] 被强杀时还在内存里的最后几秒没落地; 下一趟请 Ctrl+C 一次或 ./scripts/bringup/start_real_slam.sh --stop。" >&2
+    echo "[录包] 离线重建 PCD: ./scripts/mapping/build_pcd_from_bag.sh --bag $(q "$OUT_DIR")"
   else
     echo "[录包] 补 metadata 也失败 (db3 可能正写到一半坏了) → 这个包只能重录。" >&2
     echo "[录包] 事后仍可再试: ros2 bag reindex $(q "$OUT_DIR")" >&2

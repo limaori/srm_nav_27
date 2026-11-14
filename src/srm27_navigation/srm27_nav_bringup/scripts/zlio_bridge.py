@@ -340,7 +340,7 @@ class ZlioBridge(Node):
         # ---- 累积点云落盘（等价于 Point-LIO 的 pcd_save，见模块 docstring 的"PCD 落盘"）----
         # ZLIO 自己不落盘；这里把它已经转到 odom 系的 registered_scan 累积起来，
         # 退出时按体素降采样写成 PCD（默认写到 point_lio/PCD/scans.pcd，与旧链路同路径、
-        # 同坐标系口径：都在建图起点系，转 map 系仍然用 script/pcd_to_mapframe.py）。
+        # 同坐标系口径：都在建图起点系，转 map 系仍然用 scripts/mapping/pcd_to_mapframe.py）。
         self.declare_parameter("pcd_save_en", False)
         self.declare_parameter("pcd_save_path", "scans.pcd")
         self.declare_parameter("pcd_voxel_leaf", 0.10)      # 米；0 = 不降采样

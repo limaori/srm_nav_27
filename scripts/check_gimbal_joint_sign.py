@@ -1,1 +1,0 @@
-diagnostics/check_gimbal_joint_sign.py

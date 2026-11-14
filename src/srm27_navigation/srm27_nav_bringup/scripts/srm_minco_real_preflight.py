@@ -1025,7 +1025,7 @@ def check_fakeyaw_chain(cfg, period, report):
         spin_timeout = _as_float(_first_scalar(cfg, "controller_server.FollowPath.spin_request.timeout"))
         if not spin_topic:
             report.add(BLOCK, "yaw_policy.mode=%s 但没有 spin_request.topic" % yaw_mode,
-                       "小陀螺请求没有入口：script/spin_control.sh 发的 rotation_cmd 没人订阅，"
+                       "小陀螺请求没有入口：scripts/manual/spin_control.sh 发的 rotation_cmd 没人订阅，"
                        "MINCO 也永远不会消费它。")
         elif spin_timeout is None or spin_timeout <= 0.0:
             report.add(BLOCK, "spin_request.timeout 非法 (%r)" % spin_timeout,

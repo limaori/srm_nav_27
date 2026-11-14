@@ -44,7 +44,7 @@ REAL_PARAMS = CONFIG_DIR / "nav2_params_srm_minco_fakeyaw.yaml"
 PROTOCOL_CONFIG = (
     WORKSPACE_ROOT / "src" / "srm27_nav_protocol" / "config" / "srm27_nav_protocol.yaml"
 )
-REAL_SCRIPT = WORKSPACE_ROOT / "script" / "start_real_nav.sh"
+REAL_SCRIPT = WORKSPACE_ROOT / "scripts" / "bringup" / "start_real_nav.sh"
 
 #: 云台基座面相对地面（= URDF 的 chassis_top = 0.1504 + 0.2353/2）。
 CHASSIS_TOP = 0.26805

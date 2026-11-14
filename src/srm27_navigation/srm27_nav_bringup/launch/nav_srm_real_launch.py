@@ -40,7 +40,7 @@
 与仿真入口的区别（其余全部复用）：
 * 没有 Gazebo / 真值里程计 / 点云格式转换器；odom->base_link 由 `sensor_scan_generation`
   从 LIO 反推（`use_lio_odometry:=True` 或 `use_pcd_localization:=True`）。
-* 雷达驱动、车体 TF、底盘串口由 `script/start_real_nav.sh` 分标签页拉起（与仿真一致：
+* 雷达驱动、车体 TF、底盘串口由 `scripts/bringup/start_real_nav.sh` 分标签页拉起（与仿真一致：
   Gazebo 也是脚本单独拉），所以本入口只起"导航 + 速度出口 + RViz"。
 * `speed_limits_file` 默认取 `config/real/speed_limits.yaml`；`@fakeyaw` 段会按参数文件
   内容自动命中（smoother 的 yaw 界钳 0），并给 mux 提供 wz_max。
@@ -50,7 +50,7 @@
 
 用法::
 
-    # 默认：--lio + MINCO + fakeyaw + mux（推荐入口是 script/start_real_nav.sh）
+    # 默认：--lio + MINCO + fakeyaw + mux（推荐入口是 scripts/bringup/start_real_nav.sh）
     ros2 launch srm27_nav_bringup nav_srm_real_launch.py \\
         map:=/abs/map.yaml prior_pcd_file:=/abs/prior.pcd \\
         params_file:=/abs/config/real/nav2_params_srm_minco_fakeyaw.yaml \\
@@ -146,7 +146,7 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
         raise RuntimeError(
             "use_fakeyaw_transform=False 不支持实车迁移链：本入口就是 fakeyaw 链路"
             "（导航参考系 gimbal_yaw_fake）。要用旧链（导航不控自转）请走"
-            " nav2_stack_launch.py（script/start_real_nav.sh -c omni）。"
+            " nav2_stack_launch.py（scripts/bringup/start_real_nav.sh -c omni）。"
         )
     if command_frame != NAV_FAKE_FRAME:
         raise RuntimeError(

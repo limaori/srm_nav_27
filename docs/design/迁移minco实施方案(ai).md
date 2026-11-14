@@ -995,7 +995,7 @@ controller_server:
 | `srm27_chassis_control/src/rotation_controller_node.cpp` | 独立模式保持执行输出；SE2 模式改供策略参考/由 MPC 使用，避免并行控制 |
 | `srm27_nav_protocol` | 首期保持速度协议；补验缓存命令失效和下位机超时，力前馈另立任务 |
 | `behavior_trees/*.xml` 与自定义 BackUpFreeSpace | 保持 FollowPath ID，增加恢复进入/退出授权及窄通道限制 |
-| `script/start_sim_nav.sh` | 利用已有 `PARAMS_FILE/--params` 做切换；正式版本更新默认配置和自转说明 |
+| `scripts/bringup/start_sim_nav.sh` | 利用已有 `PARAMS_FILE/--params` 做切换；正式版本更新默认配置和自转说明 |
 | `dependencies.repos` / vendor 版本文件 | 记录固定版本；不把 ROS1 演示整仓库无筛选导入 colcon |
 | 记录/监控脚本 | 加入新轨迹、QP/规划诊断、所有速度层、仲裁状态和命令年龄 |
 
@@ -1146,7 +1146,7 @@ colcon test-result --verbose
 PARAMS_FILE=/home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
 ROTATION_MODE=stop \
 USE_VELOCITY_SMOOTHER=False \
-bash script/start_sim_nav.sh
+bash scripts/bringup/start_sim_nav.sh
 ```
 
 启动后必须回读 `FollowPath.plugin`，确认加载的是新插件，并检查插件 XML 确实被安装。RViz 需显示全局 Path、MINCO 曲线、采样速度、MPC 预测轨迹、footprint、ESDF 和模式。不是把“ros2 launch 没报错”当作闭环通过。
@@ -1249,6 +1249,6 @@ ros2 service call /red_standard_robot1/srm_cmd_mux/stop_all std_srvs/srv/Trigger
 - [底盘限速与超时](../../src/srm27_chassis_control/config/srm_chassis_control.yaml)
 - [串口速度接口](../../src/srm27_nav_protocol/src/srm27_nav_protocol.cpp)
 - [导航行为树](../../src/srm27_navigation/srm27_nav_bringup/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml)
-- [仿真启动脚本](../../script/start_sim_nav.sh)
+- [仿真启动脚本](../../scripts/bringup/start_sim_nav.sh)
 
 文档文件：`docs/迁移minco实施方案(ai).md`；核查于本机本地日期 2026-10-06。除新方案与索引外，本次未修改导航实现、运行配置或底盘协议。

@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================
-# SRM 航点任务一键启动 (包装 script/waypoint_mission.py)
+# SRM 航点任务一键启动 (包装 scripts/manual/waypoint_mission.py)
 #
-#   ./script/start_waypoints.sh                       # 点选模式: RViz 里点航点, 再调 ~/start
-#   ./script/start_waypoints.sh --file m.yaml         # 直接执行航点文件里的航点(每个点都停车)
-#   ./script/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式: 除最后一个点(终点)
+#   ./scripts/bringup/start_waypoints.sh                       # 点选模式: RViz 里点航点, 再调 ~/start
+#   ./scripts/bringup/start_waypoints.sh --file m.yaml         # 直接执行航点文件里的航点(每个点都停车)
+#   ./scripts/bringup/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式: 除最后一个点(终点)
 #                                                     # 外都是途径点, 途径点不刹车
-#   ./script/start_waypoints.sh --save-file m.yaml    # 只收集航点, 用 ~/save 存盘
-#   ./script/start_waypoints.sh --loop --retry 2      # 循环跑, 每个点失败重试 2 次
+#   ./scripts/bringup/start_waypoints.sh --save-file m.yaml    # 只收集航点, 用 ~/save 存盘
+#   ./scripts/bringup/start_waypoints.sh --loop --retry 2      # 循环跑, 每个点失败重试 2 次
 #
 # 所有参数原样透传给 waypoint_mission.py, 完整说明见:
-#   ./script/start_waypoints.sh -h
-#   (或直接看 script/waypoint_mission.py 头部注释)
+#   ./scripts/bringup/start_waypoints.sh -h
+#   (或直接看 scripts/manual/waypoint_mission.py 头部注释)
 #
 # 仿真 (Gazebo):
-#   ./script/start_sim_nav.sh                         # 先起仿真 + 导航栈(默认命名空间
+#   ./scripts/bringup/start_sim_nav.sh                         # 先起仿真 + 导航栈(默认命名空间
 #                                                     # red_standard_robot1)
-#   ./script/start_waypoints.sh --file m.yaml         # 命名空间会被自动探测, 直接这样跑就行
-#   ./script/start_waypoints.sh --file m.yaml --namespace red_standard_robot1   # 也可以显式指定
+#   ./scripts/bringup/start_waypoints.sh --file m.yaml         # 命名空间会被自动探测, 直接这样跑就行
+#   ./scripts/bringup/start_waypoints.sh --file m.yaml --namespace red_standard_robot1   # 也可以显式指定
 #   说明:
 #     - 仿真导航栈跑在命名空间下, 导航 action 在 /<ns>/navigate_to_pose、/<ns>/navigate_through_poses,
 #       TF 话题在 /<ns>/tf(cf. nav2 launch 里的 SetRemap("/tf","tf"))。本脚本会自动探测命名空间
@@ -34,8 +34,8 @@
 #       详见 waypoint_mission.py 头部注释。--no-backtrack-guard 可关。
 #
 # 注意:
-#   - 需要导航栈在跑(nav2 + bt_navigator), 即先执行 ./script/start_real_nav.sh (仿真则
-#     ./script/start_sim_nav.sh)。
+#   - 需要导航栈在跑(nav2 + bt_navigator), 即先执行 ./scripts/bringup/start_real_nav.sh (仿真则
+#     ./scripts/bringup/start_sim_nav.sh)。
 #     本脚本只下发导航目标, 不直接发速度: 速度仍走 Nav2 控制器 → velocity_smoother
 #     → fake_vel_transform → /cmd_vel_chassis 这条链路, 底盘限幅/看门狗照旧生效。
 #   - --pass-through 用的是 bt_navigator 的 navigate_through_poses 与
@@ -70,7 +70,7 @@ fi
 # 真要下发目标时 waypoint_mission.py 自己会等到超时并给出明确报错。
 if ! pgrep -u "$(id -u)" -f '[b]t_navigator|[n]av2_container|[n]av2_stack_launch' >/dev/null 2>&1; then
   echo "[提示] 没检测到导航栈 (bt_navigator / nav2_container)。" >&2
-  echo "[提示] 要下发航点请先起: ./script/start_real_nav.sh (仿真: ./script/start_sim_nav.sh)" >&2
+  echo "[提示] 要下发航点请先起: ./scripts/bringup/start_real_nav.sh (仿真: ./scripts/bringup/start_sim_nav.sh)" >&2
   echo "[提示] 现在只做点选/记录也可以继续。" >&2
 fi
 

@@ -6,19 +6,19 @@
 #   slam_toolbox 存出来的四件套 (.pgm/.yaml/.posegraph/.data) 里**没有点云**;
 #   Point-LIO 的 pcd_save 又只在节点**正常退出**时落一次盘, 而且输出路径由运行期
 #   SRM27_PCD_DIR 指定 (~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd)。录了原始包
-#   (script/record_mapping_bag.sh / start_real_slam.sh --record-bag) 就能事后重来。
+#   (scripts/mapping/record_mapping_bag.sh / start_real_slam.sh --record-bag) 就能事后重来。
 #   本脚本把"起回放链路 -> 放包 -> SIGINT 收尾 -> 取走 PCD"这套手工步骤固定下来,
 #   并把结果按 <名字>.pcd 放进 maps/pcd/ —— start_real_nav.sh 的 --prior-pcd 与
 #   --list-maps 会在那里找。
 #
 # 用法:
-#   ./script/build_pcd_from_bag.sh                       # 自动用 ~/srm_nav_27_data/bags 里最新的录包
-#   ./script/build_pcd_from_bag.sh --name 227_1011
-#   ./script/build_pcd_from_bag.sh --bag ~/srm_nav_27_data/bags/mapping_bag_227_1011_20261011_181809
-#   ./script/build_pcd_from_bag.sh --bag <目录> --name site01 --force
-#   ./script/build_pcd_from_bag.sh --no-mapframe         # 只重建, 不转系
-#   ./script/build_pcd_from_bag.sh --bag <目录> --no-reindex   # 缺 metadata.yaml 也别动它
-#   ./script/build_pcd_from_bag.sh -n                    # 只打印将执行的命令, 不真跑
+#   ./scripts/mapping/build_pcd_from_bag.sh                       # 自动用 ~/srm_nav_27_data/bags 里最新的录包
+#   ./scripts/mapping/build_pcd_from_bag.sh --name 227_1011
+#   ./scripts/mapping/build_pcd_from_bag.sh --bag ~/srm_nav_27_data/bags/mapping_bag_227_1011_20261011_181809
+#   ./scripts/mapping/build_pcd_from_bag.sh --bag <目录> --name site01 --force
+#   ./scripts/mapping/build_pcd_from_bag.sh --no-mapframe         # 只重建, 不转系
+#   ./scripts/mapping/build_pcd_from_bag.sh --bag <目录> --no-reindex   # 缺 metadata.yaml 也别动它
+#   ./scripts/mapping/build_pcd_from_bag.sh -n                    # 只打印将执行的命令, 不真跑
 #
 # 参数:
 #       --bag <目录>         录包目录 (默认: ~/srm_nav_27_data/bags/mapping_bag_* 里最新的)
@@ -53,7 +53,7 @@
 #   - 产出两份到 maps/pcd/:
 #       <名字>.pcd           Point-LIO 的 camera_init 系 (原始件)
 #       <名字>_mapframe.pcd  pgm 地图系 (成品, --reloc 用这份)
-#     第二份由 script/pcd_to_mapframe.py **自动接着做** (默认开, --no-mapframe 关):
+#     第二份由 scripts/mapping/pcd_to_mapframe.py **自动接着做** (默认开, --no-mapframe 关):
 #     camera_init 与地图系差一个固定位姿 (雷达相对 base_link: yaw 63°、roll -30°), 不转就去
 #     --reloc, 车会被定位到错姿态上而 GICP 不会报错 —— 所以这一步不该靠人记。
 #     地图 yaml (maps/<名字>/<名字>.yaml) 不存在时只告警, 并给出事后手动转的命令。
@@ -193,7 +193,7 @@ BAG_FILE="$(readlink -f "$BAG_FILE")"
 if pgrep -u "$(id -u)" -f '/[r]os2 bag record' >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 [错误] 现在有 ros2 bag record 在跑, 这个包还没收尾 (数据还在长)。
-[提示] 先在录包那个终端 Ctrl+C 一次 (只按一次), 或 ./script/start_real_slam.sh --stop,
+[提示] 先在录包那个终端 Ctrl+C 一次 (只按一次), 或 ./scripts/bringup/start_real_slam.sh --stop,
 [提示] 等目录里出现 metadata.yaml 之后再回来重建 PCD。
 EOF
   exit 1
@@ -432,7 +432,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "  6) 移动到 $OUT_PCD"
   if is_true "$TO_MAPFRAME"; then
     echo "  7) 转成地图系 -> ${OUT_PCD%.pcd}_mapframe.pcd"
-    echo "     python3 script/pcd_to_mapframe.py --pcd $OUT_PCD --map ${MAP_YAML_OVERRIDE:-$WS_DIR/maps/$BAG_NAME/$BAG_NAME.yaml}"
+    echo "     python3 scripts/mapping/pcd_to_mapframe.py --pcd $OUT_PCD --map ${MAP_YAML_OVERRIDE:-$WS_DIR/maps/$BAG_NAME/$BAG_NAME.yaml}"
   else
     echo "  7) [--no-mapframe] 跳过转系, 只留 camera_init 系原始件"
   fi
@@ -457,7 +457,7 @@ if pgrep -u "$(id -u)" -f "$POINTLIO_PATTERN" >/dev/null 2>&1 \
   cat >&2 <<'EOF'
 [错误] 已经有建图链路在跑 (pointlio_mapping / real_mapping_launch)。
 [错误] 两个 point_lio 会抢同一条 TF, 出来的点云必然是错的。
-[错误] 先停掉: ./script/start_real_slam.sh --stop
+[错误] 先停掉: ./scripts/bringup/start_real_slam.sh --stop
 EOF
   exit 1
 fi
@@ -641,7 +641,7 @@ if is_true "$TO_MAPFRAME"; then
     fi
   else
     echo "[警告] 没找到地图 yaml: $MAP_YAML" >&2
-    echo "[警告] 这张图还没 --save 的话, 先 ./script/start_real_slam.sh --save $BAG_NAME (需要链路在跑)," >&2
+    echo "[警告] 这张图还没 --save 的话, 先 ./scripts/bringup/start_real_slam.sh --save $BAG_NAME (需要链路在跑)," >&2
     echo "[警告] 或之后用 --map-yaml 指定别的地图再转。" >&2
   fi
 fi
@@ -654,8 +654,8 @@ if [ "$MAPFRAME_OK" = "1" ]; then
   $OUT_PCD  ($(du -h "$OUT_PCD" | cut -f1))   <- camera_init 系原始件
   链路日志: $RUN_LOG
 
-  ./script/start_real_nav.sh --list-maps                        # 应显示 先验PCD: 有
-  ./script/start_real_nav.sh --reloc -m $BAG_NAME --prior-pcd $BAG_NAME
+  ./scripts/bringup/start_real_nav.sh --list-maps                        # 应显示 先验PCD: 有
+  ./scripts/bringup/start_real_nav.sh --reloc -m $BAG_NAME --prior-pcd $BAG_NAME
   # --prior-pcd $BAG_NAME 会优先命中 _mapframe 那份 (见 start_real_nav.sh 的搜索顺序)
 
 ⚠ 每次重建出来的点云不是逐点可复现的, 重建之后必须重新转系 (本脚本默认已经做了);
@@ -669,14 +669,14 @@ else
   链路日志: $RUN_LOG
 
 下一步 — 转成地图系 (不转直接 --reloc 车会被定位到错姿态上, 而 GICP 不会报错):
-  python3 script/pcd_to_mapframe.py \\
+  python3 scripts/mapping/pcd_to_mapframe.py \\
       --pcd $OUT_PCD \\
       --map $MAP_YAML
 
   它会在同目录产出 $(basename "$MAPFRAME_PCD") (原始件不动), 头部标注坐标系与所用变换。
   转好之后:
-    ./script/start_real_nav.sh --list-maps                       # 应显示 先验PCD: 有
-    ./script/start_real_nav.sh --reloc -m $BAG_NAME --prior-pcd $BAG_NAME
+    ./scripts/bringup/start_real_nav.sh --list-maps                       # 应显示 先验PCD: 有
+    ./scripts/bringup/start_real_nav.sh --reloc -m $BAG_NAME --prior-pcd $BAG_NAME
 
   - 想先看一眼点云 (camera_init 系那份):
       ros2 run pcl_ros pcd_to_pointcloud --ros-args -p file_name:=$OUT_PCD -p tf_frame:=camera_init

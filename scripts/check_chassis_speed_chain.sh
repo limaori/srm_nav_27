@@ -1,1 +1,0 @@
-diagnostics/check_chassis_speed_chain.sh

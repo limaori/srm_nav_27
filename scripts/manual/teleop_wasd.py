@@ -27,10 +27,10 @@
 #   h          打印帮助      Ctrl-C 退出（退出前会补发零速）
 #
 # 用法:
-#   ./script/teleop_wasd.py                                  # 默认 1 m/s、1 rad/s
-#   ./script/teleop_wasd.py --speed 0.5 --yaw-rate 0.5
-#   ./script/teleop_wasd.py --namespace ""                   # 不带命名空间
-#   ./script/teleop_wasd.py --duration 10                    # 10 秒后自动停并退出
+#   ./scripts/manual/teleop_wasd.py                                  # 默认 1 m/s、1 rad/s
+#   ./scripts/manual/teleop_wasd.py --speed 0.5 --yaw-rate 0.5
+#   ./scripts/manual/teleop_wasd.py --namespace ""                   # 不带命名空间
+#   ./scripts/manual/teleop_wasd.py --duration 10                    # 10 秒后自动停并退出
 
 import argparse
 import math

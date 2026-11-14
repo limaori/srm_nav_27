@@ -34,13 +34,13 @@
 #   新旧帧靠 data_length 区分：20 = 新帧（有转速），16 = 旧帧（转速不可用，不报错）。
 #
 # 用法:
-#   ./script/test_chassis_speed_feedback.py --self-test
-#   ./script/test_chassis_speed_feedback.py --device /dev/ttyACM0
-#   ./script/test_chassis_speed_feedback.py --device /dev/serial/by-id/usb-... --raw
+#   ./scripts/test/test_chassis_speed_feedback.py --self-test
+#   ./scripts/test/test_chassis_speed_feedback.py --device /dev/ttyACM0
+#   ./scripts/test/test_chassis_speed_feedback.py --device /dev/serial/by-id/usb-... --raw
 #
 #   # 没有硬件时，端到端验证 ROS 节点（两个终端）:
 #   #   终端 A:
-#   ./script/test_chassis_speed_feedback.py --pty --vx 0.4 --vy 0.1 --wz 0.8 --yaw 45
+#   ./scripts/test/test_chassis_speed_feedback.py --pty --vx 0.4 --vy 0.1 --wz 0.8 --yaw 45
 #   #     -> 打印 "从端设备: /dev/pts/N"，保持运行
 #   #   终端 B（N 换成上面打印的）:
 #   ros2 run srm27_nav_protocol srm27_nav_protocol_node --ros-args \\

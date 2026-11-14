@@ -60,7 +60,7 @@
 | `nav2_params_srm_minco_fakeyaw.yaml` | `FollowPath.yaw_policy.mode: se2 -> xy_only`；`general_goal_checker.plugin -> srm27_nav_plugins::OmniStoppedGoalChecker`（只看平移） |
 | `config/real/speed_limits.yaml` | `velocity_smoother@fakeyaw` 的 `max/min_velocity` yaw 分量 `±1.0 -> 0.0`，`max/min_accel(decel)` yaw `±4.5 -> 0.0` |
 | `launch/nav_srm_real_launch.py` | 默认 `yaw_mode=xy_only`（`auto`/`se2` 都改写成 `xy_only`）；判停器对 `spin/xy_only/auto/se2` 一律换 `OmniStoppedGoalChecker`；`command_frame` 默认 `gimbal_yaw_fake` 并据此校验参数文件；新增 `mux_spin_topic`（默认 `rotation_cmd`）传给 mux；启动日志打印两路输入 |
-| `script/start_real_nav.sh` | 默认 `YAW_MODE=xy_only`；`--yaw-mode se2` **直接拒绝**并提示改用 `rotation_cmd`；`--yaw-mode spin` 保留参数面但改写成 `xy_only` 并提示；`--chassis-spin` **不再**切 MINCO 的 `spin` 模式（请求走 mux）；迁移链识别同时接受 `gimbal_yaw_fake` 与旧 `base_link_fake`；启动摘要与验收提示按新链路重写 |
+| `scripts/bringup/start_real_nav.sh` | 默认 `YAW_MODE=xy_only`；`--yaw-mode se2` **直接拒绝**并提示改用 `rotation_cmd`；`--yaw-mode spin` 保留参数面但改写成 `xy_only` 并提示；`--chassis-spin` **不再**切 MINCO 的 `spin` 模式（请求走 mux）；迁移链识别同时接受 `gimbal_yaw_fake` 与旧 `base_link_fake`；启动摘要与验收提示按新链路重写 |
 
 ### 2.4 §4.3 决策层小陀螺进 mux（代码 + 单测）
 
@@ -74,7 +74,7 @@
 
 **决策层接口**（与方案 §4.3 / §8.2 一致）：`/<ns>/rotation_cmd`，`geometry_msgs/Twist`，
 **只读 `angular.z`**（rad/s，俯视逆时针为正）。持续转就以 ≥10 Hz 持续发；停发 0.25 s 即停转；
-也可以直接发 0。`script/spin_control.sh` 不用改（它本来就是发这个话题）。
+也可以直接发 0。`scripts/manual/spin_control.sh` 不用改（它本来就是发这个话题）。
 
 ### 2.5 §4.4.1 协议加转速字段（代码 + 文档 + 测试）
 
@@ -83,9 +83,9 @@
 | `srm27_nav_protocol/include/packet_typedef.hpp` | `DATA_LENGTH_CHASSIS_SPEED: 16 -> 20`；新结构体加 `gimbal_yaw_rate_imu`（数据段偏移 16，`static_assert` 钉死 29 字节与字段偏移）；**新增旧帧结构体** `ReceiveChassisSpeedDataV1`（25 字节）。用旧结构体读新帧会补零 + 刷 stderr 警告，所以必须分开。**不加编码器转速字段**：它是云台相对底盘的转速，导航要的是相对地面（2026-11-08 决定） |
 | `srm27_nav_protocol/src/srm27_nav_protocol.cpp` | `0x0010` 按 `data_length` 分支：20=新帧（发 4 条话题）、16=旧帧（转速话题不发、节流告警一次、**不丢帧**）、其它=丢弃并计数；`publishChassisSpeed()` 改为按字段传值；新增 `gimbal_yaw_rate`（`TwistStamped`，与其它话题共用同一个 stamp）；NaN/Inf 整帧丢弃也会覆盖新字段 |
 | `src/srm27_nav_protocol/config/srm27_nav_protocol.yaml` | 新增 `gimbal_yaw_rate_topic`，并更新 `0x0010` 的字段/坐标系说明；`gimbal_joint_sign` 改 `+1.0` |
-| `script/test_chassis_speed_feedback.py` | 参考实现：`LEN_CHASSIS_SPEED=20` + `LEN_CHASSIS_SPEED_V1=16`；`build_chassis_speed()` 4 参=旧帧、5 参=新帧；`decode()` 两种都认（旧帧转速为 `None`）；`--pty` 默认发新帧（`--rate-imu`），`--legacy` 发旧帧；`--self-test` 同时校验新旧两种帧长 |
+| `scripts/test/test_chassis_speed_feedback.py` | 参考实现：`LEN_CHASSIS_SPEED=20` + `LEN_CHASSIS_SPEED_V1=16`；`build_chassis_speed()` 4 参=旧帧、5 参=新帧；`decode()` 两种都认（旧帧转速为 `None`）；`--pty` 默认发新帧（`--rate-imu`），`--legacy` 发旧帧；`--self-test` 同时校验新旧两种帧长 |
 | `src/srm27_nav_protocol/test/test_feedback_protocol.py` | 新帧形状（29 B / `data_length=20` / 偏移 16）、**旧帧兼容**、非法长度仍被拒 |
-| `script/check_chassis_speed_chain.sh` | 伪串口改发新帧（带两路转速），长度告警文案改成 24/16 |
+| `scripts/diagnostics/check_chassis_speed_chain.sh` | 伪串口改发新帧（带两路转速），长度告警文案改成 24/16 |
 | `docs/导航通信协议-下位机接口说明.md` | §0/§1/§4.2/§4.4/§4.5/附录 A 全面更新（字段表、结构体、四条话题、示例帧、新旧帧兼容规则、关节角符号随树方向） |
 
 ### 2.6 §4.4.2 / §4.4.3 假车头补延迟（代码 + 单测）
@@ -140,7 +140,7 @@
 | `scripts/srm_robot_description.py` | `build_description(..., gimbal_is_root=)` 透传；`lidar_mounting()` 从"只往上走"改成**无向关节图 BFS**（树反转后 `base_link` 在雷达下面，旧实现会 ValueError），两种方向解析出的安装位姿逐位相同；`livox_scan` 挂到雷达所在那一支（反转时挂 `gimbal_yaw`，偏移 = `T(gimbal_yaw <- 雷达)`） |
 | `sensor_scan_generation`（代码） | 新增 `publish_robot_base_tf`：为 true 时直接发 `odom->robot_base_frame`，**完全不查** `base_frame` 也不再发 `odom->base_link`（否则 `base_link` 有两个父节点） |
 | `launch/real_robot_state_publisher_launch.py`、`launch/real_mapping_launch.py` | 新增 `gimbal_is_root` 参数（默认 false） |
-| `script/start_real_nav.sh` | `RSP_CMD` 加 `gimbal_is_root:=true`（实车） |
+| `scripts/bringup/start_real_nav.sh` | `RSP_CMD` 加 `gimbal_is_root:=true`（实车） |
 | `srm27_nav_protocol.yaml` | `gimbal_joint_sign: -1.0 -> +1.0`（关节角语义变成"底盘相对云台"） |
 | `test/test_gimbal_tree_direction.py` | **新增 6 条回归**：默认方向 / 反转后的根与关节 z / 两种方向安装位姿逐位相同 / 实车参数开 `publish_robot_base_tf` / 脚本传 `gimbal_is_root:=true` / `gimbal_joint_sign == +1.0` 且没有编码器转速话题 |
 | `sensor_scan_generation` 单测 | 新增第 3 条用例：树反转模式下发 `odom->gimbal_yaw` 且**绝不**发 `odom->base_link`（即使关节 TF 存在） |
@@ -164,7 +164,7 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
 3. **协议只加**一路**转速（20 字节）**：只要陀螺仪转速（相对地面）；编码器转速是云台相对底盘，
    导航不用（2026-11-08 决定，方案原稿写的是加两路 24 字节）。
 4. **`yaw_rate_source` 实车默认 `imu`（不是 `gimbal_rate`）**：方案 §4.4.2 的表把 `gimbal_rate` 标成"实车默认"，但 §4.4.3 说明协议字段落地前先用 Mid-360 IMU，且 §8.1 要求两个转速的**符号上车实测**。现在协议字段已实现，但符号未测，所以默认 `imu`（Mid-360 装在云台上，正方向由安装姿态唯一确定）；**§8.1 测完再切 `gimbal_rate`**，切之前先两路对照。
-5. **`rotation_cmd` 的消息类型是 `geometry_msgs/Twist`**（只读 `angular.z`）：方案 §8.2 写成 `std_msgs/Float32`，但现有 `script/spin_control.sh`、MINCO 的 `spin_request` 都用 `Twist`；为不破坏现有工具，统一用 `Twist`。
+5. **`rotation_cmd` 的消息类型是 `geometry_msgs/Twist`**（只读 `angular.z`）：方案 §8.2 写成 `std_msgs/Float32`，但现有 `scripts/manual/spin_control.sh`、MINCO 的 `spin_request` 都用 `Twist`；为不破坏现有工具，统一用 `Twist`。
 6. **`--yaw-mode spin` 保留但按 `xy_only` 跑**：方案要求"`se2` 直接拒绝"，`spin` 没说。实车脚本把 `spin` 改写成 `xy_only` 并提示（请求走 mux）；直接 `ros2 launch ... yaw_mode:=spin` 仍会照原样注入 `spin`，用于 A/B 对照。
 7. **`zlio_bridge` 一起改**：方案 §4.7 只点名 `loam_interface`，但实车默认前端是 ZLIO，同样的开机快照问题必须一起处理，否则换前端就复现。
 
@@ -182,7 +182,7 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
 | `srm27_chassis_control`：`test_velocity_mix`（17+6 条，含双输入/斜率）与 `test_twist_watchdog` | 通过 |
 | `sensor_scan_generation`：`test_odometry_without_joint_tf`（关节角 TF 缺失时 `/odometry` 照常输出；关闭缓存时保持旧行为；**树反转时只发 `odom->gimbal_yaw`、绝不发 `odom->base_link`**） | 通过 |
 | `fake_vel_transform`：`test_velocity_transform` + 新增 `test_rate_integration`（9 条） | 通过 |
-| `srm27_nav_protocol`：`test_feedback_protocol.py`（含新旧帧兼容） + `script/test_chassis_speed_feedback.py --self-test` | 通过 |
+| `srm27_nav_protocol`：`test_feedback_protocol.py`（含新旧帧兼容） + `scripts/test/test_chassis_speed_feedback.py --self-test` | 通过 |
 | `srm27_nav_bringup`：`test_fakeyaw_real_wiring`、`test_fakeyaw_launch_wiring`、`test_cli_parity`、`test_lio_frontend_wiring`、`test_zlio_bridge_math`、`test_speed_limits`、**`test_gimbal_tree_direction`（新增 6 条）** | 通过 |
 | `srm_minco_real_preflight.py --expect-minco`（实车 fakeyaw 参数） | **0 个阻塞问题**，6 警告（都是改造前就有的：制动未辨识、`reaction_latency=0`、`command_lookahead` 未标定等） |
 | `srm_speed_limits_check.py` | 分层自洽，无阻塞 |
@@ -199,11 +199,11 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
 ## 5. 上车待办（按顺序，前一步不过不进下一步）
 
 > **0. 工具已按新树改过（2026-11-09）**：`debug_tools/capture_gimbal_spin.py` 与
-> `script/check_gimbal_spin_yaw.py` 现在会读 `/odometry` 的 `child_frame_id` 自动切换判据：
+> `scripts/diagnostics/check_gimbal_spin_yaw.py` 现在会读 `/odometry` 的 `child_frame_id` 自动切换判据：
 > `base_link`（旧树）判"底盘 yaw 不动"，`gimbal_yaw`（**新树，实车**）判
 > "`odom -> gimbal_yaw` 与 raw LIO **一比一**跟着云台转、残差恒定、xy 不画圈、
 > 线速度 <0.03 m/s"。没改之前这两个工具在新树下会把**正确结果判成 FAIL**。
-> `script/check_gimbal_joint_sign.py` 的判据不受树方向影响（它查的一直是
+> `scripts/diagnostics/check_gimbal_joint_sign.py` 的判据不受树方向影响（它查的一直是
 > `base_link -> gimbal_yaw` 那一对），只在文档里补了说明。
 
 > ⚠ 方案 §1.3 的警告仍然有效：下位机已按云台系执行 vx/vy，**在完成下面第 1、2 步之前不要跑实车导航**。
@@ -218,7 +218,7 @@ URDF 也不传 `gimbal_is_root` —— 两边一致，行为不变（建图/录�
    不过 —— 说明 LIO 在高速转动下本身估不准，先查 LIO 外参/重力，本方案不解决。
 2. **架车确认方向**：云台与底盘差 90°，发前进 0.2 m/s，车朝**云台**指的方向走；
    云台转动时给前方 1 m 的小目标，平移方向不随云台转动而偏。
-3. **小陀螺**（架车）：`script/spin_control.sh on 0.5` → 底盘转；停发 0.25 s 停转；
+3. **小陀螺**（架车）：`scripts/manual/spin_control.sh on 0.5` → 底盘转；停发 0.25 s 停转；
    底盘转时 `/odometry` 位置不变、速度 <0.03 m/s。
 4. **测延迟**：云台匀速转 + 直线走 2 m，看 `yaw_debug` 与实际轨迹调 `actuation_delay`（当前 0.05 s）。
 5. **落地跑点**：先云台不转、小陀螺关，再逐项打开；日志里 `validation_failed` 的"当前速度"不再 >0.42；

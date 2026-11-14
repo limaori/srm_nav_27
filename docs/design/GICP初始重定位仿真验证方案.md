@@ -26,7 +26,7 @@
 | 项目 | 当前行为 | 对验证的影响 |
 | --- | --- | --- |
 | 仿真入口 | `nav_srm_simulation_launch.py` | 用 `use_pcd_localization:=True` 启动完整链路 |
-| 一键脚本 | `script/start_sim_nav.sh` 固定 `use_pcd_localization:=False` | 不能用它证明 GICP 生效；使用本文直接 launch 命令 |
+| 一键脚本 | `scripts/bringup/start_sim_nav.sh` 固定 `use_pcd_localization:=False` | 不能用它证明 GICP 生效；使用本文直接 launch 命令 |
 | 输入点云 | 默认订阅 `registered_scan`，要求 `header.frame_id == odom` | 原始 `livox/lidar` 不能直接送入 GICP |
 | 初始位姿参数 | `init_pose=[x,y,z,roll,pitch,yaw]` 直接作为 `map → odom` 初值 | 它与机器人在地图中的位姿不是同一个量 |
 | 初值消息 | `initialpose` 表示 `robot_base_frame` 在地图中的位姿 | 本工程仿真使用 `base_link`；回调通过 TF 换算成 `map → odom` |

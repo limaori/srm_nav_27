@@ -18,12 +18,12 @@
 #   2) 在已 source install/setup.bash 的终端运行 (或设 SRM27_WS_DIR)。
 #
 # 用法:
-#   script/spin_control.sh on <rad/s>     恒速自转, 如: script/spin_control.sh on 2.0
-#   script/spin_control.sh sine <max> <min> <period>
+#   scripts/manual/spin_control.sh on <rad/s>     恒速自转, 如: scripts/manual/spin_control.sh on 2.0
+#   scripts/manual/spin_control.sh sine <max> <min> <period>
 #                                         正弦自转: wz(t)=mid+amp*sin(2*pi*t/T)
 #                                         例: spin_control.sh sine 0.5 -0.3 4
-#   script/spin_control.sh off            停止自转（撤回请求）
-#   script/spin_control.sh status         查看请求/实际转速/进线状态
+#   scripts/manual/spin_control.sh off            停止自转（撤回请求）
+#   scripts/manual/spin_control.sh status         查看请求/实际转速/进线状态
 #
 # 环境变量: ROBOT_NS (默认 red_standard_robot1；**设为空串表示根命名空间 = 实车默认**),
 #           SPIN_MAX_WZ (默认 2.0 rad/s)

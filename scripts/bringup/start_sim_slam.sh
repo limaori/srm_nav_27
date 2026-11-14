@@ -11,19 +11,19 @@
 #                          slam_toolbox ──► 2D 栅格 map（另存 pgm/yaml）
 #
 # 用法:
-#   ./script/start_sim_slam.sh                        # 默认 rmuc_2025 世界, 底盘与云台都不转
-#   ./script/start_sim_slam.sh -w rmuc_2025           # 指定世界
-#   ./script/start_sim_slam.sh -w rmuc_2025 --no-gui  # 关掉 Gazebo GUI，省一大半 GPU
-#   ./script/start_sim_slam.sh --no-clean             # 不清理上次残留
-#   ./script/start_sim_slam.sh --chassis-spin         # 底盘 2.0 rad/s 自转 (边转边建图)
-#   ./script/start_sim_slam.sh --gimbal-spin          # 云台 -1.0 rad/s 自转 (雷达跟着转)
-#   ./script/start_sim_slam.sh --chassis-spin 1.0 --gimbal-spin 0.5   # 自己给转速
-#   DRY_RUN=1 ./script/start_sim_slam.sh              # 只打印将执行的命令
+#   ./scripts/bringup/start_sim_slam.sh                        # 默认 rmuc_2025 世界, 底盘与云台都不转
+#   ./scripts/bringup/start_sim_slam.sh -w rmuc_2025           # 指定世界
+#   ./scripts/bringup/start_sim_slam.sh -w rmuc_2025 --no-gui  # 关掉 Gazebo GUI，省一大半 GPU
+#   ./scripts/bringup/start_sim_slam.sh --no-clean             # 不清理上次残留
+#   ./scripts/bringup/start_sim_slam.sh --chassis-spin         # 底盘 2.0 rad/s 自转 (边转边建图)
+#   ./scripts/bringup/start_sim_slam.sh --gimbal-spin          # 云台 -1.0 rad/s 自转 (雷达跟着转)
+#   ./scripts/bringup/start_sim_slam.sh --chassis-spin 1.0 --gimbal-spin 0.5   # 自己给转速
+#   DRY_RUN=1 ./scripts/bringup/start_sim_slam.sh              # 只打印将执行的命令
 #
 #   建完图之后（关掉 slam 标签页，Point-LIO 收到 Ctrl-C 才落盘）:
-#   ./script/start_sim_slam.sh --collect              # 把 scans.pcd 收回 maps/pcd/
-#   ./script/start_sim_slam.sh --collect --name rmuc_2025
-#   ./script/start_sim_slam.sh --view maps/pcd/rmuc_2025.pcd   # 在 RViz 里看这个 PCD
+#   ./scripts/bringup/start_sim_slam.sh --collect              # 把 scans.pcd 收回 maps/pcd/
+#   ./scripts/bringup/start_sim_slam.sh --collect --name rmuc_2025
+#   ./scripts/bringup/start_sim_slam.sh --view maps/pcd/rmuc_2025.pcd   # 在 RViz 里看这个 PCD
 #
 # 参数:
 #   -w, --world <name>     rmuc_2025 / rmuc_2024 / rmul_2024 / rmul_2025 / srm_empty
@@ -33,7 +33,7 @@
 #                          恒速 wz 注入 fakeyaw 链入口 cmd_vel_nav_fake：
 #                          cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body
 #                          → srm_cmd_mux → cmd_vel_sim → Gazebo（与导航下发同一条链）。
-#                          停转: SPIN_CMD_TOPIC=/<ns>/cmd_vel_nav_fake script/spin_control.sh off
+#                          停转: SPIN_CMD_TOPIC=/<ns>/cmd_vel_nav_fake scripts/manual/spin_control.sh off
 #   --no-chassis-spin      等价于 --chassis-spin 0（显式关掉，覆盖环境变量）。
 #   --gimbal-spin [rad/s]  云台恒速自转，不给数值时默认 -1.0 rad/s（负值=反向）。
 #                          **不加这个参数 = 云台不转**（默认行为）。
@@ -188,7 +188,7 @@ if [ "$ACTION" = "collect" ]; then
   log "已收集 3D 点云: $DEST  ($SIZE)"
   log ""
   log "在 RViz 里查看它:"
-  log "  ./script/start_sim_slam.sh --view \"$DEST\""
+  log "  ./scripts/bringup/start_sim_slam.sh --view \"$DEST\""
   log "（另开一个 RViz，加 PointCloud2 显示，Topic 选 /cloud_pcd）"
   exit 0
 fi
@@ -311,7 +311,7 @@ open_term "SRM27 建图-SLAM" "$SLAM_CMD"
 #   cmd_vel_nav_fake -> fake_vel_transform -> cmd_vel_nav_body -> srm_cmd_mux
 #     -> cmd_vel_sim -> 速度适配器 -> Gazebo
 # 与手动方式等价（同一发布器、同一 PID 文件）:
-#   SPIN_CMD_TOPIC=<topic> script/spin_control.sh on <rad/s> | off | status
+#   SPIN_CMD_TOPIC=<topic> scripts/manual/spin_control.sh on <rad/s> | off | status
 # 没给 --chassis-spin 时这里什么都不做（默认不转）。
 if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
   : # 默认不转（未给参数或显式 --no-chassis-spin）
@@ -363,7 +363,7 @@ cat <<'TIPS'
 建图结束（关键：必须让 Point-LIO 正常退出，它才会把点云写盘）：
   1) 在 "SRM27 建图-SLAM" 标签页按 Ctrl-C，等它打印保存日志；
   2) 回到这里执行：
-       ./script/start_sim_slam.sh --collect --name rmuc_2025
+       ./scripts/bringup/start_sim_slam.sh --collect --name rmuc_2025
      或直接看它在哪：
        ls -lh ~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd
 
@@ -373,9 +373,9 @@ cat <<'TIPS'
       image_format: pgm, map_mode: trinary, free_thresh: 0.25, occupied_thresh: 0.65}"
 
 清理残留：
-  ./script/kill_gzb.sh && ./script/kill_rviz.sh
+  ./scripts/bringup/kill_gzb.sh && ./scripts/bringup/kill_rviz.sh
 TIPS
 log ""
 log "点云地图怎么在 RViz 里看:"
-log "  ./script/start_sim_slam.sh --view maps/pcd/rmuc_2025.pcd"
+log "  ./scripts/bringup/start_sim_slam.sh --view maps/pcd/rmuc_2025.pcd"
 log "  再开一个 RViz，Fixed Frame 设 map，加 PointCloud2，Topic 选 /cloud_pcd"

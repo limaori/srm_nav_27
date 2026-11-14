@@ -237,15 +237,15 @@ wz = clamp(rotation_wz, -wz_max, wz_max)     # 自转独立限幅，与平移无
 ### 4.1 一键脚本（推荐现场使用）
 
 ```bash
-./script/start_sim_nav.sh -h                    # 打印文件头注释里的权威用法
-./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
-./script/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
-./script/start_sim_nav.sh -w srm_empty          # 空场 (Gazebo 默认起来就自动运行)
-./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
-./script/start_sim_nav.sh --rotation-mode periodic \
+./scripts/bringup/start_sim_nav.sh -h                    # 打印文件头注释里的权威用法
+./scripts/bringup/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
+./scripts/bringup/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
+./scripts/bringup/start_sim_nav.sh -w srm_empty          # 空场 (Gazebo 默认起来就自动运行)
+./scripts/bringup/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
+./scripts/bringup/start_sim_nav.sh --rotation-mode periodic \
     --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
-./script/start_sim_nav.sh --no-rviz --no-rotation   # 只跑仿真 + 导航
-DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
+./scripts/bringup/start_sim_nav.sh --no-rviz --no-rotation   # 只跑仿真 + 导航
+DRY_RUN=1 ./scripts/bringup/start_sim_nav.sh             # 只打印将执行的命令
 ```
 
 脚本开三个标签页：
@@ -269,10 +269,10 @@ DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
 
 | 脚本 | 用途 |
 | --- | --- |
-| `script/srm_regression.sh` | 回归运行器：一次跑完 §5/§8 的测试矩阵，自动落盘 CSV / rosbag / metadata / 汇总 |
-| `script/clean_sim_processes.sh` | 清理本工作空间的全部仿真残留进程（Gazebo / bridge / 适配器 / Nav2 / RViz） |
-| `script/diag_nav_abort.sh` | 单次安全的导航诊断：启动前检查残留、独立进程组启动、内存看门狗、日志落到 `log_diag/nav_abort/` |
-| `script/kill_nav.sh` / `script/kill_gzb.sh` / `script/kill_rviz.sh` | 分别清理 Nav2 导航栈、Gazebo、RViz（`start_sim_nav.sh` 启动前依次调用） |
+| `scripts/srm_regression.sh` | 回归运行器：一次跑完 §5/§8 的测试矩阵，自动落盘 CSV / rosbag / metadata / 汇总 |
+| `scripts/clean_sim_processes.sh` | 清理本工作空间的全部仿真残留进程（Gazebo / bridge / 适配器 / Nav2 / RViz） |
+| `scripts/diag_nav_abort.sh` | 单次安全的导航诊断：启动前检查残留、独立进程组启动、内存看门狗、日志落到 `log_diag/nav_abort/` |
+| `scripts/bringup/kill_nav.sh` / `scripts/bringup/kill_gzb.sh` / `scripts/bringup/kill_rviz.sh` | 分别清理 Nav2 导航栈、Gazebo、RViz（`start_sim_nav.sh` 启动前依次调用） |
 
 `diag_nav_abort.sh` 可用环境变量调整场景：`WORLD`、`GOAL_X`、`GOAL_Y`。
 
@@ -343,7 +343,7 @@ ros2 topic echo /red_standard_robot1/cmd_vel_sim
 世界解析顺序：`srm27_gazebo_simulator/worlds/<world>.sdf` →
 `srm27_gazebo_simulator/resource/worlds/<world>_world.sdf`；`world_sdf:=<绝对路径>` 优先级最高。
 `srm_sim.launch.py` 自身默认 `run_immediately:=false`（暂停启动），
-`script/start_sim_nav.sh` 默认传 `true`（起来就自动运行，`--no-run` 可改回暂停）。
+`scripts/bringup/start_sim_nav.sh` 默认传 `true`（起来就自动运行，`--no-run` 可改回暂停）。
 
 ### 4.4 旧入口的当前状态
 
@@ -370,11 +370,11 @@ ros2 topic echo /red_standard_robot1/cmd_vel_sim
 推荐直接用回归运行器，它把下面的场景一次性跑完并自动落盘：
 
 ```bash
-./script/srm_regression.sh                       # 空场 + 场地全部场景
-./script/srm_regression.sh --session field       # 只跑空场（纯 vx/vy/对角/wz/叠加/超时）
-./script/srm_regression.sh --session nav         # 只跑场地导航三组
-./script/srm_regression.sh --session field --cases vx,vy   # 指定场景
-RECORD_CLOUDS=1 ./script/srm_regression.sh --session field # 额外记录点云（体积大）
+./scripts/srm_regression.sh                       # 空场 + 场地全部场景
+./scripts/srm_regression.sh --session field       # 只跑空场（纯 vx/vy/对角/wz/叠加/超时）
+./scripts/srm_regression.sh --session nav         # 只跑场地导航三组
+./scripts/srm_regression.sh --session field --cases vx,vy   # 指定场景
+RECORD_CLOUDS=1 ./scripts/srm_regression.sh --session field # 额外记录点云（体积大）
 ```
 
 运行器保证：启动前检查残留（有残留直接退出）、每个 session 只起一套仿真栈、
@@ -463,7 +463,7 @@ colcon test-result --verbose
 - 注意：本机 python3 环境的 pytest11 插件（`launch_testing` 与较新 pluggy）不兼容，
   因此 `srm27_robot_description` 用 `ament_add_test` 直接执行 Python 测试脚本，而不是
   `ament_add_pytest_test`；测试文件本身仍保持 pytest 兼容。
-- 也可以用 `./script/kill_gzb.sh` 清理残留 Gazebo / 桥接 / 适配器进程后再起下一轮。
+- 也可以用 `./scripts/bringup/kill_gzb.sh` 清理残留 Gazebo / 桥接 / 适配器进程后再起下一轮。
 
 ---
 
@@ -497,7 +497,7 @@ colcon test-result --verbose
   uncrustify、cppcheck、xmllint 也通过。
 - 全工作空间 `colcon build`（43 个包）成功；`colcon test-result` 汇总 58 个用例 0 失败。
 
-**完整回归（`script/srm_regression.sh`，一次一套仿真栈，headless）**
+**完整回归（`scripts/srm_regression.sh`，一次一套仿真栈，headless）**
 
 空场 session（`world:=srm_empty`）——Phase 1 四种基本运动 + Phase 2 自转叠加。
 表中"命令"是 `cmd_vel_sim`，"实际"来自速度插件的真值里程计 `chassis_odometry_gt`
@@ -586,14 +586,14 @@ colcon test-result --verbose
 > 每次启动前先确认没有残留进程：
 >
 > ```bash
-> ./script/clean_sim_processes.sh          # 一键清理本工作空间的仿真残留进程
-> ./script/kill_gzb.sh && ./script/kill_rviz.sh
+> ./scripts/clean_sim_processes.sh          # 一键清理本工作空间的仿真残留进程
+> ./scripts/bringup/kill_gzb.sh && ./scripts/bringup/kill_rviz.sh
 > ```
 >
-> `script/start_sim_nav.sh` 自带 `flock` 单实例锁，正常使用不会叠起两套；用测试脚本
+> `scripts/bringup/start_sim_nav.sh` 自带 `flock` 单实例锁，正常使用不会叠起两套；用测试脚本
 > 手工拉起时，必须确保脚本退出时把**整个进程组**（含 `gzserver`、bridge、适配器、
 > Nav2 节点）一并结束，只 `kill` 外层 `ros2 launch` 不足以回收子进程。
-> 可直接复用 `script/diag_nav_abort.sh`：它在启动前检查残留、用独立进程组启动、
+> 可直接复用 `scripts/diag_nav_abort.sh`：它在启动前检查残留、用独立进程组启动、
 > 带内存看门狗，并把日志落到 `log_diag/`。
 
 ---

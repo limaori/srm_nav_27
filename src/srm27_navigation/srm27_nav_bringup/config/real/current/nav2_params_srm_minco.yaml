@@ -5,15 +5,15 @@
 #
 # 与仿真变体的差异与注意点：
 #   * use_sim_time = False。
-#   * 本文件不会被默认加载：script/start_real_nav.sh 的默认参数文件是
+#   * 本文件不会被默认加载：scripts/bringup/start_real_nav.sh 的默认参数文件是
 #     config/real/nav2_params_srm.yaml（Omni）。要点亮 MINCO 必须显式二选一：
-#         ./script/start_real_nav.sh --controller minco
-#         ./script/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml
+#         ./scripts/bringup/start_real_nav.sh --controller minco
+#         ./scripts/bringup/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml
 #     （--controller minco 会自动选本文件、并把 fake_vel_transform 关掉。）
 #     不能用“改了一份没被加载的 YAML”当作完成实车迁移（方案 §2.1、§9.2）。
 #   * MINCO 模式下速度链路**不串 fake_vel_transform**（与仿真入口
 #     nav_srm_simulation_launch.py 一致）：velocity_smoother 直接发 cmd_vel_chassis。
-#     原因见 script/start_real_nav.sh 文件头 —— 该节点会对已经是 base_link 系的
+#     原因见 scripts/bringup/start_real_nav.sh 文件头 —— 该节点会对已经是 base_link 系的
 #     (vx, vy) 再做一次 R(-yaw)，且其同步分支依赖只有 Omni 控制器才发布的 local_plan。
 #     因此本文件里的 fake_vel_transform 段落在本链路下不生效，保留仅为 A/B 对照与回退。
 #   * 本文件中的加速度、制动减速度、延迟与外形参数**必须来自实车辨识**；
@@ -68,7 +68,7 @@
 # 用法:
 #   ros2 launch srm27_nav_bringup nav2_stack_launch.py \
 #     params_file:=<本文件> map:=.../map/real/<name>.yaml prior_pcd_file:=.../pcd/real/<name>.pcd ...
-#   或直接用 script/start_real_nav.sh --controller minco
+#   或直接用 scripts/bringup/start_real_nav.sh --controller minco
 #   （该脚本默认指向 Omni 那份；--controller minco 才会选本文件并把 fake_vel_transform 关掉。）
 # =============================================================
 
@@ -833,7 +833,7 @@ controller_server:
         cooldown_sec: 2.0                               # 两次脱困之间的最小间隔（秒）
         window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
         # ★ 历史：0.5 -> 1.5 -> 1.0（2026-11-04）-> **0.2**（2026-11-12，与 fakeyaw 那份同步）。
-        #   0.2 是 script/start_real_nav.sh 写明的首次落地建议值；窗口上限
+        #   0.2 是 scripts/bringup/start_real_nav.sh 写明的首次落地建议值；窗口上限
         #   = 0.2 x 3.0 = **0.6 m**（1.0 时是 3.0 m）。
         #   ⚠ 脱困旁路 MPC 校验，方向只来自车周 0.40 m 环上的梯度/环形搜索；
         #     脱困是主动给速度，急停只能靠物理按钮或断电。

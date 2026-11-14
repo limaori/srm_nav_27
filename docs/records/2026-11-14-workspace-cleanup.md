@@ -12,7 +12,7 @@
 - `src/srm27_navigation/point_lio/PCD/` 约 890 MB 运行生成点云；
 - `user_test_log/` 约 99 MB 实验 CSV/PNG；
 - `.mapcheck/`、`.tmp_diag/`、`.tmp_roslog/` 中有已提交的临时脚本和结果；
-- `script/` 28 个脚本平铺；`docs/` 31 篇文档没有状态区分；
+- `scripts/` 28 个脚本平铺；`docs/` 31 篇文档没有状态区分；
 - `srm27_nav_bringup` 的 16 个 launch 平铺，实车/仿真/旧入口混在一起。
 
 ## 2. 运行数据迁出（工作区外）
@@ -43,19 +43,20 @@
 
 ## 3. 脚本重整
 
-`script/` → `scripts/{bringup,mapping,diagnostics,manual,test,lib}/`。
+`script/` → `scripts/{bringup,mapping,manual,test,lib}/`。
 
-- 根目录 `script` 改为指向 `scripts/` 的符号链接；
-- `scripts/<name>` 为每个公开脚本保留兼容符号链接，指向子目录；
-- 三种写法等价：`./script/start_real_nav.sh`、`./scripts/start_real_nav.sh`、
-  `./scripts/bringup/start_real_nav.sh`；
-- 脚本内 `SCRIPT_DIR` 改为 `readlink -f` 解析，`WS_DIR` 改为两级上级，
-  保证从旧路径/新路径/兼容链接执行都能找到工作区；
+- 脚本只保留一种路径：`./scripts/<group>/<name>`；
+- 旧的 `script/` 和 `scripts/<name>` 兼容链接已按用户要求删除（2026-11-14），
+  避免资源管理器里出现大量快捷方式箭头；
+- 脚本内 `SCRIPT_DIR` 用 `readlink -f` 解析，`WS_DIR` 改为两级上级；
 - `scripts/bringup/start_real_nav.sh`、`start_sim_nav.sh` 等对
-  `lib/`、`manual/`、`mapping/`、`test/` 的引用已改为 `../` 相对路径。
+  `lib/`、`manual/`、`mapping/`、`test/` 的引用已改为 `../` 相对路径；
+- `test_cli_parity.py` 的脚本路径常量同步改为 `scripts/bringup/`。
 
-可复用诊断脚本从 `.tmp_diag/` 迁入 `scripts/diagnostics/`：
-`plan_clearance.py`、`pose_watch.py`、`stuck_capture.py`、`stuck_probe.py`。
+诊断探针已按用户要求删除（2026-11-14）：`scripts/diagnostics/` 整个目录
+（`check_*`、`capture_minco_run`、`analyze_minco_bag`、`plan_clearance`、`pose_watch`、
+`stuck_*`）以及 `scripts/manual/inject_recovery_stuck.py`。
+保留的 `scripts/test/test_chassis_*.py` 是需要人工接串口/底盘的硬件测试，不属于一次性探针。
 
 一次性问题定位脚本（`.mapcheck/test_tree_fix*.sh`、`start_bg.sh`）不再放进源码树，
 原始件在 `~/srm_nav_27_data/archive/mapcheck_20261114/`。
@@ -118,8 +119,9 @@ launch 引用和构建缓存仍按原路径工作。
 - `.mapcheck/`、`.tmp_diag/`、`.tmp_roslog/`、`user_test_log/` 中已跟踪的临时文件
   从 Git 移除（工作区文件已迁出或删除）；
 - `.gitignore` 增加运行数据/temp 目录规则；
-- 兼容符号链接（`script`、`scripts/<name>`、`config/<area>/<name>`）与 launch 前缀别名
-  需要随本轮变更一起提交，否则旧路径/新分组入口会失效。
+- 诊断探针脚本已删除；历史记录里若仍提到这些脚本，按历史资料看待；
+- `config/<area>/<name>` 兼容符号链接与 launch 前缀别名需要随本轮变更一起提交；
+  脚本兼容链接已删除，不再需要提交 `script`/`scripts/<name>`。
 
 ## 8. 验证
 
@@ -155,15 +157,16 @@ colcon test --packages-select srm27_nav_bringup
 
 1. 清点 `build/`、`install/`、`log/` 的长期保留策略（当前保留 build/install）。
 2. ~~对 `~/srm_nav_27_data/bags/` 做去重/保留策略~~（已按用户确认删除全部 9 份，2026-11-14）。
-3. 确认现场脚本全部改用 `scripts/<group>/` 后，删除根目录兼容符号链接，并同步更新
-   `test_cli_parity.py` 等路径常量。
-4. 评估是否把 `src/srm27_navigation` 拆成 `src/navigation/` 等物理层级（本轮明确不做）。
-5. `docs/archive/` 中仍有一些 AI 生成的长文，后续按“是否还有引用价值”逐篇决定保留/删除。
+3. ~~删除脚本兼容链接并同步更新 `test_cli_parity.py` 路径常量~~（已完成，2026-11-14）。
+4. ~~诊断探针脚本清理~~（已完成；`scripts/diagnostics/` 与 `inject_recovery_stuck.py` 已删）。
+5. 评估是否把 `src/srm27_navigation` 拆成 `src/navigation/` 等物理层级（本轮明确不做）。
+6. `docs/archive/` 中仍有一些 AI 生成的长文，后续按“是否还有引用价值”逐篇决定保留/删除。
 
 ## 10. 回滚
 
 - 源码/Git：`git checkout -- <path>` 或按本轮提交 `git revert`；
 - 数据：从 `~/srm_nav_27_data/` 按上表反向 `mv` 回原路径；已删除的 9 份 bag 无法回滚，清单见数据根目录 `bags_DELETED_20261114.txt`；
-- 脚本：删除 `script`/`scripts` 兼容链接前，canonical 文件仍在 `scripts/<group>/`；
+- 脚本：旧 `script/` 链接已删除；canonical 文件在 `scripts/<group>/`，无重复副本；
+- 诊断探针：已删除，无法从工作区恢复；需要时从用户清理提交 `6bfc3a5` 之前的 Git 历史取；
 - launch：根目录 canonical 不动；删除 `common|real|simulation|compat` 前缀别名不影响旧命令。
 - config：删除根目录兼容链接前，canonical 文件仍在 `current|legacy` 分组目录。

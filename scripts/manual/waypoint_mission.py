@@ -16,7 +16,7 @@
 #
 # 用法:
 #   1) 点选航点再执行 (推荐, 边看 RViz 边排点):
-#        ./script/waypoint_mission.py
+#        ./scripts/manual/waypoint_mission.py
 #      在 RViz 工具栏用 "Publish Point" (发 /clicked_point) 或 "2D Goal Pose"
 #      (发 /goal_pose) 点选航点, 脚本会收集并在 RViz 里画出来;
 #      点够了再触发开始:
@@ -36,14 +36,14 @@
 #            时它的目标会被本脚本当成航点记下来。
 #
 #   2) 直接执行文件里的航点:
-#        ./script/waypoint_mission.py --file mission.yaml
+#        ./scripts/manual/waypoint_mission.py --file mission.yaml
 #
 #   3) 只收集并保存, 不下发 (教点模式):
-#        ./script/waypoint_mission.py --save-file mission.yaml
+#        ./scripts/manual/waypoint_mission.py --save-file mission.yaml
 #        # 点选完执行 ~/save 存盘
 #
 #   4) 途径点模式 (除最后一个点外都当途径点, 途径点不刹车):
-#        ./script/waypoint_mission.py --file mission.yaml --pass-through
+#        ./scripts/manual/waypoint_mission.py --file mission.yaml --pass-through
 #
 # 途径点模式 (--pass-through) 怎么实现的、要注意什么:
 #   - 整个列表一次交给 nav2 的 navigate_through_poses: 前 N-1 个点是途径点, 第 N 个
@@ -76,7 +76,7 @@
 #     重发剩余点和 RViz 高亮, **不参与到达判定**; 判定半径是 --passed-radius(默认 0.8 m)。
 #
 # 仿真 (Gazebo) 里怎么用:
-#   ./script/start_waypoints.sh --file missions/xxx.yaml --namespace red_standard_robot1
+#   ./scripts/bringup/start_waypoints.sh --file missions/xxx.yaml --namespace red_standard_robot1
 #   也可以不写 --namespace: start_waypoints.sh 会自动从 `ros2 action list` 认出仿真命名空间
 #   (实车是根命名空间, 探测不到就照旧)。仿真和实车只有两处差别, 本脚本都处理了:
 #   a) 导航栈跑在命名空间下 (start_sim_nav.sh 默认 ROBOT_NS=red_standard_robot1):
@@ -145,7 +145,7 @@
 # 说明:
 #   - 本节点只发导航目标, 不直接发速度: 速度仍然走 Nav2 控制器 -> velocity_smoother
 #     -> fake_vel_transform -> /cmd_vel_chassis 这条链路, 所以底盘限幅/看门狗照旧生效。
-#   - Ctrl+C 会先取消当前目标再退出; 车若仍在动, 用 ./script/start_real_nav.sh --stop。
+#   - Ctrl+C 会先取消当前目标再退出; 车若仍在动, 用 ./scripts/bringup/start_real_nav.sh --stop。
 #   - 执行中再点选航点会追加到列表末尾, 下一轮(--loop)或下次 start 生效。
 # =============================================================
 
@@ -535,8 +535,8 @@ class WaypointMission(Node):
         with open(path, "w", encoding="utf-8") as stream:
             yaml.safe_dump(data, stream, allow_unicode=True, sort_keys=False)
         self.get_logger().info(f"已保存 {len(self.waypoints)} 个航点到 {path}")
-        self.get_logger().info(f"  下次执行: ./script/start_waypoints.sh --file {path}")
-        self.get_logger().info(f"  只核对不下发: ./script/start_waypoints.sh --file {path} --record-only")
+        self.get_logger().info(f"  下次执行: ./scripts/bringup/start_waypoints.sh --file {path}")
+        self.get_logger().info(f"  只核对不下发: ./scripts/bringup/start_waypoints.sh --file {path} --record-only")
 
     # ---------------- 任务控制 ----------------
     def start_mission(self):

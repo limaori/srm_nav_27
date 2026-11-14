@@ -992,7 +992,7 @@ colcon test-result --verbose
 使用项目现有分终端启动脚本，并显式传入参数文件：
 
 ```bash
-./script/start_sim_nav.sh \
+./scripts/bringup/start_sim_nav.sh \
   --params /home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
   --rotation-mode stop
 ```

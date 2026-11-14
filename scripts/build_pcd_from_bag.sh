@@ -1,1 +1,0 @@
-mapping/build_pcd_from_bag.sh

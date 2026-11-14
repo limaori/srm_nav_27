@@ -3,7 +3,7 @@
 
 为什么需要它
 ------------
-Point-LIO 落盘的 scans.pcd (以及 script/build_pcd_from_bag.sh 产出的 maps/pcd/<名字>.pcd)
+Point-LIO 落盘的 scans.pcd (以及 scripts/mapping/build_pcd_from_bag.sh 产出的 maps/pcd/<名字>.pcd)
 是以 **camera_init** (建图起点雷达系) 表达的; 而 Nav2 的地图系是 pgm 栅格图的坐标系,
 两者相差一个**固定的刚体变换**——雷达相对 base_link 的 yaw 不是 0(见 launch 的
 lidar_rpy), 装歪时还带 roll/pitch(见下一节)。CAD 实测的安装角是 yaw = 1.099557429 rad
@@ -38,19 +38,19 @@ Point-LIO 的 camera_init 是**建图起点那一帧 IMU 的姿态系**, 不是�
 用法::
 
     # 最常用: maps/pcd/227_1011.pcd -> maps/pcd/227_1011_mapframe.pcd
-    python3 script/pcd_to_mapframe.py \
+    python3 scripts/mapping/pcd_to_mapframe.py \
         --pcd maps/pcd/227_1011.pcd \
         --map maps/227_1011/227_1011.yaml
 
     # 只看能不能对齐, 不写文件
-    python3 script/pcd_to_mapframe.py --pcd maps/pcd/227_1011.pcd \
+    python3 scripts/mapping/pcd_to_mapframe.py --pcd maps/pcd/227_1011.pcd \
         --map maps/227_1011/227_1011.yaml --dry-run
 
     # 已知变换时跳过搜索 (~13 秒); 或用 --out 指定别的位置
-    python3 script/pcd_to_mapframe.py --pcd in.pcd --map map.yaml --out out.pcd \
+    python3 scripts/mapping/pcd_to_mapframe.py --pcd in.pcd --map map.yaml --out out.pcd \
         --no-search --yaw -90.0 --dx 0.250 --dy -0.100
 
-原始件随时可由录包重建: ./script/build_pcd_from_bag.sh --name <名字> --force
+原始件随时可由录包重建: ./scripts/mapping/build_pcd_from_bag.sh --name <名字> --force
 
 退出码: 0 成功; 1 对齐残差过大/输入已转过/文件不可用; 2 参数错误。
 """
@@ -395,7 +395,7 @@ def main(argv=None) -> int:
         print("[错误] 再转一次会绕 Z 多转 90°, GICP 不会报错, 车会被定位在错的姿态上。", file=sys.stderr)
         print("[提示] 要转的是原始件 (Point-LIO camera_init 系那份, 头部没有 frame 注释)。", file=sys.stderr)
         print("[提示] 原始件没了就从录包重建:", file=sys.stderr)
-        print("[提示]   ./script/build_pcd_from_bag.sh --name <名字> --force", file=sys.stderr)
+        print("[提示]   ./scripts/mapping/build_pcd_from_bag.sh --name <名字> --force", file=sys.stderr)
         print("[提示] 确认要强行再转: 加 --force。", file=sys.stderr)
         return 1
 
@@ -478,7 +478,7 @@ def main(argv=None) -> int:
         % (os.path.relpath(args.map, os.getcwd()), origin[0], origin[1], resolution),
         "applied to Point-LIO camera_init cloud: yaw %.2f deg, translation (%.3f, %.3f) m"
         % (yaw_deg, tf[0, 2], tf[1, 2]),
-        "built by script/pcd_to_mapframe.py from %s" % os.path.basename(args.pcd),
+        "built by scripts/mapping/pcd_to_mapframe.py from %s" % os.path.basename(args.pcd),
         "alignment: median nn distance %.4f m, %.1f%% within 0.1 m, %d points"
         % (median, inlier * 100, info["points"]),
     ]
@@ -519,7 +519,7 @@ def main(argv=None) -> int:
         else:
             name = os.path.splitext(name)[0]
         print("\n提示: 这份 pcd 已经是地图系, 可以直接重定位 (--prior-pcd 会优先命中 _mapframe 那份):")
-        print("        ./script/start_real_nav.sh --reloc -m %s --prior-pcd %s" % (name, name))
+        print("        ./scripts/bringup/start_real_nav.sh --reloc -m %s --prior-pcd %s" % (name, name))
         print("      对已经转好的点云再跑一次本工具会被拒绝 (头部已标注坐标系), 那是防多转 90° 的保护。")
     return 0
 

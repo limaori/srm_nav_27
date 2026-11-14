@@ -18,7 +18,7 @@
 > | wz 来源 | **只有导航**（fakeyaw 链：`cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_sim`） |
 > | `rotation_controller` / `rotation_test_sender` | 节点与源文件删除；`srm_chassis_control` 只剩 `cmd_mux` 一个可执行 |
 > | `rotation_velocity` 话题 | 删除；`srm_cmd_mux` 只有导航输入，`wz_control_mode`/`rotation_topic`/`rotation_timeout` 参数删除 |
-> | 小陀螺（`--yaw-mode spin`） | 请求由 `script/spin_control.sh` 直接发 `rotation_cmd` → MINCO `spin_request.topic`（不再有中间节点）；原 `wz_max=2.0` 限幅改由脚本本地钳位（`SPIN_MAX_WZ`） |
+> | 小陀螺（`--yaw-mode spin`） | 请求由 `scripts/manual/spin_control.sh` 直接发 `rotation_cmd` → MINCO `spin_request.topic`（不再有中间节点）；原 `wz_max=2.0` 限幅改由脚本本地钳位（`SPIN_MAX_WZ`） |
 > | `speed_limits.yaml` | 删掉 `rotation_controller` 段；自转/小陀螺的角速度上限由 `srm_cmd_mux.wz_max` 兜底 |
 > | `start_sim_nav.sh` | 唯一链路；`-c/--omni`、`--wz-source`、`--fakeyaw/--no-fakeyaw`、`--rotation-*`、`--teleop` 全部删除（用了直接报错） |
 > | 仿真 costmap `robot_radius`（fakeyaw 那份） | 0.40（= 控制器硬净空 0.38 + 0.02），与 main 的 0.33 有意不同 |
@@ -30,7 +30,7 @@
 
 | 阶段 | 内容 | 本机结果 |
 |---|---|---|
-| P0 | 纯逻辑与 TF（单测 + 真实节点自检） | **通过**（脚本 `script/check_wz_fakeyaw_chain.py` 全绿） |
+| P0 | 纯逻辑与 TF（单测 + 真实节点自检） | **通过**（脚本 `scripts/diagnostics/check_wz_fakeyaw_chain.py` 全绿） |
 | P1 | Gazebo 空场执行 | **链路侧通过**；**底盘侧不满足**（仿真底盘执行力不可靠，旧链路同样如此，见 §5.3） |
 | P2 | Nav2 静态地图 + 真值里程计 | 未在本机执行（需要有人看着 RViz 下发目标点），命令与判据见 §7 |
 | P3 | 定位链路回归（Point-LIO / GICP / SLAM） | 未执行，见 §7 |
@@ -66,9 +66,9 @@
 | `srm27_nav_bringup/launch/nav_srm_simulation_launch.py` | 新增 `use_fakeyaw_transform` / `wz_control_mode` / `command_frame`（默认跟随参数文件名）、接线（Nav2 出口→fake→mux）、启动核对与速度链日志 |
 | `srm27_nav_bringup/test/test_fakeyaw_launch_wiring.py` | **新增** 5 例：默认值跟随配置、接线首尾相接、一致性拒绝、旧基线不被改坏 |
 | `srm27_nav_bringup/test/test_speed_limits.py` | 把迁移配置纳入限幅唯一来源回归 |
-| `script/start_sim_nav.sh` | `--wz-source nav\|rotation`、`--fakeyaw`、默认参数文件按模式选择、启动横幅打印速度链与 TF owner、按模式给检查命令 |
-| `script/check_wz_fakeyaw_chain.py` | **新增**：P0 自检（真实节点 + TF，不需要 Gazebo） |
-| `script/check_wz_fakeyaw_p1.py` | **新增**：P1 空场自检（命令层断言 + 底盘层记录 + 翻车哨兵） |
+| `scripts/bringup/start_sim_nav.sh` | `--wz-source nav\|rotation`、`--fakeyaw`、默认参数文件按模式选择、启动横幅打印速度链与 TF owner、按模式给检查命令 |
+| `scripts/diagnostics/check_wz_fakeyaw_chain.py` | **新增**：P0 自检（真实节点 + TF，不需要 Gazebo） |
+| `scripts/diagnostics/check_wz_fakeyaw_p1.py` | **新增**：P1 空场自检（命令层断言 + 底盘层记录 + 翻车哨兵） |
 | `srm27_navigation/fake_vel_transform/package.xml`、`CMakeLists.txt` | 新增 `diagnostic_msgs` 依赖与 gtest |
 
 ---
@@ -124,7 +124,7 @@ srm27_nav_bringup:      test_speed_limits 12 例、test_fakeyaw_launch_wiring 5 
 车体系输出完全相等**（ψ 取 0/±π/2/π/1.1/-2.4/0.7）。若控制器"顺手"先转一次，这条断言在
 ψ≈π/2 处会立刻失败 —— 这是"重复旋转"（方案 §5 三类错误之一）的护栏。
 
-### 4.2 节点级自检（`script/check_wz_fakeyaw_chain.py`）
+### 4.2 节点级自检（`scripts/diagnostics/check_wz_fakeyaw_chain.py`）
 
 用人工里程计驱动真实的 `fake_vel_transform(nav_se2)`：
 
@@ -158,7 +158,7 @@ srm27_nav_bringup:      test_speed_limits 12 例、test_fakeyaw_launch_wiring 5 
 # 1) 空场仿真（无 GUI，本机无 X11 socket，只能无头跑）
 ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=srm_empty gui:=false run_immediately:=true
 # 2) 自检（自己拉起 fake_vel_transform 与 srm_cmd_mux，按方案 §5 P1 下发四组速度）
-ROS_DOMAIN_ID=79 python3 script/check_wz_fakeyaw_p1.py --csv /tmp/p1_samples.csv
+ROS_DOMAIN_ID=79 python3 scripts/diagnostics/check_wz_fakeyaw_p1.py --csv /tmp/p1_samples.csv
 ```
 
 ### 5.2 链路侧结果（通过）
@@ -237,7 +237,7 @@ fake 节点用的 yaw 与探针"最近一帧"根本对不上号，而 fake 节�
   `z ≈ -8e-7` m（底盘压在/嵌在地面上），与正常"骑在轮子上"的 `z≈0.2` m 也不一致。
   P1 脚本因此加了"翻车哨兵"（`roll/pitch/z`），翻倒时直接报"本次记录无效"。
 
-因此 `script/check_wz_fakeyaw_p1.py` 把断言分成两层：
+因此 `scripts/diagnostics/check_wz_fakeyaw_p1.py` 把断言分成两层：
 **链路级（硬失败）** = 话题之间的数学关系、`wz` 透传、超时清零、模型是否立着；
 **底盘级（只记录）** = 位移方向/模长、实际 yaw 速率、里程计抖动。这样脚本在底盘不可靠时
 也能给出有意义的结论，而不会把底盘问题误报成链路问题。
@@ -261,7 +261,7 @@ P1 的"底盘执行"部分**不满足**，并且**必须先修仿真底盘或先
 4. **`mpc.q_yaw` / `q_omega` / `r_angular` 没有针对 `se2` 重新标定**：新配置沿用 MINCO
    那份（5.0 / 0.5 / 1.0）。它们原本是按 `xy_only`（yaw 不进代价）配的，`se2` 下需要
    按实车/仿真实测调。这是进入 P2 之前应该先看一眼的旋钮。
-5. **`transform_mode` 的兼容性**：实车启动脚本（`script/start_real_nav.sh`）与
+5. **`transform_mode` 的兼容性**：实车启动脚本（`scripts/bringup/start_real_nav.sh`）与
    `config/real/*.yaml` 未改；由于 `legacy` 是默认值，实车行为不变（这是刻意选择，
    见 §3.1）。**如果将来在实车启用 fakeyaw 迁移链，必须同时确认下位机自转链路已停用。**
 
@@ -271,7 +271,7 @@ P1 的"底盘执行"部分**不满足**，并且**必须先修仿真底盘或先
 
 ```bash
 # P2：静态地图 + 真值里程计 + 导航拥有 wz（空场/隧道图都可以）
-./script/start_sim_nav.sh --fakeyaw --wz-source nav -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh --fakeyaw --wz-source nav -m rmuc_2025
 # 或直接：
 ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
   params_file:=<ws>/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_fakeyaw.yaml \
@@ -316,7 +316,7 @@ main 这次带进来的东西（`49bc9c8..a080d4a`，27 个文件）：
 
 * `small_gicp_relocalization`：冷启动大角度恢复（`init_acceptance_enable` 等）与代码重构（+567 行）；
 * 实车参数：`config/real/nav2_params_srm.yaml`、`nav2_params_srm_minco.yaml` 各加一段 GICP 冷启动说明与 `init_acceptance_enable: true`；
-* 仿真入口 `script/start_sim_nav.sh`：新增 `--gicp` / `--prior-pcd` / `--prior-pcd-manifest` / `--init-pose`，
+* 仿真入口 `scripts/bringup/start_sim_nav.sh`：新增 `--gicp` / `--prior-pcd` / `--prior-pcd-manifest` / `--init-pose`，
   并把 `use_pcd_localization` / `use_lio_odometry` / `prior_pcd_file` 收敛为变量 `NAV_EXTRA_ARGS`；
 * 实车脚本与工具：`start_real_nav.sh`（默认 minco+gicp）、`start_real_slam.sh`、`kill_nav.sh`、
   `build_pcd_from_bag.sh`、`pcd_to_mapframe.py`、`record_mapping_bag.sh`；
@@ -326,10 +326,10 @@ main 这次带进来的东西（`49bc9c8..a080d4a`，27 个文件）：
 ### 8.2 冲突面：只有一个文件
 
 把本次迁移的 34 个文件（23 改 + 11 新增）与 main 的 27 个改动文件求交集，**只有
-`script/start_sim_nav.sh` 重叠**。`small_gicp_relocalization`、实车参数、地图、其余脚本、
+`scripts/bringup/start_sim_nav.sh` 重叠**。`small_gicp_relocalization`、实车参数、地图、其余脚本、
 README 与本次迁移没有交集；也确认过本次改动没有引用被 main 删掉的两个旧地图名。
 
-`script/start_sim_nav.sh` 有 3 处冲突，全部按"两边都要"解决：
+`scripts/bringup/start_sim_nav.sh` 有 3 处冲突，全部按"两边都要"解决：
 
 | 冲突位置 | main 侧 | 迁移侧 | 解决 |
 |---|---|---|---|
@@ -380,7 +380,7 @@ main 的 `--gicp` 与迁移的 fakeyaw 链可以叠，核对过三处：
   minco 8 例（含 `test_command_frame`、`test_yaw_policy`）全通过；
 * pytest：`src/srm27_navigation/srm27_nav_bringup/test/` **50 例全通过**（含 `test_fakeyaw_launch_wiring.py`
   5 例、`test_speed_limits.py` 13 例）；
-* P0 自检：`python3 script/check_wz_fakeyaw_chain.py` **26 项全过**——四基准 yaw 的速度方向与模长、
+* P0 自检：`python3 scripts/diagnostics/check_wz_fakeyaw_chain.py` **26 项全过**——四基准 yaw 的速度方向与模长、
   `wz` 逐条透传（`wz_error_max=0`）、TF `base_link -> base_link_fake` 的 yaw=-psi、无里程计与
   超时都输出零速、诊断 `mode=nav_se2`；
 * dry-run 集成：旧基线、`--fakeyaw`、矛盾组合（退出码 2）、非法 `--wz-source`、`--gicp` 缺
@@ -405,21 +405,21 @@ colcon test --packages-select fake_vel_transform srm27_chassis_control \
   srm27_minco_controller srm27_nav_bringup && colcon test-result --all
 
 # 1) P0：真实节点 + TF 的链路自检（不需要 Gazebo / Nav2，约 10 s）
-python3 script/check_wz_fakeyaw_chain.py
+python3 scripts/diagnostics/check_wz_fakeyaw_chain.py
 
 # 2) 只看命令链接得对不对，不下发速度（安全，可随时跑）
-DRY_RUN=1 ./script/start_sim_nav.sh --fakeyaw -m rmuc_2025   # 迁移链
-DRY_RUN=1 ./script/start_sim_nav.sh -m rmuc_2025             # 旧基线对照
+DRY_RUN=1 ./scripts/bringup/start_sim_nav.sh --fakeyaw -m rmuc_2025   # 迁移链
+DRY_RUN=1 ./scripts/bringup/start_sim_nav.sh -m rmuc_2025             # 旧基线对照
 
 # 3) P1：空场执行（链路级断言 + 底盘级记录；底盘执行力问题见 §5.3）
-./script/start_sim_nav.sh --fakeyaw -w srm_empty -m rmuc_2025 --no-rviz --no-gui
-python3 script/check_wz_fakeyaw_p1.py
+./scripts/bringup/start_sim_nav.sh --fakeyaw -w srm_empty -m rmuc_2025 --no-rviz --no-gui
+python3 scripts/diagnostics/check_wz_fakeyaw_p1.py
 
 # 4) P2：带 RViz 的目标点闭环（需要人下发目标点），判据见 §7
-./script/start_sim_nav.sh --fakeyaw -w srm_empty -m rmuc_2025
+./scripts/bringup/start_sim_nav.sh --fakeyaw -w srm_empty -m rmuc_2025
 
 # 5) 新组合：GICP 初始重定位 + fakeyaw（未闭环验证，见 §8.4）
-./script/start_sim_nav.sh --fakeyaw --gicp \
+./scripts/bringup/start_sim_nav.sh --fakeyaw --gicp \
   --prior-pcd /home/srm/srm_nav_27/maps/pcd/227_1011_mapframe.pcd -m 227_1011 -w srm_empty
 ```
 
@@ -540,7 +540,7 @@ ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=red_standa
 - 因此脚本显式禁止 `--fakeyaw --wz-source rotation` 组合是正确的。
 
 **旧链路（默认 `--wz-source rotation`）小陀螺实测**：
-`./script/start_sim_nav.sh -w srm_empty -m rmuc_2025 --no-rviz --no-gui
+`./scripts/bringup/start_sim_nav.sh -w srm_empty -m rmuc_2025 --no-rviz --no-gui
  --rotation-mode constant --rotation-speed <X>`：
 
 | 自转指令 | 实际自转 | 目标 | 结果 | 位移方向误差 | 路径弯曲度 | 用时(运动段) |
@@ -601,7 +601,7 @@ ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=red_standa
   未动。
 - **脚本默认切换**（`start_sim_nav.sh`）：默认 = 迁移链（`--no-fakeyaw` /
   `--wz-source rotation` 显式降级旧链）；新增 `--yaw-mode`；spin+旧链组合报错。
-- **手动转速控制**（`script/spin_control.sh`）：`on <rad/s>` / `off` / `status`，
+- **手动转速控制**（`scripts/manual/spin_control.sh`）：`on <rad/s>` / `off` / `status`，
   20 Hz 持发 `rotation_cmd`（停发即超时撤回）。
 
 ### 10.2 验证（srm_empty + 227_1011 图）

@@ -15,13 +15,13 @@
 > （`base_link_fake` + `fake_vel_transform(nav_se2)` + `srm_cmd_mux`，导航拥有 wz），
 > 见 [`仿真链迁移实车实施记录(ai).md`](仿真链迁移实车实施记录%28ai%29.md)。
 > 本文的"参数辨识清单"与"分阶段上电"仍然适用；想回到本文描述的旧链，用
-> `./script/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml`。
+> `./scripts/bringup/start_real_nav.sh -p <abs>/config/real/nav2_params_srm_minco.yaml`。
 
 ## 1. 交付物总览
 
 | 位置 | 作用 | 状态 |
 |---|---|---|
-| `script/start_real_nav.sh` | 实车唯一入口：新增 `--controller auto\|omni\|minco`、MINCO 预检、工作区一致性检查、MINCO 专属自检输出 | 【已实现】 |
+| `scripts/bringup/start_real_nav.sh` | 实车唯一入口：新增 `--controller auto\|omni\|minco`、MINCO 预检、工作区一致性检查、MINCO 专属自检输出 | 【已实现】 |
 | `src/.../srm27_nav_bringup/scripts/srm_minco_real_preflight.py` | 上电前的**只读**参数预检（不需要 ROS）：插件名 / use_sim_time / 坐标系 / 里程计频率与 `state_timeout` / 制动走廊 / 三层限速 / 到点几何 | 【已实现】，可用 `--check` 之外的独立命令复跑 |
 | `src/.../srm27_nav_bringup/test/test_minco_real_preflight.py` | 预检自身的回归测试（14 个用例）：合成配置逐条制造“应该被拦”的情形，并断言**随仓库发布的实车 MINCO 配置必须零阻塞** | 【已实现】，`colcon test --packages-select srm27_nav_bringup` 通过 |
 | `src/.../srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml` | 实车 MINCO 参数：修正 `state_timeout`，补齐文件头说明与待辨识标注 | 【已实现】，数值【待辨识】 |
@@ -87,13 +87,13 @@ controller_server ─cmd_vel_controller─► velocity_smoother ─┤          
 
 ```bash
 # 默认（Omni，与改动前完全一致）
-./script/start_real_nav.sh
+./scripts/bringup/start_real_nav.sh
 
 # MINCO（自动选 MINCO 参数文件、自动关闭 fake_vel_transform、自动跑预检）
-./script/start_real_nav.sh --controller minco
+./scripts/bringup/start_real_nav.sh --controller minco
 
 # 只看将要执行的命令，不启动任何进程
-./script/start_real_nav.sh --controller minco -n
+./scripts/bringup/start_real_nav.sh --controller minco -n
 ```
 
 ## 4. 本次定位并处理的问题
@@ -388,15 +388,15 @@ terminal=global_goal | 有效前缀=0.2611s 需要=0.6s | 最小净空=1.207m �
 colcon build --packages-select srm27_nav_plugins srm27_nav_bringup
 
 # 2. Omni / MINCO 各按老用法启动(参数文件已改好, 不需要额外开关)
-./script/start_real_nav.sh                      # Omni
-./script/start_real_nav.sh --controller minco   # MINCO(自动跑预检)
+./scripts/bringup/start_real_nav.sh                      # Omni
+./scripts/bringup/start_real_nav.sh --controller minco   # MINCO(自动跑预检)
 
 # 3. 只读验证: 预检
 python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.py \
     --params src/srm27_navigation/srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml --expect-minco
 ```
 
-`script/start_real_nav.sh` 本次加了一条启动前检查：解析参数文件里的
+`scripts/bringup/start_real_nav.sh` 本次加了一条启动前检查：解析参数文件里的
 `default_nav_through_poses_bt_xml` 与 `srm27_remove_passed_goals_bt_node`，确认行为树文件与
 `libsrm27_remove_passed_goals_bt_node.so` 都在本工作区；缺了就直接拒绝启动并提示重编哪个包，
 而不是等 bt_navigator 启动时抛"找不到节点"。
@@ -426,7 +426,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
 ## 6. 分阶段上电验收清单
 
 > 规则：**每一级通过才允许进下一级**。任一级出现“中止条件”就立即
-> `./script/start_real_nav.sh --stop` + 物理急停，不要“再试一次看看”。
+> `./scripts/bringup/start_real_nav.sh --stop` + 物理急停，不要“再试一次看看”。
 > 全程至少两人：一人操作、一人手放在急停上。
 > **不需要 rosbag 就能判定大部分结论**：插件已经把终点状态直接放进 `/FollowPath/diagnostics`（`terminal_distance` / `terminal_active` / `terminal_tolerance` / `stop_reason` / `command_owner`），会话重置也带了原因与末点坐标。录 bag 只是可选的事后复盘手段。
 
@@ -439,7 +439,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
     --params src/srm27_navigation/srm27_nav_bringup/config/real/nav2_params_srm_minco.yaml \
     --expect-minco
 # 2) 启动解析必须正确选到 MINCO 文件且速度链路不经 fake_vel_transform
-./script/start_real_nav.sh --controller minco -n | grep -E "局部控制器|速度链路|参数文件"
+./scripts/bringup/start_real_nav.sh --controller minco -n | grep -E "局部控制器|速度链路|参数文件"
 ```
 
 * 通过判据：预检 `0 个阻塞问题`；`局部控制器 = MINCO + MPC`；
@@ -449,7 +449,7 @@ python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_minco_real_preflight.
 ### S1 只起链路，不接底盘（车不上电/串口不插）
 
 ```bash
-./script/start_real_nav.sh --controller minco --no-chassis --no-joy
+./scripts/bringup/start_real_nav.sh --controller minco --no-chassis --no-joy
 ```
 
 在**新终端**里：
@@ -480,7 +480,7 @@ ros2 lifecycle get /map_server                          # active
 ### S2 底盘通电，但只验证“停得住”
 
 ```bash
-./script/start_real_nav.sh --controller minco --no-joy      # 这次带上底盘串口
+./scripts/bringup/start_real_nav.sh --controller minco --no-joy      # 这次带上底盘串口
 ```
 
 1. 确认串口存在（脚本会提示 `/dev/ttyACM0` 的权限问题）。
@@ -494,7 +494,7 @@ ros2 lifecycle get /map_server                          # active
    ```
 
 3. **急停验证**：按物理急停，确认底盘立刻断电/停止；再复位。
-4. **零速出口验证**：`./script/start_real_nav.sh --stop` 之后确认底盘停住。
+4. **零速出口验证**：`./scripts/bringup/start_real_nav.sh --stop` 之后确认底盘停住。
 
 * 通过判据：第 2 步车在约 0.5 s 内停住（不是一直以 0.1 m/s 跑）；急停确实断力。
 * 中止条件：看门狗无效（车持续跑）→ **不要继续**，先查串口固件与 `cmd_timeout_sec`；
@@ -515,7 +515,7 @@ sed -i 's/max_linear_speed: 1\.50/max_linear_speed: 0.40/;
         s/max_accel: \[3\.0, 3\.0, 0\.0\]/max_accel: [0.6, 0.6, 0.0]/;
         s/max_decel: \[-3\.0, -3\.0, 0\.0\]/max_decel: [-0.6, -0.6, 0.0]/;
         s/braking_deceleration: 0\.0/braking_deceleration: 0.6/' "$TMP"
-./script/start_real_nav.sh --controller minco -p "$TMP" --no-joy
+./scripts/bringup/start_real_nav.sh --controller minco -p "$TMP" --no-joy
 ```
 
 > 这里的 0.4 / 0.6 只是“能在一步内刹住”的量级，不是辨识结果；
@@ -557,7 +557,7 @@ sed -i 's/max_linear_speed: 1\.50/max_linear_speed: 0.40/;
 * 通过判据：四项方向全对；取消后 0.5 s 内停住。
 * 中止条件：任一方向反了 → **立即停止**，此时问题在坐标系或串口方向约定，
   不要去改 MINCO 权重。
-  （已知的现场坑：`script/test_chassis_serial.py` 里记录了下位机有 90° 轴向交叉约定；
+  （已知的现场坑：`scripts/test/test_chassis_serial.py` 里记录了下位机有 90° 轴向交叉约定；
   先用那个脚本单独验证底盘方向，再回到导航。）
 
 ### S5 停止 / 取消 / 异常注入
@@ -584,7 +584,7 @@ sed -i 's/max_linear_speed: 1\.50/max_linear_speed: 0.40/;
 
 ### S6 连续导航与重规划（仍是低速档）
 
-* 一条 5~10 m 的多点路径（用 `script/start_waypoints.sh` 或 RViz 连续下点），
+* 一条 5~10 m 的多点路径（用 `scripts/bringup/start_waypoints.sh` 或 RViz 连续下点），
   中途允许改目标；
 * 通过判据：全程 `planning_result` 以 `success` 为主；`switched_trajectory_count` 合理增长；
   没有持续 recovery；末端停稳后目标判定成功；
@@ -650,10 +650,10 @@ ros2 topic echo /FollowPath/diagnostics | grep -E "terminal_|command_owner|stop_
 
 | 目标 | 做法 |
 |---|---|
-| 回到改动前的实车行为（Omni + fake_vel_transform） | `./script/start_real_nav.sh`（默认即此，无需任何额外参数） |
-| Omni 但关闭 fake_vel_transform | `./script/start_real_nav.sh --no-fake-vel-transform` |
-| MINCO + 保留旧速度链路（对照实验） | `./script/start_real_nav.sh --controller minco --fake-vel-transform`（会打印风险警告） |
-| 运行中紧急停 | 物理急停（第一手段）；或 `./script/start_real_nav.sh --stop`（先发零速再退进程） |
+| 回到改动前的实车行为（Omni + fake_vel_transform） | `./scripts/bringup/start_real_nav.sh`（默认即此，无需任何额外参数） |
+| Omni 但关闭 fake_vel_transform | `./scripts/bringup/start_real_nav.sh --no-fake-vel-transform` |
+| MINCO + 保留旧速度链路（对照实验） | `./scripts/bringup/start_real_nav.sh --controller minco --fake-vel-transform`（会打印风险警告） |
+| 运行中紧急停 | 物理急停（第一手段）；或 `./scripts/bringup/start_real_nav.sh --stop`（先发零速再退进程） |
 | 回到 Nav2 原生到点判定 | 把 `general_goal_checker.plugin` 改回 `nav2_controller::StoppedGoalChecker` 并补回 `trans_stopped_velocity` / `rot_stopped_velocity`（**预检会因此报阻塞**，这是有意设计的：那条路会让自转中的哨兵判不了到点） |
 
 A/B 对照建议：同一张图、同一组起终点，在 **MINCO** 与 **Omni** 下各跑一遍，
@@ -711,11 +711,11 @@ source install/setup.bash
 colcon test --packages-select srm27_minco_core srm27_minco_controller srm27_nav_plugins
 colcon test-result --verbose
 # 解析检查（不启动）
-./script/start_real_nav.sh --controller minco -n
+./scripts/bringup/start_real_nav.sh --controller minco -n
 # 上电运行
-./script/start_real_nav.sh --controller minco
+./scripts/bringup/start_real_nav.sh --controller minco
 # 停车
-./script/start_real_nav.sh --stop
+./scripts/bringup/start_real_nav.sh --stop
 ```
 
 关于 lint：`colcon test --packages-select srm27_nav_bringup` 里 `copyright` 的 2 个失败

@@ -184,7 +184,7 @@ static bool planEscapeDirection(const Esdf2D & esdf, const Eigen::Vector2d & pos
 > `onSetParameters` 回调**（本包全仓搜索无 `onSetParameters` / `add_on_set_parameters_callback`）。
 > 对 `controller_server` 执行 `ros2 param set ... FollowPath.recovery.*` 会**成功返回但毫无效果**。
 > 对比：`rotation_test_sender` 有自己的回调，所以现场能热改它——两者行为不同，别类推。
-> 改完用 `./script/kill_nav.sh`（或直接重跑 `start_sim_nav.sh`，它启动前会自己杀一遍）
+> 改完用 `./scripts/bringup/kill_nav.sh`（或直接重跑 `start_sim_nav.sh`，它启动前会自己杀一遍）
 > 再起一次，然后核对启动日志里那行 `MincoMpcController 脱困参数: ...` 的实际值。
 >
 > 现场调参建议顺序：先把 `fail_threshold` 降到 2、`stuck_clearance` 抬到 0.60 确认链路通，
@@ -347,7 +347,7 @@ colcon test  --packages-select srm27_minco_core srm27_minco_controller
 ### 8.1 启动
 
 ```bash
-./script/start_sim_nav.sh --controller minco
+./scripts/bringup/start_sim_nav.sh --controller minco
 ```
 
 `--controller minco` 不能省：不给它时默认加载 Omni 那份参数文件，`recovery.*` 根本不在里面。
@@ -371,7 +371,7 @@ RViz 跑在 namespace 下会自动补全），不用手动加。
 另外插件的参数只在 configure 期读一次，**没有 `onSetParameters` 回调**——
 `ros2 param set ... FollowPath.recovery.*` 会成功返回但毫无效果（见 §3.4 的警告框）。
 
-### 8.3 用 `script/inject_recovery_stuck.py` 确定性复现
+### 8.3 用 `scripts/manual/inject_recovery_stuck.py` 确定性复现
 
 脚本把致命障碍"注入"到机器人身上，一步造出两个条件。原理：订阅当前 `/map`
 （transient_local），在机器人位置周围先清一块空地（否则真实地图自带的障碍会
@@ -380,16 +380,16 @@ transient_local 重发 `/map`；代价地图的 static_layer 下一个更新周�
 
 ```bash
 # 终端 A：起仿真
-./script/start_sim_nav.sh --controller minco
+./scripts/bringup/start_sim_nav.sh --controller minco
 
 # 终端 B：抓数据（只订阅、不控制车，事后可复盘）
-python3 script/capture_minco_run.py
+python3 scripts/diagnostics/capture_minco_run.py
 
 # 终端 C：注入（车还没动时可跳过 TF：出生时 map 系就是 (0,0)）
-python3 script/inject_recovery_stuck.py --shape wall --wall-dir +y
+python3 scripts/manual/inject_recovery_stuck.py --shape wall --wall-dir +y
 
 # 验证完恢复现场（从注入前的自动快照恢复）
-python3 script/inject_recovery_stuck.py --shape restore
+python3 scripts/manual/inject_recovery_stuck.py --shape restore
 ```
 
 脚本还会打印**注入后的净空**与**环形搜索预测的最开阔方向**，用来和 RViz 里的绿线对照。

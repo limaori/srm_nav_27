@@ -13,15 +13,15 @@
 #      默认先做 5 cm 体素降采样（缓存成 <名字>_view.pcd，秒开）；要原样看加 --raw。
 #
 # 用法:
-#   ./script/show_pcd.sh 227_1111                 # 自动找 maps/pcd/227_1111_mapframe.pcd
-#   ./script/show_pcd.sh maps/pcd/foo.pcd         # 直接给路径
-#   ./script/show_pcd.sh 227_1111 --rviz          # 连 rviz2 一起起（自带配置）
-#   ./script/show_pcd.sh 227_1111 --raw           # 不降采样
-#   ./script/show_pcd.sh 227_1111 --downsample 0.03
-#   ./script/show_pcd.sh 227_1111 --map 227_1111  # 同时把 2D 栅格图（/map）发出来叠加看
-#   ./script/show_pcd.sh 227_1111 --no-tf         # 已有 TF（比如导航在跑）时不发静态变换
-#   ./script/show_pcd.sh 227_1111 --frame camera_init --world camera_init
-#   ./script/show_pcd.sh 227_1111 -n              # 只打印将执行的命令
+#   ./scripts/mapping/show_pcd.sh 227_1111                 # 自动找 maps/pcd/227_1111_mapframe.pcd
+#   ./scripts/mapping/show_pcd.sh maps/pcd/foo.pcd         # 直接给路径
+#   ./scripts/mapping/show_pcd.sh 227_1111 --rviz          # 连 rviz2 一起起（自带配置）
+#   ./scripts/mapping/show_pcd.sh 227_1111 --raw           # 不降采样
+#   ./scripts/mapping/show_pcd.sh 227_1111 --downsample 0.03
+#   ./scripts/mapping/show_pcd.sh 227_1111 --map 227_1111  # 同时把 2D 栅格图（/map）发出来叠加看
+#   ./scripts/mapping/show_pcd.sh 227_1111 --no-tf         # 已有 TF（比如导航在跑）时不发静态变换
+#   ./scripts/mapping/show_pcd.sh 227_1111 --frame camera_init --world camera_init
+#   ./scripts/mapping/show_pcd.sh 227_1111 -n              # 只打印将执行的命令
 #
 # 起来之后（RViz 里）:
 #   Global Options → Fixed Frame = world

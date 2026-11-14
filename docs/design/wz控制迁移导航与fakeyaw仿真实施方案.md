@@ -218,6 +218,6 @@ MINCO 内部状态继续在 `odom` 系计算；输出阶段增加明确的命令
 ## 7. 回退和进入实车的前置条件
 
 - 回退方式：关闭 `use_fakeyaw_transform`，恢复 `command_frame=base_link`、`wz_control_mode=rotation`、`yaw_policy.mode=xy_only`，使用现有 `nav2_params_srm.yaml` 和 `srm_cmd_mux` 行为。
-- 仿真未完成前不改 `script/start_real_nav.sh` 默认出口、不打开实车角速度限幅、不修改串口协议。
+- 仿真未完成前不改 `scripts/bringup/start_real_nav.sh` 默认出口、不打开实车角速度限幅、不修改串口协议。
 - 只有 P0-P4 全部通过，并确认下位机接收的 `wz` 语义、最大角速度、停止看门狗和 odometry yaw 定义后，才另起实车联调方案。
 - 实车第一阶段仍应保留独立急停和零速帧；导航拥有 `wz` 后，必须再次确认没有下位机自转链路与导航角速度重复叠加。

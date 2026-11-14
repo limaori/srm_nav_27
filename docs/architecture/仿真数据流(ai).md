@@ -15,7 +15,7 @@
 当前使用的启动方式是：
 
 ```bash
-./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图
+./scripts/bringup/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图
 
 # 等价的拆开启动
 ros2 launch srm27_gazebo_simulator srm_sim.launch.py

@@ -1,1 +1,0 @@
-mapping/show_pcd.sh

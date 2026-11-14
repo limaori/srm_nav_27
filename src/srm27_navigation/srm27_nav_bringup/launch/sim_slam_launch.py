@@ -1,6 +1,6 @@
-# 仿真 SLAM 建图入口（Gazebo 由 script/start_sim_slam.sh 单独拉起）。
+# 仿真 SLAM 建图入口（Gazebo 由 scripts/bringup/start_sim_slam.sh 单独拉起）。
 
-"""仿真 SLAM 建图的 launch 入口（Gazebo 由 script/start_sim_slam.sh 单独拉起）。
+"""仿真 SLAM 建图的 launch 入口（Gazebo 由 scripts/bringup/start_sim_slam.sh 单独拉起）。
 
 本文件本身很薄：把 ``nav_srm_simulation_launch.py`` 固定成 ``slam:=True``，
 并把 RViz 配置和世界名透传下去。真正的建图节点都在下面这条链路里：
@@ -13,7 +13,7 @@
 Point-LIO 退出时把累积点云落盘成 ``PCD/scans.pcd``，路径是编译期常量 ROOT_DIR：
 ``~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd``
 （见 point_lio/CMakeLists.txt 的 ``-DROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/"``）。
-用 ``./script/start_sim_slam.sh --collect`` 把它收走。
+用 ``./scripts/bringup/start_sim_slam.sh --collect`` 把它收走。
 
 完整链路：
 

@@ -221,7 +221,7 @@ colcon test-result --verbose
 PARAMS_FILE=/home/srm/srm_nav_27/src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_minco.yaml \
 ROTATION_MODE=stop \
 USE_VELOCITY_SMOOTHER=False \
-bash script/start_sim_nav.sh
+bash scripts/bringup/start_sim_nav.sh
 ```
 
 启动后必须回读确认插件确实被加载，并检查可视化与诊断：
@@ -394,7 +394,7 @@ MINCO 的速度/加速度是**软约束**，其最优点由 `w_time`（把速度
 
 ## 6.3 限速对齐：仿真 = 实车（本次改动）
 
-**实车实际链路**（`script/start_real_nav.sh`）：
+**实车实际链路**（`scripts/bringup/start_real_nav.sh`）：
 
 ```text
 controller_server ─cmd_vel_controller─► velocity_smoother ─cmd_vel_nav2_result─┐
@@ -709,7 +709,7 @@ srm_cmd_mux 已启动: ... 平移上限 1.500 m/s (v_max 1.500), 自转上限 1.
 
 处理：
 
-1. `script/start_sim_nav.sh` 增加**工作区一致性检查**：启动前逐个核对
+1. `scripts/bringup/start_sim_nav.sh` 增加**工作区一致性检查**：启动前逐个核对
    `srm27_nav_bringup` / `srm27_chassis_control` / `srm27_minco_controller` 的解析路径，
    不在本工作区下就直接报错退出，并提示"当前环境还 source 了别的工作区"。
 2. `nav_srm_simulation_launch.py` 显式传递底盘控制的 `params_file`（绝对路径），
@@ -900,7 +900,7 @@ D400/D415，`model_builder.py`、`navigation_launch.py` 等既有文件同样报
 |---|---|---|
 | P3 | JPS 局部前端、报告式 `enable_report_fine_heuristic` 的实测标定、保留安全前缀的重规划（`kPrefixReuse` 目前只在策略层判定，未实现前缀拼接求解） | 【未实施】 |
 | P4 | 报告式双次 MPC 的完整验收（代码路径已有 `two_pass_reference`，默认关闭且未实测）、mux 的 `NAV_SE2` 等五模式仲裁、窄通道 `APPROACH_ALIGN/NARROW_TRACK/EXIT_HOLD` 状态机、Action 会话守护 | 【未实施】 |
-| P5 | 实车入口、延迟/制动/外形的实车辨识、速度内环参数档案 | **部分实施** —— 见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md)：实车入口改用 `script/start_real_nav.sh --controller minco`（未新增 `nav_srm_real_launch.py`，理由见该文 §1/§8）、新增离线预检脚本、修掉实车 `/odometry` 10 Hz 对 `state_timeout` 的阻塞项；**延迟/制动/外形辨识仍未做**，实车 MINCO YAML 里这三项仍是占位/仿真标定值 |
+| P5 | 实车入口、延迟/制动/外形的实车辨识、速度内环参数档案 | **部分实施** —— 见 [minco实车迁移实施记录(ai).md](minco实车迁移实施记录%28ai%29.md)：实车入口改用 `scripts/bringup/start_real_nav.sh --controller minco`（未新增 `nav_srm_real_launch.py`，理由见该文 §1/§8）、新增离线预检脚本、修掉实车 `/odometry` 10 Hz 对 `state_timeout` 的阻塞项；**延迟/制动/外形辨识仍未做**，实车 MINCO YAML 里这三项仍是占位/仿真标定值 |
 | P6 | 全场回归矩阵、性能报告、默认配置切换、移除 Omni 依赖 | 【未实施】 |
 
 其它已知缺口（诚实记录，不当作已完成）：

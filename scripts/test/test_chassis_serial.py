@@ -25,7 +25,7 @@
 #                本方向没有 cmd_id —— 帧头之后直接是数据段。
 #   下→上 (§4): 本脚本**只往下发, 不解析任何反馈** —— 收到什么直接丢掉,
 #                只是为了不让 tty 接收缓冲堆满。要看回传请用
-#                script/test_chassis_speed_feedback.py 或 srm27_nav_protocol。
+#                scripts/test/test_chassis_speed_feedback.py 或 srm27_nav_protocol。
 #   CRC   (§2.2): CRC8(帧头前 4 字节, init 0xFF) / CRC16(帧头+数据段, init 0xFFFF)。
 #   §3.3 量级: 上位机 1.0 ≈ 四分之一杆, 起步建议 ≤ 0.2。协议层不限幅、限幅是上位机的
 #              责任; 本脚本**默认不限幅**(指令原样下发), 需要保守时才显式 --max-speed。
@@ -33,7 +33,7 @@
 #
 # 自检 (协议 §5): 本脚本内置协议给出的三条参考向量与两个 CRC 自检值,
 #   每次运行前自动核对。要单独跑:
-#       ./script/test_chassis_serial.py --self-test
+#       ./scripts/test/test_chassis_serial.py --self-test
 #   自检不通过就不该上机 —— 说明 CRC 表或打包函数与协议不符。
 #
 # 方向约定 (协议 §3.2 有 90° 轴向交叉, 重要):
@@ -46,15 +46,15 @@
 #     · 实测发现方向反了用 --flip-y (翻转 vy 符号)。
 #
 # 用法:
-#   ./script/test_chassis_serial.py                     # vx=0, vy=-0.2, 2 秒, 然后停车
-#   ./script/test_chassis_serial.py --vx 0.2            # 直接指定协议字段
-#   ./script/test_chassis_serial.py --vy -0.1 --wz 0.5  # 含转向指令
-#   ./script/test_chassis_serial.py --duration 1.0      # 只跑 1 秒
-#   ./script/test_chassis_serial.py --self-test         # 只做协议自检, 不碰串口
-#   ./script/test_chassis_serial.py --dry-run           # 打印帧, 不开串口
-#   ./script/test_chassis_serial.py --stop-only         # 只发零速(紧急停车)
-#   ./script/test_chassis_serial.py --list-devices      # 列出候选串口设备
-#   ./script/test_chassis_serial.py -y                  # 跳过 3 秒倒计时
+#   ./scripts/test/test_chassis_serial.py                     # vx=0, vy=-0.2, 2 秒, 然后停车
+#   ./scripts/test/test_chassis_serial.py --vx 0.2            # 直接指定协议字段
+#   ./scripts/test/test_chassis_serial.py --vy -0.1 --wz 0.5  # 含转向指令
+#   ./scripts/test/test_chassis_serial.py --duration 1.0      # 只跑 1 秒
+#   ./scripts/test/test_chassis_serial.py --self-test         # 只做协议自检, 不碰串口
+#   ./scripts/test/test_chassis_serial.py --dry-run           # 打印帧, 不开串口
+#   ./scripts/test/test_chassis_serial.py --stop-only         # 只发零速(紧急停车)
+#   ./scripts/test/test_chassis_serial.py --list-devices      # 列出候选串口设备
+#   ./scripts/test/test_chassis_serial.py -y                  # 跳过 3 秒倒计时
 #
 # 参数:
 #   -d, --device <路径>   串口设备 (默认自动选 /dev/serial/by-id/ 下唯一设备,
@@ -88,7 +88,7 @@
 # 结果怎么读 (本脚本只看车动没动, 不读回传):
 #   - 车动了   → 串口/接线/板子/电机/使能全通, 问题只在上位机软件层
 #   - 车不动   → 查使能/模式/固件协议; 先用 --vx/--vy 确认平移链路, 再单独试 --wz
-#                (要看底盘回传的 vx/vy/wz, 用 script/test_chassis_speed_feedback.py)
+#                (要看底盘回传的 vx/vy/wz, 用 scripts/test/test_chassis_speed_feedback.py)
 #
 # ⚠ 如果板子上是 control-2026 a6e1638 那份固件: 它的
 #   UserApp/robot/sentry_omni_chassis/robot.c:490 把 navigator_init(&huart1)
@@ -103,7 +103,7 @@
 #   再往数据段里加字段会直接编译失败, 不会重演。
 #
 # 运行前记得先让底盘节点松开串口 (它独占该设备):
-#   ./script/start_real_nav.sh --stop
+#   ./scripts/bringup/start_real_nav.sh --stop
 # =============================================================
 
 import argparse
@@ -388,7 +388,7 @@ def open_serial(device, baud):
         if exc.errno == errno.EBUSY:
             print(f"[错误] 设备被占用: {device}", file=sys.stderr)
             print("[提示] 底盘节点独占该串口, 先停掉它:", file=sys.stderr)
-            print("[提示]   ./script/start_real_nav.sh --stop", file=sys.stderr)
+            print("[提示]   ./scripts/bringup/start_real_nav.sh --stop", file=sys.stderr)
             print("[提示]   或 pkill -f '[s]rm27_nav_protocol'", file=sys.stderr)
         else:
             print(f"[错误] 打开 {device} 失败: {exc}", file=sys.stderr)
@@ -542,7 +542,7 @@ def main():
                 print(f"         pid {pid}  {path}\n            {cmdline}", file=sys.stderr)
             print("[提示] 两个进程同时读同一个 tty 会互相抢字节 —— 你这边的波形断、"
                   "对方的 /chassis_speed 也会断。", file=sys.stderr)
-            print("[提示] 先停掉它再测: ./script/start_real_nav.sh --stop", file=sys.stderr)
+            print("[提示] 先停掉它再测: ./scripts/bringup/start_real_nav.sh --stop", file=sys.stderr)
             print("[提示]   (或 pkill -f '[s]rm27_nav_protocol')", file=sys.stderr)
             print("[提示] 确认没有别的读取者后重跑; 确实要抢过来加 --force (会互相偷帧, 慎用)。",
                   file=sys.stderr)
@@ -598,7 +598,7 @@ def main():
 
     if not args.stop_only and not args.yes:
         print("\n⚠  这个测试会让车真的动起来。请确认: 轮子已离地, 或有人守着物理急停。")
-        print("    同时确认已停掉底盘节点(它独占串口): ./script/start_real_nav.sh --stop")
+        print("    同时确认已停掉底盘节点(它独占串口): ./scripts/bringup/start_real_nav.sh --stop")
         for remaining in (3, 2, 1):
             print(f"   {remaining} ...", flush=True)
             time.sleep(1.0)

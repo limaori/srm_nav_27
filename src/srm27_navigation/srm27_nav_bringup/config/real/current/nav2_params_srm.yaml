@@ -24,7 +24,7 @@
 # 用法:
 #   ros2 launch srm27_nav_bringup nav2_stack_launch.py \
 #     params_file:=<本文件> map:=.../map/real/<name>.yaml prior_pcd_file:=.../pcd/real/<name>.pcd ...
-#   或直接用 script/start_real_nav.sh（默认就指向本文件与 SRM 模型）。
+#   或直接用 scripts/bringup/start_real_nav.sh（默认就指向本文件与 SRM 模型）。
 #   * 【2026-10-09 从仿真链迁移】多目标航点(BT):
 #       default_nav_through_poses_bt_xml 换成 behavior_trees/navigate_through_poses_route_aware.xml,
 #       plugin_lib_names 里加 srm27_remove_passed_goals_bt_node(自研 RemovePassedGoalsByRoute)。

@@ -1,1 +1,0 @@
-mapping/record_mapping_bag.sh
