@@ -566,3 +566,10 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 
 ./script/build_pcd_from_bag.sh --name pcd地图名                                       # 重建pcd地图，转map系的
 ```
+# 2026-11-13
+### 实车测试
+```bash 
+./script/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin 0.000000000000001
+
+./script/start_real_nav.sh -m 227_1113pro --controller minco --chassis-spin-sine --spin-max 6  --spin-min 2 --spin-period 1.5
+```
