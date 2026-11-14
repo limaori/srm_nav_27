@@ -1,0 +1,1 @@
+bringup/start_waypoints.sh

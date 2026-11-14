@@ -1,0 +1,1 @@
+bringup/kill_gzb.sh

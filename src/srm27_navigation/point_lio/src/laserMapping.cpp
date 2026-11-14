@@ -1,5 +1,6 @@
 // #include <so3_math.h>
 #include <chrono>
+#include <cstdlib>
 #include <malloc.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
@@ -21,6 +22,16 @@ using namespace std;
 const float MOV_THRESHOLD = 1.5f;
 
 string root_dir = ROOT_DIR;
+
+// PCD 输出目录：优先运行期环境变量 SRM27_PCD_DIR，未设置时回退到编译期
+// ROOT_DIR/PCD。这样现场可以把生成点云放到工作区外，源码包不再堆积 GB 级 PCD。
+static string pcd_output_dir()
+{
+  const char *env = std::getenv("SRM27_PCD_DIR");
+  string dir = (env != nullptr && env[0] != '\0') ? string(env) : (string(ROOT_DIR) + "PCD");
+  if (!dir.empty() && dir.back() != '/') dir.push_back('/');
+  return dir;
+}
 
 int time_log_counter = 0;
 
@@ -202,7 +213,7 @@ void publish_frame_world(
       if (!pcl_wait_save->empty() && pcd_save_interval > 0 && scan_wait_num >= pcd_save_interval) {
         pcd_index++;
         string all_points_dir(
-          string(string(ROOT_DIR) + "PCD/scans_") + to_string(pcd_index) + string(".pcd"));
+          string(pcd_output_dir() + "scans_") + to_string(pcd_index) + string(".pcd"));
         pcl::PCDWriter pcd_writer;
         std::cout << "current scan saved to /PCD/" << all_points_dir << '\n';
         pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
@@ -1076,7 +1087,7 @@ int main(int argc, char ** argv)
   // 2. noted that pcd save will influence the real-time performances
   if (!pcl_wait_save->empty() && pcd_save_en) {
     string file_name = string("scans.pcd");
-    string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
+    string all_points_dir(pcd_output_dir() + file_name);
     pcl::PCDWriter pcd_writer;
     pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
   }

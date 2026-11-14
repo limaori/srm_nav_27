@@ -11,7 +11,7 @@
     （在 has_odometry_source 为真时把 publish_tf 置 True，发布 odom -> base_link）。
 
 Point-LIO 退出时把累积点云落盘成 ``PCD/scans.pcd``，路径是编译期常量 ROOT_DIR：
-``src/srm27_navigation/point_lio/PCD/scans.pcd``
+``~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd``
 （见 point_lio/CMakeLists.txt 的 ``-DROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/"``）。
 用 ``./script/start_sim_slam.sh --collect`` 把它收走。
 

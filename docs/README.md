@@ -1,25 +1,71 @@
-# Documentation
+# SRM27 文档索引
 
-- [分支合并说明](分支合并说明.md): use `--no-ff` to preserve development commits and create a merge commit, with CLion instructions.
-- [MID360 setup](mid360使用指南.md): network configuration and LiDAR bringup.
-- [哨兵导航 TF 与下位机数据接口](哨兵导航TF与下位机数据接口(ai).md): MID-360 安装与底盘自旋的四种组合、传感器分工及上下位机通信约定。(AI 生成)
-- [Simulation data flow](仿真数据流(ai).md): topics, frames and control paths in simulation (updated for the SRM chain). (AI 生成)
-- [仿真 LIO 前端替换 Z-LIO 实施方案](仿真LIO前端替换Z-LIO实施方案(ai).md): 让 `./script/start_sim_nav.sh --lio` 改用 z-localization 的 ZLIO 出 `odom→base_link` —— 四层职责与三条输出契约、`zlio_bridge`（`T_off` 静态修正 + 换代锚定）的数学定义、仿真专有对账（IMU 单位 / `velodyne_points` 时间字段 / 命名空间 / 话题撞名）、逐文件改动清单、P0~P4 阶段判据与三级回退。**不改** `sensor_scan_generation`、静态 `map→odom` 与 terrain 链路。(AI 生成)
-- [Z-Localization 剩余部分整体迁移问题分析](Z-Localization剩余部分整体迁移问题分析(ai).md): 把 z-localization 尚未迁入的 `backend` / `bringup` / `livox_ros_driver2` 全部搬过来会遇到什么 —— 构建级硬失败（同名包、GTSAM 4.2.x、`../../` 路径、GPL-2.0）、**不会报错的语义级冲突**（`map→odom` 三方争用、`odom` 同名不同义导致 `T_off` 被乘两次、云台让 `body_from_sensor` 变成时变量、重置双重补偿、`coordinated_reset` 必须翻转、话题/帧名契约错位）、地图与建图流水线成本，以及"只迁工具 / 只迁 backend / `legacy` 前端 PoC"三档路线。(AI 生成)
-- [GICP 初始重定位仿真验证方案](GICP初始重定位仿真验证方案.md): 地图与真值坐标对齐、固定数据与完整链路验证、初值误差/退化测试矩阵、启动命令、成功判据与验收指标。
-- [Controller comparison](局部规划器相关(ai).md): current controller and alternatives.
-- [MINCO + MPC 从零详解](MINCO与MPC局部规划控制器从零详解.md): 面向初学者，结合当前源码讲解 ESDF、MINCO 轨迹优化、MPC 跟踪、线程与速度链，附参数说明、仿真练习、排错方法和实现边界。
-- [MINCO migration implementation plan](迁移minco实施方案%28ai%29.md): 基于中科大 2025 技术报告、当前 SRM 代码和北理 navi_minco_bit 的迁移方案，含源码复用清单、接口修正、MINCO/MPC 设计、阶段验收与回退；测试从 0.5 m/s 起步，上限 1.0 m/s。(AI 生成)
-- [MINCO/MPC migration notes](局部规划器迁移MINCO_MPC方案(ai).md): staged design proposal.
-- [MINCO migration implementation record](minco迁移实施记录(ai).md): P0/P1/P2 落地记录 —— 新增 vendor/core/controller 三个包、odometry 语义修复、MPC 与 MINCO 关键实现选择、构建/测试/启动命令、未完成项与已知缺口。(AI 生成)
-- [MINCO 实车迁移实施记录与上电验收清单](minco实车迁移实施记录(ai).md): 把仿真跑通的 MINCO+MPC 接到实车 —— 仿真/实车链路差异对照、`script/start_real_nav.sh --controller minco` 入口与离线预检脚本、本次定位的两个真实阻塞项（实车 `/odometry` 10 Hz 对 `state_timeout`、`fake_vel_transform` 二次旋转）、待辨识清单，以及 S0–S7 分阶段上电验收清单与回退方式；并记录 2026-10-09 实车终点往返的三条成因与修复（终点急停状态机 `TerminalStop`、会话重置阈值、`reaction_latency` 与 `state_timeout` 解耦、过期 twist、到点判定改为不依赖角速度的 `OmniStoppedGoalChecker`、实车与仿真的到点/急停半径统一为 0.50 m)。(AI 生成)
-- [MINCO 脱困机制迁移实施记录](minco脱困机制迁移实施记录(ai).md): 把北理 `navi_minco_bit` 的 `RecoverServer` + `MincoFsm::RECOVERING` 迁移到 Nav2 链路 —— 归类为 `RecoveryDecider`（脱困判定 / 逃逸方向规划 / 脱困成功判定）、控制器旁路 MPC 直接输出逃逸 Twist、`BackUpFreeSpace` 改用 ESDF 解析梯度 + 环形搜索；含阈值对照表、与行为树 recovery 的先后边界、修掉的两个参考实现缺陷、构建测试结果与待运行期验证项。(AI 生成)
-- [TDT navigation notes](tdt开源.md): upstream navigation implementation review.
-- [SRM simulation and independent rotation plan](SRM仿真与导航自转控制实施方案.md): SRM-only simulation, planar Nav2 velocity, and separate chassis rotation control.
-- [SRM simulation and rotation implementation notes](SRM仿真与自转控制实现(ai).md): 落地说明 —— 三个新包的职责、速度/自转接口表、合成与安全优先级、启动方式、测试矩阵与实测结论。(AI 生成)
-- [TF and fake chassis deep dive](TF与fake底盘详解(ai).md): 旧步兵 fake 虚拟底盘（`gimbal_yaw_fake`）与 TF 详解，历史资料，SRM 仿真已不再使用。
-- [wz 控制迁移导航与 fakeyaw 仿真实施方案](wz控制迁移导航与fakeyaw仿真实施方案.md): 让 Nav2/MINCO 拥有底盘角速度 `wz`、恢复 fakeyaw 坐标系并把导航速度一次性转到真实 `base_link` 系 —— 目标链路、接口改动清单、参数与回退开关、P0~P4 分阶段验收判据。
-- [wz 控制迁移与 fakeyaw 实施记录](wz控制迁移与fakeyaw实施记录(ai).md): 交付清单、与方案的差异、P0/P1 实测数据与底盘执行力问题的 A/B 对照、与 main 合并的兼容性核对与修法，以及 P2~P4 的跑法。(AI 生成)
-- [调试日志——by maori](调试日志——by%20maori.md): 现场调试记录。
+文档按**用途与状态**分目录，不再把方案、实施记录、现场日志混在一起。
 
-Build output, runtime logs, rosbag files, and generated diagnostic plots are kept outside this documentation tree.
+| 目录 | 放什么 | 状态 |
+|---|---|---|
+| [`architecture/`](architecture/) | 当前架构、TF、话题、速度链、唯一入口表 | 当前有效 |
+| [`operations/`](operations/) | 启动、建图、定位、调试、合并操作指南 | 当前有效 |
+| [`design/`](design/) | 尚未完成或仍在演进的设计方案 | 设计/提案 |
+| [`records/`](records/) | 已完成的实施记录、验收记录、现场日志 | 历史记录（结论仍可引用） |
+| [`archive/`](archive/) | 过时方案、旧链路、AI 生成的历史材料 | 历史资料，不再适用 |
+
+> 入口与参数的唯一权威表是 [`architecture/launch_matrix.md`](architecture/launch_matrix.md)。
+> 其他文档里的入口说明若与它冲突，以入口表为准。
+
+## architecture
+
+- [启动入口矩阵（唯一入口表）](architecture/launch_matrix.md) —— 四个正式入口、16 个 launch 的 current/compat/deprecated 分类、参数文件分类、fake_vel_transform 当前职责。
+- [ROS 包清点](architecture/package_inventory.md) —— 48 个包的分类、路径与职责。
+- [仿真数据流](architecture/仿真数据流%28ai%29.md) —— 仿真链的话题、frame、控制路径（AI 生成，已按 SRM 链更新）。
+- [哨兵导航 TF 与下位机数据接口](architecture/哨兵导航TF与下位机数据接口%28ai%29.md) —— MID-360 安装、传感器分工、上下位机约定。
+- [导航通信协议：下位机接口说明](architecture/导航通信协议-下位机接口说明.md) —— 串口帧格式、速度反馈、状态包。
+
+## operations
+
+- [MID360 使用指南](operations/mid360使用指南.md) —— 网络配置与驱动启动。
+- [导航速度调试指南](operations/导航速度调试指南.md) —— 限速、加速度、前瞻、PID。
+- [导航避障调试指南](operations/导航避障调试指南.md) —— 代价地图、膨胀、净空、恢复行为。
+- [分支合并说明](operations/分支合并说明.md) —— `--no-ff` 合并与 CLion 操作。
+
+## design
+
+- [MINCO 与 MPC 局部规划控制器从零详解](design/MINCO与MPC局部规划控制器从零详解.md) —— 面向初学者的原理与源码讲解。
+- [MINCO 迁移实施方案](design/迁移minco实施方案%28ai%29.md) —— 目标架构、阶段与验收（AI 生成）。
+- [局部规划器迁移 MINCO/MPC 方案](design/局部规划器迁移MINCO_MPC方案%28ai%29.md) —— 早期分阶段方案。
+- [局部规划器相关](design/局部规划器相关%28ai%29.md) —— 当前控制器与候选方案对比。
+- [SRM 仿真与导航自转控制实施方案](design/SRM仿真与导航自转控制实施方案.md) —— SRM-only 仿真、平面速度、独立自转。
+- [wz 控制迁移导航与 fakeyaw 仿真实施方案](design/wz控制迁移导航与fakeyaw仿真实施方案.md) —— 目标链路、接口改动、回退开关。
+- [导航改云台系与决策层小陀螺实施方案](design/导航改云台系与决策层小陀螺实施方案.md) —— 云台系导航与 `rotation_cmd` 的职责边界。
+- [GICP 初始重定位仿真验证方案](design/GICP初始重定位仿真验证方案.md) —— 地图对齐、误差矩阵、验收指标。
+- [仿真 LIO 前端替换 Z-LIO 实施方案](design/仿真LIO前端替换Z-LIO实施方案%28ai%29.md) —— ZLIO 接入与三级回退。
+- [Z-Localization 剩余部分整体迁移问题分析](design/Z-Localization剩余部分整体迁移问题分析%28ai%29.md) —— 迁移风险与三档路线。
+
+## records
+
+- [2026-11-14 工作区清理记录](records/2026-11-14-workspace-cleanup.md) —— 本轮数据迁移、脚本/launch/docs 重整与 Git 清理。
+- [MINCO 迁移实施记录](records/minco迁移实施记录%28ai%29.md)
+- [MINCO 实车迁移实施记录与上电验收清单](records/minco实车迁移实施记录%28ai%29.md)
+- [MINCO 脱困机制迁移实施记录](records/minco脱困机制迁移实施记录%28ai%29.md)
+- [MINCO 连续导航修复记录](records/minco连续导航修复记录%28ai%29.md)
+- [wz 控制迁移与 fakeyaw 实施记录](records/wz控制迁移与fakeyaw实施记录%28ai%29.md)
+- [SRM 仿真与自转控制实现](records/SRM仿真与自转控制实现%28ai%29.md)
+- [仿真链迁移实车实施记录](records/仿真链迁移实车实施记录%28ai%29.md)
+- [仿真云台系改造实施记录](records/仿真云台系改造实施记录%28ai%29.md)
+- [云台系改造实施记录](records/云台系改造实施记录%28ai%29.md)
+- [仿真 LIO 前端替换 Z-LIO 实施记录](records/仿真LIO前端替换Z-LIO实施记录%28ai%29.md)
+- [调试日志——by maori](records/调试日志——by%20maori.md)
+- [旧版完整 README（2026-11-14 归档）](records/README_full_20261114.md) —— 重构前的完整项目说明，仅供追溯。
+
+## archive
+
+- [TF 树与 fake 虚拟底盘详解](archive/TF与fake底盘详解%28ai%29.md) —— **历史资料**：旧步兵 fake 链路，当前 SRM 链路不适用。
+- [TDT 导航算法移植记录](archive/tdt开源.md) —— **历史资料**：上游算法调研，旧链路图已过时。
+- [`legacy_viz/`](archive/legacy_viz/) —— 旧可视化 launch/rviz 配置。
+
+## 新增文档的规则
+
+1. 先说清状态：当前架构 / 操作指南 / 设计提案 / 已完成记录 / 历史资料。
+2. 已完成的实施记录放 `records/`，不要修改成“当前架构”口吻；需要更新结论时另写一篇。
+3. 历史资料放 `archive/`，文件开头写：状态、当前是否适用、替代入口。
+4. 不把运行日志、CSV、PNG、rosbag 放进 `docs/`；实验产物放 `~/srm_nav_27_data/`。

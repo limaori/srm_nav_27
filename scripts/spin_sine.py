@@ -1,0 +1,1 @@
+manual/spin_sine.py

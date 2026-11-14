@@ -61,9 +61,7 @@ sentry_*/
 
 # 现场测试产物（波形图/CSV/日志片段），随时可删，不进版本库；
 # 需要保留的结论请写进 docs/。
-# 只忽略产物本身，保留 README 说明。
-/user_test_log/*
-!/user_test_log/README.md
+/user_test_log/
 
 # 临时工作目录（抓取的参考文章/图片、解包的第三方仓库等），仅供本地查阅，
 # 不属于工程产物，随时可删，不进版本库。
@@ -73,3 +71,22 @@ sentry_*/
 # push 会被 pre-receive 直接拒收）。默认只留本地，需要版本化的请走 Release 附件或 Git LFS。
 # 注：此规则只拦新增文件；227_1011*.pcd 等已跟踪的老文件不受影响。
 maps/pcd/*.pcd
+
+# ---------------------------------------------------------------------------
+# 2026-11-14 工作区清理：运行数据/实验产物统一移出源码树
+# 默认根目录：~/srm_nav_27_data/（SRM27_DATA_DIR 可覆盖）
+# 这些规则只防误提交；真正长期保留的数据放工作区外。
+# ---------------------------------------------------------------------------
+/data/
+/artifacts/
+/log_diag/
+/.mapcheck/
+/.tmp_diag/
+/.tmp_roslog/
+/.rm_scratch/
+/.sim_run/
+/**/.pytest_cache/
+
+# Point-LIO 生成点云：源码包只保留说明文件
+/src/srm27_navigation/point_lio/PCD/*
+!/src/srm27_navigation/point_lio/PCD/readme.md

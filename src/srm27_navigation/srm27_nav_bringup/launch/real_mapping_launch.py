@@ -86,10 +86,10 @@ def launch_setup(context):
     )
     # 累积点云默认落到与 Point-LIO 同一个文件：下游 pcd_to_mapframe.py /
     # build_pcd_from_bag.sh 都按这个路径找，换前端不该换路径。
-    default_pcd_path = str(
-        Path(get_package_share_directory("srm27_nav_bringup")).parents[4]
-        / "src/srm27_navigation/point_lio/PCD/scans.pcd"
-    )
+    data_root = Path(
+        os.environ.get("SRM27_DATA_DIR", str(Path.home() / "srm_nav_27_data"))
+    ).expanduser()
+    default_pcd_path = str(data_root / "generated_pcd" / "point_lio" / "scans.pcd")
     pcd_save_path = LaunchConfiguration("pcd_save_path").perform(context) or default_pcd_path
     lio_frontend = LaunchConfiguration("lio_frontend").perform(context)
     zlio_config = LaunchConfiguration("zlio_config").perform(context)
@@ -338,7 +338,7 @@ def generate_launch_description():
         (
             "pcd_save_path",
             "",
-            "累积点云落盘路径（默认 <ws>/src/srm27_navigation/point_lio/PCD/scans.pcd，"
+            "累积点云落盘路径（默认 ~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd，"
             "与 Point-LIO 同路径；只在 save_pcd 为真时生效）",
         ),
         (

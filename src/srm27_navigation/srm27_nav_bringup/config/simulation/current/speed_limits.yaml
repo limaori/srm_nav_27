@@ -1,0 +1,159 @@
+# =============================================================================
+# 仿真速度限幅 —— 唯一来源（single source of truth）
+# =============================================================================
+#
+# 本文件是仿真链上**所有非串口限幅**的唯一定义处。启动时由
+#   launch/nav2_stack_launch.py
+#   launch/nav_srm_simulation_launch.py
+# 合并进下面这几份参数文件，合并后各节点收到的就是这里的值：
+#   * config/simulation/nav2_params_srm.yaml         （Omni 变体）
+#   * config/simulation/nav2_params_srm_minco.yaml   （MINCO 变体）
+#   * srm27_chassis_control/config/srm_chassis_control.yaml （mux 与自转链）
+# 那几份文件里**不再写**这些键：如果两处都写、值还不一样，启动会直接报错
+# （见 scripts/srm_speed_limits.py 的冲突检查——"两处都在定义"正是要消灭的陷阱）。
+#
+# 为什么必须放一处
+# ----------------
+# 导航实际速度 = 链路上所有限幅层的最小值：
+#   控制器 FollowPath ─► velocity_smoother ─► srm_cmd_mux ─► 速度适配器 ─► Gazebo
+# 少改一层，上游提速就被下游静默吃掉，现场表现就是"改了参数没效果"。
+#
+# 语法
+# ----
+#   * 顶层键 = 参数文件里的节点名；`@minco` / `@omni` 后缀表示只对该控制器变体生效，
+#     不带 @ 的段对所有变体生效（共用节点）。
+#   * 变体由参数文件里的 FollowPath.plugin 判定，不需要在这里声明。
+#   * 段内层级与参数文件完全一致（必须带 ros__parameters，否则启动报错）。
+#
+# 当前档位（2026-11-06，按底盘实测能力写入）
+# ------------------------------------------
+# 底盘能力上限（本次写入的依据）：
+#   转动 8.5 rad/s、25 rad/s²；平动 2.6 m/s、7 m/s²
+#
+#   | 层                       | Omni 变体 | MINCO 变体 | 说明                     |
+#   |--------------------------|-----------|------------|--------------------------|
+#   | 控制器平移上限           | 1.50      | 2.60       | 最直接的"油门"（合速度） |
+#   | 控制器平移加速度上限     | 无        | 7.00       | Omni 由平滑器承担        |
+#   | 控制器角速度 / 角加速度  | 1.00      | 8.50 / 25.0| xy_only 下导航 wz 权限为 0 |
+#   | 平滑器 max_velocity      | 1.50      | 2.60 / 8.50| @fakeyaw 再钳 yaw=0      |
+#   | 平滑器 max_accel         | 3.00      | 7.00 / 25.0| @fakeyaw 再钳 yaw=0      |
+#   | mux v_max（合速度）      | 2.60      | 2.60       | cmd_vel_sim 前最后一道钳位 |
+#   | mux wz_max               | 8.50      | 8.50       | 决策层 rotation_cmd 的唯一上限闸 |
+#   ⚠ 2026-11-12 仿真云台系：导航只出平移（xy_only）。`velocity_smoother@fakeyaw`
+#     把 yaw 界钳 0（导航漏出 wz 的上游闸）；底盘 wz 只来自 mux 的 spin_topic
+#     （rotation_cmd），由 mux 的 wz_max / wz_ramp 约束，不经过控制器与平滑器。
+#   ⚠ Omni 变体仍留在 1.5 档（`--omni` 入口已删除，它只剩建图/回退用途）；
+#     mux 段是两个变体共用的，所以 mux 的上限按 MINCO 的档位给 —— 对 Omni 无害
+#     （它的控制器/平滑器自己就钳在 1.5）。
+#   ⚠ 三层现在是**同档**（控制器 = 平滑器 = mux = 底盘能力），所以"这条链的上限"
+#     就应该是 2.60 m/s / 8.50 rad/s；任何一层写小了，它立刻成为瓶颈（check 脚本会指出来）。
+#   ⚠ 2.6 m/s 下 planning_horizon = 3.0 m 的三角剖面峰值 √(7×3) ≈ 4.6 m/s，够用；
+#     制动距离 v²/(2a) ≈ 0.48 m。真正要先验证的是**控制精度**：MINCO 在 8.5 rad/s
+#     自转下的 w_jerk / 预测步长（prediction_dt 0.02 × steps 30 = 0.6 s）能否跟上。
+#
+# 改档位的步骤
+# ------------
+#   1) 只改本文件里的数字（别去改参数文件，那里已经没有这些键了）；
+#   2) 跑 `python3 src/srm27_navigation/srm27_nav_bringup/scripts/srm_speed_limits_check.py`
+#      —— 它打印各层实际生效值、指出**卡住速度的是哪一层**，并校验
+#      "控制器 ≤ 平滑器 ≤ mux" 的单调关系；
+#   3) 提速还要一起看：planning_horizon / max_linear_accel（制动距离）、
+#      行为树 RemovePassedGoals 的 radius（切弯偏移）、MINCO 的 w_jerk，
+#      见 docs/导航速度调试指南.md §6。
+#
+# 故意不放在这里的东西
+# --------------------
+#   * 实车串口 srm27_nav_protocol（max_vx/max_vy/max_wz、linear_velocity_scale）——串口那一层；
+#   * 手柄 scale_chassis / scale_chassis_turbo —— 手动链路，绕过平滑器；
+#   * 行为树 BackUp 的 backup_speed —— 脱困动作，也绕过平滑器；
+#   * 弯道降速与前瞻（curvature_*、lookahead_time、corner_speed_ratio、w_jerk）——
+#     它们不是硬上限而是"曲线"，留在各自的参数文件里，改动要点见调试指南 §4.3/§4.5/§4.6。
+
+# -----------------------------------------------------------------------------
+# 控制器（Omni 变体：nav2_params_srm.yaml）
+# -----------------------------------------------------------------------------
+controller_server@omni:
+  ros__parameters:
+    FollowPath:
+      v_linear_max: 1.5                 # 平移线速度上限（米/秒），PID 输出的饱和值
+      v_linear_min: -1.5                # 平移线速度下限（倒车同理）
+      v_angular_max: 1.0                # 自转角速度上限（弧度/秒）；导航 wz 下游恒被钳 0
+      v_angular_min: -1.0               # 自转角速度下限
+      # ↑ 注意：只抬这里不够，velocity_smoother 与 srm_cmd_mux 会把它压回去。
+
+# -----------------------------------------------------------------------------
+# 控制器（MINCO-MPC 变体：nav2_params_srm_minco.yaml）
+# 速度层 MPC 的硬约束，同时是"规划器"的速度上限：前端起停剖面按这两个值生成，
+# 校验器也按 (1 + 2%) 判定候选轨迹能否执行（超了整条丢弃、车不动）。
+# -----------------------------------------------------------------------------
+controller_server@minco:
+  ros__parameters:
+    FollowPath:
+      limits:
+        max_linear_speed: 2.60          # 平移合速度上限（米/秒）= 底盘平动能力
+        max_linear_accel: 7.0           # 平移合加速度上限（米/秒²）= 底盘平动加速度能力
+        max_angular_speed: 8.50         # 角速度上限（弧度/秒）= 底盘转动能力；xy_only 阶段权限为 0
+        max_angular_accel: 25.0         # 角加速度上限（弧度/秒²）= 底盘转动加速度能力
+
+# -----------------------------------------------------------------------------
+# 速度平滑器（两个变体各一套：控制器上限不同，平滑器必须分别跟住）
+# -----------------------------------------------------------------------------
+velocity_smoother@omni:
+  ros__parameters:
+    max_velocity: [1.5, 1.5, 0.0]       # 最大速度[x,y,yaw]，yaw 钳 0（导航 wz 恒 0）
+    min_velocity: [-1.5, -1.5, 0.0]     # 最小速度[x,y,yaw]
+    max_accel: [3.0, 3.0, 0.0]          # 最大加速度[x,y,yaw]
+    max_decel: [-3.0, -3.0, 0.0]        # 最大减速度[x,y,yaw]
+
+velocity_smoother@minco:
+  ros__parameters:
+    # 按分量钳位（scale_velocities: False），所以斜向合速度可以到 √2 × 这里的 x 值；
+    # 合速度最终由 srm_cmd_mux.v_max 兜底。
+    max_velocity: [2.6, 2.6, 8.5]       # 最大速度[x,y,yaw]（= 底盘能力）
+    min_velocity: [-2.6, -2.6, -8.5]    # 最小速度[x,y,yaw]
+    max_accel: [7.0, 7.0, 25.0]         # 最大加速度[x,y,yaw]（= 底盘能力）
+    max_decel: [-7.0, -7.0, -25.0]      # 最大减速度[x,y,yaw]
+
+# -----------------------------------------------------------------------------
+# 迁移链（fakeyaw，`config/simulation/nav2_params_srm_fakeyaw.yaml`）
+# 叠加在 `velocity_smoother@minco` 之上：平移档不动，只钉住"导航这一路不许出 wz"。
+# -----------------------------------------------------------------------------
+velocity_smoother@fakeyaw:
+  ros__parameters:
+    # 2026-11-12 仿真云台系（与实车链 config/real 对齐）：导航只出平移，yaw 界钳 0。
+    # 底盘 wz 改由**决策层**发 rotation_cmd，在 srm_cmd_mux 里合进输出，不经过平滑器。
+    # 这一层是"导航漏出 wz"的最后一道上游闸：平滑器任何 yaw 都会被削成 0，
+    # mux 还会再忽略一次并计数告警。
+    max_velocity: [2.6, 2.6, 0.0]
+    min_velocity: [-2.6, -2.6, 0.0]
+    max_accel: [7.0, 7.0, 0.0]
+    max_decel: [-7.0, -7.0, 0.0]
+
+# -----------------------------------------------------------------------------
+# 速度合成 mux（合并进 srm27_chassis_control/config/srm_chassis_control.yaml）
+# mux 是 cmd_vel_sim 的唯一发布者、仿真链最后一道钳位；留低就会把速度整个吃掉。
+# 下面是两个变体共用的值（必须 ≥ 两个控制器上限里的较大者）；
+# 若将来要让某个变体单独收紧，写成 `srm_cmd_mux@minco:` / `srm_cmd_mux@omni:` 即可。
+# 注意：mux 的限幅参数**没有**动态回调，改完必须重启。
+# -----------------------------------------------------------------------------
+# 2026-10-19：独立自转链（rotation_controller / rotation_velocity）已删除，
+# wz 只由上位机（导航栈）产生，所以这里不再有 rotation_controller 段；
+# 想让自转更慢，改下面的 wz_max（mux 是最后一道钳位）。
+srm_cmd_mux:
+  ros__parameters:
+    vx_max: 2.6                         # 前向速度上限（米/秒，按分量）
+    vy_max: 2.6                         # 左向速度上限（米/秒，按分量）
+    v_max: 2.6                          # 平移合速度上限（米/秒，按向量模长）
+    # 2026-11-05 曾临时压到 0.2 排查"LIO 自转时平移发散"，根因已定位为
+    # point_lio.point_filter_num 过大（32 -> 8 后位移误差 6.5x -> 0.99x），故恢复。
+    wz_max: 8.5                         # 自转角速度上限（弧度/秒；= 底盘转动能力，仿真实车同值）
+
+# -----------------------------------------------------------------------------
+# 恢复行为（behavior_server）：Spin 等的自转限幅，四份参数文件里原本都是这三个值。
+# 不是导航速度上限，放在这里只是为了"非串口限幅都能一处找到"。
+# -----------------------------------------------------------------------------
+behavior_server:
+  ros__parameters:
+    max_rotational_vel: 1.0             # 最大旋转速度（弧度/秒）
+    min_rotational_vel: 0.0             # 最小旋转速度（弧度/秒）
+    rotational_acc_lim: 3.2             # 旋转加速度上限（弧度/秒²）
