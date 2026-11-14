@@ -1,3 +1,4 @@
+#include "referee_2027.hpp"
 #include "srm27_nav_protocol.hpp"
 #include <algorithm>
 #include <atomic>
@@ -435,12 +436,24 @@ void Srm27NavProtocolNode::receiveData()
         // 8. 解析数据
         switch (cmd_id) {
           case ID_EVENT_DATA: {
-            ReceiveEventData event_data = fromVector<ReceiveEventData>(full_packet);
-            publishEventData(event_data);
+            if (receive_length_matches<ReceiveEventData2027>(header_frame.data_length)) {
+              event_data_pub_->publish(decodeEvent2027(fromVector<ReceiveEventData2027>(full_packet)));
+            } else if (receive_length_matches<ReceiveEventData>(header_frame.data_length)) {
+              auto event_data = fromVector<ReceiveEventData>(full_packet);
+              publishEventData(event_data);
+            } else {
+              RCLCPP_WARN(get_logger(), "Rejected event payload length: %u", header_frame.data_length);
+            }
           } break;
           case ID_ALL_ROBOT_HP: {
-            ReceiveAllRobotHpData all_robot_hp_data = fromVector<ReceiveAllRobotHpData>(full_packet);
-            publishAllRobotHp(all_robot_hp_data);
+            if (receive_length_matches<ReceiveAllRobotHp2027>(header_frame.data_length)) {
+              all_robot_hp_pub_->publish(decodeHp2027(fromVector<ReceiveAllRobotHp2027>(full_packet)));
+            } else if (receive_length_matches<ReceiveAllRobotHpData>(header_frame.data_length)) {
+              auto all_robot_hp_data = fromVector<ReceiveAllRobotHpData>(full_packet);
+              publishAllRobotHp(all_robot_hp_data);
+            } else {
+              RCLCPP_WARN(get_logger(), "Rejected HP payload length: %u", header_frame.data_length);
+            }
           } break;
           case ID_GAME_STATUS: {
             ReceiveGameStatusData game_status_data = fromVector<ReceiveGameStatusData>(full_packet);

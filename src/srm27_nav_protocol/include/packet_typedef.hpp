@@ -90,6 +90,30 @@ struct ReceiveAllRobotHpData
 } __attribute__((packed));
 
 // 0x0101 场地事件数据
+struct ReceiveAllRobotHp2027
+{
+  HeaderFrame frame_header;
+  uint16_t cmd_id;
+  struct
+  {
+    uint16_t ally_1_robot_hp, reserved, ally_3_robot_hp, ally_4_robot_hp;
+    int16_t damage_difference;
+    uint16_t ally_7_robot_hp, red_outpost_hp, ally_base_hp, blue_outpost_hp;
+    uint16_t enemy_base_hp, ally_control_degree, enemy_control_degree;
+  } __attribute__((packed)) data;
+  uint16_t crc;
+} __attribute__((packed));
+
+struct ReceiveEventData2027
+{
+  HeaderFrame frame_header;
+  uint16_t cmd_id;
+  struct { uint32_t event_data, event_data_2; } __attribute__((packed)) data;
+  uint16_t crc;
+} __attribute__((packed));
+static_assert(sizeof(ReceiveAllRobotHp2027) == 33);
+static_assert(sizeof(ReceiveEventData2027) == 17);
+
 struct ReceiveEventData
 {
   HeaderFrame frame_header;
