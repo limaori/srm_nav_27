@@ -75,6 +75,10 @@ install(DIRECTORY
 # 用 **独立实现** 的组帧/解析与 C++ 节点互相校验（CRC 覆盖范围、按 cmd_id 分派、
 # 槽位跳过、长度自检、seq 回绕）。参考实现在 script/test_chassis_speed_feedback.py。
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_referee_2027 test/test_referee_2027.cpp)
+  target_include_directories(test_referee_2027 PRIVATE include)
+  ament_target_dependencies(test_referee_2027 rm_decision_interfaces)
   find_package(ament_cmake_test REQUIRED)
   ament_add_test(test_feedback_protocol
     GENERATE_RESULT_FOR_RETURN_CODE_ZERO
