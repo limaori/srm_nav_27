@@ -2,6 +2,13 @@
 <sdf version='1.7'>
   <world name='default'>
     <!-- Physics -->
+    <!-- 2026-11-09：llvmpipe 软渲染环境 rtf≈0.04，1000Hz 物理让指令在 sim 时间上
+         出现 0.4s 空窗（命令超时清零、控制断续）。改为 4ms 步长 × 250Hz，
+         物理计算量降为 1/4，rtf 提升 4 倍，闭环跟踪频率得以满足。 -->
+    <physics name="default_physics" type="ignored">
+      <max_step_size>0.004</max_step_size>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
     <plugin filename="libignition-gazebo-physics-system.so" name="ignition::gazebo::systems::Physics">
     </plugin>
 

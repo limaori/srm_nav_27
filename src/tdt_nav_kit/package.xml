@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>tdt_nav_kit</name>
+  <version>0.1.0</version>
+  <description>
+    Nav2 plugins wrapping the vendored T-DT tdt-nav-kit algorithms:
+    TdtGlobalPlanner (YAstar) and TdtSmoother (MinimumSnap + SfcSquare + OSQP).
+    Upstream: https://github.com/T-DT-Algorithm-2026/tdt-nav-kit (MIT, see vendor/LICENCE),
+    pinned commit 814d5ce0237acc7faa8c070e5c5e61e2ddc81996,
+    tree 3274cebb0459c8d650466d675da6774c514bf268.
+  </description>
+  <maintainer email="srm27@example.com">SRM27 Navigation Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+  <build_depend>eigen3_cmake_module</build_depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+  <exec_depend>eigen</exec_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav2_util</depend>
+  <depend>pluginlib</depend>
+  <depend>tf2_ros</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <!-- OSQP 由 ROS 包 osqp_vendor 提供（osqp.h + libosqp）。
+       OsqpEigen 没有 rosdep key，需按 README 源码安装到 /usr/local，见 package.xml 注释。 -->
+  <depend>osqp_vendor</depend>
+
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>srm27_gazebo_simulator</exec_depend>
+  <exec_depend>srm27_nav_bringup</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <!--
+    本包**故意不**被 srm27_nav_bringup 的 package.xml 声明为 exec_depend
+    （既有文件零改动约束）。pluginlib 通过 ament resource index 发现插件，
+    只要本包已单独 build 且 install/setup 已 source 即可加载。
+    代价：rosdep、packages-up-to 构建、二进制打包都不会自动带上本包，见 README.md。
+    注意：本注释避免出现连续两个连字符，XML 注释不允许该序列。
+  -->
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

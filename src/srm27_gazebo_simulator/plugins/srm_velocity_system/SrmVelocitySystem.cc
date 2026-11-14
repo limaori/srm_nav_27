@@ -86,6 +86,12 @@ class SrmVelocitySystemPrivate
   /// \brief 最近一次收到命令的仿真时间。
   public: std::chrono::steady_clock::duration lastCommandSimTime{0};
 
+  /// \brief 翻车检测：开始倾斜的时刻（仿真时间），0 表示未倾斜。
+  public: std::chrono::steady_clock::duration flipSimTime{0};
+
+  /// \brief 翻车检测：是否已在持续倾斜状态。
+  public: bool flipping{false};
+
   /// \brief 是否已经收到过至少一条命令。
   public: bool commandReceived{false};
 
@@ -303,6 +309,15 @@ void SrmVelocitySystem::Configure(
 void SrmVelocitySystemPrivate::OnCmdVel(const ignition::msgs::Twist &_msg)
 {
   std::lock_guard<std::mutex> lock(this->targetVelMutex);
+  // 诊断（节流）：每秒至多 1 条，确认 ign 链路是否把指令送达插件。
+  static std::chrono::steady_clock::time_point lastLog;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - lastLog > std::chrono::seconds(1))
+  {
+    lastLog = now;
+    ignmsg << "[srm-vel] 收到指令 vx=" << _msg.linear().x()
+           << " vy=" << _msg.linear().y() << std::endl;
+  }
   this->targetVel = _msg;
 }
 
@@ -419,6 +434,65 @@ void SrmVelocitySystem::PreUpdate(
   const auto angularVel =
       _ecm.Component<ignition::gazebo::components::AngularVelocity>(
           this->dataPtr->chassisLink)->Data();
+
+  // 【2026-11-09】翻车自动复位：车平面驱动爬坡/碰撞会翻倒，翻倒后
+  // SetLinearVelocity 被接触约束完全压制（twist 恒 0，导航必死）。
+  // 倾角 >25° 持续 2 sim 秒则扶正：保留 xy 与 yaw，roll/pitch 归零，
+  // 抬回安全高度并清空残余速度。
+  const auto wpComp =
+      _ecm.Component<ignition::gazebo::components::WorldPose>(
+          this->dataPtr->chassisLink);
+  if (wpComp)
+  {
+    const ignition::math::Quaterniond rot(wpComp->Data().Rot());
+    const double roll = std::atan2(
+        2.0 * (rot.W() * rot.X() + rot.Y() * rot.Z()),
+        1.0 - 2.0 * (rot.X() * rot.X() + rot.Y() * rot.Y()));
+    const double pitch = std::asin(std::max(-1.0, std::min(1.0,
+        2.0 * (rot.W() * rot.Y() - rot.Z() * rot.X()))));
+    const double tilt = std::max(std::abs(roll), std::abs(pitch));
+    if (tilt > 0.44)  // ~25°
+    {
+      if (!this->dataPtr->flipping)
+      {
+        this->dataPtr->flipping = true;
+        this->dataPtr->flipSimTime = _info.simTime;
+      }
+      if (_info.simTime - this->dataPtr->flipSimTime >
+          std::chrono::duration<double>(2.0))
+      {
+        ignition::math::Pose3d upright(
+            wpComp->Data().Pos().X(), wpComp->Data().Pos().Y(), 0.30,
+            0.0, 0.0, rot.Yaw());
+        // ign-gazebo 6 的 Link 没有 SetWorldPose，直接改 WorldPose 组件并标记变更。
+        auto poseMut =
+            _ecm.Component<ignition::gazebo::components::WorldPose>(
+                this->dataPtr->chassisLink);
+        if (poseMut)
+        {
+          poseMut->Data() = upright;
+          _ecm.SetChanged(
+              this->dataPtr->chassisLink,
+              ignition::gazebo::components::WorldPose::typeId);
+        }
+        ignition::gazebo::Link chassisLink(this->dataPtr->chassisLink);
+        chassisLink.SetLinearVelocity(
+            _ecm, ignition::math::Vector3d::Zero);
+        chassisLink.SetAngularVelocity(
+            _ecm, ignition::math::Vector3d::Zero);
+        {
+          std::lock_guard<std::mutex> lock(this->dataPtr->targetVelMutex);
+          this->dataPtr->targetVel.clear_linear();
+          this->dataPtr->targetVel.clear_angular();
+        }
+        this->dataPtr->flipping = false;
+        ignwarn << "SrmVelocitySystem: 检测到翻车（倾角 "
+                << tilt * 57.2958 << "°），已自动复位。" << std::endl;
+      }
+      return;  // 翻车等待复位期间不施加平面速度
+    }
+    this->dataPtr->flipping = false;
+  }
 
   // Gazebo 的 SetLinearVelocity / SetAngularVelocity 接受的就是 Link 坐标系
   // （车体系）速度，因此合成指令不需要再做世界系转换；转换只能做一次。

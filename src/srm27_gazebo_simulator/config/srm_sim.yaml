@@ -33,6 +33,6 @@ velocity:
   # Gazebo Transport 真值里程计话题（相对模型名），桥接为 chassis_odometry_gt。
   odom_topic: "odometry"
   # 适配器与执行插件的命令超时（秒）；输入中断后清零全部速度。
-  command_timeout: 0.1
+  command_timeout: 2.0 # 2026-11-09：0.1→2.0。llvmpipe 环境 rtf≈0.04，controller 20Hz 墙钟指令的 sim 间隔≈0.4s，0.1s(sim) 超时让插件 90% 时间清零，车蠕动。
   # 适配器向 Gazebo 转发命令的频率（Hz）。
   publish_rate: 200.0
