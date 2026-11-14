@@ -76,6 +76,9 @@ public:
   BT::BehaviorTreeFactory& factory();
 
 protected:
+  // Join the worker before a derived server destroys its callback state.
+  void stopExecution();
+
   /**
    * @brief Callback invoked when a goal is received and before the tree is created.
    * If it returns false, the goal will be rejected.

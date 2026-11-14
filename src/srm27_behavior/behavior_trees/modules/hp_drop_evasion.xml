@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <!-- 掉血差分反制模块 -->
+  <BehaviorTree ID="HpDropEvasion">
+    <ReactiveSequence name="HpDropEvasionSeq">
+      <IsHpDropping hp_drop_threshold="{hp_drop_threshold}"
+                    hold_duration_ms="{hold_duration_ms}"
+                    key_port="{@referee_robotStatus}"/>
+      <SubTree ID="EvasionSpin" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="{evasion_waypoint}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucHpDropDefense">
+    <ReactiveSequence name="RmucHpDropDefenseSeq">
+      <IsHpDropping hp_drop_threshold="10"
+                    hold_duration_ms="2500"
+                    key_port="{@referee_robotStatus}"/>
+      <Script code="@decision_mode := 'evade'; @decision_reason := 'rapid_hp_loss'"/>
+      <SetSentryPosture _successIf="@dry_run" posture="DEFENSE"
+                        fallback_posture="MOVE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="EvasionSpin" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="rmuc_hp_evasion" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

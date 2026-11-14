@@ -66,14 +66,15 @@ geometry_msgs::msg::Twist makeTwist(double _vx, double _vy, double _wz)
 
 /// \brief 用一组给定参数构造检查器；参数通过节点 override 提供。
 std::shared_ptr<srm27_nav_plugins::OmniStoppedGoalChecker> makeChecker(
-  double _xy_tolerance, double _yaw_tolerance, double _trans_stopped)
+  double _xy_tolerance, double _yaw_tolerance, double _trans_stopped, bool _stateful = false)
 {
   const std::string name = "test_goal_checker";
   rclcpp::NodeOptions options;
   options.parameter_overrides(
     {{name + ".xy_goal_tolerance", _xy_tolerance},
      {name + ".yaw_goal_tolerance", _yaw_tolerance},
-     {name + ".trans_stopped_velocity", _trans_stopped}});
+     {name + ".trans_stopped_velocity", _trans_stopped},
+     {name + ".stateful", _stateful}});
   auto node =
     std::make_shared<rclcpp_lifecycle::LifecycleNode>("goal_checker_test_node", "", options);
 
@@ -83,6 +84,23 @@ std::shared_ptr<srm27_nav_plugins::OmniStoppedGoalChecker> makeChecker(
 }
 
 }  // namespace
+
+TEST(OmniStoppedGoalCheckerTest, StatefulCaptureCompletesAfterBrakeDrift)
+{
+  auto checker = makeChecker(0.50, 6.28, 0.10, true);
+  const auto goal = makePose(1.0, 0.0);
+  EXPECT_FALSE(checker->isGoalReached(makePose(0.501, 0.0), goal, makeTwist(.2, 0., 2.5)));
+  EXPECT_TRUE(checker->isGoalReached(makePose(0.495, 0.0), goal, makeTwist(0., 0., 2.5)));
+  checker->reset();
+  EXPECT_FALSE(checker->isGoalReached(makePose(0.495, 0.0), goal, makeTwist(0., 0., 2.5)));
+}
+
+TEST(OmniStoppedGoalCheckerTest, StatefulCaptureDoesNotFollowAChangedGoal)
+{
+  auto checker = makeChecker(0.50, 6.28, 0.10, true);
+  EXPECT_TRUE(checker->isGoalReached(makePose(.9, 0.), makePose(1., 0.), makeTwist(0., 0., 2.5)));
+  EXPECT_FALSE(checker->isGoalReached(makePose(.9, 0.), makePose(3., 0.), makeTwist(0., 0., 2.5)));
+}
 
 /// \brief 角速度任意大都不影响到达判定 —— 本插件的存在理由。
 TEST(OmniStoppedGoalCheckerTest, AngularVelocityIsIrrelevant)

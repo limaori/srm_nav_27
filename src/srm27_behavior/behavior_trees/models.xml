@@ -1,3 +1,154 @@
 <root BTCPP_format="4">
-    <TreeNodesModel/>
+    <TreeNodesModel>
+        <Decorator ID="RecoveryWindow">
+            <input_port name="timeout_sec" default="25.0" type="double">Attempt budget</input_port>
+            <input_port name="retry_sec" default="15.0" type="double">Retry cooldown</input_port>
+            <input_port name="match_epoch" default="{@match_epoch}" type="int">Match epoch</input_port>
+            <output_port name="cooling" type="bool">Cooldown active</output_port>
+        </Decorator>
+        <Action ID="CalculateAttackPose">
+            <input_port name="costmap_port" default="{@nav_globalCostmap}" type="nav_msgs::msg::OccupancyGrid">GlobalCostmap port on blackboard</input_port>
+            <input_port name="enemy_pose_port" default="{@enemy_pose}" type="geometry_msgs::msg::PoseStamped">Enemy pose port on blackboard</input_port>
+            <input_port name="odom_port" default="{@nav_odometry}" type="nav_msgs::msg::Odometry">Fallback odometry port when TF is unavailable</input_port>
+            <input_port name="attack_radius" default="2.5" type="double">Desired engagement radius around enemy (m)</input_port>
+            <input_port name="num_sectors" default="36" type="int">Number of ring candidate samples</input_port>
+            <input_port name="cost_threshold" default="50" type="int">Maximum acceptable occupancy cost (0-100)</input_port>
+            <input_port name="robot_base_frame" default="base_link" type="std::string">Robot base TF frame</input_port>
+            <input_port name="transform_tolerance" default="0.5" type="double">TF lookup timeout (s)</input_port>
+            <input_port name="max_target_age_sec" default="1.5" type="double">Expire enemy_pose older than this age</input_port>
+            <input_port name="visualize" default="false" type="bool">Publish RViz MarkerArray</input_port>
+            <input_port name="topic_name" default="attack_pose_markers" type="std::string">MarkerArray topic</input_port>
+            <output_port name="goal" default="{attack_pose}" type="geometry_msgs::msg::PoseStamped">Computed attack PoseStamped</output_port>
+        </Action>
+        <Condition ID="HysteresisCheck">
+            <input_port name="exit_allowed" default="true" type="bool">Evidence required to release</input_port>
+            <input_port name="key_port" default="{@referee_robotStatus}" type="rm_decision_interfaces::msg::RobotStatus">RobotStatus port on blackboard</input_port>
+            <input_port name="metric" default="hp" type="std::string">Metric to monitor: hp|ammo|heat</input_port>
+            <input_port name="trigger_value" default="150" type="int">Entry threshold</input_port>
+            <input_port name="exit_value" default="360" type="int">Exit threshold</input_port>
+            <input_port name="trigger_when_below" default="true" type="bool">True for low-value trigger</input_port>
+            <input_port name="ignore_zero_hp" default="true" type="bool">Ignore HP==0</input_port>
+            <input_port name="match_epoch" default="{@match_epoch}" type="int">Reset history each new match</input_port>
+        </Condition>
+        <Condition ID="IsAttacked">
+            <output_port name="gimbal_yaw" default="{gimbal_yaw}" type="float">Move gimbal_yaw to the direction of the hit armor plate</output_port>
+            <output_port name="gimbal_pitch" default="{gimbal_pitch}" type="float">Move gimbal_pitch (const 0.0) to the direction of the hit armor plate</output_port>
+            <input_port name="key_port" default="{@referee_robotStatus}" type="rm_decision_interfaces::msg::RobotStatus">RobotStatus port on blackboard</input_port>
+        </Condition>
+        <Condition ID="IsGameStatus">
+            <input_port name="max_remain_time" default="420" type="int">Maximum remaining time (s)</input_port>
+            <input_port name="min_remain_time" default="0" type="int">Minimum remaining time (s)</input_port>
+            <input_port name="expected_game_progress" default="4" type="int">Expected game progress stage</input_port>
+            <input_port name="expected_game_type" default="0" type="int">Expected game type (0=any, 1=RMUC, 4=RMUL)</input_port>
+            <input_port name="key_port" default="{@referee_gameStatus}" type="rm_decision_interfaces::msg::GameStatus">GameStatus port on blackboard</input_port>
+        </Condition>
+        <Condition ID="IsHpDropping">
+            <input_port name="key_port" default="{@referee_robotStatus}" type="rm_decision_interfaces::msg::RobotStatus">RobotStatus port on blackboard</input_port>
+            <input_port name="hp_drop_threshold" default="10" type="int">Minimum HP drop between ticks</input_port>
+            <input_port name="hold_duration_ms" default="2000" type="int">Hold SUCCESS duration (ms)</input_port>
+            <input_port name="stale_reset_ms" default="800" type="int">Re-baseline window (ms)</input_port>
+            <input_port name="match_epoch" default="{@match_epoch}" type="int">Reset history each new match</input_port>
+        </Condition>
+        <Condition ID="IsInSemanticZone">
+            <input_port name="map_file" default="params/rmuc_semantic_map.yaml" type="std::string">Semantic map YAML file</input_port>
+            <input_port name="zone_type" default="" type="std::string">Optional zone type filter</input_port>
+            <input_port name="map_pose_port" default="{@nav_mapPose}" type="geometry_msgs::msg::PoseStamped">Robot map pose port</input_port>
+            <input_port name="odom_port" default="{@nav_odometry}" type="nav_msgs::msg::Odometry">Fallback odometry port</input_port>
+            <output_port name="matched_zone" default="{matched_zone}" type="std::string">Matched zone code</output_port>
+            <output_port name="zone_max_spin" default="{zone_max_spin}" type="double">Configured max spin in zone</output_port>
+        </Condition>
+        <Condition ID="IsRfidDetected">
+            <input_port name="friendly_supply_zone_exchange" default="false" type="bool">己方与兑换区重叠的补给区</input_port>
+            <input_port name="friendly_supply_zone_non_exchange" default="false" type="bool">己方与兑换区不重叠的补给区 / RMUL 补给区</input_port>
+            <input_port name="center_gain_point" default="false" type="bool">中心增益点（仅 RMUL 适用）</input_port>
+            <input_port name="friendly_fortress_gain_point" default="false" type="bool">己方堡垒增益点</input_port>
+            <input_port name="key_port" default="{@referee_rfidStatus}" type="rm_decision_interfaces::msg::RfidStatus">RfidStatus port on blackboard</input_port>
+        </Condition>
+        <Condition ID="IsStatusOK">
+            <input_port name="ammo_min" default="0" type="int">Lower then minimum ammo will return FAILURE</input_port>
+            <input_port name="heat_max" default="350" type="int">Maximum heat. NOTE: Sentry heat limit is 400</input_port>
+            <input_port name="hp_min" default="300" type="int">Minimum HP. NOTE: Sentry init/max HP is 400</input_port>
+            <input_port name="key_port" default="{@referee_robotStatus}" type="rm_decision_interfaces::msg::RobotStatus">RobotStatus port on blackboard</input_port>
+        </Condition>
+        <Action ID="MuxStopControl">
+            <input_port name="service_name" default="srm_cmd_mux/stop_all" type="std::string">Trigger service name</input_port>
+            <input_port name="ignore_unreachable" default="false" type="bool">Treat a missing mux as a failure</input_port>
+        </Action>
+        <Action ID="NavigateThroughPoses">
+            <input_port name="action_name" default="navigate_through_poses" type="std::string">Nav2 NavigateThroughPoses action name</input_port>
+            <input_port name="waypoint_group" default="" type="std::string">Named group in params/waypoints.yaml</input_port>
+            <input_port name="waypoints_config" default="{@waypoints_file}" type="std::string">Named waypoint YAML path</input_port>
+            <input_port name="frame_id" default="map" type="std::string">Target frame ID</input_port>
+            <input_port name="waypoint_file" default="" type="std::string">YAML/CSV waypoint file path</input_port>
+            <input_port name="goals" default="" type="std::string">Inline pipe-separated poses `x;y;yaw|...`</input_port>
+        </Action>
+        <Action ID="PubNav2Goal">
+            <input_port name="goal" default="0;0;0" type="geometry_msgs::msg::PoseStamped">Expected goal pose that send to nav2. Fill with format `x;y;yaw`</input_port>
+            <input_port name="waypoint_name" default="" type="std::string">Optional named waypoint from waypoints_file</input_port>
+            <input_port name="waypoints_file" default="params/waypoints.yaml" type="std::string">Named waypoints YAML path</input_port>
+            <input_port name="topic_name" default="__default__placeholder__" type="std::string">Topic name</input_port>
+        </Action>
+        <Action ID="PublishGimbalAbsolute">
+            <input_port name="topic_name" default="__default__placeholder__" type="std::string">Topic name</input_port>
+            <input_port name="duration" type="std::chrono::milliseconds">Publish duration</input_port>
+            <input_port name="gimbal_yaw" type="float">Expected Yaw angle (rad)</input_port>
+            <input_port name="gimbal_pitch" type="float">Expected Pitch angle (rad)</input_port>
+        </Action>
+        <Action ID="PublishGimbalVelocity">
+            <input_port name="duration" type="std::chrono::milliseconds">Publish duration</input_port>
+            <input_port name="yaw_min" default="-3.140000" type="float">Minimum yaw range</input_port>
+            <input_port name="pitch_min" default="-1.570000" type="float">Minimum pitch range</input_port>
+            <input_port name="yaw_max" default="3.140000" type="float">Maximum yaw range</input_port>
+            <input_port name="pitch_max" default="1.570000" type="float">Maximum pitch range</input_port>
+            <input_port name="gimbal_vel_yaw" default="0.000000" type="float">Yaw velocity (rad/s)</input_port>
+            <input_port name="topic_name" default="__default__placeholder__" type="std::string">Topic name</input_port>
+            <input_port name="gimbal_vel_pitch" default="0.000000" type="float">Pitch velocity (rad/s)</input_port>
+        </Action>
+        <Action ID="PublishRotationCmd">
+            <input_port name="spin_speed" default="0.000000" type="double">Angular Z velocity on rotation_cmd (rad/s)</input_port>
+            <input_port name="spin_mode" default="" type="std::string">Optional mode tag for behavior/spin_state</input_port>
+            <input_port name="topic_name" default="rotation_cmd" type="std::string">Twist topic name</input_port>
+        </Action>
+        <Action ID="PublishSpinSpeed">
+            <input_port name="spin_speed" default="0.000000" type="double">Angular Z velocity (rad/s)</input_port>
+            <input_port name="duration" type="std::chrono::milliseconds">Publish then sleep duration in milliseconds</input_port>
+            <input_port name="topic_name" default="__default__placeholder__" type="std::string">Topic name</input_port>
+        </Action>
+        <Action ID="PublishTwist">
+            <input_port name="v_y" default="0.000000" type="double">Linear Y velocity (m/s)</input_port>
+            <input_port name="v_yaw" default="0.000000" type="double">Angular Z velocity (rad/s)</input_port>
+            <input_port name="v_x" default="0.000000" type="double">Linear X velocity (m/s)</input_port>
+            <input_port name="duration" type="std::chrono::milliseconds">Publish then sleep duration in milliseconds</input_port>
+            <input_port name="topic_name" default="__default__placeholder__" type="std::string">Topic name</input_port>
+        </Action>
+        <Decorator ID="RateController">
+            <input_port name="hz" default="10.000000" type="double">Rate</input_port>
+        </Decorator>
+        <Control ID="RecoveryNode">
+            <input_port name="num_attempts" default="999" type="int">Number of retries</input_port>
+        </Control>
+        <Action ID="SendNav2Goal">
+            <input_port name="goal" default="0;0;0" type="geometry_msgs::msg::PoseStamped">Expected goal pose that send to nav2. Fill with format `x;y;yaw`</input_port>
+            <input_port name="action_name" type="std::string">Action server name</input_port>
+            <input_port name="waypoint_name" default="" type="std::string">Named waypoint, overriding inline goal</input_port>
+            <input_port name="waypoints_file" default="{@waypoints_file}" type="std::string">Named waypoint YAML path</input_port>
+            <input_port name="tracker_port" default="{@nav_spin_tracker}" type="std::shared_ptr&lt;srm27_behavior::NavigationSpinTracker&gt;">Shared navigation tracker</input_port>
+        </Action>
+        <Action ID="SetSentryPosture">
+            <input_port name="posture" default="MOVE" type="std::string">Desired RMUC posture: MOVE|ATTACK|DEFENSE or 0|1|2</input_port>
+            <input_port name="fallback_posture" default="" type="std::string">Optional fallback posture when desired approaches 180s cap</input_port>
+            <input_port name="cooldown_sec" default="5.0" type="double">Minimum interval between switches (s)</input_port>
+            <input_port name="degrade_limit_sec" default="175.0" type="double">Cumulative threshold before fallback (s)</input_port>
+            <input_port name="reset" default="false" type="bool">Reset timers and posture to MOVE(0)</input_port>
+            <input_port name="topic_name" default="sentry/desired_posture" type="std::string">UInt8 posture topic</input_port>
+            <output_port name="active_posture" default="{@current_posture}" type="int">Currently active posture ID</output_port>
+        </Action>
+        <Decorator ID="TickAfterTimeout">
+            <input_port name="timeout" type="float">time in s to wait before ticking child again</input_port>
+        </Decorator>
+        <Decorator ID="NavigationTransitionGate">
+            <input_port name="timeout_sec" default="{@navigation_timeout}" type="double">Per-attempt goal budget</input_port>
+            <input_port name="hold_success" default="true" type="bool">Hold the reached point until preempted; false for repeating routes</input_port>
+        </Decorator>
+    </TreeNodesModel>
 </root>

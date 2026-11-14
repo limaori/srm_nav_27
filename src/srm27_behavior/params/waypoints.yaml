@@ -1,0 +1,85 @@
+# 2027 哨兵全局命名航点配置 (RMUL & RMUC 共用)
+# 所有坐标均在 map 坐标系下；上场前只需标定此文件，无需修改 C++ 或行为树 XML 结构。
+frame_id: map
+
+named_waypoints:
+  # --- RMUL 3v3 ---
+  rmul_supply:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  rmul_home_highland:  # UL 己方高地控区预案，按实图标定
+    x: 2.0
+    y: -1.0
+    yaw: 0.0
+  rmul_supply_shelter:  # 回补超时暂避；标定在己方安全区，不等同于补给 RFID
+    x: 1.0
+    y: 0.0
+    yaw: 0.0
+  rmul_evasion:
+    x: 3.8
+    y: -2.8
+    yaw: 0.0
+  rmul_center:
+    x: 4.5
+    y: -3.2
+    yaw: 0.0
+
+  # --- RMUC 7v7 ---
+  rmuc_supply:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  rmuc_base_defense:
+    x: 0.8
+    y: 0.0
+    yaw: 0.0
+  rmuc_own_outpost_control:  # 己方前哨阵地的中央高地/前哨增益点，示例
+    x: 3.5
+    y: 0.0
+    yaw: 0.0
+  rmuc_enemy_outpost_control:  # 对方前哨阵地的合法增益点，示例
+    x: 5.0
+    y: 1.2
+    yaw: 0.0
+  rmuc_enemy_base_control:  # 对方基地阵地的合法增益点，默认不启用
+    x: 6.0
+    y: 0.0
+    yaw: 0.0
+  rmuc_hp_evasion:
+    x: 2.5
+    y: 1.5
+    yaw: 0.0
+  rmuc_outpost_fallback:
+    x: 6.2
+    y: 1.8
+    yaw: 0.0
+  rmuc_fortress_fallback:
+    x: 2.0
+    y: 0.0
+    yaw: 0.0
+
+waypoint_groups:
+  # RMUL 中心控制区多点巡防
+  rmul_patrol:
+    - {x: 4.65, y: -3.50, yaw: 0.0}
+    - {x: 4.20, y: -3.10, yaw: 0.0}
+    - {x: 4.50, y: -3.00, yaw: 0.0}
+
+  # RMUC 0x000D 开关触发前哨推进点
+  rmuc_outpost_push:
+    - {x: 6.20, y: 1.80, yaw: 0.0}
+    - {x: 6.80, y: 0.50, yaw: 0.0}
+    - {x: 6.00, y: -1.20, yaw: 0.0}
+
+  # RMUC 前期中场/高地巡逻
+  rmuc_early_patrol:
+    - {x: 5.00, y: 1.20, yaw: 0.0}
+    - {x: 4.20, y: -1.20, yaw: 0.0}
+    - {x: 3.50, y: 0.00, yaw: 0.0}
+
+  # RMUC 残局/失前哨后堡垒联防点
+  rmuc_fortress_hold:
+    - {x: 2.00, y: 0.00, yaw: 0.0}
+    - {x: 2.40, y: 0.80, yaw: 0.0}
+    - {x: 2.40, y: -0.80, yaw: 0.0}

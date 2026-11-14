@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <!-- 运动与语义联合自转仲裁模块:
+       1. 坡道/隧道等语义区优先限速 (通常 0.0 rad/s)
+       2. 到达目标点 (@nav_arrived == true) -> 快速转 (@spin_arrived_speed)
+       3. 前往目标点/巡航中 (@nav_arrived == false) -> 慢速转 (@spin_moving_speed)
+       所有转速与到点半径均由 params/sentry_behavior.yaml 注入且支持 ros2 param set 热更新 -->
+
+  <BehaviorTree ID="SemanticSpinGuard">
+    <Sequence>
+      <Fallback>
+        <IsInSemanticZone map_file="{semantic_map_file}"
+                          zone_type="slope"
+                          matched_zone="{matched_zone}"
+                          zone_max_spin="{zone_max_spin}"/>
+        <IsInSemanticZone map_file="{semantic_map_file}"
+                          zone_type="tunnel"
+                          matched_zone="{matched_zone}"
+                          zone_max_spin="{zone_max_spin}"/>
+      </Fallback>
+      <PublishRotationCmd _successIf="@dry_run" spin_speed="{zone_max_spin}"
+                          spin_mode="SEMANTIC_ZONE"
+                          topic_name="rotation_cmd"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="SpinArbitration">
+    <Fallback name="MotionSpinArbitration">
+      <SubTree ID="SemanticSpinGuard" semantic_map_file="{semantic_map_file}"/>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run" spin_speed="{@spin_arrived_speed}"
+                            spin_mode="ARRIVED_FAST"
+                            topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run" spin_speed="{@spin_moving_speed}"
+                          spin_mode="MOVING_SLOW"
+                          topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="SupplySpin">
+    <Fallback name="SupplySpinArbitration">
+      <SubTree ID="SemanticSpinGuard" semantic_map_file="{semantic_map_file}"/>
+      <Sequence name="ArrivedSupplySpin">
+        <ScriptCondition code="@rfid_supply || @nav_arrived"/>
+        <PublishRotationCmd _successIf="@dry_run" spin_speed="{@spin_supply_speed}"
+                            spin_mode="SUPPLY_HOLD"
+                            topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run" spin_speed="{@spin_moving_speed}"
+                          spin_mode="SUPPLY_MOVE"
+                          topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="EvasionSpin">
+    <Fallback name="EvasionSpinArbitration">
+      <SubTree ID="SemanticSpinGuard" semantic_map_file="{semantic_map_file}"/>
+      <PublishRotationCmd _successIf="@dry_run" spin_speed="{@spin_evasion_speed}"
+                          spin_mode="HP_DROP_EVASION"
+                          topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+</root>

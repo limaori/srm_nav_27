@@ -13,6 +13,7 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 
 # ---------------------------------------------------------------- 纯逻辑核心
@@ -36,6 +37,7 @@ target_link_libraries(cmd_mux
   ${geometry_msgs_TARGETS}
   ${diagnostic_msgs_TARGETS}
   ${std_srvs_TARGETS}
+  ${std_msgs_TARGETS}
   ${rcl_interfaces_TARGETS}
 )
 install(TARGETS cmd_mux DESTINATION lib/${PROJECT_NAME})

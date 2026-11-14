@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4">
+  <!-- 控制区需持续激活；弹量耗尽也能控区，不回补买弹。 -->
+  <BehaviorTree ID="RmulControlHold">
+    <ReactiveSequence>
+      <Script code="@decision_mode := 'control'; @decision_reason := 'ul_continuous_control'"/>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="{waypoint_name}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

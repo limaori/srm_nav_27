@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <!-- 代价地图动态接敌模块 (遵循 赶路慢转/到点快转 运动仲裁) -->
+  <BehaviorTree ID="DynamicAttackEngagement">
+    <ReactiveSequence name="DynamicAttackEngagementSeq">
+      <CalculateAttackPose topic_name="attack_pose_markers"
+                           attack_radius="{attack_radius}"
+                           num_sectors="36"
+                           cost_threshold="50"
+                           robot_base_frame="base_link"
+                           max_target_age_sec="1.5"
+                           visualize="true"
+                           goal="{attack_pose}"/>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal goal="{attack_pose}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucDynamicAttackEngagement">
+    <ReactiveSequence name="RmucDynamicAttackEngagementSeq">
+      <CalculateAttackPose topic_name="attack_pose_markers"
+                           attack_radius="{attack_radius}"
+                           num_sectors="36"
+                           cost_threshold="50"
+                           robot_base_frame="base_link"
+                           max_target_age_sec="1.5"
+                           visualize="true"
+                           goal="{attack_pose}"/>
+      <SetSentryPosture _successIf="@dry_run" posture="ATTACK"
+                        fallback_posture="MOVE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal goal="{attack_pose}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

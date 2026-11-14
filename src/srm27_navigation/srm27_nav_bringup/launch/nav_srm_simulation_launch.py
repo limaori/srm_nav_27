@@ -431,6 +431,7 @@ def generate_launch_description():
         ),
         condition=IfCondition(start_chassis_control),
         launch_arguments={
+            "decision_required": LaunchConfiguration("decision_required"),
             "namespace": namespace,
             "use_sim_time": use_sim_time,
             # 显式传底盘控制自己的参数文件：底盘限速（vx_max/vy_max/v_max/wz_max）与超时
@@ -468,6 +469,7 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
+    ld.add_action(DeclareLaunchArgument("decision_required", default_value="true"))
 
     ld.add_action(
         DeclareLaunchArgument(

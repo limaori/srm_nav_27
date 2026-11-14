@@ -72,7 +72,8 @@
 # 用法:
 #   ./script/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
 #   ./script/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
-#   ./script/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
+#   ./script/start_real_nav.sh --chassis-spin 0.3     # rotation_cmd -> mux -> 底盘
+#   ./script/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
 #   ./script/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
 #   ./script/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
 #   ./script/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
@@ -317,6 +318,7 @@ PRIOR_PCD_MANIFEST="${PRIOR_PCD_MANIFEST:-}"
 WORLD_ARG="${WORLD:-}"
 # 自定义 RViz 配置（与 start_sim_nav.sh 同名）。
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
+BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
 
 # 云台关节角回传话题：0x0010 第 4 个字段已改为 chassis_to_gimbal_yaw，
 # srm27_nav_protocol 会据此发出 gimbal_joint_angle（云台相对底盘、弧度）。
@@ -410,6 +412,7 @@ CHASSIS_PATTERN='[s]rm27_nav_protocol'
 NAV_PATTERN='[n]av_(srm_real|2_stack)_launch\.py'
 RVIZ_PATTERN='[r]viz_launch\.py'
 JOY_PATTERN='[j]oy_teleop_launch\.py'
+BEHAVIOR_PATTERN='[s]rm27_behavior_launch\.py|[s]rm27_behavior_server'
 
 # ---------- 帮助 ----------
 usage() {
@@ -540,6 +543,8 @@ stop_real_nav() {
     "$NAV_PATTERN"
     "$RVIZ_PATTERN"
     "$JOY_PATTERN"
+    "$BEHAVIOR_PATTERN"
+    '[s]rm27_behavior'
     '[n]av2_container'
     '[p]oint_lio'
     '[l]oam_interface'
@@ -688,6 +693,8 @@ while [ $# -gt 0 ]; do
                         GIMBAL_SPIN_WZ="$GIMBAL_SPIN_DEFAULT"; shift
                       fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_CLI_GIVEN=1; shift ;;
+    --behavior)       BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
+    --no-behavior)    BEHAVIOR_TREE=""; shift ;;
     --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"; shift 2 ;;
     --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; shift ;;
     --lio-frontend)   LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"
@@ -1512,6 +1519,11 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD use_chassis_mux:=$Z_MUX_ARG"
   NAV_CMD="$NAV_CMD mux_nav_topic:=cmd_vel_nav_body"
   NAV_CMD="$NAV_CMD mux_output_topic:=cmd_vel_chassis"
+  if [ -n "$BEHAVIOR_TREE" ]; then
+    NAV_CMD="$NAV_CMD decision_required:=true"
+  else
+    NAV_CMD="$NAV_CMD decision_required:=false"
+  fi
   # 空值绝对不能传: ros2 launch 会报 malformed launch argument 'gimbal_joint_topic:='
   # 并直接退出 —— 表现是整个 nav2 栈一个节点都不起、launch.log 是 0 字节。
   # 没接云台角回传时干脆不传这个参数, 让 launch 用自己的默认值 ('')。
@@ -1570,6 +1582,14 @@ JOY_CMD="ros2 launch srm27_nav_bringup joy_teleop_launch.py"
 [ -n "$NS_ARG" ] && JOY_CMD="$JOY_CMD $NS_ARG"
 JOY_CMD="$JOY_CMD use_sim_time:=False"
 JOY_CMD="$JOY_CMD joy_vel:=cmd_vel_chassis joy_config_file:=$(q "$PARAMS_FILE")"
+
+# 7) 决策行为树（可选，加 --behavior <tree> 时拉起）
+BEHAVIOR_CMD=""
+if [ -n "$BEHAVIOR_TREE" ]; then
+  BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py"
+  [ -n "$NS_ARG" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD $NS_ARG"
+  BEHAVIOR_CMD="$BEHAVIOR_CMD use_sim_time:=False target_tree:=${BEHAVIOR_TREE} log_level:=$LOG_LEVEL"
+fi
 
 # ---------- 配置摘要 ----------
 if [ "$SLAM_ON" = "1" ]; then
@@ -1762,6 +1782,9 @@ if [ "$USE_RVIZ" = "1" ]; then
 fi
 if [ "$USE_JOY" = "1" ]; then
   add_step "SRM27 手柄遥控" "$JOY_PATTERN" "$JOY_CMD"
+fi
+if [ -n "$BEHAVIOR_CMD" ]; then
+  add_step "SRM27 决策行为树 (${BEHAVIOR_TREE})" "$BEHAVIOR_PATTERN" "$BEHAVIOR_CMD"
 fi
 
 TOTAL=${#STEP_TITLES[@]}

@@ -35,6 +35,7 @@ srm_cmd_mux:
     # 输出：mux 是它**唯一**的发布者。
     # 仿真 = cmd_vel_sim（速度适配器订阅）；实车入口会重写为 cmd_vel_chassis（串口节点订阅）。
     output_topic: "cmd_vel_sim"
+    decision_required: true             # 决策许可缺失/超时锁车；纯手动导航显式关闭
     publish_rate: 200.0                   # 输出频率（Hz）
     # 超时清零：两路各自计时（方案 §4.3）。
     nav_timeout: 0.3                      # 导航输入超时（s）-> 平移清零（wz 不受影响）
