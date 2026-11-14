@@ -1,0 +1,29 @@
+# RMUL 2027 (3v3) 语义地图配置 (示例多边形, 上场前请按实际建图 map 坐标系坐标标定替换)
+frame_id: map
+zones:
+  - code: rmul_slope_center
+    type: slope
+    max_spin: 0.0
+    polygon:
+      - [100.0, 100.0]
+      - [102.0, 100.0]
+      - [102.0, 102.0]
+      - [100.0, 102.0]
+
+  - code: rmul_center_gain
+    type: center
+    max_spin: 5.5
+    polygon:
+      - [3.5, -4.5]
+      - [5.5, -4.5]
+      - [5.5, -2.5]
+      - [3.5, -2.5]
+
+  - code: rmul_supply_zone
+    type: supply
+    max_spin: 2.0
+    polygon:
+      - [-1.0, -1.0]
+      - [1.0, -1.0]
+      - [1.0, 1.0]
+      - [-1.0, 1.0]

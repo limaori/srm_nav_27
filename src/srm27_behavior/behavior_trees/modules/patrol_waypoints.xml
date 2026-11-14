@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4">
+  <BehaviorTree ID="PatrolWaypoints">
+    <ReactiveSequence>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate hold_success="false">
+        <NavigateThroughPoses action_name="navigate_through_poses"
+                              waypoint_group="{waypoint_group}" frame_id="map"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

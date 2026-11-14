@@ -47,6 +47,9 @@ void OmniStoppedGoalChecker::initialize(
   // （在 ROS 参数语义里做这个检查是不可靠的：未声明的键不会成为参数）。
   (void)logger_;
 
+  nav2_util::declare_parameter_if_not_declared(
+    node, plugin_name + ".stateful", rclcpp::ParameterValue(false));
+  node->get_parameter(plugin_name + ".stateful", stateful_);
   node->get_parameter(plugin_name + ".xy_goal_tolerance", xy_goal_tolerance_);
   node->get_parameter(plugin_name + ".yaw_goal_tolerance", yaw_goal_tolerance_);
   node->get_parameter(plugin_name + ".trans_stopped_velocity", trans_stopped_velocity_);
@@ -64,9 +67,7 @@ void OmniStoppedGoalChecker::initialize(
 
 void OmniStoppedGoalChecker::reset()
 {
-  // 本类不保存任何跨调用状态：每次判定都只用传进来的位姿与速度。
-  // （Nav2 的 SimpleGoalChecker 有 stateful 缓存在目标位姿的语义，本类不需要，
-  //   因为 controller_server 每个周期都会把当前 FollowPath 的末点一并传进来。）
+  xy_reached_ = false;
 }
 
 bool OmniStoppedGoalChecker::isGoalReached(
@@ -75,8 +76,14 @@ bool OmniStoppedGoalChecker::isGoalReached(
 {
   const double dx = goal_pose.position.x - query_pose.position.x;
   const double dy = goal_pose.position.y - query_pose.position.y;
-  if (std::hypot(dx, dy) > xy_goal_tolerance_) {
-    return false;
+  if (goal_pose.position.x != last_goal_.x || goal_pose.position.y != last_goal_.y) {
+    xy_reached_ = false;
+  }
+  last_goal_ = goal_pose.position;
+  if (!stateful_ || !xy_reached_) {
+    if (std::hypot(dx, dy) > xy_goal_tolerance_) { return false; }
+    // Match Nav2's configured stateful XY capture while the chassis brakes.
+    xy_reached_ = true;
   }
 
   // 航向只作**位姿**比较（实车把 yaw_goal_tolerance 取到 6.28 = 不约束朝向，

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4">
+  <!-- 自动许可与人工 stop_all 独立；决策永不调用 resume_all。 -->
+  <BehaviorTree ID="GameLifecycleGate">
+    <Sequence>
+      <Script code="@motion_allowed := false; @decision_mode := 'wait'; @decision_reason := 'inputs_or_match_gate'"/>
+      <ScriptCondition code="@inputs_ready &amp;&amp; @status_valid &amp;&amp; @chassis_enabled &amp;&amp; @hp > 0 &amp;&amp; @waypoints_calibrated &amp;&amp; (@dry_run || @guard_ready)"/>
+      <IsGameStatus expected_game_type="{expected_game_type}" expected_game_progress="4"
+                    min_remain_time="1" max_remain_time="{max_remain_time}"/>
+      <Script code="@motion_allowed := true"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="GameLifecycleGateRmuc">
+    <SubTree ID="GameLifecycleGate" expected_game_type="1" max_remain_time="420"/>
+  </BehaviorTree>
+</root>

@@ -1611,8 +1611,6 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   const geometry_msgs::msg::PoseStamped & _pose, const geometry_msgs::msg::Twist & _velocity,
   nav2_core::GoalChecker * _goal_checker)
 {
-  (void)_pose;
-
   const double control_begin = steadyNow();
   auto node = parent_.lock();
   if (!node) {
@@ -1780,7 +1778,19 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   {
     double distance_to_goal = std::numeric_limits<double>::infinity();
     if (!planning_path_.empty()) {
-      const Eigen::Vector2d position(state.x, state.y);
+      // GoalChecker uses measured TF pose; extrapolated odometry can stop us before that pose enters tolerance.
+      auto measured_pose = _pose;
+      if (_pose.header.frame_id != planning_frame_) {
+        if (!tf_) { return fail("TF buffer unavailable for terminal pose"); }
+        try {
+          const auto transform = tf_->lookupTransform(planning_frame_, _pose.header.frame_id, tf2::TimePointZero);
+          tf2::doTransform(_pose, measured_pose, transform);
+        } catch (const tf2::TransformException & exception) {
+          return fail(std::string("terminal pose transform failed: ") + exception.what());
+        }
+      }
+      const Eigen::Vector2d position(measured_pose.pose.position.x, measured_pose.pose.position.y);
+      if (!position.allFinite()) { return fail("non-finite terminal pose"); }
       distance_to_goal = (planning_path_.back() - position).norm();
     }
     // 进入阈值与目标检查器同源：优先读它的 xy 容差，读不到才退回 terminal_reached_radius。

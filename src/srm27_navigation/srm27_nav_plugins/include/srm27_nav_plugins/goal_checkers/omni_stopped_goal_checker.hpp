@@ -44,10 +44,12 @@ namespace srm27_nav_plugins
 /// 判定条件（全部满足才算到达）：
 ///  1. 平面距离 `hypot(dx, dy) <= xy_goal_tolerance`；
 ///  2. 航向差 `|Δyaw| <= yaw_goal_tolerance`（实车取 6.28，等于不约束朝向）；
-///  3. 平动速度 `hypot(vx, vy) <= trans_stopped_velocity`
+///  3. `|vx|`、`|vy|` 分别不超过 `trans_stopped_velocity`
 ///     —— 这一条保留：它保证"到点"时车是真的停住了，而不是高速掠过目标点。
 ///
 /// `Angular velocity` 完全不出现在判定里。
+/// `stateful=true` 时同一目标只捕获一次 XY（沿用 Nav2 语义），等待平动刹停；
+/// reset 或目标位置变化清除捕获。默认 false 保留逐次检查位置的旧接口行为。
 class OmniStoppedGoalChecker : public nav2_core::GoalChecker
 {
 public:
@@ -68,6 +70,9 @@ public:
     geometry_msgs::msg::Pose & pose_tolerance, geometry_msgs::msg::Twist & vel_tolerance) override;
 
 private:
+  bool stateful_{false};
+  bool xy_reached_{false};
+  geometry_msgs::msg::Point last_goal_;
   double xy_goal_tolerance_{0.25};
   double yaw_goal_tolerance_{0.25};
   /// \brief 平动停稳阈值（m/s）；`vx`/`vy` 任一超过它就不算到达。

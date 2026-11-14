@@ -32,7 +32,7 @@ if ! [[ "$WAIT_SECONDS" =~ ^[0-9]+$ ]]; then
 fi
 
 # 本包导航入口 launch（[r]os2 的写法让 pgrep 不去匹配自己这条命令行）。
-NAV_LAUNCH_PATTERN="${NAV_LAUNCH_PATTERN:-[r]os2[[:space:]]+launch[[:space:]]+srm27_nav_bringup[[:space:]]+(nav_srm_simulation_launch|nav_simulation_launch|nav_srm_real_launch|nav2_stack_launch)\.py}"
+NAV_LAUNCH_PATTERN="${NAV_LAUNCH_PATTERN:-[r]os2[[:space:]]+launch[[:space:]]+(srm27_nav_bringup[[:space:]]+(nav_srm_simulation_launch|nav_simulation_launch|nav_srm_real_launch|nav2_stack_launch)|srm27_behavior[[:space:]]+srm27_behavior_launch)\.py}"
 
 # 孤儿兜底：Nav2 核心节点 + 本仓库导航链上会被 launch 带起来的进程。
 # ⚠ 可执行文件名和节点名不一定相同，模式里必须写**可执行文件**名，而且要容忍后缀：
@@ -40,7 +40,7 @@ NAV_LAUNCH_PATTERN="${NAV_LAUNCH_PATTERN:-[r]os2[[:space:]]+launch[[:space:]]+sr
 #   small_gicp_relocalization → 实际可执行文件是 small_gicp_relocalization_node
 #   （后者是 script/start_reloc_manual.sh 手动起重定位时用的形态，它挂在终端下、
 #     不属于任何 launch 树，只能靠这条兜底模式清除）
-ORPHAN_EXEC_PATTERN='(^|/)(controller_server|planner_server|smoother_server|behavior_server|bt_navigator|waypoint_follower|velocity_smoother|map_server|amcl|slam_toolbox|lifecycle_manager[a-z_]*|component_container(_isolated)?|static_transform_publisher|terrainAnalysis|terrainAnalysisExt|loam_interface|sensor_scan_generation|small_gicp_relocalization(_node)?|pointcloud_to_laserscan|ign_sim_pointcloud_tool|cmd_mux|fake_vel_transform_node|zlio_node|zlio_bridge\.py|imu_saturation_guard\.py|gimbal_joint_state_relay\.py|gimbal_spin_gate\.py)([[:space:]]|$)'
+ORPHAN_EXEC_PATTERN='(^|/)(controller_server|planner_server|smoother_server|behavior_server|bt_navigator|waypoint_follower|velocity_smoother|map_server|amcl|slam_toolbox|lifecycle_manager[a-z_]*|component_container(_isolated)?|static_transform_publisher|terrainAnalysis|terrainAnalysisExt|loam_interface|sensor_scan_generation|small_gicp_relocalization(_node)?|pointcloud_to_laserscan|ign_sim_pointcloud_tool|cmd_mux|fake_vel_transform_node|zlio_node|zlio_bridge\.py|imu_saturation_guard\.py|gimbal_joint_state_relay\.py|gimbal_spin_gate\.py|srm27_behavior_server|srm27_behavior_client)([[:space:]]|$)'
 
 cmdline_of() {
   tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null || true

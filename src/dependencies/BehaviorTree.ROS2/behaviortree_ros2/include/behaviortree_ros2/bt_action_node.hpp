@@ -171,6 +171,8 @@ public:
   void setActionName(const std::string& action_name);
 
 protected:
+  bool isGoalAccepted() const { return static_cast<bool>(goal_handle_); }
+
   struct ActionClientInstance
   {
     ActionClientInstance(std::shared_ptr<rclcpp::Node> node,
@@ -244,7 +246,7 @@ RosActionNode<T>::ActionClientInstance::ActionClientInstance(
     std::shared_ptr<rclcpp::Node> node, const std::string& action_name)
 {
   callback_group =
-      node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+      node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
   callback_executor.add_callback_group(callback_group, node->get_node_base_interface());
   action_client = rclcpp_action::create_client<T>(node, action_name, callback_group);
 }
@@ -382,6 +384,7 @@ inline NodeStatus RosActionNode<T>::tick()
     setStatus(NodeStatus::RUNNING);
 
     goal_received_ = false;
+    goal_handle_.reset();
     future_goal_handle_ = {};
     on_feedback_state_change_ = NodeStatus::RUNNING;
     result_ = {};
@@ -408,7 +411,7 @@ inline NodeStatus RosActionNode<T>::tick()
         };
     //--------------------
     goal_options.result_callback = [this](const WrappedResult& result) {
-      if(goal_handle_->get_goal_id() == result.goal_id)
+      if(goal_handle_ && goal_handle_->get_goal_id() == result.goal_id)
       {
         RCLCPP_DEBUG(logger(), "result_callback");
         result_ = result;
@@ -418,7 +421,7 @@ inline NodeStatus RosActionNode<T>::tick()
     //--------------------
     goal_options.goal_response_callback =
         [this](typename GoalHandle::SharedPtr const future_handle) {
-          auto goal_handle_ = future_handle.get();
+          goal_handle_ = future_handle;
           if(!goal_handle_)
           {
             RCLCPP_ERROR(logger(), "Goal was rejected by server");
@@ -444,7 +447,8 @@ inline NodeStatus RosActionNode<T>::tick()
   if(status() == NodeStatus::RUNNING)
   {
     std::unique_lock<std::mutex> lock(getMutex());
-    client_instance_->callback_executor.spin_some();
+    // Humble handles feedback before responses; drain bursts to avoid starving goal/result replies.
+    client_instance_->callback_executor.spin_all(std::chrono::milliseconds(1));
 
     // FIRST case: check if the goal request has a timeout
     if(!goal_received_)
@@ -459,6 +463,9 @@ inline NodeStatus RosActionNode<T>::tick()
       {
         if((now() - time_goal_sent_) > timeout)
         {
+          // Acceptance may have reached the server even when its response is lost.
+          lock.unlock();
+          cancelGoal();
           return CheckStatus(onFailure(SEND_GOAL_TIMEOUT));
         }
         else
@@ -482,6 +489,7 @@ inline NodeStatus RosActionNode<T>::tick()
     // SECOND case: onFeedback requested a stop
     if(on_feedback_state_change_ != NodeStatus::RUNNING)
     {
+      lock.unlock();
       cancelGoal();
       return on_feedback_state_change_;
     }
@@ -510,14 +518,22 @@ inline void RosActionNode<T>::halt()
 {
   if(status() == BT::NodeStatus::RUNNING)
   {
-    cancelGoal();
+    try {
+      cancelGoal();
+    } catch(...) {
+      resetStatus();
+      onHalt();
+      throw;
+    }
     onHalt();
   }
+  resetStatus();
 }
 
 template <class T>
 inline void RosActionNode<T>::cancelGoal()
 {
+  std::unique_lock<std::mutex> lock(getMutex());
   auto& executor = client_instance_->callback_executor;
   if(!goal_handle_)
   {
@@ -529,7 +545,7 @@ inline void RosActionNode<T>::cancelGoal()
       if(ret != rclcpp::FutureReturnCode::SUCCESS)
       {
         // In that case the goal was not accepted or timed out so probably we should do nothing.
-        return;
+        throw BT::RuntimeError("Timed out awaiting navigation goal acceptance during halt");
       }
       else
       {
@@ -544,6 +560,11 @@ inline void RosActionNode<T>::cancelGoal()
     }
   }
 
+  if(!goal_handle_ || result_.code != rclcpp_action::ResultCode::UNKNOWN)
+  {
+    return;
+  }
+
   auto& action_client = client_instance_->action_client;
 
   auto future_result = action_client->async_get_result(goal_handle_);
@@ -553,14 +574,18 @@ inline void RosActionNode<T>::cancelGoal()
 
   if(executor.spin_until_future_complete(future_cancel, server_timeout_) != SUCCESS)
   {
-    RCLCPP_ERROR(logger(), "Failed to cancel action server for [%s]",
-                 action_name_.c_str());
+    throw BT::RuntimeError("Failed to cancel action server for ", action_name_);
+  }
+
+  if(future_cancel.get()->goals_canceling.empty() &&
+     future_result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+  {
+    throw BT::RuntimeError("Cancellation rejected by ", action_name_);
   }
 
   if(executor.spin_until_future_complete(future_result, server_timeout_) != SUCCESS)
   {
-    RCLCPP_ERROR(logger(), "Failed to get result call failed :( for [%s]",
-                 action_name_.c_str());
+    throw BT::RuntimeError("Failed to finish cancellation for ", action_name_);
   }
 }
 

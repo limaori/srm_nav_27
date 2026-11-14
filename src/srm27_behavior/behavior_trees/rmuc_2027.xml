@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="rmuc_2027">
+  <!-- RMUC 2027 (7v7) 总装行为树：
+       仅描述优先级与模块装配，要临时增删策略只需注释或调整下方 SubTree 顺序；
+       具体战术块在 modules/*.xml，命名点位在 params/waypoints.yaml，
+       移动慢转/到点快转参数在 params/sentry_behavior.yaml。 -->
+
+  <BehaviorTree ID="rmuc_2027">
+    <KeepRunningUntilFailure>
+      <ForceSuccess>
+        <ReactiveSequence>
+          <SubTree ID="GameLifecycleGateRmuc"/>
+
+          <ReactiveFallback name="RmucPriorityRoot">
+            <!-- P0: 滞回回补（普通低弹回补让位于基地危机） -->
+            <SubTree ID="RmucSupplyAndResupply"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- P1: 基地低血、阵地失守或被侵入时回防 -->
+            <SubTree ID="RmucBaseDefense"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- P2: 掉血差分防御反制 -->
+            <SubTree ID="RmucHpDropDefense"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- P3: 可选接敌，先完成 enemy_pose 与禁区地图验收，再取消此注释。
+            <SubTree ID="RmucDynamicAttackEngagement" attack_radius="3.0"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+            -->
+
+            <!-- 阵地反馈可用时，以恢复己方阵地、争夺/维持控制收益为主线。 -->
+            <SubTree ID="RmucRestoreOutpost" semantic_map_file="{@uc_semantic_map_file}"/>
+            <SubTree ID="RmucEndgameBasePressure" semantic_map_file="{@uc_semantic_map_file}"/>
+            <SubTree ID="RmucCaptureOutpost" semantic_map_file="{@uc_semantic_map_file}"/>
+            <SubTree ID="RmucHoldOutposts" semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- 无阵地反馈/控区策略不适用时，使用原有分层预案。 -->
+            <!-- 0x000D 下位机前哨开关推进 -->
+            <SubTree ID="RmucOutpostPush"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- 前期高地巡逻 (前哨存活且 remain >= 240s) -->
+            <SubTree ID="RmucEarlyPatrol"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+
+            <!-- P6: 残局/失前哨堡垒联防 (赶路慢转 -> 到点快转) -->
+            <SubTree ID="RmucLateFortressHold"
+                     semantic_map_file="{@uc_semantic_map_file}"/>
+          </ReactiveFallback>
+        </ReactiveSequence>
+      </ForceSuccess>
+    </KeepRunningUntilFailure>
+  </BehaviorTree>
+</root>

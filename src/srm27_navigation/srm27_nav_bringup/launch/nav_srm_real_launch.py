@@ -399,6 +399,7 @@ def generate_launch_description():
             "spin_topic": mux_spin_topic,
             # 实车出口必须是串口节点订阅的话题。
             "output_topic": mux_output_topic,
+            "decision_required": LaunchConfiguration("decision_required"),
         }.items(),
     )
 
@@ -441,6 +442,7 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
+    ld.add_action(DeclareLaunchArgument("decision_required", default_value="true"))
 
     ld.add_action(
         DeclareLaunchArgument(

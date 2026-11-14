@@ -19,6 +19,7 @@
 #else
 #include <thread>
 #endif
+#include <atomic>
 
 // auto-generated header, created by generate_parameter_library
 #include "behaviortree_ros2/bt_executor_parameters.hpp"
@@ -53,6 +54,8 @@ struct TreeExecutionServer::Pimpl
   BT::Tree tree;
   BT::Blackboard::Ptr global_blackboard;
   bool factory_initialized_ = false;
+  std::atomic<bool> executing{false};
+  std::atomic<bool> stopping{false};
 
   rclcpp::WallTimer<rclcpp::VoidCallbackType>::SharedPtr single_shot_timer;
 };
@@ -95,7 +98,15 @@ TreeExecutionServer::TreeExecutionServer(const rclcpp::Node::SharedPtr& node)
 }
 
 TreeExecutionServer::~TreeExecutionServer()
-{}
+{
+  stopExecution();
+}
+
+void TreeExecutionServer::stopExecution()
+{
+  p_->stopping = true;
+  if(p_->action_thread.joinable()) { p_->action_thread.join(); }
+}
 
 void TreeExecutionServer::executeRegistration()
 {
@@ -131,10 +142,11 @@ TreeExecutionServer::handle_goal(const rclcpp_action::GoalUUID& /* uuid */,
   RCLCPP_INFO(kLogger, "Received goal request to execute Behavior Tree: %s",
               goal->target_tree.c_str());
 
-  if(!onGoalReceived(goal->target_tree, goal->payload))
+  if(p_->stopping || !onGoalReceived(goal->target_tree, goal->payload))
   {
     return rclcpp_action::GoalResponse::REJECT;
   }
+  if(p_->executing.exchange(true)) { return rclcpp_action::GoalResponse::REJECT; }
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -166,6 +178,7 @@ void TreeExecutionServer::handle_accepted(
 void TreeExecutionServer::execute(
     const std::shared_ptr<GoalHandleExecuteTree> goal_handle)
 {
+  auto release_execution = std::shared_ptr<void>(nullptr, [this](void*) { p_->executing = false; });
   const auto goal = goal_handle->get_goal();
   BT::NodeStatus status = BT::NodeStatus::RUNNING;
   auto action_result = std::make_shared<ExecuteTree::Result>();
@@ -212,10 +225,10 @@ void TreeExecutionServer::execute(
       {
         action_result->return_message = message;
       }
-      RCLCPP_WARN(kLogger, action_result->return_message.c_str());
+      RCLCPP_WARN(kLogger, "%s", action_result->return_message.c_str());
     };
 
-    while(rclcpp::ok() && status == BT::NodeStatus::RUNNING)
+    while(rclcpp::ok() && !p_->stopping && status == BT::NodeStatus::RUNNING)
     {
       if(goal_handle->is_canceling())
       {
@@ -249,12 +262,23 @@ void TreeExecutionServer::execute(
       }
       loop_deadline += period;
     }
+    p_->tree.haltTree();
+    if(!rclcpp::ok() || p_->stopping) {
+      onTreeExecutionCompleted(BT::NodeStatus::FAILURE, true);
+      try { goal_handle->abort(action_result); } catch(const std::exception&) {}
+      return;
+    }
   }
   catch(const std::exception& ex)
   {
+    try { p_->tree.haltTree(); } catch(const std::exception&) {}
+    onTreeExecutionCompleted(BT::NodeStatus::FAILURE, true);
     action_result->return_message = std::string("Behavior Tree exception:") + ex.what();
-    RCLCPP_ERROR(kLogger, action_result->return_message.c_str());
-    goal_handle->abort(action_result);
+    RCLCPP_ERROR(kLogger, "%s", action_result->return_message.c_str());
+    status = BT::NodeStatus::FAILURE;
+    action_result->node_status = ConvertNodeStatus(status);
+    // Mark terminal even after context shutdown; otherwise Humble's handle destructor publishes again.
+    try { goal_handle->abort(action_result); } catch(const std::exception&) {}
     return;
   }
 
@@ -276,12 +300,12 @@ void TreeExecutionServer::execute(
   // return success or aborted for the action result
   if(status == BT::NodeStatus::SUCCESS)
   {
-    RCLCPP_INFO(kLogger, action_result->return_message.c_str());
+    RCLCPP_INFO(kLogger, "%s", action_result->return_message.c_str());
     goal_handle->succeed(action_result);
   }
   else
   {
-    RCLCPP_ERROR(kLogger, action_result->return_message.c_str());
+    RCLCPP_ERROR(kLogger, "%s", action_result->return_message.c_str());
     goal_handle->abort(action_result);
   }
 }

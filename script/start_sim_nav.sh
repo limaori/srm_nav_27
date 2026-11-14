@@ -59,7 +59,8 @@
 #   ./script/start_sim_nav.sh --gimbal-spin                    # 云台自转 -1.0 rad/s (底盘不转)
 #   ./script/start_sim_nav.sh --chassis-spin --gimbal-spin     # 两个一起: 底盘 2.0 + 云台 -1.0
 #   ./script/start_sim_nav.sh --chassis-spin 3.0 --gimbal-spin 1.5   # 自己给转速
-#   ./script/start_sim_nav.sh --yaw-mode xy_only                # 显式导航只出平移 (默认)
+#   ./script/start_sim_nav.sh --behavior rmul_2027               # 同时起决策行为树
+#   ./script/start_sim_nav.sh --yaw-mode xy_only                # 导航只出平移（默认）
 #   ./script/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
 #   ./script/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
 #   ./script/start_sim_nav.sh --no-rviz                         # 只跑仿真 + 导航
@@ -227,6 +228,8 @@ GIMBAL_SPIN_DEFAULT="-1.0"                     # --gimbal-spin 不带数值时�
 
 # 自定义 RViz 配置（留空 = 用包内 rviz/nav2_default_view.rviz；--rviz-config 覆盖）
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
+BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
+BEHAVIOR_PATTERN='[s]rm27_behavior_launch\.py|[s]rm27_behavior_server'
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
@@ -321,6 +324,8 @@ while [ $# -gt 0 ]; do
                     GIMBAL_SPIN_WZ="$GIMBAL_SPIN_DEFAULT"; shift
                   fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_GIVEN=1; shift ;;
+    --behavior)   BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
+    --no-behavior) BEHAVIOR_TREE=""; shift ;;
     --verify-spin) VERIFY_SPIN=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
@@ -1158,7 +1163,18 @@ fi
 # 定位方式由 NAV_EXTRA_ARGS 统一给出 (use_pcd_localization / use_lio_odometry /
 # prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
 NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}${RVIZ_CONFIG_ARG} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE} gimbal_spin_rate:=${GIMBAL_SPIN_WZ}"
+# 自动决策模式从 mux 启动即要求许可；普通手动导航显式关闭。
+if [ -n "$BEHAVIOR_TREE" ]; then
+  NAV_CMD="$NAV_CMD decision_required:=true"
+else
+  NAV_CMD="$NAV_CMD decision_required:=false"
+fi
 start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
+
+if [ -n "$BEHAVIOR_TREE" ]; then
+  BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py namespace:=${ROBOT_NS} use_sim_time:=True target_tree:=${BEHAVIOR_TREE}"
+  start_once "SRM27 决策行为树 (${BEHAVIOR_TREE})" "$BEHAVIOR_PATTERN" "$BEHAVIOR_CMD"
+fi
 
 if [ "$VERIFY_SPIN" = "1" ]; then
   BANNER_DONE=1

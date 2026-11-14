@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <!-- 滞回回补模块 (点位由 params/waypoints.yaml 命名加载) -->
+  <BehaviorTree ID="RmulSupplyAttempt">
+    <ReactiveSequence name="RmulSupplyRecoverySeq">
+      <ReactiveFallback>
+        <ScriptCondition code="@needs_supply == true"/>
+        <HysteresisCheck metric="hp"
+                       trigger_value="{@ul_hp_trigger}"
+                       exit_value="{@ul_hp_exit}"
+                       trigger_when_below="true"
+                       exit_allowed="{@rfid_supply}"
+                       ignore_zero_hp="true"
+                       key_port="{@referee_robotStatus}"/>
+      </ReactiveFallback>
+      <Script code="@decision_mode := 'recover'; @decision_reason := 'hp_revive_or_free_ammo'"/>
+      <SubTree ID="SupplySpin" semantic_map_file="{semantic_map_file}"/>
+      <ReactiveFallback>
+        <IsRfidDetected friendly_supply_zone_non_exchange="true"
+                        key_port="{@referee_rfidStatus}"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmul_supply" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveFallback>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucSupplyAttempt">
+    <ReactiveSequence name="RmucSupplyAndResupplySeq">
+      <ScriptCondition code="@game_valid &amp;&amp; ((@remain_time >= 30) || @needs_supply)"/>
+      <ReactiveFallback>
+        <ScriptCondition code="@needs_supply == true"/>
+        <HysteresisCheck metric="hp"
+                         trigger_value="{@uc_hp_trigger}"
+                         exit_value="{@uc_hp_exit}"
+                         trigger_when_below="true"
+                         exit_allowed="{@rfid_supply}"
+                       ignore_zero_hp="true"
+                         key_port="{@referee_robotStatus}"/>
+        <Sequence>
+          <ScriptCondition code="@uc_resupply_enabled &amp;&amp; @ammo_valid &amp;&amp; @remain_time &lt;= 360"/>
+          <Inverter><SubTree ID="RmucBaseThreat"/></Inverter>
+          <HysteresisCheck metric="ammo"
+                         trigger_value="{@uc_ammo_trigger}"
+                         exit_value="{@uc_ammo_exit}"
+                         trigger_when_below="true"
+                         exit_allowed="{@rfid_supply}"
+                       ignore_zero_hp="true"
+                         key_port="{@referee_robotStatus}"/>
+        </Sequence>
+      </ReactiveFallback>
+      <SetSentryPosture _successIf="@dry_run" posture="DEFENSE"
+                        fallback_posture="MOVE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <Script code="@decision_mode := 'recover'; @decision_reason := 'hp_revive_or_free_ammo'"/>
+      <SubTree ID="SupplySpin" semantic_map_file="{semantic_map_file}"/>
+      <ReactiveFallback>
+        <IsRfidDetected friendly_supply_zone_exchange="true"
+                        friendly_supply_zone_non_exchange="true"
+                        key_port="{@referee_rfidStatus}"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_supply" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveFallback>
+    </ReactiveSequence>
+  </BehaviorTree>
+  <BehaviorTree ID="RmulSupplyRecovery">
+    <ReactiveFallback>
+      <RecoveryWindow timeout_sec="{@supply_timeout}" retry_sec="{@supply_retry}" cooling="{@supply_cooling}">
+        <SubTree ID="RmulSupplyAttempt" semantic_map_file="{semantic_map_file}"/>
+      </RecoveryWindow>
+      <ReactiveSequence>
+        <ScriptCondition code="@supply_cooling &amp;&amp; (@needs_supply || @hp &lt; @ul_hp_exit)"/>
+        <Script code="@decision_mode := 'shelter'; @decision_reason := 'supply_timeout'"/>
+        <SubTree ID="SupplySpin" semantic_map_file="{semantic_map_file}"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmul_supply_shelter" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveFallback>
+  </BehaviorTree>
+  <BehaviorTree ID="RmucSupplyAndResupply">
+    <ReactiveFallback>
+      <RecoveryWindow timeout_sec="{@supply_timeout}" retry_sec="{@supply_retry}" cooling="{@supply_cooling}">
+        <SubTree ID="RmucSupplyAttempt" semantic_map_file="{semantic_map_file}"/>
+      </RecoveryWindow>
+      <ReactiveSequence>
+        <ScriptCondition code="@supply_cooling &amp;&amp; (@needs_supply || @hp &lt; @uc_hp_exit)"/>
+        <Script code="@decision_mode := 'shelter'; @decision_reason := 'supply_timeout'"/>
+        <SubTree ID="SupplySpin" semantic_map_file="{semantic_map_file}"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_base_defense" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveFallback>
+  </BehaviorTree>
+</root>

@@ -22,7 +22,8 @@
 /// 输出：
 ///   <output_topic> 最终执行命令（mux 是唯一发布者）
 ///
-/// `spin_topic` 留空 = **单输入**（旧行为）：导航同时拥有平移与 wz，用于仿真链与回退。
+/// `spin_topic` 留空时导航同时拥有平移与 wz。到点后 behavior/hold_spin
+/// 仅在导航已停/超时时接管原地转速；人工停车或决策许可超时清除所有输入。
 ///
 /// 两路各自计时、互不影响：导航停了决策层还能让底盘原地转，决策层停发导航照常走。
 /// `wz` 还带变化率限制（`wz_ramp`，默认与 MINCO 的 max_angular_accel 同档 4.5 rad/s²），
@@ -44,6 +45,8 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include "srm27_chassis_control/twist_watchdog.hpp"
 #include "srm27_chassis_control/velocity_mix.hpp"
@@ -76,6 +79,20 @@ public:
     const double publishRate =
       this->declare_parameter<double>("publish_rate", 200.0);
     this->nav_timeout_ = this->declare_parameter<double>("nav_timeout", 0.3);
+    this->decision_required_ = this->declare_parameter<bool>("decision_required", true);
+    this->decision_watchdog_.setTimeout(0.5);
+    this->decision_params_ = this->add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "decision_required" && p.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+            result.successful = false;
+            result.reason = "decision_required must be bool";
+          }
+        }
+        return result;
+      });
     this->spin_timeout_ = this->declare_parameter<double>("spin_timeout", 0.25);
     this->limits_.vx_max = this->declare_parameter<double>("vx_max", 0.5);
     this->limits_.vy_max = this->declare_parameter<double>("vy_max", 0.5);
@@ -108,6 +125,28 @@ public:
       this->nav_topic_, qos,
       [this](const geometry_msgs::msg::Twist::SharedPtr _msg) {
         this->onNavCommand(*_msg);
+      });
+    this->hold_sub_ = this->create_subscription<std_msgs::msg::Float64>(
+      "behavior/hold_spin", qos,
+      [this](const std_msgs::msg::Float64::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        if (this->stopped_ || this->decisionBlocked(std::chrono::steady_clock::now())) { return; }
+        this->hold_wz_ = std::isfinite(msg->data) ? msg->data : 0.0;
+        this->hold_watchdog_.markInput(std::chrono::steady_clock::now());
+      });
+    this->decision_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      "decision/motion_permit", qos,
+      [this](const std_msgs::msg::Bool::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        this->decision_permit_ = msg->data;
+        this->decision_watchdog_.markInput(std::chrono::steady_clock::now());
+        if (!msg->data && this->decision_required_) {
+          this->nav_ = geometry_msgs::msg::Twist();
+          this->nav_watchdog_.reset();
+          this->hold_watchdog_.reset();
+          this->spin_watchdog_.reset();
+          this->spin_wz_ = 0.0;
+        }
       });
     if (this->dual_input_) {
       this->spin_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
@@ -180,15 +219,22 @@ public:
   }
 
 private:
+  bool decisionBlocked(std::chrono::steady_clock::time_point now) const
+  {
+    return decision_required_ && (!decision_permit_ || decision_watchdog_.expired(now));
+  }
+
   void onNavCommand(const geometry_msgs::msg::Twist & _msg)
   {
     const auto now = std::chrono::steady_clock::now();
     bool rejected = false;
     {
       std::lock_guard<std::mutex> lock(this->mutex_);
-      if (this->stopped_) {
-        // 急停/stop_all 期间仍然计时，但输出保持为零。
-        this->nav_watchdog_.markInput(now);
+      if (this->stopped_ || this->decisionBlocked(now)) {
+        // 丢弃门控期间的输入，恢复后等待新的导航速度和驻点租约。
+        this->nav_ = geometry_msgs::msg::Twist();
+        this->nav_watchdog_.reset();
+        this->hold_watchdog_.reset();
         return;
       }
       if (!allFinite(_msg)) {
@@ -218,7 +264,11 @@ private:
     bool rejected = false;
     {
       std::lock_guard<std::mutex> lock(this->mutex_);
-      // 与导航一致：stop_all 期间仍然计时，但输出保持为零。
+      if (this->stopped_ || this->decisionBlocked(now)) {
+        this->spin_wz_ = 0.0;
+        this->spin_watchdog_.reset();
+        return;
+      }
       this->spin_watchdog_.markInput(now);
       this->spin_input_count_++;
       if (std::isfinite(wz)) {
@@ -244,12 +294,12 @@ private:
     this->nav_ = geometry_msgs::msg::Twist();
     this->spin_wz_ = 0.0;
     this->nav_watchdog_.reset();
+    this->hold_watchdog_.reset();
+    this->hold_wz_ = 0.0;
     this->spin_watchdog_.reset();
-    // 急停不做斜率限制：输出立即归零。
     this->wz_limited_ = 0.0;
     this->wz_limited_valid_ = true;
-    RCLCPP_WARN(
-      this->get_logger(), "收到 stop_all：导航与自转输入已清零并保持零输出。");
+    RCLCPP_WARN(this->get_logger(), "收到 stop_all：所有输入已清零并保持零输出。");
   }
 
   void resumeAll()
@@ -259,8 +309,10 @@ private:
     this->nav_ = geometry_msgs::msg::Twist();
     this->spin_wz_ = 0.0;
     this->nav_watchdog_.reset();
+    this->hold_watchdog_.reset();
+    this->hold_wz_ = 0.0;
     this->spin_watchdog_.reset();
-    RCLCPP_INFO(this->get_logger(), "收到 resume_all：等待导航/自转重新下发速度。");
+    RCLCPP_INFO(this->get_logger(), "收到 resume_all：等待新的导航/自转输入。");
   }
 
   void guardLoop()
@@ -274,12 +326,27 @@ private:
         break;
       }
       const auto now = std::chrono::steady_clock::now();
+      const bool required = this->get_parameter("decision_required").as_bool();
+      if (required != this->decision_required_) {
+        this->decision_required_ = required;
+        this->spin_watchdog_.reset();
+        this->spin_wz_ = 0.0;
+        this->nav_ = geometry_msgs::msg::Twist();
+        this->nav_watchdog_.reset();
+        this->hold_watchdog_.reset();
+      }
 
       MixInput input;
       bool navExpired = false;
       bool spinExpired = false;
-      const bool stopped = this->stopped_;
-      if (!this->stopped_) {
+      const bool stopped = this->stopped_ || this->decisionBlocked(now);
+      if (stopped) {
+        this->nav_ = geometry_msgs::msg::Twist();
+        this->nav_watchdog_.reset();
+        this->hold_watchdog_.reset();
+        this->spin_watchdog_.reset();
+        this->spin_wz_ = 0.0;
+      } else {
         navExpired = this->nav_watchdog_.expired(now);
         if (!navExpired) {
           input.nav_vx = this->nav_.linear.x;
@@ -292,9 +359,17 @@ private:
           input.spin_valid = !spinExpired;
           input.spin_wz = spinExpired ? 0.0 : this->spin_wz_;
         }
-      } else if (this->dual_input_) {
-        input.spin_enabled = true;
-        input.spin_valid = false;
+        const bool nav_still = std::abs(input.nav_vx) < 1e-6 &&
+          std::abs(input.nav_vy) < 1e-6 &&
+          (this->dual_input_ || std::abs(input.nav_wz) < 1e-6);
+        if (nav_still && !this->hold_watchdog_.expired(now) && this->hold_wz_ != 0.0) {
+          if (this->dual_input_) {
+            input.spin_valid = true;
+            input.spin_wz = this->hold_wz_;
+          } else {
+            input.nav_wz = this->hold_wz_;
+          }
+        }
       }
 
       auto mixed = srm27_chassis_control::mixVelocity(input, this->limits_);
@@ -359,7 +434,7 @@ private:
       if (navExpired && !this->nav_timeout_active_) {
         this->nav_timeout_active_ = true;
         RCLCPP_WARN(
-          this->get_logger(), "[%s] 超过 %.3f s 未收到导航速度，平移已清零。",
+          this->get_logger(), "[%s] 超过 %.3f s 未收到导航速度，导航输入已清零。",
           this->nav_topic_.c_str(), this->nav_timeout_);
       } else if (!navExpired) {
         this->nav_timeout_active_ = false;
@@ -411,10 +486,10 @@ private:
     status.hardware_id = this->get_namespace();
     if (_stopped) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      status.message = "stop_all 生效中，输出保持为零";
+      status.message = "人工停车或决策许可门控生效，输出保持为零";
     } else if (_navExpired && this->dual_input_ && _spinExpired) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-      status.message = "导航与自转输入都超时，平移与 wz 均已清零";
+      status.message = "导航与自转输入都超时";
     } else if (_navExpired) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       status.message = this->dual_input_ ?
@@ -459,6 +534,10 @@ private:
       addKeyValue("nav_wz_clamped_count", std::to_string(this->nav_wz_clamped_count_));
       addKeyValue("non_finite_nav_count", std::to_string(this->non_finite_nav_count_));
       addKeyValue("stopped", this->stopped_ ? "true" : "false");
+      addKeyValue("decision_required", this->decision_required_ ? "true" : "false");
+      addKeyValue("decision_permit", this->decision_permit_ ? "true" : "false");
+      addKeyValue("decision_expired", this->decision_watchdog_.expired(
+        std::chrono::steady_clock::now()) ? "true" : "false");
     }
     if (this->dual_input_) {
       // 决策层自转输入的频率/超时/漏出统计（方案 §4.3 要求 diagnostics 里能看到）。
@@ -505,6 +584,9 @@ private:
   std::chrono::duration<double> diagnostics_period_{0.5};
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr hold_sub_;
+  TwistWatchdog hold_watchdog_{0.2};
+  double hold_wz_{0.0};
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr output_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
@@ -513,6 +595,11 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr resume_service_;
 
   TwistWatchdog nav_watchdog_{0.3};
+  TwistWatchdog decision_watchdog_{0.5};
+  bool decision_required_{true};
+  bool decision_permit_{false};
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr decision_sub_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr decision_params_;
   TwistWatchdog spin_watchdog_{0.25};
 
   std::mutex mutex_;

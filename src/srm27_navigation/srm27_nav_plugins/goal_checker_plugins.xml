@@ -4,7 +4,7 @@
     <class type="srm27_nav_plugins::OmniStoppedGoalChecker" base_class_type="nav2_core::GoalChecker">
       <description>
         全向底盘用的停稳到点判定：位置 + 航向 + 平动停稳；角速度不参与判定
-        （导航不拥有自转，哨兵的自转由下位机/独立链路负责）。
+        （spin 模式下到点后仍可保持自转）；stateful=true 时锁存同一目标的 XY 到达。
       </description>
     </class>
   </library>

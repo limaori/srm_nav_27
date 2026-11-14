@@ -25,28 +25,34 @@ IsGameStatusCondition::IsGameStatusCondition(
 
 BT::NodeStatus IsGameStatusCondition::checkGameStart()
 {
-  int expected_game_progress, min_remain_time, max_remain_time;
+  int expected_game_type = 0;
+  int expected_game_progress = 4;
+  int min_remain_time = 0;
+  int max_remain_time = 420;
   auto msg = getInput<rm_decision_interfaces::msg::GameStatus>("key_port");
   if (!msg) {
     RCLCPP_ERROR(logger_, "GameStatus message is not available");
     return BT::NodeStatus::FAILURE;
   }
 
+  getInput("expected_game_type", expected_game_type);
   getInput("expected_game_progress", expected_game_progress);
   getInput("min_remain_time", min_remain_time);
   getInput("max_remain_time", max_remain_time);
 
   RCLCPP_DEBUG(
-    logger_, "Checking: Progress(%d/%d), Remain Time(%ds) in [%d-%d]",
-    static_cast<int>(msg->game_progress), expected_game_progress, msg->stage_remain_time,
-    min_remain_time, max_remain_time);
+    logger_, "Checking: Type(%d/%d), Progress(%d/%d), Remain Time(%ds) in [%d-%d]",
+    static_cast<int>(msg->game_type), expected_game_type, static_cast<int>(msg->game_progress),
+    expected_game_progress, msg->stage_remain_time, min_remain_time, max_remain_time);
 
+  const bool is_type_match =
+    (expected_game_type == 0) || (msg->game_type == expected_game_type);
   const bool is_progress_match = (msg->game_progress == expected_game_progress);
   const bool is_time_in_range =
     (msg->stage_remain_time >= min_remain_time) && (msg->stage_remain_time <= max_remain_time);
 
-  return (is_progress_match && is_time_in_range) ? BT::NodeStatus::SUCCESS
-                                                 : BT::NodeStatus::FAILURE;
+  return (is_type_match && is_progress_match && is_time_in_range) ? BT::NodeStatus::SUCCESS
+                                                                  : BT::NodeStatus::FAILURE;
 }
 
 BT::PortsList IsGameStatusCondition::providedPorts()
@@ -54,6 +60,8 @@ BT::PortsList IsGameStatusCondition::providedPorts()
   return {
     BT::InputPort<rm_decision_interfaces::msg::GameStatus>(
       "key_port", "{@referee_gameStatus}", "GameStatus port on blackboard"),
+    BT::InputPort<int>(
+      "expected_game_type", 0, "Expected game type (0=any, 1=RMUC, 4=RMUL 3v3)"),
     BT::InputPort<int>("expected_game_progress", 4, "Expected game progress stage"),
     BT::InputPort<int>("min_remain_time", 0, "Minimum remaining time (s)"),
     BT::InputPort<int>("max_remain_time", 420, "Maximum remaining time (s)"),

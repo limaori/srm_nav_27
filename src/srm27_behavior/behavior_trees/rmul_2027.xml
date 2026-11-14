@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4" main_tree_to_execute="rmul_2027">
+  <!-- UL 只做单机回补与占守。切换中心/己方高地预案：修改 RmulControlHold 的 waypoint_name。 -->
+  <BehaviorTree ID="rmul_2027">
+    <KeepRunningUntilFailure>
+      <ForceSuccess>
+        <ReactiveSequence>
+          <SubTree ID="GameLifecycleGate" expected_game_type="4" max_remain_time="300"/>
+          <ReactiveFallback name="RmulPriorityRoot">
+            <SubTree ID="RmulSupplyRecovery" semantic_map_file="{@ul_semantic_map_file}"/>
+            <SubTree ID="RmulControlHold" semantic_map_file="{@ul_semantic_map_file}"
+                     waypoint_name="{@ul_control_waypoint}"/>
+          </ReactiveFallback>
+        </ReactiveSequence>
+      </ForceSuccess>
+    </KeepRunningUntilFailure>
+  </BehaviorTree>
+</root>

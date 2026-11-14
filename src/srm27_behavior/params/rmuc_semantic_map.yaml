@@ -1,0 +1,38 @@
+# RMUC 2027 (7v7) 语义地图配置 (示例多边形, 上场前请按实际建图 map 坐标系坐标标定替换)
+frame_id: map
+zones:
+  - code: rmuc_tunnel_area
+    type: tunnel
+    max_spin: 0.0
+    polygon:
+      - [100.0, 100.0]
+      - [103.0, 100.0]
+      - [103.0, 101.5]
+      - [100.0, 101.5]
+
+  - code: rmuc_slope_area
+    type: slope
+    max_spin: 0.0
+    polygon:
+      - [104.0, 100.0]
+      - [106.0, 100.0]
+      - [106.0, 102.0]
+      - [104.0, 102.0]
+
+  - code: rmuc_fortress_zone
+    type: fortress
+    max_spin: 5.5
+    polygon:
+      - [1.0, -1.0]
+      - [3.0, -1.0]
+      - [3.0, 1.0]
+      - [1.0, 1.0]
+
+  - code: rmuc_supply_zone
+    type: supply
+    max_spin: 2.0
+    polygon:
+      - [-1.0, -1.0]
+      - [0.8, -1.0]
+      - [0.8, 1.0]
+      - [-1.0, 1.0]

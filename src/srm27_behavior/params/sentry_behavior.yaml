@@ -1,19 +1,56 @@
 srm27_behavior_server:
   ros__parameters:
     use_sim_time: true
+    robot_base_frame: gimbal_yaw # 与 main 的云台系导航/定位一致
     action_name: srm27_behavior         # Optional
-    tick_frequency: 5                          # Optional (defaults to 100 Hz)
+    tick_frequency: 20                          # Optional (defaults to 100 Hz)
     groot2_port: 1667                           # Optional (defaults to 1667)
-    ros_plugins_timeout: 1000                   # Optional (defaults 1000 ms)
+    ros_plugins_timeout: 1000                   # Optional (defaults to 1000 ms)
     use_cout_logger: false                      # Optional (defaults to false)
+
+    dry_run: true             # 默认仅计算策略，不发导航/自转/许可/姿态请求
+    waypoints_calibrated: false # 按当前场地和己方颜色标定后设 true
+    status_topic: /srm/sefdefined
+    supply_timeout: 25.0
+    supply_retry: 15.0
+    navigation_timeout: 45.0 # 单次 Action 最长运行时间；超时取消，退避后重试
+    navigation_completion_tolerance: 0.8 # 独立于自转滞回；需覆盖 Nav2 XY 容差及栅格端点误差
+    uc_attack_hp: 250
+    uc_endgame_remain: 60
+    uc_enemy_base_enabled: false # 基地阵地施压需单独验收路线
+
+    input_timeout_sec: 2.0    # game/status/map pose 接收超时后停止；无建图阶段
+    waypoints_file: params/waypoints.yaml
+    ul_control_waypoint: rmul_center  # 改 rmul_home_highland 可切己方高地预案
+    ul_semantic_map_file: params/rmul_semantic_map.yaml
+    uc_semantic_map_file: params/rmuc_semantic_map.yaml
+    uc_resupply_enabled: true   # 仅开赛满 1 分钟后的免费弹量回补；不发购买指令
+    ul_hp_trigger: 150
+    ul_hp_exit: 360
+    uc_hp_trigger: 140
+    uc_hp_exit: 360
+    uc_ammo_trigger: 30
+    uc_ammo_exit: 150
+    uc_base_defense_hp: 2000
+    uc_early_remain: 240
+
+    # 动态小陀螺转速与到点判定参数 (支持运行中 `ros2 param set` 实时热修改)
+    spin:
+      moving_speed: 2.5       # 前往目标点/巡航移动中的慢速小陀螺 (rad/s)
+      arrived_speed: 7.0      # 到达目标点后的快速小陀螺 (rad/s)
+      supply_speed: 2.0       # 补给区回血/补弹转速 (rad/s)
+      evasion_speed: 8.0      # 掉血受击突发闪避转速 (rad/s)
+      arrive_tolerance: 0.35  # 判定已到达目标点的距离阈值 (m)
+      leave_tolerance: 0.55   # 滞回离开阈值 (m, 避免边界定位抖动引起慢/快切换震荡)
 
     plugins:
       - srm27_behavior/bt_plugins
 
     behavior_trees:
+      - srm27_behavior/behavior_trees/modules
       - srm27_behavior/behavior_trees
 
 srm27_behavior_client:
   ros__parameters:
     use_sim_time: true
-    target_tree: rmul_2025
+    target_tree: rmul_2027

@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<root BTCPP_format="4">
+  <!-- 2027 §5.6.2：0=己方完全控制，1=己方临时控制，2=己方未控制。
+       只消费新鲜的真实阵地反馈；不以到点、RFID 或计时伪造“已占领”。 -->
+  <BehaviorTree ID="RmucRestoreOutpost">
+    <ReactiveSequence>
+      <ScriptCondition code="@arena_valid &amp;&amp; (@own_outpost_control != 0 || @own_highland_activation == 2 || @own_outpost_activation == 2 || @own_outpost_activation == 3)"/>
+      <Script code="@decision_mode := 'restore_outpost'; @decision_reason := 'own_outpost_not_secure'"/>
+      <SubTree ID="RmucControlHold" semantic_map_file="{semantic_map_file}" waypoint_name="rmuc_own_outpost_control"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucCaptureOutpost">
+    <ReactiveSequence>
+      <ScriptCondition code="@arena_valid &amp;&amp; @own_base_control == 0 &amp;&amp; @own_outpost_control == 0 &amp;&amp; @enemy_outpost_control != 0 &amp;&amp; @ammo_valid &amp;&amp; @ammo > @uc_ammo_trigger &amp;&amp; @hp >= @uc_attack_hp"/>
+      <Script code="@decision_mode := 'capture_outpost'; @decision_reason := 'seek_two_outposts_score'"/>
+      <SubTree ID="RmucControlHold" semantic_map_file="{semantic_map_file}" waypoint_name="rmuc_enemy_outpost_control"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucHoldOutposts">
+    <ReactiveSequence>
+      <ScriptCondition code="@arena_valid &amp;&amp; @own_outpost_control == 0 &amp;&amp; @enemy_outpost_control == 0"/>
+      <Script code="@decision_mode := 'hold_outposts'; @decision_reason := 'two_outposts_score_one_per_second'"/>
+      <SubTree ID="RmucControlHold" semantic_map_file="{semantic_map_file}" waypoint_name="rmuc_enemy_outpost_control"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- 己方两前哨已稳固，残局落后时可选择基地阵地施压；默认关闭，先标定合法路线。 -->
+  <BehaviorTree ID="RmucEndgameBasePressure">
+    <ReactiveSequence>
+      <ScriptCondition code="@uc_enemy_base_enabled &amp;&amp; @arena_valid &amp;&amp; @score_valid &amp;&amp; @control_lead &lt; 0 &amp;&amp; @remain_time &lt;= @uc_endgame_remain &amp;&amp; @own_base_control == 0 &amp;&amp; @own_outpost_control == 0 &amp;&amp; @enemy_outpost_control == 0 &amp;&amp; @hp >= @uc_attack_hp &amp;&amp; @ammo_valid &amp;&amp; @ammo >= @uc_ammo_exit"/>
+      <Script code="@decision_mode := 'pressure_base'; @decision_reason := 'endgame_control_deficit'"/>
+      <SubTree ID="RmucControlHold" semantic_map_file="{semantic_map_file}" waypoint_name="rmuc_enemy_base_control"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="RmucControlHold">
+    <ReactiveSequence>
+      <SetSentryPosture _successIf="@dry_run" posture="DEFENSE" fallback_posture="MOVE" cooldown_sec="5.0"
+                        degrade_limit_sec="175.0" topic_name="sentry/desired_posture"/>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="{waypoint_name}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>

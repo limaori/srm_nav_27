@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <!-- RMUC 7v7 战术模块集合：直接基于黑板事实字段做声明式组合，无需改 C++ 即可增减条件 -->
+
+  <BehaviorTree ID="RmucBaseThreat">
+    <ScriptCondition code="(@ally_hp_valid &amp;&amp; @ally_base_hp >= 1 &amp;&amp; @ally_base_hp &lt; @uc_base_defense_hp) || (@arena_valid &amp;&amp; (@own_base_control != 0 || @own_base_activation == 2 || @own_base_activation == 3 || @own_fortress_activation == 2 || @own_fortress_activation == 3))"/>
+  </BehaviorTree>
+
+  <!-- 基地危机回防 (1 <= ally_base_hp < 2000) -->
+  <BehaviorTree ID="RmucBaseDefense">
+    <ReactiveSequence name="RmucBaseDefenseSeq">
+      <SubTree ID="RmucBaseThreat"/>
+      <Script code="@decision_mode := 'defend'; @decision_reason := 'base_hp_or_territory_threat'"/>
+      <SetSentryPosture _successIf="@dry_run" posture="DEFENSE"
+                        fallback_posture="MOVE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="SpinArbitration" semantic_map_file="{semantic_map_file}"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="rmuc_base_defense" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- 0x000D 下位机前哨开关触发推进 (remain >= 180s 且 switch_position == 0) -->
+  <BehaviorTree ID="RmucOutpostPush">
+    <ReactiveSequence name="RmucOutpostPushSeq">
+      <ScriptCondition code="@game_valid == true &amp;&amp; @remain_time >= 180 &amp;&amp; @switch_valid == true &amp;&amp; @switch_position == 0 &amp;&amp; ((@ammo_valid == false) || (@ammo > @uc_ammo_trigger)) &amp;&amp; @ally_hp_valid &amp;&amp; @ally_outpost_hp > 0"/>
+      <Script code="@decision_mode := 'push'; @decision_reason := 'operator_outpost_request'"/>
+      <SetSentryPosture _successIf="@dry_run" posture="MOVE"
+                        fallback_posture="ATTACK"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="PatrolWaypoints"
+               semantic_map_file="{semantic_map_file}"
+               waypoint_group="rmuc_outpost_push"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- 前期均衡巡逻 (remain >= 240s 且 前哨未被确认击毁) -->
+  <BehaviorTree ID="RmucEarlyPatrol">
+    <ReactiveSequence name="RmucEarlyPatrolSeq">
+      <ScriptCondition code="@game_valid == true &amp;&amp; @remain_time >= @uc_early_remain &amp;&amp; ((@ammo_valid == false) || (@ammo > @uc_ammo_trigger)) &amp;&amp; ((@ally_hp_valid == false) || (@ally_outpost_hp >= 1))"/>
+      <Script code="@decision_mode := 'patrol'; @decision_reason := 'arena_unknown_early_patrol'"/>
+      <SetSentryPosture _successIf="@dry_run" posture="MOVE"
+                        fallback_posture="DEFENSE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="PatrolWaypoints"
+               semantic_map_file="{semantic_map_file}"
+               waypoint_group="rmuc_early_patrol"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- 残局或失前哨后堡垒联防 -->
+  <BehaviorTree ID="RmucLateFortressHold">
+    <ReactiveSequence name="RmucLateFortressHoldSeq">
+      <Script code="@decision_mode := 'fortress'; @decision_reason := 'low_ammo_or_late_fallback'"/>
+      <SetSentryPosture _successIf="@dry_run" posture="DEFENSE"
+                        fallback_posture="MOVE"
+                        cooldown_sec="5.0"
+                        degrade_limit_sec="175.0"
+                        topic_name="sentry/desired_posture"/>
+      <SubTree ID="PatrolWaypoints"
+               semantic_map_file="{semantic_map_file}"
+               waypoint_group="rmuc_fortress_hold"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+</root>
