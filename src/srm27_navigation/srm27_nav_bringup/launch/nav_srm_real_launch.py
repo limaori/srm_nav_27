@@ -67,6 +67,8 @@
 import os
 import sys
 
+import yaml
+
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -273,6 +275,29 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
+class RealNavParams(RewrittenYaml):
+    def perform(self, context):
+        path = super().perform(context)
+        if not _as_bool(LaunchConfiguration("use_tdt_planner").perform(context)):
+            return path
+
+        with open(path, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        planner = config.get("planner_server", {}).get("ros__parameters", {})
+        if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
+            raise RuntimeError("use_tdt_planner requires planner_server with a single GridBased planner")
+        planner["GridBased"] = {
+            "plugin": "tdt_nav_kit::TdtGlobalPlanner",
+            "occupancy_threshold": 252,
+            "treat_unknown_as_obstacle": True,
+            "save_point_max_radius": 0.4,
+            "path_resample_step": 0.20,
+        }
+        with open(path, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream)
+        return path
+
+
 def generate_launch_description():
     bringup_dir = get_package_share_directory("srm27_nav_bringup")
     launch_dir = os.path.join(bringup_dir, "launch")
@@ -329,7 +354,7 @@ def generate_launch_description():
     # Nav2 栈的参数文件：在通用文件之上注入航向策略与判停器（点分全路径，
     # 见 nav2_common RewrittenYaml 的 substitute_params "total path" 分支）。
     # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装。
-    nav_stack_params = RewrittenYaml(
+    nav_stack_params = RealNavParams(
         source_file=params_file,
         root_key=None,
         param_rewrites={
@@ -528,6 +553,14 @@ def generate_launch_description():
                 bringup_dir, "config", "real", "nav2_params_srm_minco_fakeyaw.yaml"
             ),
             description="实车迁移链参数文件（MINCO + gimbal_yaw 云台系）",
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_tdt_planner",
+            default_value="False",
+            choices=["True", "False"],
+            description="Use YAstar as the GridBased global planner for real navigation",
         )
     )
     ld.add_action(

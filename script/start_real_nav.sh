@@ -71,6 +71,7 @@
 #
 # 用法:
 #   ./script/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
+#   ./script/start_real_nav.sh --tdt-planner          # YAstar + MINCO/MPC
 #   ./script/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
 #   ./script/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./script/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
@@ -337,6 +338,7 @@ ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 # 局部控制器: auto (按参数文件内容判断) / omni / minco。
 CONTROLLER="${CONTROLLER:-minco}"
 CONTROLLER_CLI_GIVEN=0
+USE_TDT_PLANNER=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
@@ -624,6 +626,7 @@ while [ $# -gt 0 ]; do
     -p|--params)      PARAMS_FILE="${2:?--params 需要绝对路径}"; PARAMS_FILE_GIVEN=1; shift 2 ;;
     -c|--controller)  CONTROLLER="${2:?--controller 需要 auto|omni|minco}"
                       CONTROLLER_CLI_GIVEN=1; shift 2 ;;
+    --tdt-planner)    USE_TDT_PLANNER=1; shift ;;
     --minco)          CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --omni)           CONTROLLER="omni"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --map-to-odom)
@@ -1043,6 +1046,10 @@ if [ "$CONTROLLER" = "minco" ] && [ "$USE_FAKE_VEL_TRANSFORM" = "1" ] \
    && grep -qE "gimbal_yaw_fake|base_link_fake" "$PARAMS_FILE" 2>/dev/null; then
   MINCO_FAKEYAW_CHAIN=1
 fi
+if [ "$USE_TDT_PLANNER" = "1" ] && [ "$MINCO_FAKEYAW_CHAIN" != "1" ]; then
+  echo "[错误] --tdt-planner 需要 MINCO/MPC 云台系实车配置。" >&2
+  exit 2
+fi
 
 # 速度出口：迁移链的出口话题是 fake_vel_transform 的输入 cmd_vel_nav_fake；
 # Omni 旧链保持原样（fake -> cmd_vel_nav2_result，无 fake -> 直接 cmd_vel_chassis）。
@@ -1235,6 +1242,9 @@ if [ "$DRY_RUN" != "1" ]; then
   if [ "$CONTROLLER" = "minco" ]; then
     WS_CHECK_PKGS+=(srm27_minco_controller srm27_minco_core)
   fi
+  if [ "$USE_TDT_PLANNER" = "1" ]; then
+    WS_CHECK_PKGS+=(tdt_nav_kit)
+  fi
   if [ "$USE_CHASSIS_MUX" = "1" ]; then
     # 迁移链的出口节点；缺了它 cmd_vel_chassis 没有任何发布者（车不动）。
     WS_CHECK_PKGS+=(srm27_chassis_control)
@@ -1256,7 +1266,7 @@ if [ "$CONTROLLER" = "minco" ]; then
   [ -f "$PREFLIGHT_PY" ] || PREFLIGHT_PY="$PKG_DIR/scripts/srm_minco_real_preflight.py"
   if [ -f "$PREFLIGHT_PY" ] && command -v python3 >/dev/null 2>&1; then
     PROTOCOL_CFG_FOR_PREFLIGHT="$WS_DIR/src/srm27_nav_protocol/config/srm27_nav_protocol.yaml"
-    PREFLIGHT_ARGS=(--params "$PARAMS_FILE" --expect-minco)
+    PREFLIGHT_ARGS=(--params "$PARAMS_FILE" --speed-limits "$SPEED_LIMITS_FILE" --expect-minco)
     [ -f "$PROTOCOL_CFG_FOR_PREFLIGHT" ] && PREFLIGHT_ARGS+=(--protocol "$PROTOCOL_CFG_FOR_PREFLIGHT")
     if ! python3 "$PREFLIGHT_PY" "${PREFLIGHT_ARGS[@]}"; then
       echo >&2
@@ -1482,6 +1492,7 @@ CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"
 Z_MUX_ARG="$(bool_arg "$USE_CHASSIS_MUX")"
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_real_launch.py"
+  NAV_CMD="$NAV_CMD use_tdt_planner:=$(bool_arg "$USE_TDT_PLANNER")"
   [ -n "$NS_ARG" ] && NAV_CMD="$NAV_CMD $NS_ARG"
   NAV_CMD="$NAV_CMD slam:=$SLAM_ARG"
   NAV_CMD="$NAV_CMD use_pcd_localization:=$RELOC_ARG"
@@ -1505,7 +1516,7 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD autostart:=true"
   NAV_CMD="$NAV_CMD use_composition:=$COMPOSITION_ARG"
   NAV_CMD="$NAV_CMD use_respawn:=false"
-  NAV_CMD="$NAV_CMD use_fake_vel_transform:=$FAKE_ARG"
+  NAV_CMD="$NAV_CMD use_fakeyaw_transform:=$FAKE_ARG"
   # 命令系 = 云台系的假车头系（2026-11-08）。必须与参数文件的
   # FollowPath.command_frame 一致，否则 launch 会直接报错。
   NAV_CMD="$NAV_CMD command_frame:=gimbal_yaw_fake"
@@ -1625,6 +1636,9 @@ if [ "$CONTROLLER" = "minco" ]; then
   echo "  局部控制器  : MINCO + MPC (srm27_minco_controller::MincoMpcController)"
 else
   echo "  局部控制器  : Omni (srm27_omni_pid_controller::OmniPidPursuitController)"
+fi
+if [ "$USE_TDT_PLANNER" = "1" ]; then
+  echo "  全局规划器  : TDT YAstar (GridBased)"
 fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then

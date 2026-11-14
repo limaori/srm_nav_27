@@ -1065,7 +1065,7 @@ local_costmap:
         #   取 0.30 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.30。
         #   （0.45 那一档试过：253 的硬阻挡带仍是 inscribed 0.33，只是把 0.33~0.45
         #     加成高代价，0.69 m 缝里整条缝都变高代价，反而更难走。）
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        inflation_radius: 0.31          # 覆盖加 padding 后约 0.304 m 的车体内切半径
       always_send_full_costmap: False
 
 global_costmap:
@@ -1121,7 +1121,7 @@ global_costmap:
         # ★ 2026-11-14：0.25 → 0.30，与 robot_radius 齐平（原因见 local_costmap 同项）。
         #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.38，
         #   中间 13 cm 的"规划器认为能走、控制器不敢走"就是 0.8 m 通道卡死的直接来源。
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        inflation_radius: 0.31          # 覆盖加 padding 后约 0.304 m 的车体内切半径
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入

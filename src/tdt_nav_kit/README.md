@@ -25,7 +25,7 @@
 
 ## 初版移植范围
 
-1. 仿真启动入口接入 SRM 的云台速度链。TDT 插件可单独构建，当前实车入口使用原有导航配置。
+1. 仿真和实车共用 SRM 的云台速度链。实车用 `--tdt-planner` 启用 YAstar。
 2. 初版只新增 `src/tdt_nav_kit/`。后续仿真修复同步更新了 SRM 仿真入口和 RMUC 2025 地图。
 
 ## 启动前置（重要）
@@ -147,6 +147,28 @@ ros2 param get /controller_server FollowPath.plugin    # 仍为 OmniPidPursuitCo
 或 `[srm_speed_limits] 警告`。5 个 gtest 分别覆盖：Costmap 语义/索引/快照、
 SFC 反向占据语义与边界补圈、P7 原点符号与两套坐标换算一致性、
 YAstar 链路与 SDF 一致性、pluginlib 加载。
+
+### 实车首次联调
+
+按前面的 OSQP 和 OsqpEigen 说明安装依赖后，在实车 ROS 2 Humble 工作空间构建。
+下例使用 Z-LIO 与静态 `map→odom`。将地图和起步位姿换成现场值，并先在 RViz 对照实景。
+
+```bash
+colcon build --symlink-install --packages-select srm27_nav_bringup tdt_nav_kit \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+
+limits="$PWD/src/srm27_navigation/srm27_nav_bringup/config/real/speed_limits_tdt_first_run.yaml"
+./script/start_real_nav.sh --check --tdt-planner --lio --map <地图名> \
+  --map-to-odom <X> <Y> <YAW> --no-chassis-spin --no-joy --speed-limits "$limits"
+```
+
+检查输出包含 `use_tdt_planner:=True`、`cmd_vel_chassis` 和 **0.40 m/s**。去掉
+`--check` 启动后，用 `ros2 param get /planner_server GridBased.plugin` 确认加载
+`tdt_nav_kit::TdtGlobalPlanner`，再发空旷处约 0.75 m 的目标。低速台架测试中，3.6 m 的直线路线在 YAstar 和
+ThetaStar 下都遇到 MINCO 局部轨迹超速校验拒绝。按现有实车定位流程使用其他定位
+模式时，保留原来的定位参数。MINCO/MPC 负责局部轨迹和跟踪。取消 `--tdt-planner`
+即可对照原来的 ThetaStar。实车提速前以现场制动辨识结果为准。
 
 ## 仿真实测（2026-11-05，Ignition Fortress 无头容器）
 

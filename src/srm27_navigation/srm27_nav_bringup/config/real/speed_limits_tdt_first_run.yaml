@@ -1,0 +1,21 @@
+# TDT 首次低速联调。速度通过控制器、速度平滑器和底盘 mux 三层限制。
+controller_server@minco:
+  ros__parameters:
+    FollowPath:
+      limits:
+        max_linear_speed: 0.4
+        max_linear_accel: 1.0
+        max_angular_speed: 1.0
+        max_angular_accel: 3.2
+velocity_smoother@minco:
+  ros__parameters:
+    max_velocity: [0.4, 0.4, 0.0]
+    min_velocity: [-0.4, -0.4, 0.0]
+    max_accel: [1.0, 1.0, 0.0]
+    max_decel: [-1.0, -1.0, 0.0]
+srm_cmd_mux:
+  ros__parameters:
+    vx_max: 0.4
+    vy_max: 0.4
+    v_max: 0.4
+    wz_max: 1.0
