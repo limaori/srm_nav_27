@@ -33,6 +33,10 @@
        OsqpEigen 没有 rosdep key，需按 README 源码安装到 /usr/local，见 package.xml 注释。 -->
   <depend>osqp_vendor</depend>
 
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>srm27_gazebo_simulator</exec_depend>
+  <exec_depend>srm27_nav_bringup</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
 
   <!--

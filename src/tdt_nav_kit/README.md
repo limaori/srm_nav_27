@@ -23,11 +23,10 @@
 上游 8 个源码全部入库；CMake 编译 `yastar.cpp`、`minimumSnap.cpp`、`sfcSquare.cpp`，
 **不编译 `kinodynamicAstar.cpp`**（上游自述全局搜索约 2 s，主链路不用）。
 
-## 约束（本次移植特有的两条）
+## 初版移植范围
 
 1. 改动只在分支 `hj_dev`（基于 `b2d6fc2`）上，`main` 不提交。
-2. **既有文件零改动**：所有产出都在 `src/tdt_nav_kit/` 内，连
-   `srm27_nav_bringup/config/simulation/` 都不新增文件。
+2. 初版只新增 `src/tdt_nav_kit/`。后续仿真修复同步更新了 SRM 仿真入口和 RMUC 2025 地图。
 
 ## 启动前置（重要）
 
@@ -75,29 +74,36 @@ echo /usr/local/lib | sudo tee /etc/ld.so.conf.d/usr-local.conf && sudo ldconfig
 ## 启动
 
 ```bash
-# 只换全局规划器（平滑器仍是 SimpleSmoother）
+# 默认启动 RMUC 2025、YAstar 和 MinimumSnap
+ros2 launch tdt_nav_kit tdt_nav_simulation.launch.py use_rviz:=False
+
+# 用 SimpleSmoother 做对照
 ros2 launch tdt_nav_kit tdt_nav_simulation.launch.py \
+  use_rviz:=False \
   params_file:=$(ros2 pkg prefix tdt_nav_kit)/share/tdt_nav_kit/config/nav2_params_srm_tdt.yaml
 
-# 规划器 + 平滑器都换
-ros2 launch tdt_nav_kit tdt_nav_simulation.launch.py \
-  params_file:=$(ros2 pkg prefix tdt_nav_kit)/share/tdt_nav_kit/config/nav2_params_srm_tdt_smooth.yaml
-```
-
-# 回退原链路：不带任何参数，仍是 ThetaStar + SimpleSmoother
+# 接入已有 Gazebo 时加 start_simulation:=False
+# 切换回 SRM 原有导航链路
 ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py
 ```
+
+TDT 入口默认加载与 Gazebo 世界同名的地图。从 `sim_config_file` 读取出生位姿，
+作为 `map → odom` 的默认平移和航向。使用其他坐标原点的地图时，可显式传入
+`map_to_odom_x`、`map_to_odom_y` 和 `map_to_odom_yaw`。
+
+`rmuc_2025.pgm` 用 `python3 script/build_rmuc_2025_map.py` 从 Gazebo 碰撞网格生成，
+保留平地并标记底盘高度范围内的障碍。YAML 原点为 `[-0.10, -0.10, 0]`，分辨率 0.05 m。
+旧测试目标 `(12, 3)` 位于障碍区域，可用默认出生点 `(3.4, 9.5)` 到 `(10, 5)` 验证导航。
 
 **不要**传 `speed_limits_file`。原 launch 的默认值已是显式绝对路径
 `config/simulation/speed_limits.yaml`，与本包的参数文件所在目录无关；
 若改成 `auto`，`ReplaceString` 会让参数文件落到临时目录，
 `srm_speed_limits.py` 会静默不合并限幅，退回插件默认高值（Omni 3.0 m/s）。
 
-`config/nav2_params_srm_tdt.yaml` 以 `nav2_params_srm.yaml` 为底，**只改了
-`planner_server` 段**；`nav2_params_srm_tdt_smooth.yaml` 在此基础上再**只改
-`smoother_server` 段**。两份文件都保持 `controller_server.FollowPath.plugin` 为
-`srm27_omni_pid_controller::OmniPidPursuitController`，使 `speed_limits.yaml`
-的 `@omni` 档位判定不变；文件里没有重复定义任何限幅键。
+单目标行为树由 Nav2 选用各配置中唯一注册的平滑器。SimpleSmoother 版本在 YAstar
+输出时加密路径，MinimumSnap 版本在平滑阶段加密，并处理只有两个输入点的直线路径。
+两份文件都使用 `srm27_omni_pid_controller::OmniPidPursuitController`，速度限制由
+`speed_limits.yaml` 的 `@omni` 档位提供。
 
 ### 构建机接口已核对（2026-11-04）
 
@@ -141,13 +147,6 @@ ros2 param get /controller_server FollowPath.plugin    # 仍为 OmniPidPursuitCo
 或 `[srm_speed_limits] 警告`。5 个 gtest 分别覆盖：Costmap 语义/索引/快照、
 SFC 反向占据语义与边界补圈、P7 原点符号与两套坐标换算一致性、
 YAstar 链路与 SDF 一致性、pluginlib 加载。
-
-零改动判据（在仓库根执行）：
-
-```bash
-git diff --name-only b2d6fc2..HEAD | grep -v '^src/tdt_nav_kit/'   # 应无输出
-git rev-parse main                                                    # 应仍是 b2d6fc2
-```
 
 ## 仿真实测（2026-11-05，Ignition Fortress 无头容器）
 

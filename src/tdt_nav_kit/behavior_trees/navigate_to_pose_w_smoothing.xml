@@ -6,7 +6,6 @@
   的唯一差别：在 ComputePathToPose 与 FollowPath 之间插入了 SmoothPath。
 
   为什么必须有这个节点
-  --------------------
   TDT 的 YAstar 输出的是**稀疏**路径（本图实测 11 点 / 段长 5.7 m），而
   srm27_omni_pid_controller 的 transformGlobalPlan() 会按局部代价地图范围裁剪
   路径，并把「距机器人超过 max_costmap_extent 的点」全部丢掉。稀疏路径裁剪后
@@ -39,7 +38,8 @@
               <ClearEntireCostmap name="ClearGlobalCostmap-Context"
                                   service_name="global_costmap/clear_entirely_global_costmap"/>
             </RecoveryNode>
-            <SmoothPath smoother_id="tdt_smoother"
+            <!-- 两套参数各注册一个平滑器，留空由 Nav2 选用该实例。 -->
+            <SmoothPath smoother_id=""
                         unsmoothed_path="{path}"
                         smoothed_path="{smoothed_path}"
                         max_smoothing_duration="1.0"

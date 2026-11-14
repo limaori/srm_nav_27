@@ -267,7 +267,7 @@ bool TdtSmoother::smooth(
   if (!active_) {
     return false;
   }
-  if (static_cast<int>(path.poses.size()) < min_points_) {
+  if (path.poses.size() < static_cast<std::size_t>(std::max(min_points_, 2))) {
     // 点数太少无需平滑：返回 true 表示「已完成」，保持原路径。
     return true;
   }

@@ -402,7 +402,7 @@ controller_server:
       yaw_goal_tolerance: 6.28                           # 航向角容差（弧度）
     FollowPath:
       plugin: "srm27_omni_pid_controller::OmniPidPursuitController" # 全向PID跟踪控制器
-      enable_collision_check: False                        # 2026-11-09：关轨迹碰撞检查。它读 local costmap 253+，但雷达动态层标的墙与 PGM 静态墙有偏差（A* 绕的是 PGM），平滑曲线会踩上雷达偏移的 254 → 反复 abort。全局安全由 A* + smoother 双层保证。
+      enable_collision_check: True                         # 用局部代价地图检查跟踪路径
       translation_kp: 3.0                               # 平移比例增益
       translation_ki: 0.1                               # 平移积分增益
       translation_kd: 0.3                               # 平移微分增益
@@ -459,11 +459,11 @@ local_costmap:
       width: 5                                             # 局部地图宽度（米）
       height: 5                                            # 局部地图高度（米）
       resolution: 0.05                                    # 地图分辨率（米）
-      robot_radius: 0.15                                   # 2026-11-09：0.33→0.15。inscribed 带过大（墙缘19.72 vs 路径20.0=0.28m）使 253 带吞掉正常通道，A*/smoother/controller 三层全判撞死锁。缩小判据圈，物理剐蹭由 Gazebo 观察。
+      robot_radius: 0.33                                   # 与 SRM 的导航外接包络一致
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
-        enabled: true                                     # 是否启用体素障碍层
+        enabled: False  # 2026-11-09：local 也关动态层。terrain_map 点云与 PGM 墙位偏差产生的 254 曾让碰撞检查误杀；仿真场地静态，PGM 已补全。
         track_unknown_space: true                         # 是否跟踪未知空间
         footprint_clearing_enabled: true                  # 是否清除机器人 footprint 内障碍
         publish_voxel_map: false                           # 是否发布体素地图
@@ -505,7 +505,7 @@ global_costmap:
       publish_frequency: 2.0                              # 全局地图发布频率（Hz）
       global_frame: map                                    # 全局地图坐标系
       robot_base_frame: base_link                   # 机器人坐标系
-      robot_radius: 0.15                                   # 2026-11-09：0.33→0.15。inscribed 带过大（墙缘19.72 vs 路径20.0=0.28m）使 253 带吞掉正常通道，A*/smoother/controller 三层全判撞死锁。缩小判据圈，物理剐蹭由 Gazebo 观察。
+      robot_radius: 0.33                                   # 与 SRM 的导航外接包络一致
       resolution: 0.05                                    # 地图分辨率（米）
       track_unknown_space: true                           # 主代价地图是否跟踪未知空间；与实车一致（缺省 false）
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
@@ -542,7 +542,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"         # 障碍膨胀图层插件
         cost_scaling_factor: 3.0                            # 膨胀代价衰减系数
-        inflation_radius: 0.40                               # 2026-11-09 v2：global 0.25→0.40（此行实为 global 段，此前误标 local）。0.25 时 A* 路径距 STL 柱仅 0.25m < 车半径 0.33，车嵌柱卡死（(4.44,4.24) 三次卡死根因）。0.40 提供安全裕度。
+        inflation_radius: 0.40                               # 2026-11-09 final：h39f 验证组合（final PGM + 0.40 + smoother 252 + collision off）A* 全程成功、车持续走 4.3m，为今日最佳。
       always_send_full_costmap: False                      # 是否每次发布完整代价地图
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
@@ -577,7 +577,7 @@ planner_server:
       mask_num_layers: 1
       cost_inflate_radius: 1.0
       simplify_epsilon: 0.1
-      save_point_max_radius: 20.0
+      save_point_max_radius: 0.4
       orientation_mode: "tangent"
 
 # 阶段二：在 TDT 全局规划器基础上，把 smoother_server 也换成 MinimumSnap。
@@ -628,7 +628,7 @@ smoother_server:
       init_vel_from_odom: false                          # 实测：开启后车一动（非零起点速度）OSQP 就开始失败，3 Hz 重规划下平滑频繁 abort
       odom_topic: odom                                   # 速度来源（相对机器人命名空间）
       init_vel_max_age: 0.30                             # 超过该时长(秒)视为无有效里程计
-      min_points: 3                                       # 少于此点数不做平滑
+      min_points: 2                                       # 两点直线路径也需要加密供控制器跟踪
       orientation_mode: "tangent"                         # 由相邻点求 yaw
 
 

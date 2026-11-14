@@ -567,7 +567,8 @@ planner_server:
       mask_num_layers: 1
       cost_inflate_radius: 1.0
       simplify_epsilon: 0.1
-      save_point_max_radius: 20.0
+      save_point_max_radius: 0.4
+      path_resample_step: 0.20                            # 给 SimpleSmoother 和控制器提供连续路径点
       orientation_mode: "tangent"
 
 smoother_server:

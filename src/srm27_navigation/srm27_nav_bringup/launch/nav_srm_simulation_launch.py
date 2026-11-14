@@ -108,6 +108,9 @@ def generate_launch_description():
     map_to_odom_yaw = LaunchConfiguration("map_to_odom_yaw")
 
     start_simulation = LaunchConfiguration("start_simulation")
+    sim_config_file = LaunchConfiguration("sim_config_file")
+    gui = LaunchConfiguration("gui")
+    run_immediately = LaunchConfiguration("run_immediately")
     start_chassis_control = LaunchConfiguration("start_chassis_control")
     start_rotation_sender = LaunchConfiguration("start_rotation_sender")
 
@@ -139,6 +142,13 @@ def generate_launch_description():
             )
         ),
         condition=IfCondition(start_simulation),
+        launch_arguments={
+            "config_file": sim_config_file,
+            "world": world,
+            "robot_name": namespace,
+            "gui": gui,
+            "run_immediately": run_immediately,
+        }.items(),
     )
 
     # 2) 点云转换：保持现有 ign_sim_pointcloud_tool 链路。
@@ -387,6 +397,9 @@ def generate_launch_description():
             description="是否由本入口一并启动 Gazebo 与 SRM 模型（默认由启动脚本单独拉起）",
         )
     )
+    ld.add_action(DeclareLaunchArgument("sim_config_file", default_value=""))
+    ld.add_action(DeclareLaunchArgument("gui", default_value="True"))
+    ld.add_action(DeclareLaunchArgument("run_immediately", default_value="False"))
     ld.add_action(
         DeclareLaunchArgument(
             "start_chassis_control",

@@ -11,6 +11,7 @@
 #include "nav2_core/exceptions.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "pluginlib/class_list_macros.hpp"
+#include "tdt_nav_kit/path_utils.hpp"
 #include "yastar.hpp"
 
 using nav2_util::declare_parameter_if_not_declared;
@@ -21,28 +22,60 @@ namespace tdt_nav_kit
 namespace
 {
 
-/// 起/终点落在障碍或地图外时才吸附到安全栅格；已在自由格则原样返回，
-/// 避免无谓移动合法的导航目标。map_img: 0 = 障碍，255 = 可行（YAstar::getMap()）。
+/// 只在配置的欧氏距离内吸附到最近的自由栅格中心。
 Eigen::Vector2f snapToSafe(
-  YAstar & planner,
-  const YAstar::TMatrix<u_char> & map_img,
+  const CostmapSnapshot & map,
   const geometry_msgs::msg::Point & point,
-  float max_radius)
+  float max_radius,
+  const char * endpoint)
 {
   const Eigen::Vector2f world(
     static_cast<float>(point.x), static_cast<float>(point.y));
-  const Eigen::Vector2i cell = planner.transformPos(world);
-
-  const bool safe =
-    cell.x() >= 0 && cell.y() >= 0 &&
-    cell.x() < static_cast<int>(map_img.cols()) &&
-    cell.y() < static_cast<int>(map_img.rows()) &&
-    map_img(cell.y(), cell.x()) != 0;
-
-  if (safe) {
+  const Eigen::Vector2f origin(map.origin_x, map.origin_y);
+  const Eigen::Vector2f cell = (world - origin) / map.resolution;
+  const auto is_free = [&map](int x, int y) {return map.data[y * map.size_x + x] == 0;};
+  if (cell.x() >= 0.0f && cell.x() < map.size_x &&
+    cell.y() >= 0.0f && cell.y() < map.size_y &&
+    is_free(static_cast<int>(cell.x()), static_cast<int>(cell.y())))
+  {
     return world;
   }
-  return planner.findSavePoint(world.x(), world.y(), max_radius);
+
+  const float radius_cells = max_radius / map.resolution;
+  const auto first_cell = [radius_cells](float coordinate, int size) {
+      return static_cast<int>(std::clamp(coordinate - radius_cells, 0.0f, float(size)));
+    };
+  const auto last_cell = [radius_cells](float coordinate, int size) {
+      return static_cast<int>(std::clamp(coordinate + radius_cells, -1.0f, float(size - 1)));
+    };
+  Eigen::Vector2f snapped = world;
+  float best_distance = max_radius;
+  bool found = false;
+  if (cell.allFinite()) {
+    const int x0 = first_cell(cell.x(), map.size_x);
+    const int x1 = last_cell(cell.x(), map.size_x);
+    const int y0 = first_cell(cell.y(), map.size_y);
+    const int y1 = last_cell(cell.y(), map.size_y);
+    for (int y = y0; y <= y1; ++y) {
+      for (int x = x0; x <= x1; ++x) {
+        if (!is_free(x, y)) {
+          continue;
+        }
+        const Eigen::Vector2f center = origin + map.resolution * Eigen::Vector2f(x + 0.5f, y + 0.5f);
+        const float distance = (center - world).norm();
+        if (distance <= best_distance) {
+          best_distance = distance;
+          snapped = center;
+          found = true;
+        }
+      }
+    }
+  }
+  if (found) {
+    return snapped;
+  }
+  throw nav2_core::PlannerException(
+    std::string("TdtGlobalPlanner: no free cell within tolerance of ") + endpoint);
 }
 
 /// 上游路径点只有 xy，无时间戳 / 朝向 / frame_id，这里补齐 Path 所需字段。
@@ -121,6 +154,9 @@ void TdtGlobalPlanner::configure(
     node, plugin_name_ + ".save_point_max_radius",
     rclcpp::ParameterValue(static_cast<double>(save_point_max_radius_)));
   declare_parameter_if_not_declared(
+    node, plugin_name_ + ".path_resample_step",
+    rclcpp::ParameterValue(static_cast<double>(path_resample_step_)));
+  declare_parameter_if_not_declared(
     node, plugin_name_ + ".orientation_mode", rclcpp::ParameterValue(orientation_mode_));
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".debug_timing", rclcpp::ParameterValue(debug_timing_));
@@ -137,6 +173,8 @@ void TdtGlobalPlanner::configure(
     node->get_parameter(plugin_name_ + ".simplify_epsilon").as_double());
   save_point_max_radius_ = static_cast<float>(
     node->get_parameter(plugin_name_ + ".save_point_max_radius").as_double());
+  path_resample_step_ = static_cast<float>(
+    node->get_parameter(plugin_name_ + ".path_resample_step").as_double());
   orientation_mode_ =
     node->get_parameter(plugin_name_ + ".orientation_mode").as_string();
   debug_timing_ = node->get_parameter(plugin_name_ + ".debug_timing").as_bool();
@@ -147,6 +185,12 @@ void TdtGlobalPlanner::configure(
   if (cost_inflate_radius_ <= 0.0f || simplify_epsilon_ <= 0.0f) {
     throw nav2_core::PlannerException(
       "TdtGlobalPlanner: cost_inflate_radius / simplify_epsilon must be positive");
+  }
+  if (!std::isfinite(save_point_max_radius_) || save_point_max_radius_ < 0.0f ||
+    !std::isfinite(path_resample_step_) || path_resample_step_ < 0.0f)
+  {
+    throw nav2_core::PlannerException(
+      "TdtGlobalPlanner: save_point_max_radius / path_resample_step must be finite and nonnegative");
   }
 }
 
@@ -202,11 +246,10 @@ nav_msgs::msg::Path TdtGlobalPlanner::createPlan(
     cost_inflate_radius_, [](float x) { return x < 0.60f ? 100.0f : 0.0f; });
   planner.initCostMap();
 
-  const YAstar::TMatrix<u_char> map_img = planner.getMap();
   const Eigen::Vector2f s =
-    snapToSafe(planner, map_img, start.pose.position, save_point_max_radius_);
+    snapToSafe(snap, start.pose.position, save_point_max_radius_, "start");
   const Eigen::Vector2f g =
-    snapToSafe(planner, map_img, goal.pose.position, save_point_max_radius_);
+    snapToSafe(snap, goal.pose.position, save_point_max_radius_, "goal");
   setup_ms = (clock_->now() - t_begin).seconds() * 1000.0;
   const auto t_search = clock_->now();
 
@@ -235,7 +278,8 @@ nav_msgs::msg::Path TdtGlobalPlanner::createPlan(
   }
 
   return toPath(
-    path, costmap_ros_->getGlobalFrameID(), node->now(), orientation_mode_);
+    resamplePath(path, path_resample_step_, 10000),
+    costmap_ros_->getGlobalFrameID(), node->now(), orientation_mode_);
 }
 
 }  // namespace tdt_nav_kit

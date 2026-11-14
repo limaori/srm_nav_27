@@ -62,7 +62,8 @@ private:
   int mask_num_layers_{1};
   float cost_inflate_radius_{1.0f};
   float simplify_epsilon_{0.1f};
-  float save_point_max_radius_{20.0f};
+  float save_point_max_radius_{0.4f};
+  float path_resample_step_{0.0f};
   /// "identity"（默认 w=1）或 "tangent"（由相邻路径点求 yaw）。
   std::string orientation_mode_{"identity"};
 

@@ -100,7 +100,7 @@ private:
   float max_acc_{2.0f};
 
   /// 少于该点数的路径不做平滑（直接返回 true）。
-  int min_points_{3};
+  int min_points_{2};
   /// 平滑前的路径加密步长（米）。0 表示不加密。
   ///
   /// 上游 MinimumSnap 的碰撞检查是按「相邻输入点连线/样条采样」判定的，

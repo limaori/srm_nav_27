@@ -906,7 +906,7 @@ std::pair<MinimumSnap::MatXd, MinimumSnap::MatXd> MinimumSnap::osqpExecute(
         if(solver.solveProblem() != OsqpEigen::ErrorExitFlag::NoError ||
            (solver.getStatus() != OsqpEigen::Status::Solved &&
             solver.getStatus() != OsqpEigen::Status::SolvedInaccurate)){
-            // 诊断（节流）：打印 OSQP 状态与迭代，定位 corridor 收敛失败原因。
+            // 诊断（节流）：打印 OSQP 状态与问题规模，定位 corridor 收敛失败原因。
             static std::chrono::steady_clock::time_point lastFailLog;
             const auto nowFail = std::chrono::steady_clock::now();
             if (nowFail - lastFailLog > std::chrono::seconds(2))
@@ -914,7 +914,6 @@ std::pair<MinimumSnap::MatXd, MinimumSnap::MatXd> MinimumSnap::osqpExecute(
                 lastFailLog = nowFail;
                 std::cout << "[osqp-fail] axis=" << axis
                           << " status=" << static_cast<int>(solver.getStatus())
-                          << " iter=" << solver.getNumberOfIterations()
                           << " vars=" << A.cols()
                           << " cons=" << A.rows() << std::endl;
             }
