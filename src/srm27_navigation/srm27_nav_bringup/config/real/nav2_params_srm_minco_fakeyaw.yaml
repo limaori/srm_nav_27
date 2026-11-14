@@ -785,7 +785,12 @@ controller_server:
         #   连续 10 次后进脱困盲推。软目标 = 0.33+0.05+本值 = 0.53，给上文
         #   "软目标与实际交付之间还有 ~5 cm 落差"再留 5 cm 缓冲。
         #   代价同上：窄道里更用力往中心挤；窄道通过性变差就回 0.10（再差回 0.05~0.075）。
-        optimization_clearance_margin: 0.15
+        # ★ 2026-11-14：0.15 → 0.05（窄道档）。软目标 = robot_radius 0.30 + margin 0.02
+        #   + 本值 = 0.37。0.8 m 通道里能拿到的最大净空是 0.40，软目标 0.37 可达；
+        #   若仍取 0.15（软目标 0.53）则窄道内该目标**永远不可达**，优化器一直顶着墙罚，
+        #   交付值被压到硬门槛附近（历史上的 0.3771/0.3809 判死就是这么来的）。
+        #   过窄道时"贴中线"就够了，不需要 0.53 的富余。
+        optimization_clearance_margin: 0.05
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
         # 依据: 实车 227_1006 那组 7 点航点（9.8 m 路径里 7 个转折）实测沿路径平均
@@ -799,7 +804,9 @@ controller_server:
         #   18:09 实车跑正是 0.3771 m 判死（见 optimization_clearance_margin 段）：
         #   弯角保速 80% 会把 MINCO 往内弯里拽，窄场地里这一步比"弯道快一点"更不值。
         #   要再保守取 0.45；它同时是弯道耗时的主要来源（沿路径平均速度丢在弯角）。
-        corner_speed_ratio: 0.60                        # 转角处最低速度比例
+        # ★ 2026-11-14：0.60 → 0.45（窄道档）。弯角保速越高，MINCO 切内弯越深；
+        #   0.8 m 通道里的直角弯按 0.60 会把轨迹拽向内侧墙，直接吃掉 0.32 的余量。
+        corner_speed_ratio: 0.45                        # 转角处最低速度比例
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
         # 2026-10-10: 与仿真同步 0.0 → 0.8。
@@ -877,8 +884,16 @@ controller_server:
         timeout: 0.25                                   # 新鲜窗口（秒）；超时按撤回（停转）
 
       safety:                                           # 几何与安全
-        robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
-        clearance_margin: 0.05                          # 额外净空裕量（米）
+        # ★ 2026-11-14 窄道档：0.33/0.05（硬门槛 0.38）→ 0.30/0.02（硬门槛 0.32）。
+        #   依据：CAD 实测底盘外廓 546×550 mm → 真实外接圆半径 0.2743 m，原来的 0.33
+        #   是"模型包络 + 保守量"，再叠 0.05 裕量把门槛推到 0.38，意味着**只有净宽
+        #   ≥ 0.76 m 的通道才可能通过**（车心必须几乎压在中线上），现场的 0.8 m 窄道
+        #   只剩 ±2 cm 余量，实测就是卡在 0.3809 m、差 0.9 mm 被判死。
+        #   现在 0.30 + 0.02 = 0.32：0.8 m 通道两侧各留 8 cm 给跟踪误差，
+        #   最小可通过宽度 0.64 m（规划器按 0.33 留，见下方 costmap 段）。
+        #   ⚠ 0.32 - 0.2743 = 4.6 cm 是**几何余量**，不含定位漂移；窄道内必须低速。
+        robot_radius: 0.30                              # 车身包络半径（米）；CAD 外廓 0.2743 + 2.6 cm
+        clearance_margin: 0.02                          # 额外净空裕量（米）；硬门槛 = 0.32
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
         # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
         # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
@@ -896,7 +911,11 @@ controller_server:
         # **仍需按实车辨识**：命令阶跃到 /odometry 速度起变化的时延中位数。
         # ⚠ 2026-10-10 与仿真同步时**未**采纳仿真的 0.0：取 0 会退化为使用
         #   state_timeout(0.25)，比 0.10 更保守（短终点轨迹更容易被拒）。
-        reaction_latency: 0.0
+        # ★ 2026-11-14：0.0 → 0.10。取 0 时 makeValidatorConfig() 会退化为
+        #   state_timeout = 0.50 s，于是"短停车轨迹"的豁免条件变成
+        #   轨迹总时长 >= 0.50 s；窄道里局部路径被截断后只有 0.45~0.50 s，
+        #   实测就差了 3 ms 被整条丢弃（validation_failed，每周期一次）。
+        reaction_latency: 0.10
 
       # 脱困（迁移自 navi_minco_bit 的 MincoPlanner.recovery_server.* + 其 FSM 里
       # 硬编码的 0.25/0.40 分诊与成功阈值）。语义与仿真那份完全一致，见
@@ -988,7 +1007,11 @@ local_costmap:
       width: 8
       height: 8
       resolution: 0.05
-      robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
+      # ★ 2026-11-14 窄道档：0.40 → 0.33（全局/局部一起改）。
+      #   0.33 是规划器要留的净空，比控制器的硬门槛 0.32 大 1 cm —— 规划器比控制器
+      #   严一点，规划出来的路径才不会在控制器里被 terminal=blocked 截断。
+      #   0.8 m 通道：可走的中心线带宽 = 0.40 - 0.33 = 7 cm（两侧各 7 cm）。
+      robot_radius: 0.33           # 规划用外形 = 控制器硬门槛 0.32 + 1 cm；车体 CAD 外廓 0.2743
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
@@ -1030,7 +1053,11 @@ local_costmap:
         # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
         # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
         #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
-        inflation_radius: 0.5           # 障碍膨胀半径(m)
+        # ★ 2026-11-14：0.1 → 0.33，与 robot_radius 齐平。
+        #   inflation_radius < robot_radius 时，膨胀层只把 inflation_radius 内的格子
+        #   标成 253，规划器实际只避开这么远 —— 原值 0.1 等于"规划器根本不管净空"。
+        #   取 0.33 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.32。
+        inflation_radius: 0.45          # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 global_costmap:
@@ -1041,7 +1068,11 @@ global_costmap:
       publish_frequency: 2.0
       global_frame: map
       robot_base_frame: gimbal_yaw_fake          # 迁移链（见 local_costmap 同项）
-      robot_radius: 0.40           # 规划用外形 = 车体外廓 0.33 + 控制器净空裕量(MINCO 要求 0.38, 取 0.40); 见文件头
+      # ★ 2026-11-14 窄道档：0.40 → 0.33（全局/局部一起改）。
+      #   0.33 是规划器要留的净空，比控制器的硬门槛 0.32 大 1 cm —— 规划器比控制器
+      #   严一点，规划出来的路径才不会在控制器里被 terminal=blocked 截断。
+      #   0.8 m 通道：可走的中心线带宽 = 0.40 - 0.33 = 7 cm（两侧各 7 cm）。
+      robot_radius: 0.33           # 规划用外形 = 控制器硬门槛 0.32 + 1 cm；车体 CAD 外廓 0.2743
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -1079,7 +1110,10 @@ global_costmap:
         # 2026-10-10: 与仿真同步 0.5 → 0.7（路径更居中、离墙更远）。
         # ⚠ 当初调小到 0.5 就是为了钻窄道；注意本层只影响 planner 选路，MINCO 控制器的
         #   净空判定不看膨胀层（只取 LETHAL_OBSTACLE）。窄道通过性变差就改回 0.5。
-        inflation_radius: 0.5           # 障碍膨胀半径(m)
+        # ★ 2026-11-14：0.25 → 0.33，与 robot_radius 齐平（原因见 local_costmap 同项）。
+        #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.32，
+        #   中间 7 cm 的"规划器认为能走、控制器不敢走"就是这次卡死的直接来源。
+        inflation_radius: 0.45          # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入

@@ -83,8 +83,12 @@
                   0.2 m/s 只看 0.4 m（原来 1.0 m/s 看满 1.0 m），窄处 "Collision Ahead" 误判变少。
                4) 代价：走完 1.0 m 要 5 s，是 1.0 m/s 的 5 倍；若脱困后仍卡在同处，先加
                   time_allowance（或多推几次），别再靠加 speed。 -->
-          <BackUp backup_dist="1.0"
-                  backup_speed="0.2"/>
+          <!-- 2026-11-14 窄道档：backup_dist 1.0 -> 0.6，并显式给 time_allowance 5.0。
+               0.2 m/s 走 1.0 m 要 5 s，正好顶到原来的 10 s 超时边缘；窄道里被顶住时
+               一次 recovery 白等 10 s，BT 计数一直涨。0.6 m / 5 s 让失败更快回到重规划。 -->
+          <BackUp backup_dist="0.6"
+                  backup_speed="0.2"
+                  time_allowance="5.0"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
