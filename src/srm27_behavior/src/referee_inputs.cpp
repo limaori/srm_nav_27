@@ -149,6 +149,8 @@ void SentryBehaviorServer::initRefereeInputs()
       status.heat_valid = m.heat_valid;
       status.damage_info_valid = m.damage_info_valid;
       status.hp_deduction_reason = m.hp_deduction_reason;
+      status.is_attacked = m.is_attacked;
+      status.armor_id = m.armor_id;
       bb->set("referee_robotStatus", status);
     });
 
@@ -248,6 +250,12 @@ void SentryBehaviorServer::refreshInputState()
   rm_decision_interfaces::msg::RobotStatus status;
   if (bb->get("referee_robotStatus", status)) {
     status.ammo_valid = ammo_valid;
+    std::chrono::steady_clock::time_point damage_received;
+    if (!bb->get("referee_aggregate_received", damage_received) ||
+        std::chrono::duration<double>(now - damage_received).count() >= input_timeout_sec_) {
+      status.damage_info_valid = false;
+      status.is_attacked = false;
+    }
     bb->set("referee_robotStatus", status);
   }
   rm_decision_interfaces::msg::EventData events;
@@ -256,6 +264,13 @@ void SentryBehaviorServer::refreshInputState()
     bb->get("referee_eventData_received", event_received) &&
     std::chrono::duration<double>(now - event_received).count() < input_timeout_sec_;
   bb->set("arena_valid", arena_valid);
+  const bool center_valid = events.center_control_valid && events.center_control <= 2 &&
+    events.center_gain_point_status <= 3 && bb->get<int>("game_type") == 4 &&
+    bb->get("referee_eventData_received", event_received) &&
+    std::chrono::duration<double>(now - event_received).count() < input_timeout_sec_;
+  bb->set("ul_center_valid", center_valid);
+  bb->set("ul_center_control", center_valid ? static_cast<int>(events.center_control) : -1);
+  bb->set("ul_center_activation", center_valid ? static_cast<int>(events.center_gain_point_status) : -1);
   const size_t own = bb->get<int>("robot_id") == 107 ? 1 : 0, enemy = 1 - own;
   bb->set("own_outpost_control", arena_valid ? static_cast<int>(events.outpost_control[own]) : -1);
   bb->set("enemy_outpost_control", arena_valid ? static_cast<int>(events.outpost_control[enemy]) : -1);

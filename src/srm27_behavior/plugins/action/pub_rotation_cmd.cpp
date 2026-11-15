@@ -15,6 +15,8 @@
 #include "srm27_behavior/plugins/action/pub_rotation_cmd.hpp"
 
 #include <memory>
+#include <chrono>
+#include <cmath>
 
 #include "srm27_behavior/navigation_spin_tracker.hpp"
 
@@ -31,6 +33,7 @@ BT::PortsList PublishRotationCmdAction::providedPorts()
 {
   return providedBasicPorts({
     BT::InputPort<double>("spin_speed", 0.0, "Angular Z velocity on rotation_cmd (rad/s)"),
+    BT::InputPort<double>("oscillation_period", 0.0, "Signed sine period in seconds; 0 keeps constant speed"),
     BT::InputPort<std::string>("spin_mode", "", "Optional label recorded in behavior/spin_state"),
     BT::InputPort<std::shared_ptr<NavigationSpinTracker>>(
       "tracker_port", "{@nav_spin_tracker}", "Shared NavigationSpinTracker on blackboard"),
@@ -43,6 +46,17 @@ bool PublishRotationCmdAction::setMessage(geometry_msgs::msg::Twist & msg)
   std::string spin_mode;
   getInput("spin_speed", spin_speed);
   getInput("spin_mode", spin_mode);
+  const double period = getInput<double>("oscillation_period").value();
+  if (!std::isfinite(spin_speed) || !std::isfinite(period) || period < 0.0 ||
+      (period > 0.0 && period < 0.2)) {
+    RCLCPP_ERROR(node_->get_logger(), "Spin speed must be finite; oscillation period must be 0 or >= 0.2s");
+    return false;
+  }
+  if (period > 0.0) {
+    const double now = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    spin_speed *= std::sin(2.0 * M_PI * std::fmod(now, period) / period);
+  }
 
   std::shared_ptr<NavigationSpinTracker> tracker;
   if (getInput("tracker_port", tracker) && tracker) {

@@ -147,9 +147,63 @@
                 </NavigationTransitionGate>
               </ReactiveSequence>
             </ReactiveFallback>
-            <!-- P1 持续占守：没有回补需求时前往 ul_control_waypoint。
-                 默认 rmul_center；在 sentry_behavior.yaml 改成 rmul_home_highland 可切己方高地。
-                 到点后持续驻留，不因已占领或弹量耗尽主动离点，也不追敌丢点。 -->
+            <!-- P1 中心回退：仅中心预案启用，回补优先。
+                 2027 UL §3.3.4.1 / 通信协议表1-9：激活与控制权独立；双方激活只暂停进度。
+                 敌方控制或敌方单独激活且非双方争夺时架枪，反馈失效也先回退。
+                 双方争夺时允许回中心，不根据计时、RFID、抵达或臆测敌方血量宣告夺回。
+                 回退点需标定安全路线和射界，不能由示例坐标保证。 -->
+            <ReactiveSequence name="RmulCenterFallback">
+              <ScriptCondition code="@ul_control_waypoint == 'rmul_center'
+                                     &amp;&amp; (!@ul_center_valid || (@ul_center_activation != 3
+                                       &amp;&amp; (@ul_center_control == 2 || @ul_center_activation == 2)))"/>
+              <Script code="@decision_mode := 'fallback'; @decision_reason := 'center_unknown_or_enemy_control'"/>
+              <Fallback name="SpinArbitration">
+                <Sequence name="SemanticSpinGuard">
+                  <Fallback>
+                    <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                      zone_type="slope"
+                      matched_zone="{fallback_matched_zone}"
+                      zone_max_spin="{fallback_zone_max_spin}"/>
+                    <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                      zone_type="tunnel"
+                      matched_zone="{fallback_matched_zone}"
+                      zone_max_spin="{fallback_zone_max_spin}"/>
+                  </Fallback>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{fallback_zone_max_spin}"
+                    spin_mode="SEMANTIC_ZONE"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
+                <Sequence name="HpDropSpin">
+                  <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{@spin_evasion_speed}"
+                    oscillation_period="{@spin_evasion_period}"
+                    spin_mode="HP_DROP_EVASION"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
+                <Sequence name="ArrivedFastSpin">
+                  <ScriptCondition code="@nav_arrived == true"/>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{@spin_arrived_speed}"
+                    spin_mode="ARRIVED_FAST"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
+                <PublishRotationCmd _successIf="@dry_run"
+                  spin_speed="{@spin_moving_speed}"
+                  spin_mode="MOVING_SLOW"
+                  topic_name="rotation_cmd"/>
+              </Fallback>
+              <NavigationTransitionGate hold_radius="{@ul_hold_radius}">
+                <SendNav2Goal waypoint_name="{@ul_fallback_waypoint}" action_name="navigate_to_pose"/>
+              </NavigationTransitionGate>
+            </ReactiveSequence>
+
+            <!-- P2 正常占守：中心无回退条件时进点；高地预案不受中心状态影响。
+                 自转优先级：语义区限转 > 掉血>=10锁存2.5s的正弦交变 > 到点快转 > 移动慢转。
+                 交变峰值/周期由 spin.evasion_speed/evasion_period 提供，不推断受击方向。
+                 两种驻守分支都按预设目标检查 ul.hold_radius（默认0.5m），偏离后重新导航；
+                 不以实际停车点代替目标，不重置定位，Nav2 XY 容差应小于驻守半径。 -->
             <ReactiveSequence name="RmulControlHold">
               <Script code="@decision_mode := 'control'; @decision_reason := 'ul_continuous_control'"/>
               <Fallback name="SpinArbitration">
@@ -169,6 +223,14 @@
                     spin_mode="SEMANTIC_ZONE"
                     topic_name="rotation_cmd"/>
                 </Sequence>
+                <Sequence name="HpDropSpin">
+                  <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{@spin_evasion_speed}"
+                    oscillation_period="{@spin_evasion_period}"
+                    spin_mode="HP_DROP_EVASION"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
                 <Sequence name="ArrivedFastSpin">
                   <ScriptCondition code="@nav_arrived == true"/>
                   <PublishRotationCmd _successIf="@dry_run"
@@ -181,7 +243,7 @@
                   spin_mode="MOVING_SLOW"
                   topic_name="rotation_cmd"/>
               </Fallback>
-              <NavigationTransitionGate>
+              <NavigationTransitionGate hold_radius="{@ul_hold_radius}">
                 <SendNav2Goal waypoint_name="{@ul_control_waypoint}" action_name="navigate_to_pose"/>
               </NavigationTransitionGate>
             </ReactiveSequence>

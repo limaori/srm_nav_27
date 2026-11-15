@@ -581,11 +581,9 @@ controller_server:
     general_goal_checker:
       plugin: "srm27_nav_plugins::OmniStoppedGoalChecker"
       stateful: True                                    # 是否保存目标检查状态
-      # 平面位置容差（米）：与实车统一为 0.50，同时也是终点急停的进入半径。
-      # 顺带修掉了原来的一处不自洽 —— 本文件原先 xy_goal_tolerance(0.15) 小于
-      # terminal_reached_radius(0.20)，车在 0.15~0.20 m 处会被插件判 already_at_goal
-      # 但目标检查器不接受（详见 minco实车迁移实施记录 §4.4）。
-      xy_goal_tolerance: 0.50                           # 平面位置容差（米）
+      # 给 UL 的 0.50m 驻守范围留出 0.10m 栅格端点误差余量，且大于巡逻过点半径 0.35m。
+      # MINCO 终点停车读取同一个 GoalChecker 容差，保持到点与急停判据一致。
+      xy_goal_tolerance: 0.40                           # 平面位置容差（米）
       yaw_goal_tolerance: 6.28                          # 航向角容差（弧度），自由 yaw
       # ★ 2026-11-03：0.03 -> 0.10。仿真里程计（simulation_ground_truth_odometry.py）
       #   直接转发 Gazebo 的 twist，静止时实测恒为 (-0.061, 0.022) m/s（而位姿 3 s 只爬
@@ -630,11 +628,6 @@ controller_server:
       terminal_reached_radius: 0.20
 
       # 同一导航任务内"路径刷新"与"换目标"的判定阈值（米）。
-      # ⚠ 仿真的 general_goal_checker.xy_goal_tolerance 是 0.15，比这里的
-      # terminal_reached_radius(0.20) 还小 —— 也就是说车在 0.15~0.20 m 处会被插件判成
-      # already_at_goal（输出零速、不算失败），但目标检查器不接受，随后进度检查器会把
-      # 目标判失败。实车那份是 0.40 > 0.20，没有这个问题；本文件保持原值未改，
-      # 是否收敛这对参数由仿真侧单独决定。
       goal_change_tolerance: 0.10
 
       # 终点急停（与实车同语义，见 terminal_stop.hpp）：进容差立即给零速。

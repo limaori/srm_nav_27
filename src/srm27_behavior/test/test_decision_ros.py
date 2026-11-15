@@ -60,6 +60,7 @@ class Arena:
         self.out = OUT / f"{league}-{scenario}"
         self.events = []
         self.spins = []
+        self.spin_requests = []
         self.outputs = []
         self.postures = []
         self.reports = []
@@ -86,6 +87,7 @@ class Arena:
         self.ally = AllyRobotHP(ally_outpost_hp=1500, ally_base_hp=5000)
         self.switch = SwitchPosition(switch_position=1)
         self.field = EventData()
+        self.field.center_control_valid = True
         self.x, self.y, self.frame = -2., 0., "map"
         self.node = rclpy.create_node("decision_arena")
         self.group = ReentrantCallbackGroup()
@@ -115,6 +117,7 @@ class Arena:
             self.node.create_subscription(String, "decision/status", lambda m: self.reports.append(json.loads(m.data)), 10),
             self.node.create_subscription(Bool, "decision/motion_permit", lambda m: self.permits.append(m.data), 10),
             self.node.create_subscription(String, "behavior/spin_state", lambda m: self.spins.append(m.data), 10),
+            self.node.create_subscription(Twist, "rotation_cmd", lambda m: self.spin_requests.append(m.angular.z), 10),
             self.node.create_subscription(Twist, "cmd_vel_test_output", lambda m: self.outputs.append(m), 10),
             self.node.create_subscription(UInt8, "sentry/desired_posture", lambda m: self.postures.append(m.data), 10),
         ]
@@ -536,6 +539,8 @@ def test_ul_home_highland_preset():
     try:
         a.__init__("ul", "home-highland", overrides={"ul_control_waypoint": "rmul_home_highland"})
         a.game.game_progress = 4
+        a.field.center_control = 2
+        a.field.center_gain_point_status = 2
         a.goal(2., -1.)
         assert not a.postures
         a.check("ul_home_highland_preset_from_configuration")
@@ -545,6 +550,129 @@ def test_ul_home_highland_preset():
                 a.close()
         finally:
             rclpy.shutdown()
+
+
+def test_ul_center_control_activation_freshness_and_supply_priority():
+    init_test_ros()
+    a = Arena.__new__(Arena)
+    try:
+        a.__init__('ul', 'center-fallback')
+        a.game.game_progress = 4
+        a.goal(4.5, -3.2)
+        for control, activation, target in [
+            (2, 2, (3., -3.2)),  # Enemy controls and exclusively activates the point.
+            (2, 3, (4.5, -3.2)), # Contested activation pauses progress; control can still be enemy.
+            (2, 0, (3., -3.2)),  # Empty point does not instantly lose its retained control.
+            (0, 0, (4.5, -3.2)),
+            (0, 2, (3., -3.2)),  # Enemy can activate before its 5-second capture completes.
+            (1, 1, (4.5, -3.2)),
+        ]:
+            before = len(a.accepted())
+            a.field.center_control = control
+            a.field.center_gain_point_status = activation
+            a.goal(*target, after=before)
+        a.check('2027_control_and_activation_are_independent')
+        a.suspended.add('field')
+        a.goal(3., -3.2, after=len(a.accepted()))
+        assert not a.reports[-1]['ul_center_valid']
+        a.check('stale_center_feedback_retreats')
+        a.suspended.remove('field')
+        a.goal(4.5, -3.2, after=len(a.accepted()))
+        a.field.center_control_valid = False
+        a.goal(3., -3.2, after=len(a.accepted()))
+        a.check('legacy_center_feedback_is_unknown')
+        a.field.center_control_valid = True
+        a.field.center_control = 3
+        time.sleep(.25)
+        assert not a.reports[-1]['ul_center_valid']
+        a.field.center_control = 2
+        a.field.center_gain_point_status = 2
+        a.status.current_hp = 100
+        a.goal(0., 0., after=len(a.accepted()))
+        assert a.reports[-1]['mode'] == 'recover'
+        a.check('hp_recovery_preempts_center_fallback')
+        assert not a.postures
+        active = None
+        for event in a.events:
+            if event['event'] == 'accepted':
+                assert active is None, 'center switch overlapped navigation actions'
+                active = event['seq']
+            elif event['seq'] == active:
+                active = None
+        a.check('center_switch_cancels_before_send')
+    finally:
+        a.close()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize('fallback', [False, True])
+def test_ul_repositions_from_requested_point_instead_of_completion_anchor(fallback):
+    init_test_ros()
+    a = Arena.__new__(Arena)
+    try:
+        a.__init__('ul', f'reposition-{fallback}')
+        if fallback:
+            a.field.center_control = 2
+            a.field.center_gain_point_status = 2
+        target = (3., -3.2) if fallback else (4.5, -3.2)
+        a.game.game_progress = 4
+        a.goal(*target)
+        a.x, a.y = target[0] - .30, target[1]
+        a.succeed = True
+        wait_for(lambda: any(e['event'] == 'succeeded' for e in a.events), 'Nav2 success missing')
+        wait_for(lambda: a.outputs and abs(a.outputs[-1].angular.z - 7.) < .01, 'hold spin missing')
+        a.succeed = False
+        count = len(a.accepted())
+        a.x = target[0] - .49
+        time.sleep(.3)
+        assert len(a.accepted()) == count, 'inside hold radius resent navigation'
+        # Only 0.21m from the accepted stopping pose, but >0.5m from the configured point.
+        a.x = target[0] - .51
+        a.goal(*target, after=count)
+        a.check('strict_half_meter_reposition_from_configured_point')
+    finally:
+        a.close()
+        rclpy.shutdown()
+
+
+def test_hp_drop_sine_spin_preserves_navigation_semantic_and_stop_gates(arena):
+    a = arena
+    a.game.game_progress = 4
+    a.goal(*( (4.5, -3.2) if a.league == 'ul' else (3.5, 0.) ))
+    time.sleep(.3)  # Establish the real HP-difference condition's baseline.
+    assert not a.set_parameters({'spin.evasion_period': .1})
+    assert not a.set_parameters({'spin.evasion_period': math.nan})
+    assert a.set_parameters({'spin.evasion_period': 1.0})
+    before = len(a.spin_requests)
+    output_start = len(a.outputs)
+    a.status.current_hp = 380
+    wait_for(lambda: any(v > 2. for v in a.spin_requests[before:]) and
+                    any(v < -2. for v in a.spin_requests[before:]), 'sine spin did not reverse', timeout=2)
+    assert max(abs(v) for v in a.spin_requests[before:]) <= 8.01
+    wait_for(lambda: len(a.outputs) > output_start + 10 and
+                    max(v.angular.z for v in a.outputs[output_start:]) -
+                    min(v.angular.z for v in a.outputs[output_start:]) > .5,
+             'real mux output did not respond to the sine requests', timeout=2)
+    assert max(abs(v.angular.z) for v in a.outputs[output_start:]) <= 9.01
+    if a.league == 'ul':
+        assert a.accepted()[-1]['xy'][-1] == [4.5, -3.2]
+        assert not a.postures
+    else:
+        a.goal(2.5, 1.5)
+    a.check('hp_drop_signed_sine_and_real_mux_slew_limited_response')
+    a.x, a.y = 101., 101. if a.league == 'ul' else 100.5
+    wait_for(lambda: 'SEMANTIC_ZONE' in a.spins[-1] and 'wz=0.00' in a.spins[-1],
+             'semantic limit did not override attack spin')
+    a.check('semantic_spin_limit_preempts_sine')
+    a.x, a.y = -2., 0.
+    a.status.current_hp = 360
+    wait_for(lambda: 'HP_DROP_EVASION' in a.spins[-1], 'attack spin did not resume')
+    a.manual_stop()
+    wait_for(lambda: a.outputs and a.outputs[-1].linear.x == 0. and a.outputs[-1].angular.z == 0.,
+             'manual stop did not override attack spin')
+    a.check('manual_stop_preempts_sine')
+    wait_for(lambda: 'HP_DROP_EVASION' not in a.spins[-1], 'sine spin survived HP-drop window', timeout=4)
+    a.check('sine_expires_with_hp_drop_window')
 
 
 def test_feedback_flood_does_not_starve_action_responses(arena):
@@ -783,7 +911,7 @@ def test_serial_referee_2027_and_legacy_frames():
         '-p', 'flow_control:=none', '-p', 'parity:=none', "-p", "stop_bits:='1'",
         '-r', '/srm/sefdefined:=test/serial_identity',
     ], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    frames = [build_frame(0x0101, struct.pack('<II', 2 << 30, 2 << 2)) +
+    frames = [build_frame(0x0101, struct.pack('<II', 2 << 30, (2 << 2) | (3 << 24) | (2 << 26))) +
               build_frame(0x0003, struct.pack('<4Hh7H', 100, 0, 180, 190, -5, 380,
                                              1200, 4000, 1400, 3000, 123, 456))]
     stopping = threading.Event()
@@ -801,11 +929,14 @@ def test_serial_referee_2027_and_legacy_frames():
         assert process.poll() is None
         assert received_event[-1].battlefield_valid
         assert list(received_event[-1].outpost_control) == [0, 2]
+        assert received_event[-1].center_control_valid
+        assert received_event[-1].center_control == 2 and received_event[-1].center_gain_point_status == 3
         assert received_hp[-1].control_score_valid
         assert received_hp[-1].ally_control_degree == 123 and received_hp[-1].enemy_control_degree == 456
         assert received_hp[-1].blue_outpost_hp == 1400
         frames[0] = build_frame(0x0101, struct.pack('<I', 0)) + build_frame(0x0003, struct.pack('<8H', 1, 2, 3, 4, 0, 380, 1500, 5000))
-        wait_for(lambda: not received_event[-1].battlefield_valid and not received_hp[-1].control_score_valid,
+        wait_for(lambda: not received_event[-1].battlefield_valid and not received_event[-1].center_control_valid
+                 and not received_hp[-1].control_score_valid,
                  'legacy serial frames not preserved')
         assert received_hp[-1].ally_outpost_hp == 1500
         frames[0] = build_frame(0x0101, bytes(6)) + build_frame(0x0003, bytes(20))

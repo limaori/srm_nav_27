@@ -24,6 +24,10 @@ named_waypoints:
     x: 4.5
     y: -3.2
     yaw: 0.0
+  rmul_center_fallback: # 示例：己方侧掩体/架枪位置，必须实测路线、射界与驻守安全性
+    x: 3.0
+    y: -3.2
+    yaw: 0.0
 
   # --- RMUC 7v7 ---
   rmuc_supply:

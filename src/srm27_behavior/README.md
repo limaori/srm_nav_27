@@ -6,7 +6,7 @@
 
 ```bash
 # 已有 ROS 2 Humble 工作区
-colcon build --packages-up-to srm27_behavior srm27_chassis_control
+colcon build --packages-up-to srm27_behavior srm27_chassis_control srm27_nav_protocol
 source install/setup.bash
 ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_sim_time:=false
 # UC 换 target_tree:=rmuc_2027；Gazebo 换 use_sim_time:=true
@@ -30,6 +30,7 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 | 一个战术的条件/动作、比赛门控、自转仲裁 | 直接编辑对应赛制 XML，已全部内联并附中文注释 |
 | 坐标、巡逻路线 | `params/waypoints.yaml`；命名点 `named_waypoints`，连续路线 `waypoint_groups` |
 | 回补阈值、早期时段、UL 中心/高地预案 | `params/sentry_behavior.yaml` |
+| UL 架枪回退点、回位半径、受击交变周期 | `ul.fallback_waypoint`、`ul.hold_radius`、`spin.evasion_period`；坐标在 `waypoints.yaml` |
 | 坡道/隧道限制 | `params/rmuc_semantic_map.yaml`、`params/rmul_semantic_map.yaml` |
 
 `waypoints_file`、`ul.control_waypoint`、`ul.semantic_map_file`、`uc.semantic_map_file` 都是服务端参数，在 `sentry_behavior.yaml` 中已按 `ul:` 与 `uc:` 分块维护（且兼容 `ul_*` / `uc_*` 扁平传参），支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
@@ -47,13 +48,29 @@ flowchart TD
   B -->|是| D{赛种}
   D -->|UL| E{低血或复活未回补?}
   E -->|是| F[回补 / RFID 到区驻留 / 滞回到恢复阈值]
-  E -->|否| G[持续占守中心或己方高地]
+  E -->|否| U{中心预案且敌控/敌方单独激活或反馈失效?}
+  U -->|是且非双方争夺| V[回退架枪点驻守]
+  U -->|否或双方争夺| G[持续占守中心或己方高地]
   D -->|UC| H[回补 → 基地危机 → 掉血回避 → 己方阵地恢复 → 控区攻守 → 巡逻/联防]
 ```
 
 回补尝试默认最多 25 秒（包括赶路与等待），失败后暂避并冷却 15 秒再尝试；UL 仍属于“回补/占守”两种主行为，不增加追敌、多机通信或补弹。`supply_timeout/supply_retry` 可调，必须结合实际路径长度标定。
 
 **UL**：5 分钟、400 HP、750 发、100 W，无姿态、无多机通信、无局内补弹。默认只保留回补和占守；低血 150 触发、恢复到 360 离开。复活后即使血量已经抬高，也必须检测到己方补给区 RFID 才清除回补要求。弹量耗尽继续控区。控制区需要持续激活，默认驻留，不因“已占领”就离开，也不追敌丢点。
+
+**UL 中心攻守（2027 规则适配）**：优先级为低血/复活回补 → 中心回退架枪 → 正常占守。`ul.control_waypoint=rmul_center` 时，中心由敌方控制或敌方单独激活，且不处于双方激活态，前往 `ul.fallback_waypoint`（默认 `rmul_center_fallback`）；中心反馈无效/过期也先回退。双方激活时允许返回中心参与争夺；中立/己控且无敌方单独激活时正常进点。选择己方高地预案不受中心状态影响。架枪点仅为导航目标，不保证火力射界或命中收益，必须实测标定。
+
+规则依据为 UL §3.3.4.1、§3.3.5.3 和通信协议表 1-9：中心激活状态为 `0=无人/1=己方/2=对方/3=双方`，控制权为 `0=中立/1=己方/2=对方`，二者独立。双方激活只会暂停占领进度；双方均不激活非中立控制区时进度每秒减少 1；激活状态有 2 秒失效延迟。决策不根据抵达、计时或 RFID 伪造控制权，也不假定敌方已残血。中心字段仅接受新鲜的 2027 原生 8 字节反馈，旧转发包不具备该信息。
+
+**UL 驻守回位**：中心、回退点和高地驻守均使用 `ul.hold_radius=0.5m`，相对预设目标坐标偏离超过此距离，下一 tick 重新发起导航；不会把 Nav2 实际停车点当成新的驻守中心，也不重置定位。范围内保持驻守，不反复发目标。Nav2 XY 到点容差应小于该半径，并实测地图栅格端点误差，否则会因无法满足驻守精度而反复纠偏。其他回补和 UC 任务仍使用原来的到点滞回。
+
+仿真云台系 Nav2 的 XY 容差改为 `0.40m`，为驻守半径留出 `0.10m` 栅格端点误差余量，同时保留与连续巡逻 `0.35m` 过点半径的兼容；实车云台系原有 `0.20m` 配置保持原值。仿真示例架枪点仅对平面测试地图验证进退路线，不能替代实际赛场的路线、全车净空和射界标定。
+
+**掉血交变自转**：有效 HP 相邻采样下降至少 10，反制窗口维持 2.5 秒。UL 在中心/回退/高地目标处交变，不另选躲避点；UC 保留原来的 `rmuc_hp_evasion` 脱困路线。窗口内输出 `evasion_speed × sin(2πt / evasion_period)`，相位使用单调时钟；默认峰值 `8 rad/s`、周期 `1.2s`（可热更新，最小 `0.2s`）。窗口结束恢复普通速度，语义区限转、低血回补和所有运动门控优先。HP 掉血可能包含碰撞等伤害，不能据此确定射手方向；正弦交变降低敌方预测效果的实战收益尚需评估，反转加速度与底盘负载须实测。
+
+这里的峰值和周期描述的是 `rotation_cmd` 请求。mux 仍按 `wz_max` 限幅、按 `wz_ramp` 限坡；当前默认 `wz_ramp=4.5 rad/s²`，而理想 `8 rad/s / 1.2s` 正弦的最大斜率约为 `41.9 rad/s²`，实际出口会被限坡，从已有高速自转进入时，2.5 秒内也不保证完成顺逆反转。必须结合电控实测设置峰值、周期和 XML 中的反制时长，不能绕过限坡或宣称已达到理想波形。
+
+受击方向接口继续使用 `RobotStatus.damage_info_valid/is_attacked/armor_id/hp_deduction_reason` 和现有 `IsAttacked` 插件；聚合字段转发及断流失效已补齐。当前串口没有有效装甲伤害来源，云台没有执行接口，故不装配自动云台对齐，也不根据 HP 差分编造方向。
 
 **UC**：回补优先，基地危机可抢占巡逻；前哨已毁时禁止自定义 `switch_position=0` 推进；低弹收缩堡垒，避免在当前没有购买下行的情况下无限等待补弹。`uc_resupply_enabled` 默认 true，仅在开赛满 1 分钟后低弹时尝试获取免费弹量；以新鲜真实弹量达到退出阈值且 RFID 在补给区为完成条件，不发送购买请求。基地危机跳过普通低弹回补。最后 30 秒不主动进行普通远程回补；复活解除虚弱的回补保留。
 
@@ -89,7 +106,7 @@ ros2 service call /srm_cmd_mux/stop_all std_srvs/srv/Trigger
 
 ## 裁判协议兼容
 
-`EventData` 包含 2027 R/B 阵地控制/激活数组和 `battlefield_valid`，`AllyRobotHP` 包含 R/B 前哨 HP、双方控制度和 `control_score_valid`，对应通信协议 V1.0.0（2026-10-29）表 1-8/1-9。旧转发包保留原字段，新有效位为 false；速度下行仍为 19 字节。ROS 消息定义更新后，生产者和消费者须一起重新构建，避免混用旧消息类型。
+`EventData` 包含 2027 R/B 阵地控制/激活数组和 `battlefield_valid`，并分别提供 UL 中心激活 `center_gain_point_status`、控制权 `center_control` 及有效位 `center_control_valid`；`AllyRobotHP` 包含 R/B 前哨 HP、双方控制度和 `control_score_valid`，对应通信协议 V1.0.0（2026-10-29）表 1-8/1-9。旧转发包保留原字段，新有效位为 false；速度下行仍为 19 字节。ROS 消息定义更新后，生产者和消费者须一起重新构建，避免混用旧消息类型。
 
 ## 黑板与接口
 

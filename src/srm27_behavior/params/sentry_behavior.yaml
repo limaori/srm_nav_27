@@ -24,6 +24,8 @@ srm27_behavior_server:
     # ==============================
     ul:
       control_waypoint: rmul_center  # 改 rmul_home_highland 可切己方高地预案
+      fallback_waypoint: rmul_center_fallback # 中心被敌方控制/独占激活，或反馈失效时架枪；需实测标定
+      hold_radius: 0.5          # 相对预设驻守点的最大偏离距离，不以 Nav2 停车位置代替
       semantic_map_file: params/rmul_semantic_map.yaml
       hp_trigger: 150
       hp_exit: 360
@@ -49,7 +51,8 @@ srm27_behavior_server:
       moving_speed: 2.5       # 前往目标点/巡航移动中的慢速小陀螺 (rad/s)
       arrived_speed: 7.0      # 到达目标点后的快速小陀螺 (rad/s)
       supply_speed: 2.0       # 补给区回血/补弹转速 (rad/s)
-      evasion_speed: 8.0      # 掉血受击突发闪避转速 (rad/s)
+      evasion_speed: 8.0      # 掉血反制正弦请求的峰值(rad/s)，实际出口仍受 mux 限幅/限坡
+      evasion_period: 1.2     # 正弦请求周期(s)；>=0.2，默认限坡下不保证 2.5s 内完成实际反转
       arrive_tolerance: 0.35  # 判定已到达目标点的距离阈值 (m)
       leave_tolerance: 0.55   # 滞回离开阈值 (m, 避免边界定位抖动引起慢/快切换震荡)
 

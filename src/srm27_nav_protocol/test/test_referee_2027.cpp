@@ -7,7 +7,7 @@ TEST(Referee2027, FieldStatesKeepRedBlueAndUnknownActivationSeparate)
 {
   ReceiveEventData2027 p{};
   p.data.event_data = (1u << 28) | (2u << 30) | (4u << 5) | (3u << 25) | (2u << 20);
-  p.data.event_data_2 = (2u << 2) | (321u << 4) | (6u << 13) | (3u << 24);
+  p.data.event_data_2 = (2u << 2) | (321u << 4) | (6u << 13) | (3u << 24) | (2u << 26);
   const auto m = decodeEvent2027(p);
   EXPECT_TRUE(m.battlefield_valid);
   EXPECT_EQ(m.outpost_control[0], 1);
@@ -20,6 +20,10 @@ TEST(Referee2027, FieldStatesKeepRedBlueAndUnknownActivationSeparate)
   EXPECT_EQ(m.dart_last_hit_time, 321);
   EXPECT_EQ(m.dart_last_hit_target, 6);
   EXPECT_EQ(m.center_gain_point_status, 3);
+  EXPECT_TRUE(m.center_control_valid);
+  EXPECT_EQ(m.center_control, 2);
+  p.data.event_data_2 |= 3u << 26;
+  EXPECT_FALSE(decodeEvent2027(p).center_control_valid);
   p.data.event_data |= 3u << 28;
   EXPECT_FALSE(decodeEvent2027(p).battlefield_valid);
 }

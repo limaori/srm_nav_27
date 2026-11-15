@@ -17,6 +17,7 @@ public:
   static BT::PortsList providedPorts()
   {
     return {BT::InputPort<bool>("hold_success", true, "Hold a reached point until preempted"),
+      BT::InputPort<double>("hold_radius", 0.0, "Strict distance from requested point; 0 uses arrival hysteresis"),
       BT::InputPort<double>("timeout_sec", "{@navigation_timeout}", "Per-attempt goal time budget")};
   }
 
@@ -53,9 +54,17 @@ private:
     setStatus(BT::NodeStatus::RUNNING);
     bool hold = true;
     getInput("hold_success", hold);
+    const double hold_radius = getInput<double>("hold_radius").value();
+    if (!std::isfinite(hold_radius) || hold_radius < 0.0) {
+      throw BT::RuntimeError("hold_radius must be finite and nonnegative");
+    }
     if (hold && reached_) {
       bool arrived = false;
       (void)bb->get("nav_arrived", arrived);
+      if (hold_radius > 0.0) {
+        double distance = 0.0;
+        arrived = bb->get("dist_to_goal", distance) && std::isfinite(distance) && distance <= hold_radius;
+      }
       if (arrived) { return BT::NodeStatus::RUNNING; }
       reached_ = false;
     }

@@ -163,7 +163,7 @@ def test_real_navigation_closed_loop(league):
             a.field.outpost_control = [0, 2]
             a.field.base_control = [0, 2]
         a.game.game_progress = 4
-        # Nav2 uses 0.5m XY tolerance around a grid-snapped endpoint (0.1m cells).
+        # The common navigation bound includes grid-endpoint error; UL holding is stricter.
         arrival_bound = .6
         if league == "ul":
             target = (4.5, -3.2)
@@ -176,6 +176,29 @@ def test_real_navigation_closed_loop(league):
             assert math.hypot(a.x-start[0], a.y-start[1]) < .08
             assert abs(a.yaw-start[2]) > 2.
             a.check("nav2_minco_arrival_and_stationary_spin")
+            assert math.hypot(a.x-target[0], a.y-target[1]) <= .5
+            # Model a collision impulse without changing localization or restarting Nav2.
+            a.x, a.y = target[0] - .7, target[1]
+            wait_for(lambda: math.hypot(a.x-target[0], a.y-target[1]) <= .5,
+                     "real Nav2 did not reposition inside the hold radius", timeout=30)
+            wait_for(lambda: abs(a.outputs[-1].linear.x) < .02 and abs(a.outputs[-1].linear.y) < .02
+                     and abs(a.outputs[-1].angular.z-7.) < .1, 'reposition did not finish in stationary hold')
+            a.check("nav2_repositions_after_collision_displacement")
+            a.field.center_control = 2
+            a.field.center_gain_point_status = 2
+            wait_for(lambda: a.reports[-1]['mode'] == 'fallback' and
+                     math.hypot(a.x-3., a.y+3.2) <= .5,
+                     "real Nav2 did not reach center fallback", timeout=35)
+            wait_for(lambda: abs(a.outputs[-1].linear.x) < .02 and abs(a.outputs[-1].linear.y) < .02
+                     and abs(a.outputs[-1].angular.z-7.) < .1, 'fallback did not finish in stationary hold')
+            a.check("nav2_center_enemy_control_retreat")
+            a.field.center_gain_point_status = 3
+            wait_for(lambda: a.reports[-1]['mode'] == 'control' and
+                     math.hypot(a.x-target[0], a.y-target[1]) <= .5,
+                     "real Nav2 did not reenter contested center", timeout=35)
+            wait_for(lambda: abs(a.outputs[-1].linear.x) < .02 and abs(a.outputs[-1].linear.y) < .02
+                     and abs(a.outputs[-1].angular.z-7.) < .1, 'center reentry did not finish in stationary hold')
+            a.check("nav2_contested_center_reentry")
         else:
             wait_for(lambda: math.hypot(a.x-5., a.y-1.2) < arrival_bound,
                      "MINCO did not reach enemy outpost control point", timeout=65)

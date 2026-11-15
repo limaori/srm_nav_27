@@ -25,6 +25,8 @@ inline rm_decision_interfaces::msg::EventData decodeEvent2027(const ReceiveEvent
   m.dart_last_hit_time = (b >> 4) & 0x1ff;
   m.dart_last_hit_target = (b >> 13) & 7;
   m.center_gain_point_status = (b >> 24) & 3;
+  m.center_control = (b >> 26) & 3;
+  m.center_control_valid = m.center_control <= 2;
   return m;
 }
 

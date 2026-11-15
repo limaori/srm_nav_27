@@ -246,7 +246,7 @@
             </ReactiveSequence>
             <!-- P2 掉血反制：连续采样间 HP 下降至少 10，触发后维持 2500ms；
                  检测间隔过长时重新建立 HP 基线，避免将分支未执行期间的累计掉血当成突发受击。
-                 请求 DEFENSE、使用受击自转速度并前往 rmuc_hp_evasion；语义区限转仍优先。 -->
+                 请求 DEFENSE、以 spin.evasion_period 为周期正弦交变并前往 rmuc_hp_evasion；语义区限转仍优先。 -->
             <ReactiveSequence name="RmucHpDropDefense">
               <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
               <Script code="@decision_mode := 'evade'; @decision_reason := 'rapid_hp_loss'"/>
@@ -275,6 +275,7 @@
                 </Sequence>
                 <PublishRotationCmd _successIf="@dry_run"
                   spin_speed="{@spin_evasion_speed}"
+                  oscillation_period="{@spin_evasion_period}"
                   spin_mode="HP_DROP_EVASION"
                   topic_name="rotation_cmd"/>
               </Fallback>

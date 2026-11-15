@@ -110,6 +110,7 @@
             <input_port name="gimbal_vel_pitch" default="0.000000" type="float">Pitch velocity (rad/s)</input_port>
         </Action>
         <Action ID="PublishRotationCmd">
+            <input_port name="oscillation_period" default="0.0" type="double">Signed sine period in seconds; 0 keeps constant speed</input_port>
             <input_port name="spin_speed" default="0.000000" type="double">Angular Z velocity on rotation_cmd (rad/s)</input_port>
             <input_port name="spin_mode" default="" type="std::string">Optional mode tag for behavior/spin_state</input_port>
             <input_port name="topic_name" default="rotation_cmd" type="std::string">Twist topic name</input_port>
@@ -152,6 +153,7 @@
             <input_port name="timeout" type="float">time in s to wait before ticking child again</input_port>
         </Decorator>
         <Decorator ID="NavigationTransitionGate">
+            <input_port name="hold_radius" default="0.0" type="double">Strict distance from requested point; 0 uses arrival hysteresis</input_port>
             <input_port name="timeout_sec" default="{@navigation_timeout}" type="double">Per-attempt goal budget</input_port>
             <input_port name="hold_success" default="true" type="bool">Hold the reached point until preempted; false for repeating routes</input_port>
         </Decorator>

@@ -83,6 +83,9 @@ void SentryBehaviorServer::initBlackboardDefaults()
       "own_fortress_activation", "own_base_activation"}) { bb->set(key, -1); }
   bb->set("event_valid", false);
   bb->set("center_status", -1);
+  bb->set("ul_center_valid", false);
+  bb->set("ul_center_control", -1);
+  bb->set("ul_center_activation", -1);
   bb->set("fortress_status", -1);
   bb->set("central_highland_status", -1);
   bb->set("big_energy_status", -1);
@@ -104,6 +107,7 @@ void SentryBehaviorServer::initDynamicParameters()
   node()->declare_parameter("spin.arrived_speed", spin_tracker_->arrived_speed);
   node()->declare_parameter("spin.supply_speed", spin_tracker_->supply_speed);
   node()->declare_parameter("spin.evasion_speed", spin_tracker_->evasion_speed);
+  node()->declare_parameter("spin.evasion_period", 1.2);
   node()->declare_parameter("spin.arrive_tolerance", spin_tracker_->arrive_tolerance);
   node()->declare_parameter("spin.leave_tolerance", spin_tracker_->leave_tolerance);
 
@@ -120,16 +124,18 @@ void SentryBehaviorServer::initDynamicParameters()
   }
 
   auto validate = [](double moving, double arrived, double supply, double evasion,
-                     double enter, double leave) {
+                     double enter, double leave, double period) {
     return std::isfinite(moving) && std::isfinite(arrived) && std::isfinite(supply) &&
            std::isfinite(evasion) && std::isfinite(enter) && std::isfinite(leave) &&
-           enter >= 0.05 && leave >= enter;
+           enter >= 0.05 && leave >= enter && std::isfinite(period) && period >= 0.2;
   };
   if (!validate(spin_tracker_->moving_speed, spin_tracker_->arrived_speed,
                 spin_tracker_->supply_speed, spin_tracker_->evasion_speed,
-                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance)) {
+                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance,
+                node()->get_parameter("spin.evasion_period").as_double())) {
     throw std::invalid_argument("Invalid spin speeds or arrival tolerances");
   }
+  globalBlackboard()->set("spin_evasion_period", node()->get_parameter("spin.evasion_period").as_double());
   param_cb_handle_ = node()->add_on_set_parameters_callback(
     [this, validate](const std::vector<rclcpp::Parameter> & params) {
       rcl_interfaces::msg::SetParametersResult result;
@@ -138,6 +144,7 @@ void SentryBehaviorServer::initDynamicParameters()
       double moving = values[0].as_double(), arrived = values[1].as_double();
       double supply = values[2].as_double(), evasion = values[3].as_double();
       double enter = values[4].as_double(), leave = values[5].as_double();
+      double period = node()->get_parameter("spin.evasion_period").as_double();
       for (const auto & p : params) {
         const auto & n = p.get_name();
         if (n == "spin.moving_speed") { moving = p.as_double(); }
@@ -146,10 +153,11 @@ void SentryBehaviorServer::initDynamicParameters()
         else if (n == "spin.evasion_speed") { evasion = p.as_double(); }
         else if (n == "spin.arrive_tolerance") { enter = p.as_double(); }
         else if (n == "spin.leave_tolerance") { leave = p.as_double(); }
+        else if (n == "spin.evasion_period") { period = p.as_double(); }
       }
-      result.successful = validate(moving, arrived, supply, evasion, enter, leave);
+      result.successful = validate(moving, arrived, supply, evasion, enter, leave, period);
       if (!result.successful) {
-        result.reason = "Speeds must be finite; 0.05 <= arrive_tolerance <= leave_tolerance";
+        result.reason = "Speeds must be finite; 0.05 <= arrive_tolerance <= leave_tolerance; evasion_period >= 0.2s";
         return result;
       }
       // Apply only committed parameters in the tick loop; another callback may still reject this batch.
@@ -230,9 +238,15 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
 
   for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, std::string>>{
       {"ul.control_waypoint", "ul_control_waypoint", "rmul_center"},
+      {"ul.fallback_waypoint", "ul_fallback_waypoint", "rmul_center_fallback"},
       {"ul.semantic_map_file", "ul_semantic_map_file", "params/rmul_semantic_map.yaml"},
       {"uc.semantic_map_file", "uc_semantic_map_file", "params/rmuc_semantic_map.yaml"}}) {
     declare_scoped_param(scoped_name, legacy_name, default_val);
+  }
+
+  const double hold_radius = declare_scoped_param("ul.hold_radius", "ul_hold_radius", 0.5);
+  if (!std::isfinite(hold_radius) || hold_radius < 0.05) {
+    throw std::invalid_argument("ul.hold_radius must be finite and >= 0.05m");
   }
 
   for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, int>>{
@@ -320,6 +334,7 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
     spin_tracker_->evaluateLocked();
     spin_tracker_->syncToBlackboard();
   }
+  bb->set("spin_evasion_period", node()->get_parameter("spin.evasion_period").as_double());
   std_msgs::msg::Float64 hold;
   bool stationary = false;
   const bool enabled = !dry_run && bb->get<bool>("guard_ready") && bb->get<bool>("motion_allowed") &&
@@ -353,6 +368,9 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
        << ",\"hp\":" << bb->get<int>("hp") << ",\"ammo\":" << bb->get<int>("ammo")
        << ",\"ammo_valid\":" << bb->get<bool>("ammo_valid")
        << ",\"arena_valid\":" << bb->get<bool>("arena_valid")
+       << ",\"ul_center_valid\":" << bb->get<bool>("ul_center_valid")
+       << ",\"ul_center_control\":" << bb->get<int>("ul_center_control")
+       << ",\"ul_center_activation\":" << bb->get<int>("ul_center_activation")
        << ",\"score_valid\":" << bb->get<bool>("score_valid")
        << ",\"control_lead\":" << bb->get<int>("control_lead")
        << ",\"own_outpost_control\":" << bb->get<int>("own_outpost_control")

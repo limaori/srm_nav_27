@@ -18,7 +18,9 @@ uint16 dart_last_hit_time          # 对方飞镖最后一次击中时间
 uint8 dart_last_hit_target         # 对方飞镖最后一次击中目标
 
 # --- 增益点状态 ---
-uint8 center_gain_point_status     # 中心增益点 (仅 RMUL)
+uint8 center_gain_point_status     # RMUL 中央控制区激活：0=无人，1=己方，2=对方，3=双方
+bool center_control_valid         # 仅 2027 原生 8 字节报文提供，旧转发包保持 false
+uint8 center_control               # RMUL 中央控制权：0=中立，1=己方，2=对方；与激活状态独立
 uint8 fortress_gain_point_status   # 己方堡垒增益点
 uint8 outpost_gain_point_status    # 己方前哨站增益点
 uint8 base_gain_point_status       # 己方基地增益点
