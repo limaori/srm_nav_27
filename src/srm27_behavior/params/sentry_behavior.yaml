@@ -57,7 +57,6 @@ srm27_behavior_server:
       - srm27_behavior/bt_plugins
 
     behavior_trees:
-      - srm27_behavior/behavior_trees/modules
       - srm27_behavior/behavior_trees
 
 srm27_behavior_client:

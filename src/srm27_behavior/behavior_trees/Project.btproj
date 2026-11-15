@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <root BTCPP_format="4" project_name="Project">
-    <include path="modules/game_lifecycle.xml" />
-    <include path="modules/spin_arbitration.xml" />
-    <include path="modules/supply_recovery.xml" />
-    <include path="modules/hp_drop_evasion.xml" />
-    <include path="modules/dynamic_engagement.xml" />
-    <include path="modules/patrol_waypoints.xml" />
-    <include path="modules/rmul_center_contest.xml" />
-    <include path="modules/rmuc_tactical.xml" />
-    <include path="modules/rmuc_control.xml" />
     <include path="rmul_2027.xml" />
     <include path="rmuc_2027.xml" />
     <include path="dev_rm.xml" />

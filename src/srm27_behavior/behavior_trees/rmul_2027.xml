@@ -1,15 +1,190 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <root BTCPP_format="4" main_tree_to_execute="rmul_2027">
-  <!-- UL 只做单机回补与占守。切换中心/己方高地预案：修改 RmulControlHold 的 waypoint_name。 -->
+  <!-- RMUL 2027（3v3）：仅回补与持续占守。
+       阅读约定：本文件包含当前赛制的全部策略、比赛门控和自转仲裁，无需加载其他 XML。
+       从上往下读：比赛门控 -> 优先级选择 -> 当前战术的条件、自转、导航。
+       ReactiveSequence 每 tick 从头检查，前置条件失败即停止后续动作；
+       ReactiveFallback 每 tick 从高到低选择第一个 SUCCESS/RUNNING 分支，可抢占低优先级。
+       普通 Sequence/Fallback 依次执行/择一；Inverter 用于反转条件。
+       最外层 ForceSuccess + KeepRunningUntilFailure 使等待/战术失败后继续下一 tick，
+       不会因赛前不满足门控而结束整棵树；取消树/异常的最终停机由服务端处理。
+
+       黑板：{@key} / 脚本 @key 是服务端提供的全局事实或共享状态；
+       {supply_matched_zone} 等无 @ 名称是本树内部输出，各战术独立命名以保留原子树隔离。
+       HP/弹量阈值、转速和超时见 params/sentry_behavior.yaml；点/路线见 params/waypoints.yaml。
+       UC/UL 语义地图由对应的 semantic_map_file 参数提供，区域和航点均须按场地实测标定。
+
+       自转仲裁（各战术内部展开）：优先坡道，再隧道，命中时采用地图 zone_max_spin；
+       普通战术按 nav_arrived 切换到点快转/赶路慢转；回补按 rfid_supply 或 nav_arrived
+       切换补给驻留/赶路转速；掉血反制采用 evasion_speed。语义区始终优先于这些速度。
+       语义查询 FAILURE 会继续下一个自转候选，并非全局停车；语义区约束需保证地图正确。
+
+       导航均经 NavigationTransitionGate：先取消旧目标，再发新目标；拒绝/中止后退避重试，
+       单次运行受 navigation_timeout 限制。单点成功后保持 RUNNING 驻留，漂离后重新导航；
+       hold_success=false 的连续路线允许整组成功后再循环。RFID 确认在补给区时停止导航。
+       dry_run 跳过自转/姿态发布，导航门返回 RUNNING；可计算策略但不发实际导航目标。
+       motion_allowed 是本轮决策条件放行，最终运动许可还需服务端确认导航就绪/合法驻留，
+       所有速度经 srm_cmd_mux 的独立许可与人工停车门控，决策不会解除人工停车。 -->
   <BehaviorTree ID="rmul_2027">
     <KeepRunningUntilFailure>
       <ForceSuccess>
         <ReactiveSequence>
-          <SubTree ID="GameLifecycleGate" expected_game_type="4" max_remain_time="300"/>
+          <!-- 比赛与运动门控：每 tick 先撤销本轮许可、将状态置为 wait，再逐项放行。
+               输入必须新鲜，原始身份/HP 有效、底盘上电、HP > 0、点位已标定；
+               实动模式还要确认 mux 的独立决策门控已就绪，dry_run 只允许策略计算。
+               要求 game_type=4（UL）、game_progress=4（比赛中）、剩余 1~300s；通过后置 motion_allowed=true。
+               任一条件失败时，外层 ReactiveSequence 停止当前战术，由服务端撤销运动许可。 -->
+          <Sequence name="GameLifecycleGate">
+            <Script code="@motion_allowed := false; @decision_mode := 'wait'; @decision_reason := 'inputs_or_match_gate'"/>
+            <ScriptCondition code="@inputs_ready
+                                   &amp;&amp; @status_valid
+                                   &amp;&amp; @chassis_enabled
+                                   &amp;&amp; @hp &gt; 0
+                                   &amp;&amp; @waypoints_calibrated
+                                   &amp;&amp; (@dry_run || @guard_ready)"/>
+            <IsGameStatus expected_game_type="4"
+              expected_game_progress="4"
+              min_remain_time="1"
+              max_remain_time="300"/>
+            <Script code="@motion_allowed := true"/>
+          </Sequence>
           <ReactiveFallback name="RmulPriorityRoot">
-            <SubTree ID="RmulSupplyRecovery" semantic_map_file="{@ul_semantic_map_file}"/>
-            <SubTree ID="RmulControlHold" semantic_map_file="{@ul_semantic_map_file}"
-                     waypoint_name="{@ul_control_waypoint}"/>
+            <!-- P0 回补优先于控区：低血或复活未完成回补时进入。
+                 RecoveryWindow 将赶路和等待一起计时；超过 supply_timeout（默认 25s）后
+                 进入 supply_retry（默认 15s）冷却，避免不可达的补给点长期锁住策略。
+                 冷却期仍需回补且未恢复到退出血量时，先去 rmul_supply_shelter 暂避。 -->
+            <ReactiveFallback name="RmulSupplyRecovery">
+              <RecoveryWindow timeout_sec="{@supply_timeout}"
+                retry_sec="{@supply_retry}"
+                cooling="{@supply_cooling}">
+                <!-- 回补触发与退出：needs_supply 是复活回补锁存；HP 滞回在
+                     hp <= ul_hp_trigger（默认 150）时触发，需 hp >= ul_hp_exit（默认 360）
+                     且己方补给区 RFID 有效才释放。补给区驻留由 RFID 确认，不以到点代替。
+                     UL 不检查补弹、不请求姿态；弹量耗尽也继续执行回补/控区策略。 -->
+                <ReactiveSequence name="RmulSupplyAttempt">
+                  <ReactiveFallback>
+                    <ScriptCondition code="@needs_supply == true"/>
+                    <HysteresisCheck metric="hp"
+                      trigger_value="{@ul_hp_trigger}"
+                      exit_value="{@ul_hp_exit}"
+                      trigger_when_below="true"
+                      exit_allowed="{@rfid_supply}"
+                      ignore_zero_hp="true"
+                      key_port="{@referee_robotStatus}"/>
+                  </ReactiveFallback>
+                  <Script code="@decision_mode := 'recover'; @decision_reason := 'hp_revive_or_free_ammo'"/>
+                  <Fallback name="SupplySpin">
+                    <Sequence name="SemanticSpinGuard">
+                      <Fallback>
+                        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                          zone_type="slope"
+                          matched_zone="{supply_matched_zone}"
+                          zone_max_spin="{supply_zone_max_spin}"/>
+                        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                          zone_type="tunnel"
+                          matched_zone="{supply_matched_zone}"
+                          zone_max_spin="{supply_zone_max_spin}"/>
+                      </Fallback>
+                      <PublishRotationCmd _successIf="@dry_run"
+                        spin_speed="{supply_zone_max_spin}"
+                        spin_mode="SEMANTIC_ZONE"
+                        topic_name="rotation_cmd"/>
+                    </Sequence>
+                    <Sequence name="ArrivedSupplySpin">
+                      <ScriptCondition code="@rfid_supply || @nav_arrived"/>
+                      <PublishRotationCmd _successIf="@dry_run"
+                        spin_speed="{@spin_supply_speed}"
+                        spin_mode="SUPPLY_HOLD"
+                        topic_name="rotation_cmd"/>
+                    </Sequence>
+                    <PublishRotationCmd _successIf="@dry_run"
+                      spin_speed="{@spin_moving_speed}"
+                      spin_mode="SUPPLY_MOVE"
+                      topic_name="rotation_cmd"/>
+                  </Fallback>
+                  <ReactiveFallback>
+                    <IsRfidDetected friendly_supply_zone_non_exchange="true" key_port="{@referee_rfidStatus}"/>
+                    <NavigationTransitionGate>
+                      <SendNav2Goal waypoint_name="rmul_supply" action_name="navigate_to_pose"/>
+                    </NavigationTransitionGate>
+                  </ReactiveFallback>
+                </ReactiveSequence>
+              </RecoveryWindow>
+              <ReactiveSequence>
+                <ScriptCondition code="@supply_cooling &amp;&amp; (@needs_supply || @hp &lt; @ul_hp_exit)"/>
+                <Script code="@decision_mode := 'shelter'; @decision_reason := 'supply_timeout'"/>
+                <Fallback name="SupplySpin">
+                  <Sequence name="SemanticSpinGuard">
+                    <Fallback>
+                      <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                        zone_type="slope"
+                        matched_zone="{shelter_matched_zone}"
+                        zone_max_spin="{shelter_zone_max_spin}"/>
+                      <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                        zone_type="tunnel"
+                        matched_zone="{shelter_matched_zone}"
+                        zone_max_spin="{shelter_zone_max_spin}"/>
+                    </Fallback>
+                    <PublishRotationCmd _successIf="@dry_run"
+                      spin_speed="{shelter_zone_max_spin}"
+                      spin_mode="SEMANTIC_ZONE"
+                      topic_name="rotation_cmd"/>
+                  </Sequence>
+                  <Sequence name="ArrivedSupplySpin">
+                    <ScriptCondition code="@rfid_supply || @nav_arrived"/>
+                    <PublishRotationCmd _successIf="@dry_run"
+                      spin_speed="{@spin_supply_speed}"
+                      spin_mode="SUPPLY_HOLD"
+                      topic_name="rotation_cmd"/>
+                  </Sequence>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{@spin_moving_speed}"
+                    spin_mode="SUPPLY_MOVE"
+                    topic_name="rotation_cmd"/>
+                </Fallback>
+                <NavigationTransitionGate>
+                  <SendNav2Goal waypoint_name="rmul_supply_shelter" action_name="navigate_to_pose"/>
+                </NavigationTransitionGate>
+              </ReactiveSequence>
+            </ReactiveFallback>
+            <!-- P1 持续占守：没有回补需求时前往 ul_control_waypoint。
+                 默认 rmul_center；在 sentry_behavior.yaml 改成 rmul_home_highland 可切己方高地。
+                 到点后持续驻留，不因已占领或弹量耗尽主动离点，也不追敌丢点。 -->
+            <ReactiveSequence name="RmulControlHold">
+              <Script code="@decision_mode := 'control'; @decision_reason := 'ul_continuous_control'"/>
+              <Fallback name="SpinArbitration">
+                <Sequence name="SemanticSpinGuard">
+                  <Fallback>
+                    <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                      zone_type="slope"
+                      matched_zone="{control_matched_zone}"
+                      zone_max_spin="{control_zone_max_spin}"/>
+                    <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+                      zone_type="tunnel"
+                      matched_zone="{control_matched_zone}"
+                      zone_max_spin="{control_zone_max_spin}"/>
+                  </Fallback>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{control_zone_max_spin}"
+                    spin_mode="SEMANTIC_ZONE"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
+                <Sequence name="ArrivedFastSpin">
+                  <ScriptCondition code="@nav_arrived == true"/>
+                  <PublishRotationCmd _successIf="@dry_run"
+                    spin_speed="{@spin_arrived_speed}"
+                    spin_mode="ARRIVED_FAST"
+                    topic_name="rotation_cmd"/>
+                </Sequence>
+                <PublishRotationCmd _successIf="@dry_run"
+                  spin_speed="{@spin_moving_speed}"
+                  spin_mode="MOVING_SLOW"
+                  topic_name="rotation_cmd"/>
+              </Fallback>
+              <NavigationTransitionGate>
+                <SendNav2Goal waypoint_name="{@ul_control_waypoint}" action_name="navigate_to_pose"/>
+              </NavigationTransitionGate>
+            </ReactiveSequence>
           </ReactiveFallback>
         </ReactiveSequence>
       </ForceSuccess>

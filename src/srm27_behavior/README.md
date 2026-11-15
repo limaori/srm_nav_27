@@ -27,7 +27,7 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 | --- | --- |
 | UC 战术优先级 | `behavior_trees/rmuc_2027.xml` |
 | UL 回补/控区 | `behavior_trees/rmul_2027.xml` |
-| 一个战术的条件/动作 | `behavior_trees/modules/*.xml` |
+| 一个战术的条件/动作、比赛门控、自转仲裁 | 直接编辑对应赛制 XML，已全部内联并附中文注释 |
 | 坐标、巡逻路线 | `params/waypoints.yaml`；命名点 `named_waypoints`，连续路线 `waypoint_groups` |
 | 回补阈值、早期时段、UL 中心/高地预案 | `params/sentry_behavior.yaml` |
 | 坡道/隧道限制 | `params/rmuc_semantic_map.yaml`、`params/rmul_semantic_map.yaml` |
@@ -35,6 +35,8 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 `waypoints_file`、`ul.control_waypoint`、`ul.semantic_map_file`、`uc.semantic_map_file` 都是服务端参数，在 `sentry_behavior.yaml` 中已按 `ul:` 与 `uc:` 分块维护（且兼容 `ul_*` / `uc_*` 扁平传参），支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
 
 所有随包航点、区域多边形都是示例，需按当前场地 map 原点和己方颜色标定。目标朝向单位 rad。无效路线整体拒绝，不跳过错误点继续执行。
+
+两份 2027 XML 各自包含完整执行树，无 `SubTree` 或外部 XML 依赖；服务端仅加载 `behavior_trees` 目录，Groot 工程也直接引用两棵完整树。
 
 ## 两套策略
 
@@ -57,7 +59,7 @@ flowchart TD
 
 **UC 阵地主线**：新鲜 2027 场地反馈可用时，己方基地受侵入优先回防，己方前哨阵地失守/受侵入先恢复；己方阵地稳固且血弹足够才争夺对方前哨阵地，双方前哨均完全控制后持续占守。临时控制不当作完全控制。残局落后时的基地阵地施压由 `uc_enemy_base_enabled` 控制，默认关闭，须先验收合法路线。输入是旧报文或阵地反馈过期时回退原巡逻/堡垒预案，`decision/status.arena_valid=false` 明示信息边界。
 
-`RmucDynamicAttackEngagement` 保留为可选模块，默认不装配。启用前应确认 `enemy_pose` 的坐标系/时间戳、当前代价地图及禁区，完成射程/视线/整车 footprint 验收。该节点只选择环上的可行栅格，不保证射击视线；最终路径由 Nav2 检查。未标许可参考库只借鉴设计，不复制实现。
+`RmucDynamicAttackEngagement` 已完整内联为 `rmuc_2027.xml` 中的可选注释块，默认禁用；启用时整体取消该块注释。启用前应确认 `enemy_pose` 的坐标系/时间戳、当前代价地图及禁区，完成射程/视线/整车 footprint 验收。该节点只选择环上的可行栅格，不保证射击视线；最终路径由 Nav2 检查。未标许可参考库只借鉴设计，不复制实现。
 
 ## 导航与自转契约
 
