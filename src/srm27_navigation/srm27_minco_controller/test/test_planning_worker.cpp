@@ -125,3 +125,24 @@ TEST(PlanningWorkerTest, ShortGoalTrajectoryCanHoldAtRestForMpc)
   EXPECT_LT(result.trajectory.totalDuration(), 0.6);
   EXPECT_GE(result.validation.effective_prefix_duration, 0.6);
 }
+
+TEST(PlanningWorkerTest, ClearDiscardsTheResultOfAnAlreadyRunningTask)
+{
+  controller::PlanningWorker worker;
+  ASSERT_TRUE(worker.start());
+  ASSERT_TRUE(worker.submit(request(5.0)));
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!worker.busy() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(worker.busy());
+  worker.clear();
+  while (worker.busy() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_FALSE(worker.busy());
+  controller::PlanningResult result;
+  EXPECT_FALSE(worker.takeResult(result));
+  EXPECT_GE(worker.discardedStaleCount(), 1u);
+  worker.stop();
+}

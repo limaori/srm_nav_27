@@ -86,9 +86,9 @@ protected:
    *
    * 保留为 `escape_direction_mode: costmap_gap` 的回退路径与 A/B 对照。
    */
-  float findBestDirection(
+  bool findBestDirection(
     const nav2_msgs::msg::Costmap & costmap, geometry_msgs::msg::Pose2D pose, float start_angle,
-    float end_angle, float radius, float angle_increment);
+    float end_angle, float radius, float angle_increment, float * best_angle);
 
   /**
    * @brief 把 `GetCostmap` 返回的代价图转成 `srm27_minco_core::GridSnapshot`。
@@ -101,7 +101,7 @@ protected:
    *
    * 数据布局：`GetCostmap` 直接返回 `Costmap2D::getCharMap()`，索引是
    * `my * size_x + mx`（行优先、自左下角起），与 `GridSnapshot` 完全一致，**不需要翻转 y**。
-   * （nav_msgs/OccupancyGrid 才是自上而下，本服务不是。）
+   * （OccupancyGrid 同样从原点按 x、y 递增；只有图片文件需要翻转行。）
    */
   bool buildGridSnapshot(
     const nav2_msgs::msg::Costmap & costmap, srm27_minco_core::GridSnapshot * snapshot) const;
@@ -180,7 +180,12 @@ protected:
   rclcpp::Client<nav2_msgs::srv::GetCostmap>::SharedPtr costmap_client_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>>
     marker_pub_;
-  double twist_x_, twist_y_;
+  // 方向固定在 global_frame，发布前转换到 robot_base_frame。
+  double twist_x_{0.0}, twist_y_{0.0};
+  double map_resolution_{0.05};
+  bool isCollisionFree(
+    const double & distance, geometry_msgs::msg::Twist * cmd_vel,
+    geometry_msgs::msg::Pose2D & pose);
 
   // parameters
   std::string service_name_;

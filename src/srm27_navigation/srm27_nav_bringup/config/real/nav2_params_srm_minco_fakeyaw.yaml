@@ -923,74 +923,19 @@ controller_server:
         #   实测就差了 3 ms 被整条丢弃（validation_failed，每周期一次）。
         reaction_latency: 0.10
 
-      # 脱困（迁移自 navi_minco_bit 的 MincoPlanner.recovery_server.* + 其 FSM 里
-      # 硬编码的 0.25/0.40 分诊与成功阈值）。语义与仿真那份完全一致，见
-      # config/simulation/nav2_params_srm_minco.yaml 里的详细说明。
-      #
-      # 实车与仿真的差异（2026-11-12 起）：escape_speed 实车 0.5 / 仿真 1.0，
-      # stuck_clearance 实车 0.30 / 仿真 0.40 —— 实车场地窄、底盘速度环慢，
-      # 先把"推得动、推得准"放前面，见下面两条 ★ 注释。
-      # 若实测发现"车在动但 3 s 内走不出卡死区"，先加大 window_sec 而不是 escape_speed——
-      # 提高逃逸速度会同时抬高贴障碍时的碰撞风险，而延长时间只是让它多推一会儿。
+      # 控制器内恢复；安全包络复用 safety，详细约束见 docs/recovery.md。
       recovery:
-        # ★ 2026-11-06：5 -> 10。门限数的是"规划失败结果条数"，不是时长 ——
-        #   有已提交轨迹时重规划被 replan_period(0.1 s) 节流 → 5 次 ≈ 0.5 s；
-        #   **没有**已提交轨迹时 ReplanManager 在节流判断之前就放行（每控制周期提交一次，
-        #   controller_frequency 50 Hz）→ 5 次 ≈ 0.1 s。同一门限代表的物理时长差 5 倍，
-        #   "太容易进脱困"主要来自这一档；取 10 后 ≈ 0.2 s（无轨迹）/ 1.0 s（稳定跟随）。
-        #   ⚠ 只改"多快进"，不改"为什么进"（分诊仍只看自身净空 < stuck_clearance），
-        #     也不改"进得去出不来"（escaped_clearance 0.50 在窄通道内不可达）。
-        fail_threshold: 10                              # 连续规划失败多少次才允许进入脱困
-        # ★ 2026-11-03：1.0 -> 2.0。窄通道里链路 A 曾 1.5~2.0 s 就再进一次
-        #   （方向成对相反、净位移≈0），冷却太短是抖动频率的直接放大器。
-        cooldown_sec: 2.0                               # 两次脱困之间的最小间隔（秒）
-        window_sec: 3.0                                 # 一次脱困会话的最长持续时间（秒）
-        # ★ 历史：0.5 -> 1.5 -> 1.0（2026-11-04）-> 0.5 -> **0.2**（2026-11-12）。
-        #   0.5 只用了半天又降到 0.2：18:09 实车跑（227_1111，起点离最近障碍只有 0.42 m）
-        #   3 次脱困合计盲推 ≈2 m，单次 0.46~0.91 s，方向 -38°/+37°/+79° —— 车看着
-        #   "完全不贴蓝线"主要就是这三段；这个场地里 1.0（以及 0.5）都只是更快推向下一面墙。
-        #   0.2 也是 script/start_real_nav.sh 里写的首次落地建议值（先确认方向对不对）。
-        #   窗口上限 = escape_speed x window_sec = 0.2 x 3.0 = **0.6 m**（1.0 时是 3.0 m）。
-        #   ⚠ 不变的两条：脱困旁路 MPC 校验（方向只来自车周 0.40 m 环上的梯度/环形搜索，
-        #     窗口跑满时方向早已过期）；脱困是主动给速度，急停只能靠物理按钮或断电。
-        #   ⚠ 代价：走 1 m 要 5 s，同样一次卡死会比 1.0 时多推几倍时间。若现场出现
-        #     "推满 3 s 还看不出位移"，先加大 window_sec（3.0 -> 5.0），不要回头加 speed。
-        #   提速前提：空地上按验收清单确认方向与刹车距离，再考虑 0.5 -> 0.75 -> 1.0。
-        escape_speed: 0.2                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
-        # 卡死分诊阈值（米）：低于它才计入失败、才脱困。
-        # ★ 2026-10-16 由 0.25 抬到 0.40（与仿真同步），原因见
-        #   simulation/nav2_params_srm_minco.yaml 同段的"核心不变量"：
-        #   阈值必须 >= 控制器硬校验要求的净空（safety.robot_radius 0.33 +
-        #   clearance_margin 0.05 = 0.38），否则 [阈值, 0.38) 是"本地重规划必败、
-        #   却判不出卡死"的死区，脱困永远不接管。
-        #   本文件代价地图 robot_radius 是 0.40（见下方 costmap 段），车心净空正常
-        #   打不到 0.25 —— 原值 0.25 在实车上等价于"静态地图永远不触发脱困"。
-        #   ⚠ 2026-11-12 实测确认：会（0.325 / 0.353 m 两次都是贴墙通过被判卡死），见下条。
-        # ★ 2026-11-12：0.40 -> 0.30，**明知会重新打开 [0.30, 0.38) 这段死区**，理由：
-        #   18:09 实车跑的 3 次脱困里有 2 次触发在 0.325 / 0.353 m，而当时车并没有真被
-        #   卡住（同周期规划还在推进）—— "贴墙正常通过"被当成了卡死。
-        #   取 0.30 后这类失败只走"前方路障"分支：继续重规划，攒满 build_grace_period
-        #   (1.0 s) 还没成轨就抛给行为树（清图 + BackUpFreeSpace）。
-        #   ⚠ 代价（必须知道）：[0.30, 0.38) 内本地重规划基本必败、链路 A 又不会脱困，
-        #     兜底全压在行为树那一路。2026-11-12 起 BT 的 backup_speed 也一并降到 0.2
-        #     （三份 behavior_trees/*.xml，仿真共用），所以这条兜底同样是"慢推"，
-        #     只是每次要 5 s 才走完 1.0 m —— 现场表现为"卡住后要等一会儿才动"。
-        #   回退：改回 0.40（>= 0.38，不留死区）。
+        fail_threshold: 10
+        cooldown_sec: 2.0
+        window_sec: 3.0
+        escape_speed: 0.2
         stuck_clearance: 0.30
-        # 脱困成功判据（米）：留 0.10 间隔避免进出一进一出振荡。
         escaped_clearance: 0.50
-        search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
-        search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
-        # 重复进入抑制：上一次脱困就在附近结束、而这次要往几乎相反的方向逃 ——
-        # 说明车夹在「推得动一点但推不出困境」的窄带里，继续按 escape_speed 盲推只会
-        # 左右来回荡（2026-11-03 实测 26 s 进 4 次、净位移≈0）。判据成立时**不脱困**，
-        # 交回重规划；一直失败就由建轨宽限抛给行为树 backup，真正把车挪开。
-        # radius 必须小于行为树 backup 的单次位移（1.0 m，提前退出时约 0.3~0.5 m），
-        # 否则兜底动作刚挪开就又被判成「同一处」。取 0 关闭该判据。
-        repeat_guard_radius: 0.35                       # 抑制半径（米）
-        repeat_guard_angle_deg: 120.0                   # 方向门限（度）：>= 它才判为「来回荡」
-        publish_visualization: True                     # 是否发布 recovery_markers 可视化
-
+        search_radius: 0.4
+        search_samples: 36
+        repeat_guard_radius: 0.35
+        repeat_guard_angle_deg: 120.0
+        publish_visualization: True
 
 local_costmap:
   local_costmap:
@@ -1162,6 +1107,9 @@ smoother_server:
 behavior_server:
   ros__parameters:
     use_sim_time: False
+    # Humble 的碰撞检查器使用单组话题，必须与 global_frame 同系。
+    costmap_topic: global_costmap/costmap_raw
+    footprint_topic: global_costmap/published_footprint
     local_costmap_topic: local_costmap/costmap_raw
     global_costmap_topic: global_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint

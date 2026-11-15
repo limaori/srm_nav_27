@@ -157,11 +157,7 @@ private:
     const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node,
     geometry_msgs::msg::TwistStamped * _command);
 
-  /// \brief 构造一条逃逸命令（世界系速度 -> 车体系 Twist）。
-  ///
-  /// `_escape_velocity` 是规划坐标系（odom）下的世界速度；输出按当前航向转成
-  /// 车体系，仍是 Nav2 要求的 `TwistStamped`。自转恒为零：脱困只平移、不转向，
-  /// 与参考实现"yaw 轨迹锁存当前 yaw"一致。
+  /// \brief 将规划系逃逸速度转换到当前 command_frame，自转为零。
   geometry_msgs::msg::TwistStamped makeEscapeCommand(
     const State2D & _state, const Eigen::Vector2d & _escape_velocity,
     const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node);
@@ -174,24 +170,7 @@ private:
   /// \brief 退出脱困并清理状态（成功/超时/新目标/取消/失活共用）。
   void leaveRecovery(const char * _exit_reason, double _now_stamp);
 
-  /// \brief 脱困"停滞看门狗"：收拾"目标被取消、脱困状态却留在那儿"的残局。
-  ///
-  /// **为什么需要它**：`updateRecovery` 只在 `computeVelocityCommands` 里被调用，
-  /// 而导航目标被取消后 Nav2 就不再调用控制器。于是"目标取消的瞬间正好处在脱困中"
-  /// 会让 `RecoveryDecider` 的会话**静默冻结**：不输出、不推进、不超时；
-  /// 等下一个目标到来才被重新推进，那时车早已被挪走，于是凭空报一句
-  /// "脱困成功"，用时还显示成整个冻结时长（实测 6.13 s / 输出 0 个周期）。
-  ///
-  /// **判据（务必只认这个）**：两帧 `computeVelocityCommands` 之间的**时间间隔**
-  /// 显著大于正常控制周期。控制器只在导航进行中被调用，所以"间隔异常大"是
-  /// "中间目标被取消过"的唯一可靠证据。
-  ///
-  /// ⚠ 曾经用过"`recovery_command_count_ == 0`"当判据，那是**错的**：
-  /// 进入脱困的那一周期必然还没输出，于是看门狗会在正常脱困中每周期把会话掐掉，
-  /// 脱困永远发不出速度（2026-10-17 实测：0.5 s 内反复"进入脱困/停滞复位" 17 次）。
-  ///
-  /// \param _call_gap_sec 本次调用与上次调用之间的间隔（s）；<0 表示没有上次记录。
-  /// \return 是否执行了复位。
+  /// \brief 在读取输入之前清理控制调用长时间中断后留下的恢复状态。
   bool abortStaleRecovery(double _now_stamp, double _call_gap_sec);
 
   // 插件与生命周期

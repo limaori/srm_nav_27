@@ -178,6 +178,7 @@ private:
   std::thread thread_{};
   mutable std::mutex mutex_{};
   std::condition_variable condition_{};
+  std::uint64_t generation_{0};
   bool has_request_{false};
   bool shutdown_{false};
   PlanningRequest request_{};

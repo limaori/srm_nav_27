@@ -207,22 +207,14 @@ class MapInjector(Node):
 
 
 def rect_from_world(info, x0, y0, x1, y1):
-    """世界坐标矩形 -> 栅格索引矩形 (col0, col1, row0, row1)，含端点，已夹到界内。
-
-    **所有几何都走这个函数**，不要手写行列算术。原因：OccupancyGrid / pgm 的
-    data 行序是"行 0 = 最高 y"，于是"世界 y 增大"对应"行号减小"。
-    本脚本第一版在 build_shape 里直接写 `cy = my + dy * offset`，把 `+y` 算成了
-    行号 +1，也就是**地图上的 -y 方向**，墙被砌到了车身后头（实测偏移 10 格）。
-    换成世界坐标后就只有这一处需要关心行序，写不错。
-    """
+    """世界矩形转换为 OccupancyGrid 的行列；行号随世界 y 递增。"""
     res = info.resolution
     ox, oy = info.origin.position.x, info.origin.position.y
     h, w = info.height, info.width
     c0 = int(math.floor((min(x0, x1) - ox) / res))
     c1 = int(math.ceil((max(x0, x1) - ox) / res))
-    # row = (oy + h*res - y)/res ；y 越大 row 越小
-    r0 = int(math.floor((oy + h * res - max(y0, y1)) / res))
-    r1 = int(math.ceil((oy + h * res - min(y0, y1)) / res))
+    r0 = int(math.floor((min(y0, y1) - oy) / res))
+    r1 = int(math.ceil((max(y0, y1) - oy) / res))
     c0, c1 = max(0, c0), min(w - 1, c1)
     r0, r1 = max(0, r0), min(h - 1, r1)
     return c0, c1, r0, r1
@@ -276,7 +268,7 @@ def build_shape(cells2d, info, mx, my, shape, args):
 
     # 车心的世界坐标（由栅格反算，和 rect_from_world 用同一套换算）
     cx_w = info.origin.position.x + (mx + 0.5) * res
-    cy_w = info.origin.position.y + (info.height - my - 0.5) * res
+    cy_w = info.origin.position.y + (my + 0.5) * res
 
     directions = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}
     half_len = args.wall_length / 2.0
@@ -341,7 +333,7 @@ def clearance_field(cells2d, info):
 
     seed = cells2d
     if not seed.any():
-        return None, np.full((h, w), 1.0e3)
+        return None, np.full(seed.shape, 1.0e3)
     edt_cells = ndimage.distance_transform_edt(~seed)
     half_diag = 0.5 * math.hypot(info.resolution, info.resolution)
     edt_m = edt_cells * info.resolution - half_diag
@@ -349,7 +341,7 @@ def clearance_field(cells2d, info):
 
 
 def report_directions(edt_m, info, mx, my, radius_m, samples):
-    """打印机器人处净空 + 环形采样里最开阔的方向（与脱困的环形搜索同口径）。"""
+    """打印端点净空参考；实际控制器还会检查整段通行性。"""
     res = info.resolution
     clr = edt_m[my, mx]
     print(f"  机器人处净空（EDT，米）: {clr:.3f}")
@@ -357,7 +349,7 @@ def report_directions(edt_m, info, mx, my, radius_m, samples):
     for i in range(samples):
         ang = 2.0 * math.pi * i / samples
         sx = int(round(mx + radius_m * math.cos(ang) / res))
-        sy = int(round(my - radius_m * math.sin(ang) / res))  # 栅格 y 向下
+        sy = int(round(my + radius_m * math.sin(ang) / res))
         if not (0 <= sx < info.width and 0 <= sy < info.height):
             continue
         v = edt_m[sy, sx]
@@ -366,7 +358,7 @@ def report_directions(edt_m, info, mx, my, radius_m, samples):
     if best[1] is not None:
         deg = math.degrees(best[1])
         print(f"  环形搜索半径 {radius_m:.2f} m, {samples} 方向:")
-        print(f"    最开阔方向 = {deg:7.1f} deg (净空 {best[0]:.3f} m)  <-- 绿线应指向这里")
+        print(f"    最开阔方向 = {deg:7.1f} deg (净空 {best[0]:.3f} m)  (端点参考，未作扫掠校验)")
     return clr, best
 
 
@@ -460,14 +452,9 @@ def main():
         rx, ry, ryaw = pose
         print(f"机器人位姿（{args.map_frame}）: x={rx:.3f} y={ry:.3f} yaw={math.degrees(ryaw):.1f} deg")
 
-        # world -> cell（OccupancyGrid 的 data 自上而下：行 0 = 最高 y）
+        # OccupancyGrid.data 从原点按 x、y 递增排列；不使用图片行序。
         mx = int(math.floor((rx - info.origin.position.x) / info.resolution))
-        my = int(
-            math.floor(
-                (info.origin.position.y + info.height * info.resolution - ry)
-                / info.resolution
-            )
-        )
+        my = int(math.floor((ry - info.origin.position.y) / info.resolution))
         if not (0 <= mx < info.width and 0 <= my < info.height):
             print(f"[错误] 机器人 ({rx:.2f},{ry:.2f}) 在地图外；"
                   f"给它在地图内的坐标（--robot-x/--robot-y）。")
@@ -542,7 +529,7 @@ def main():
         print("     日志: '进入脱困（触发=gradient|circular_search，进入净空 ...）'")
         print("     diagnostics: recovery_active=true")
         print("  3) RViz 里出现绿线（脱困路径）+ 蓝箭头 + 净空球")
-        print(f"     绿线应指向上面算出的最开阔方向")
+        print(f"     环形端点仅供参考；实际方向还需通过控制器的完整线段检查")
         print("  4) 脱离卡死区 -> '脱困成功'；跑满 window_sec -> '脱困超时' 回重规划")
         print()
         print("观察命令:")

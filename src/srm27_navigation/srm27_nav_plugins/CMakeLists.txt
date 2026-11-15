@@ -41,6 +41,10 @@ if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_back_up_free_space test/test_back_up_free_space.cpp)
+  target_link_libraries(test_back_up_free_space srm27_backup_free_space_behavior)
+  set_tests_properties(test_back_up_free_space PROPERTIES ENVIRONMENT
+    "ROS_HOME=${CMAKE_BINARY_DIR}/ros_home;ROS_LOG_DIR=${CMAKE_BINARY_DIR}/ros_home/log")
   ament_add_gtest(test_intensity_voxel_layer test/test_intensity_voxel_layer.cpp)
   target_link_libraries(test_intensity_voxel_layer srm27_costmap_layers)
   set_tests_properties(test_intensity_voxel_layer PROPERTIES ENVIRONMENT

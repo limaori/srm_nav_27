@@ -76,6 +76,7 @@ void PlanningWorker::stop()
 void PlanningWorker::clear()
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  ++generation_;
   has_request_ = false;
   has_result_ = false;
   result_ = PlanningResult();
@@ -118,12 +119,14 @@ void PlanningWorker::run()
 {
   while (true) {
     PlanningRequest request;
+    std::uint64_t generation;
     {
       std::unique_lock<std::mutex> lock(mutex_);
       condition_.wait(lock, [this] { return shutdown_ || has_request_; });
       if (shutdown_) {
         break;
       }
+      generation = generation_;
       request = request_;
       has_request_ = false;
       busy_.store(true);
@@ -137,6 +140,11 @@ void PlanningWorker::run()
         // 生命周期已停止：不回写任何结果。
         busy_.store(false);
         break;
+      }
+      if (generation != generation_) {
+        discarded_stale_.fetch_add(1);
+        busy_.store(false);
+        continue;
       }
       result_ = result;
       has_result_ = true;

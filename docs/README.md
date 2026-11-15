@@ -1,5 +1,7 @@
 # Documentation
 
+- [导航恢复与仿真验证](recovery.md): 两层恢复的职责、安全约束、参数入口与一键验证。
+
 - [分支合并说明](分支合并说明.md): use `--no-ff` to preserve development commits and create a merge commit, with CLion instructions.
 - [MID360 setup](mid360使用指南.md): network configuration and LiDAR bringup.
 - [哨兵导航 TF 与下位机数据接口](哨兵导航TF与下位机数据接口(ai).md): MID-360 安装与底盘自旋的四种组合、传感器分工及上下位机通信约定。(AI 生成)
