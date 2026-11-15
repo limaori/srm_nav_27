@@ -32,7 +32,7 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 | 回补阈值、早期时段、UL 中心/高地预案 | `params/sentry_behavior.yaml` |
 | 坡道/隧道限制 | `params/rmuc_semantic_map.yaml`、`params/rmul_semantic_map.yaml` |
 
-`waypoints_file`、`ul_control_waypoint`、`ul_semantic_map_file`、`uc_semantic_map_file` 都是服务端参数，支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
+`waypoints_file`、`ul.control_waypoint`、`ul.semantic_map_file`、`uc.semantic_map_file` 都是服务端参数，在 `sentry_behavior.yaml` 中已按 `ul:` 与 `uc:` 分块维护（且兼容 `ul_*` / `uc_*` 扁平传参），支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
 
 所有随包航点、区域多边形都是示例，需按当前场地 map 原点和己方颜色标定。目标朝向单位 rad。无效路线整体拒绝，不跳过错误点继续执行。
 

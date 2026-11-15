@@ -16,6 +16,7 @@
 #include "srm27_behavior/sentry_posture_state.hpp"
 
 #include <cmath>
+#include <tuple>
 #include <type_traits>
 
 
@@ -209,21 +210,43 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   auto bb = globalBlackboard();
   bb->set("dry_run", node()->declare_parameter("dry_run", true));
   bb->set("waypoints_calibrated", node()->declare_parameter("waypoints_calibrated", false));
-  bb->set("uc_resupply_enabled", node()->declare_parameter("uc_resupply_enabled", true));
-  bb->set("uc_enemy_base_enabled", node()->declare_parameter("uc_enemy_base_enabled", false));
-  for (const auto & entry : std::vector<std::pair<std::string, std::string>>{
-      {"waypoints_file", "params/waypoints.yaml"},
-      {"ul_control_waypoint", "rmul_center"},
-      {"ul_semantic_map_file", "params/rmul_semantic_map.yaml"},
-      {"uc_semantic_map_file", "params/rmuc_semantic_map.yaml"}}) {
-    bb->set(entry.first, node()->declare_parameter(entry.first, entry.second));
+  bb->set("waypoints_file", node()->declare_parameter("waypoints_file", std::string("params/waypoints.yaml")));
+
+  auto declare_scoped_param = [this, bb](
+    const std::string & scoped_name, const std::string & legacy_name, auto default_val) {
+    using RawT = std::decay_t<decltype(default_val)>;
+    using ValT = std::conditional_t<std::is_same_v<RawT, const char *>, std::string, RawT>;
+    const ValT def = default_val;
+    const ValT scoped_v = node()->declare_parameter<ValT>(scoped_name, def);
+    const ValT legacy_v = node()->declare_parameter<ValT>(legacy_name, scoped_v);
+    const ValT chosen = (legacy_v != def && scoped_v == def) ? legacy_v : scoped_v;
+    bb->set(legacy_name, chosen);
+    bb->set(scoped_name, chosen);
+    return chosen;
+  };
+
+  declare_scoped_param("uc.resupply_enabled", "uc_resupply_enabled", true);
+  declare_scoped_param("uc.enemy_base_enabled", "uc_enemy_base_enabled", false);
+
+  for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, std::string>>{
+      {"ul.control_waypoint", "ul_control_waypoint", "rmul_center"},
+      {"ul.semantic_map_file", "ul_semantic_map_file", "params/rmul_semantic_map.yaml"},
+      {"uc.semantic_map_file", "uc_semantic_map_file", "params/rmuc_semantic_map.yaml"}}) {
+    declare_scoped_param(scoped_name, legacy_name, default_val);
   }
-  for (const auto & setting : std::vector<std::pair<std::string, int>>{
-      {"ul_hp_trigger", 150}, {"ul_hp_exit", 360}, {"uc_hp_trigger", 140},
-      {"uc_hp_exit", 360}, {"uc_ammo_trigger", 30}, {"uc_ammo_exit", 150},
-      {"uc_base_defense_hp", 2000}, {"uc_early_remain", 240},
-      {"uc_attack_hp", 250}, {"uc_endgame_remain", 60}}) {
-    globalBlackboard()->set(setting.first, static_cast<int>(node()->declare_parameter(setting.first, setting.second)));
+
+  for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, int>>{
+      {"ul.hp_trigger", "ul_hp_trigger", 150},
+      {"ul.hp_exit", "ul_hp_exit", 360},
+      {"uc.hp_trigger", "uc_hp_trigger", 140},
+      {"uc.hp_exit", "uc_hp_exit", 360},
+      {"uc.ammo_trigger", "uc_ammo_trigger", 30},
+      {"uc.ammo_exit", "uc_ammo_exit", 150},
+      {"uc.base_defense_hp", "uc_base_defense_hp", 2000},
+      {"uc.early_remain", "uc_early_remain", 240},
+      {"uc.attack_hp", "uc_attack_hp", 250},
+      {"uc.endgame_remain", "uc_endgame_remain", 60}}) {
+    declare_scoped_param(scoped_name, legacy_name, default_val);
   }
 
   for (const auto & setting : std::vector<std::pair<std::string, double>>{
