@@ -4,21 +4,21 @@ frame_id: map
 
 named_waypoints:
   # --- RMUL 3v3 ---
-  rmul_supply: # 家
-    x: 0.0
-    y: 0.0
+  rmul_supply: # 家 (实测起步点 B)
+    x: 0.237
+    y: -0.112
     yaw: 0.0
   rmul_supply_shelter:  # 补给区门前避险点
     x: 1.0
     y: 0.0
     yaw: 0.0
-  rmul_center: # 中央控制区
-    x: 4.5
-    y: -3.2
+  rmul_center: # 中央控制区 (实测目标点 A)
+    x: -0.470
+    y: 2.249
     yaw: 0.0
-  rmul_center_fallback: # 中心边缘架枪点
-    x: 3.0
-    y: -3.2
+  rmul_center_fallback: # 实测回退点 B，与补给点共用
+    x: 0.237
+    y: -0.112
     yaw: 0.0
 
   # --- RMUC 7v7 ---
