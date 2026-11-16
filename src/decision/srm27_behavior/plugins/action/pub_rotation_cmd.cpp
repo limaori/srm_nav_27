@@ -64,7 +64,7 @@ bool PublishRotationCmdAction::setMessage(geometry_msgs::msg::Twist & msg)
       const double request = spin_speed;
       spin_speed = tracker->spin_reference.sample(now, request, randomize,
         std::numeric_limits<double>::infinity(), epoch, tracker->spin_seed,
-        tracker->spin_max_accel, tracker->spin_max_jerk);
+        tracker->spin_max_accel, tracker->spin_max_jerk, tracker->evasion_min_speed);
       tracker->evasion_smoothing = randomize || !tracker->spin_reference.settled(request);
     } else {
       // 保留普通恒速请求，并作为受击平滑变速的起点。

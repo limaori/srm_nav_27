@@ -147,8 +147,8 @@ TEST(DecisionCore, SpinReferenceIsBoundedSmoothReproducibleAndResets)
     const double now = i * dt;
     const double request = i < 7000 ? 7.0 : (i < 14000 ? 2.5 : 8.0);
     const bool variable = i < 7000 || i >= 14000;
-    const double v = a.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0);
-    EXPECT_DOUBLE_EQ(v, b.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0));
+    const double v = a.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0, 3.0);
+    EXPECT_DOUBLE_EQ(v, b.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0, 3.0));
     EXPECT_GE(v, 0.0);
     EXPECT_LE(v, 8.0);
     const double accel = (v - prev) / dt;
@@ -161,28 +161,45 @@ TEST(DecisionCore, SpinReferenceIsBoundedSmoothReproducibleAndResets)
     prev_accel = accel;
   }
   EXPECT_GT(high - low, 0.2);
-  EXPECT_LE(a.sample(20.0, 8.0, true, 2.0, 1, 42, 8.0, 40.0), 2.0);
-  EXPECT_DOUBLE_EQ(a.sample(20.001, 0.0, true, 8.0, 1, 42, 8.0, 40.0), 0.0);
-  EXPECT_DOUBLE_EQ(a.sample(20.002, 7.0, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
-  EXPECT_DOUBLE_EQ(a.sample(22.0, 7.0, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
-  EXPECT_DOUBLE_EQ(a.sample(22.001, NAN, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
+  EXPECT_LE(a.sample(20.0, 8.0, true, 2.0, 1, 42, 8.0, 40.0, 3.0), 2.0);
+  EXPECT_DOUBLE_EQ(a.sample(20.001, 0.0, true, 8.0, 1, 42, 8.0, 40.0, 3.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(20.002, 7.0, true, 8.0, 2, 42, 8.0, 40.0, 3.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(22.0, 7.0, true, 8.0, 2, 42, 8.0, 40.0, 3.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(22.001, NAN, true, 8.0, 2, 42, 8.0, 40.0, 3.0), 0.0);
+}
+
+TEST(DecisionCore, RandomSpinMinimumCanChangeWithoutResettingTheReference)
+{
+  SpinReference reference;
+  reference.reset(7.0);
+  double previous = 7.0, low = 8.0;
+  for (int i = 0; i < 2000; ++i) {
+    const double minimum = i < 500 ? 7.0 : 3.0;
+    const double value = reference.sample(i * .01, 8.0, true, 8.0, 1, 42, 8.0, 40.0, minimum);
+    EXPECT_LE(std::abs(value - previous), .080001);
+    EXPECT_GE(value, minimum);
+    EXPECT_LE(value, 8.0);
+    if (i >= 500) { low = std::min(low, value); }
+    previous = value;
+  }
+  EXPECT_LT(low, 5.0);
 }
 
 TEST(DecisionCore, RandomSpinStartsFromPreviousSpeedAndRejectsInvalidInputs)
 {
   SpinReference reference;
   reference.reset(2.5);
-  EXPECT_DOUBLE_EQ(reference.sample(0.0, 8.0, true, 8.0, 1, 42, 8.0, 40.0), 2.5);
+  EXPECT_DOUBLE_EQ(reference.sample(0.0, 8.0, true, 8.0, 1, 42, 8.0, 40.0, 3.0), 2.5);
   double previous = 2.5;
   for (int i = 1; i <= 200; ++i) {
-    const double value = reference.sample(i * .01, 8.0, true, 8.0, 1, 42, 8.0, 40.0);
+    const double value = reference.sample(i * .01, 8.0, true, 8.0, 1, 42, 8.0, 40.0, 3.0);
     EXPECT_GT(value, 0.0);
     EXPECT_LE(std::abs(value - previous), .080001);
     previous = value;
   }
-  EXPECT_DOUBLE_EQ(reference.sample(2.01, -8.0, true, 8.0, 1, 42, 8.0, 40.0), 0.0);
-  EXPECT_DOUBLE_EQ(reference.sample(2.02, 8.0, true, 8.0, 1, 42, 0.0, 40.0), 0.0);
-  EXPECT_DOUBLE_EQ(reference.sample(2.03, 8.0, true, 8.0, 1, 42, 8.0, NAN), 0.0);
+  EXPECT_DOUBLE_EQ(reference.sample(2.01, -8.0, true, 8.0, 1, 42, 8.0, 40.0, 3.0), 0.0);
+  EXPECT_DOUBLE_EQ(reference.sample(2.02, 8.0, true, 8.0, 1, 42, 0.0, 40.0, 3.0), 0.0);
+  EXPECT_DOUBLE_EQ(reference.sample(2.03, 8.0, true, 8.0, 1, 42, 8.0, NAN, 3.0), 0.0);
 }
 
 TEST(DecisionCore, RandomSpinHasNoFixedPeriodAndCanReturnToConstantSpeed)
@@ -192,7 +209,7 @@ TEST(DecisionCore, RandomSpinHasNoFixedPeriodAndCanReturnToConstantSpeed)
   double now = 0.0;
   for (int i = 0; i < 12000; ++i) {
     now = i * .01;
-    samples.push_back(reference.sample(now, 8.0, true, 8.0, 1, 42, 8.0, 40.0));
+    samples.push_back(reference.sample(now, 8.0, true, 8.0, 1, 42, 8.0, 40.0, 3.0));
   }
   // 排除 0.2~5 秒的重复周期；这不代表对任意预测器都不可预测。
   for (int lag = 20; lag <= 500; ++lag) {
@@ -203,7 +220,7 @@ TEST(DecisionCore, RandomSpinHasNoFixedPeriodAndCanReturnToConstantSpeed)
     EXPECT_GT(squared_error / (samples.size() - 1000 - lag), .001);
   }
   for (int i = 1; i <= 500; ++i) {
-    reference.sample(now + i * .01, 2.5, false, 8.0, 1, 42, 8.0, 40.0);
+    reference.sample(now + i * .01, 2.5, false, 8.0, 1, 42, 8.0, 40.0, 3.0);
   }
   EXPECT_TRUE(reference.settled(2.5));
 }

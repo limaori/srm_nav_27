@@ -692,11 +692,14 @@ def test_hp_drop_random_spin_preserves_navigation_semantic_and_stop_gates(arena)
     a.game.game_progress = 4
     a.goal(*((4.5, -3.2) if a.league == 'ul' else (3.5, 0.)))
     time.sleep(.3)  # Establish the real HP-difference condition's baseline.
-    for name in ('spin.moving_speed', 'spin.arrived_speed', 'spin.supply_speed', 'spin.evasion_speed'):
+    for name in ('spin.moving_speed', 'spin.arrived_speed', 'spin.supply_speed', 'spin.evasion_speed', 'spin.evasion_min_speed'):
         assert not a.set_parameters({name: -1.})
         assert not a.set_parameters({name: math.nan})
     assert not a.set_parameters({'spin.max_accel': 0.})
     assert not a.set_parameters({'spin.max_jerk': 20.})  # Read-only until restart.
+    assert not a.set_parameters({'spin.evasion_min_speed': 9.0})
+    assert not a.set_parameters({'spin.evasion_duration_ms': 0})
+    assert a.set_parameters({'spin.evasion_min_speed': 3.0, 'spin.evasion_duration_ms': 5000})
     assert a.set_parameters({'spin.evasion_speed': 8.0})
     before = len(a.spin_requests)
     output_start = len(a.outputs)
@@ -718,7 +721,7 @@ def test_hp_drop_random_spin_preserves_navigation_semantic_and_stop_gates(arena)
     (a.out / 'random-spin.json').write_text(json.dumps({
         'requests': requests,
         'mux_wz': [v.angular.z for v in a.outputs[output_start:]],
-        'target_range': [6., 8.], 'max_accel': 8., 'max_jerk': 40.,
+        'target_range': [3., 8.], 'max_accel': 8., 'max_jerk': 40.,
     }, indent=2) + '\n')
     a.check('hp_drop_positive_random_spin_reaches_real_mux_without_changing_navigation')
     a.x, a.y = 101., 101. if a.league == 'ul' else 100.5
@@ -732,7 +735,7 @@ def test_hp_drop_random_spin_preserves_navigation_semantic_and_stop_gates(arena)
     wait_for(lambda: a.outputs and a.outputs[-1].linear.x == 0. and a.outputs[-1].angular.z == 0.,
              'manual stop did not override attack spin')
     a.check('manual_stop_preempts_random_spin')
-    wait_for(lambda: 'HP_DROP_EVASION' not in a.spins[-1], 'random spin survived HP-drop window', timeout=4)
+    wait_for(lambda: 'HP_DROP_EVASION' not in a.spins[-1], 'random spin survived HP-drop window', timeout=7)
     wait_for(lambda: 'wz=2.50' in a.spins[-1], 'constant moving spin did not resume', timeout=4)
     a.check('random_spin_expires_and_smoothly_returns_to_constant_speed')
 

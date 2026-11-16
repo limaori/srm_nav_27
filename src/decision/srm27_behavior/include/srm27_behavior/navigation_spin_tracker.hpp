@@ -42,6 +42,8 @@ struct NavigationSpinTracker
   double arrived_speed = 7.0;
   double supply_speed = 2.0;
   double evasion_speed = 8.0;
+  double evasion_min_speed = 3.0;
+  int evasion_duration_ms = 5000;
   double spin_max_accel = 8.0;
   double spin_max_jerk = 40.0;
   unsigned spin_seed = 2027;
@@ -80,6 +82,7 @@ struct NavigationSpinTracker
     target->set("spin_arrived_speed", arrived_speed);
     target->set("spin_supply_speed", supply_speed);
     target->set("spin_evasion_speed", evasion_speed);
+    target->set("spin_evasion_duration_ms", evasion_duration_ms);
     if (has_active_goal) {
       target->set("active_goal", active_goal);
     }

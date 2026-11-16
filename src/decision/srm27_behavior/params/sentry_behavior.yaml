@@ -54,7 +54,9 @@ srm27_behavior_server:
       moving_speed: 2.5       # 前往目标点/巡航移动中的慢速小陀螺 (rad/s)
       arrived_speed: 7.0      # 到达目标点后的快速小陀螺 (rad/s)
       supply_speed: 0.0       # 补给区回血/补弹转速 (rad/s，改为不转)
-      evasion_speed: 8.0      # 掉血反制随机目标的上限(rad/s)，目标范围为其75%~100%
+      evasion_speed: 8.0      # 掉血反制随机目标上限(rad/s)，支持热调
+      evasion_min_speed: 3.0 # 随机目标下限(rad/s)，支持热调，须 <= evasion_speed
+      evasion_duration_ms: 5000 # 掉血反制持续时间(ms)，热调后下次掉血生效
       max_accel: 8.0          # 随机变速及平滑退出的角加速度上限(rad/s²)，需实车标定
       max_jerk: 40.0          # 角加加速度上限(rad/s³)
       seed: 2027             # 与 match_epoch 合成种子，便于复现实验；不保证不可预测

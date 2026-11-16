@@ -18,6 +18,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <tuple>
 #include <type_traits>
 
@@ -113,6 +114,9 @@ void SentryBehaviorServer::initDynamicParameters()
   node()->declare_parameter("spin.arrived_speed", spin_tracker_->arrived_speed);
   node()->declare_parameter("spin.supply_speed", spin_tracker_->supply_speed);
   node()->declare_parameter("spin.evasion_speed", spin_tracker_->evasion_speed);
+  node()->declare_parameter("spin.evasion_min_speed", spin_tracker_->evasion_min_speed);
+  const auto duration_ms = node()->declare_parameter(
+    "spin.evasion_duration_ms", int64_t{5000});
 
   node()->declare_parameter("spin.arrive_tolerance", spin_tracker_->arrive_tolerance);
   node()->declare_parameter("spin.leave_tolerance", spin_tracker_->leave_tolerance);
@@ -123,6 +127,7 @@ void SentryBehaviorServer::initDynamicParameters()
     node()->get_parameter("spin.arrived_speed", spin_tracker_->arrived_speed);
     node()->get_parameter("spin.supply_speed", spin_tracker_->supply_speed);
     node()->get_parameter("spin.evasion_speed", spin_tracker_->evasion_speed);
+    node()->get_parameter("spin.evasion_min_speed", spin_tracker_->evasion_min_speed);
     node()->get_parameter("spin.arrive_tolerance", spin_tracker_->arrive_tolerance);
     node()->get_parameter("spin.leave_tolerance", spin_tracker_->leave_tolerance);
     spin_tracker_->evaluateLocked();
@@ -130,17 +135,22 @@ void SentryBehaviorServer::initDynamicParameters()
   }
 
   auto validate = [](double moving, double arrived, double supply, double evasion,
-                     double enter, double leave) {
+                     double enter, double leave, double minimum, int64_t duration) {
     return std::isfinite(moving) && std::isfinite(arrived) && std::isfinite(supply) &&
            std::isfinite(evasion) && std::isfinite(enter) && std::isfinite(leave) &&
            moving > 0.0 && arrived > 0.0 && supply >= 0.0 && evasion > 0.0 &&
+           std::isfinite(minimum) && minimum > 0.0 && minimum <= evasion &&
+           duration > 0 && duration <= std::numeric_limits<int>::max() &&
            enter >= 0.05 && leave >= enter;
   };
   if (!validate(spin_tracker_->moving_speed, spin_tracker_->arrived_speed,
                 spin_tracker_->supply_speed, spin_tracker_->evasion_speed,
-                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance)) {
-    throw std::invalid_argument("Invalid spin speeds or arrival tolerances");
+                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance,
+                spin_tracker_->evasion_min_speed, duration_ms)) {
+    throw std::invalid_argument("Invalid spin speeds, duration or arrival tolerances");
   }
+  spin_tracker_->evasion_duration_ms = static_cast<int>(duration_ms);
+  spin_tracker_->syncToBlackboard();
   rcl_interfaces::msg::ParameterDescriptor fixed;
   fixed.read_only = true;
   spin_tracker_->spin_max_accel = node()->declare_parameter("spin.max_accel", 8.0, fixed);
@@ -155,10 +165,13 @@ void SentryBehaviorServer::initDynamicParameters()
     [this, validate](const std::vector<rclcpp::Parameter> & params) {
       rcl_interfaces::msg::SetParametersResult result;
       const auto values = node()->get_parameters({"spin.moving_speed", "spin.arrived_speed",
-        "spin.supply_speed", "spin.evasion_speed", "spin.arrive_tolerance", "spin.leave_tolerance"});
+        "spin.supply_speed", "spin.evasion_speed", "spin.arrive_tolerance", "spin.leave_tolerance",
+        "spin.evasion_min_speed", "spin.evasion_duration_ms"});
       double moving = values[0].as_double(), arrived = values[1].as_double();
       double supply = values[2].as_double(), evasion = values[3].as_double();
       double enter = values[4].as_double(), leave = values[5].as_double();
+      double minimum = values[6].as_double();
+      int64_t duration = values[7].as_int();
       for (const auto & p : params) {
         const auto & n = p.get_name();
         if (n == "spin.moving_speed") { moving = p.as_double(); }
@@ -167,10 +180,13 @@ void SentryBehaviorServer::initDynamicParameters()
         else if (n == "spin.evasion_speed") { evasion = p.as_double(); }
         else if (n == "spin.arrive_tolerance") { enter = p.as_double(); }
         else if (n == "spin.leave_tolerance") { leave = p.as_double(); }
+        else if (n == "spin.evasion_min_speed") { minimum = p.as_double(); }
+        else if (n == "spin.evasion_duration_ms") { duration = p.as_int(); }
       }
-      result.successful = validate(moving, arrived, supply, evasion, enter, leave);
+      result.successful = validate(moving, arrived, supply, evasion, enter, leave, minimum, duration);
       if (!result.successful) {
         result.reason = "Speeds must be finite and positive (supply may be zero); "
+          "evasion_min_speed <= evasion_speed; duration_ms must fit a positive int; "
           "0.05 <= arrive_tolerance <= leave_tolerance";
         return result;
       }
@@ -344,7 +360,8 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
   }
   {
     const auto values = node()->get_parameters({"spin.moving_speed", "spin.arrived_speed",
-      "spin.supply_speed", "spin.evasion_speed", "spin.arrive_tolerance", "spin.leave_tolerance"});
+      "spin.supply_speed", "spin.evasion_speed", "spin.arrive_tolerance", "spin.leave_tolerance",
+      "spin.evasion_min_speed", "spin.evasion_duration_ms"});
     std::lock_guard<std::mutex> lock(spin_tracker_->mutex);
     spin_tracker_->moving_speed = values[0].as_double();
     spin_tracker_->arrived_speed = values[1].as_double();
@@ -352,6 +369,8 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
     spin_tracker_->evasion_speed = values[3].as_double();
     spin_tracker_->arrive_tolerance = values[4].as_double();
     spin_tracker_->leave_tolerance = values[5].as_double();
+    spin_tracker_->evasion_min_speed = values[6].as_double();
+    spin_tracker_->evasion_duration_ms = static_cast<int>(values[7].as_int());
     spin_tracker_->evaluateLocked();
     spin_tracker_->syncToBlackboard();
   }

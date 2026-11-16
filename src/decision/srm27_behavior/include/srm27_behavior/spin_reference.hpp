@@ -16,9 +16,10 @@ public:
   bool settled(double request) const { return value_ == to_ && to_ == request; }
 
   double sample(double now, double request, bool variable, double limit, int epoch,
-                unsigned seed, double max_accel, double max_jerk)
+                unsigned seed, double max_accel, double max_jerk, double minimum)
   {
     if (!std::isfinite(now) || !std::isfinite(request) || request < 0.0 || std::isnan(limit) || limit < 0.0 ||
+        !std::isfinite(minimum) || minimum <= 0.0 ||
         !std::isfinite(max_accel) || max_accel <= 0.0 ||
         !std::isfinite(max_jerk) || max_jerk <= 0.0) { reset(); return 0.0; }
     if (!initialized_ || epoch != epoch_ || now < last_ || now - last_ > 0.5) {
@@ -46,7 +47,8 @@ public:
     if (now >= start_ + duration_ &&
         ((variable && now >= next_) || (!variable && requested != to_))) {
       from_ = value_;
-      to_ = requested * (variable ? std::uniform_real_distribution<double>(0.75, 1.0)(rng_) : 1.0);
+      to_ = variable ? std::uniform_real_distribution<double>(
+        std::min(minimum, requested), requested)(rng_) : requested;
       const double delta = std::abs(to_ - from_);
       duration_ = std::max({0.05, 1.875 * delta / max_accel,
                            std::sqrt(5.773502692 * delta / max_jerk)});

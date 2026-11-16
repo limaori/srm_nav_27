@@ -187,7 +187,7 @@
           topic_name="rotation_cmd"/>
       </Sequence>
       <Sequence name="HpDropSpin">
-        <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
+        <IsHpDropping hp_drop_threshold="10" hold_duration_ms="{@spin_evasion_duration_ms}" key_port="{@referee_robotStatus}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{@spin_evasion_speed}"
           randomize="true"
@@ -221,7 +221,7 @@
           topic_name="rotation_cmd"/>
       </Sequence>
       <Sequence name="HpDropSpin">
-        <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
+        <IsHpDropping hp_drop_threshold="10" hold_duration_ms="{@spin_evasion_duration_ms}" key_port="{@referee_robotStatus}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{@spin_evasion_speed}"
           randomize="true"
