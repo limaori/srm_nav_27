@@ -49,11 +49,14 @@ void SentryBehaviorServer::initBlackboardDefaults()
   bb->set("chassis_enabled", false);
   bb->set("inputs_ready", false);
   bb->set("needs_supply", false);
+  bb->set("supply_exit_allowed", false);
   bb->set("supply_cooling", false);
   bb->set("match_epoch", 0);
   bb->set<BT::TreeNode *>("navigation_owner", nullptr);
   bb->set("sentry_posture_state", std::make_shared<SentryPostureState>());
   bb->set("current_posture", 0);
+  bb->set("ul_contest_neutral", true);
+  bb->set("ul_contest_hp_min", 250);
 
   // Flat referee scalar defaults so XML ScriptCondition never fails on unset keys
   bb->set("game_valid", false);
@@ -211,7 +214,7 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   guard_client_ = node()->create_client<rcl_interfaces::srv::SetParameters>("srm_cmd_mux/set_parameters");
   initBlackboardDefaults();
   initDynamicParameters();
-  input_timeout_sec_ = node()->declare_parameter("input_timeout_sec", 2.0);
+  input_timeout_sec_ = node()->declare_parameter("input_timeout_sec", 3.0);
   if (!std::isfinite(input_timeout_sec_) || input_timeout_sec_ <= 0.0) {
     throw std::invalid_argument("input_timeout_sec must be positive and finite");
   }
@@ -235,6 +238,7 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
 
   declare_scoped_param("uc.resupply_enabled", "uc_resupply_enabled", true);
   declare_scoped_param("uc.enemy_base_enabled", "uc_enemy_base_enabled", false);
+  declare_scoped_param("ul.contest_neutral", "ul_contest_neutral", true);
 
   for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, std::string>>{
       {"ul.control_waypoint", "ul_control_waypoint", "rmul_center"},
@@ -252,6 +256,7 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, int>>{
       {"ul.hp_trigger", "ul_hp_trigger", 150},
       {"ul.hp_exit", "ul_hp_exit", 360},
+      {"ul.contest_hp_min", "ul_contest_hp_min", 250},
       {"uc.hp_trigger", "uc_hp_trigger", 140},
       {"uc.hp_exit", "uc_hp_exit", 360},
       {"uc.ammo_trigger", "uc_ammo_trigger", 30},

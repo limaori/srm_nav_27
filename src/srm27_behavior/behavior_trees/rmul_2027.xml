@@ -76,16 +76,17 @@
         cooling="{@supply_cooling}">
         <!-- 回补触发与退出：needs_supply 是复活回补锁存；HP 滞回在
              hp <= ul_hp_trigger（默认 150）时触发，需 hp >= ul_hp_exit（默认 360）
-             且己方补给区 RFID 有效才释放。补给区驻留由 RFID 确认，不以到点代替。
+             且己方补给区 RFID 有效或已经满血才释放。补给区驻留由 RFID 确认，不以到点代替。
              UL 不检查补弹、不请求姿态；弹量耗尽也继续执行回补/控区策略。 -->
         <ReactiveSequence name="RmulSupplyAttempt">
           <ReactiveFallback>
             <ScriptCondition code="@needs_supply == true"/>
             <HysteresisCheck metric="hp"
+              match_epoch="{@match_epoch}"
               trigger_value="{@ul_hp_trigger}"
               exit_value="{@ul_hp_exit}"
               trigger_when_below="true"
-              exit_allowed="{@rfid_supply}"
+              exit_allowed="{@supply_exit_allowed}"
               ignore_zero_hp="true"
               key_port="{@referee_robotStatus}"/>
           </ReactiveFallback>
@@ -113,13 +114,16 @@
   <!-- P1 中心回退：仅中心预案启用，回补优先。
        2027 UL §3.3.4.1 / 通信协议表1-9：激活与控制权独立；双方激活只暂停进度。
        敌方控制或敌方单独激活且非双方争夺时架枪，反馈失效也先回退。
+       中立点允许在开启争夺且血量达到 contest_hp_min 时主动进点。
        双方争夺时允许回中心，不根据计时、RFID、抵达或臆测敌方血量宣告夺回。
        回退点需标定安全路线和射界，不能由示例坐标保证。 -->
   <BehaviorTree ID="Sub_RmulCenterFallback">
     <ReactiveSequence name="RmulCenterFallback">
       <ScriptCondition code="@ul_control_waypoint == 'rmul_center'
                              &amp;&amp; (!@ul_center_valid || (@ul_center_activation != 3
-                               &amp;&amp; (@ul_center_control == 2 || @ul_center_activation == 2)))"/>
+                               &amp;&amp; (@ul_center_control == 2 || (@ul_center_activation == 2
+                                 &amp;&amp; ((@ul_center_control != 0) || (@ul_contest_neutral == false)
+                                   || (@hp &lt; @ul_contest_hp_min))))))"/>
       <Script code="@decision_mode := 'fallback'; @decision_reason := 'center_unknown_or_enemy_control'"/>
       <SubTree ID="Sub_RmulCenterFallbackSpin" _autoremap="true"/>
       <NavigationTransitionGate hold_radius="{@ul_hold_radius}">

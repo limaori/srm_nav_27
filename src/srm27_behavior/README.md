@@ -57,8 +57,8 @@ flowchart TD
   D -->|UL| E{低血或复活未回补?}
   E -->|是| F[回补 / RFID 到区驻留 / 滞回到恢复阈值]
   E -->|否| U{中心预案且敌控/敌方单独激活或反馈失效?}
-  U -->|是且非双方争夺| V[回退架枪点驻守]
-  U -->|否或双方争夺| G[持续占守中心或己方高地]
+  U -->|是且不满足争夺条件| V[回退架枪点驻守]
+  U -->|否、双方争夺或满足中立点争夺条件| G[持续占守中心或己方高地]
   D -->|UC| H[回补 → 基地危机 → 掉血回避 → 己方阵地恢复 → 控区攻守 → 巡逻/联防]
 ```
 
@@ -127,7 +127,7 @@ ros2 service call /srm_cmd_mux/stop_all std_srvs/srv/Trigger
 | `referee/rfid_status` | 己方补给、中心、堡垒；超时清除缓存 |
 | UC 的 `ally_robot_hp` / `switch_position` | 基地、前哨血量 / 自定义推进开关；UL 策略不依赖这些输入 |
 | `nav_mapPose` | 新鲜 `map → gimbal_yaw` TF（由 `robot_base_frame` 配置）；仅允许 map 同帧 odometry 作为替代，拒绝把 odom 当 map |
-| `inputs_ready` | game/原始身份/map pose 新鲜度守卫，默认 2 秒；相同 TF/odometry 时间戳不能续命 |
+| `inputs_ready` | game/原始身份/map pose 新鲜度守卫，默认 3 秒；相同 TF/odometry 时间戳不能续命 |
 | `arena_valid` / `score_valid` | 2027 8 字节场地事件 / 24 字节血量控制度，独立超时；R/B 场地标识按原始身份映射 |
 | `match_epoch` / `needs_supply` | 新局清除历史滞回/姿态预算；复活回补锁存 |
 | `nav_arrived` / `nav_goal_finished` | 距离滞回 / Action 成功，二者分别记录 |

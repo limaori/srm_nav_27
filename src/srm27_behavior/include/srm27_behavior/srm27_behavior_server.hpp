@@ -109,7 +109,7 @@ private:
   std::shared_ptr<BT::StdCoutLogger> logger_cout_;
   uint32_t tick_count_ = 0;
   bool use_cout_logger_;
-  double input_timeout_sec_ = 2.0;
+  double input_timeout_sec_ = 3.0;
   int match_epoch_ = 0;
   int previous_progress_ = -1;
   int previous_remain_ = 0;

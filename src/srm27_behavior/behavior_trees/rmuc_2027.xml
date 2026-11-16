@@ -85,7 +85,7 @@
         retry_sec="{@supply_retry}"
         cooling="{@supply_cooling}">
         <!-- 回补条件：HP <= uc_hp_trigger（默认 140）进入，HP >= uc_hp_exit（默认 360）
-             且补给区 RFID 有效才退出。needs_supply 另由服务端根据复活与 RFID 维护。
+             且补给区 RFID 有效或已经满血才退出。needs_supply 由服务端根据复活、RFID 与满血状态维护。
              低弹分支要求免费补弹开关开启、弹量新鲜、开赛满 60s（remain_time <= 360）；
              基地无危机时才检查弹量滞回：<= uc_ammo_trigger（默认 30）进入，
              >= uc_ammo_exit（默认 150）且 RFID 在补给区才退出，不发送购买请求。
@@ -95,10 +95,11 @@
           <ReactiveFallback>
             <ScriptCondition code="@needs_supply == true"/>
             <HysteresisCheck metric="hp"
+              match_epoch="{@match_epoch}"
               trigger_value="{@uc_hp_trigger}"
               exit_value="{@uc_hp_exit}"
               trigger_when_below="true"
-              exit_allowed="{@rfid_supply}"
+              exit_allowed="{@supply_exit_allowed}"
               ignore_zero_hp="true"
               key_port="{@referee_robotStatus}"/>
             <Sequence>

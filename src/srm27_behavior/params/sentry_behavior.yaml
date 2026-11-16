@@ -16,7 +16,7 @@ srm27_behavior_server:
     navigation_timeout: 45.0 # 单次 Action 最长运行时间；超时取消，退避后重试
     navigation_completion_tolerance: 0.8 # 独立于自转滞回；需覆盖 Nav2 XY 容差及栅格端点误差
 
-    input_timeout_sec: 2.0    # game/status/map pose 接收超时后停止；无建图阶段
+    input_timeout_sec: 3.0    # 裁判、身份状态和定位的新鲜度期限（秒）；过期撤销运动许可
     waypoints_file: params/waypoints.yaml
 
     # ==========================================
@@ -29,6 +29,8 @@ srm27_behavior_server:
       semantic_map_file: params/rmul_semantic_map.yaml
       hp_trigger: 150
       hp_exit: 360
+      contest_neutral: true     # 中心仍中立(control==0)且血量充沛时允许进点争夺，不因敌方单独激活就立刻撤退
+      contest_hp_min: 250       # 进点争夺的最低生命值要求
 
     # ==========================================
     # RMUC (7v7) 决策参数

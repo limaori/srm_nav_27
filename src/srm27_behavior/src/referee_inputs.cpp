@@ -107,7 +107,11 @@ void SentryBehaviorServer::initRefereeInputs()
         (m.friendly_supply_zone_non_overlap == m.DETECTED) ||
         (m.friendly_supply_zone_overlap == m.DETECTED);
       bb->set("rfid_supply", supply);
-      if (supply && previous_hp_ > 0) { bb->set("needs_supply", false); }
+      int hp = 0, max_hp = 0;
+      const bool full_hp = bb->get("hp", hp) && bb->get("max_hp", max_hp) && max_hp > 0 && hp >= max_hp;
+      const bool supply_cleared = supply || full_hp;
+      bb->set("supply_exit_allowed", supply_cleared);
+      if (supply_cleared && previous_hp_ > 0) { bb->set("needs_supply", false); }
       bb->set("rfid_center", m.center_gain_point_rmul == m.DETECTED);
       bb->set("rfid_fortress", m.friendly_fortress_gain == m.DETECTED);
     });
@@ -122,7 +126,11 @@ void SentryBehaviorServer::initRefereeInputs()
       if (valid) {
         if (previous_hp_ == 0 && m.current_hp > 0) { bb->set("needs_supply", true); }
         previous_hp_ = m.current_hp;
-        if (m.current_hp > 0 && bb->get<bool>("rfid_supply")) { bb->set("needs_supply", false); }
+        bool rfid_supply = false;
+        (void)bb->get("rfid_supply", rfid_supply);
+        const bool supply_cleared = rfid_supply || (m.maximum_hp > 0 && m.current_hp >= m.maximum_hp);
+        bb->set("supply_exit_allowed", supply_cleared);
+        if (m.current_hp > 0 && supply_cleared) { bb->set("needs_supply", false); }
       }
       bb->set("robot_id", static_cast<int>(m.robot_id));
       bb->set("status_valid", valid);
@@ -303,6 +311,9 @@ void SentryBehaviorServer::refreshInputState()
     bb->set("rfid_supply", false);
     bb->set("rfid_center", false);
     bb->set("referee_rfidStatus", rm_decision_interfaces::msg::RfidStatus{});
+    int hp = 0, max_hp = 0;
+    const bool full_hp = bb->get("hp", hp) && bb->get("max_hp", max_hp) && max_hp > 0 && hp >= max_hp;
+    bb->set("supply_exit_allowed", full_hp);
   }
 }
 

@@ -26,7 +26,9 @@ HysteresisCheckCondition::HysteresisCheckCondition(
 BT::NodeStatus HysteresisCheckCondition::checkHysteresis()
 {
   int epoch = 0;
-  getInput("match_epoch", epoch);
+  if (!getInput("match_epoch", epoch)) {
+    (void)config().blackboard->rootBlackboard()->get("match_epoch", epoch);
+  }
   if (epoch != match_epoch_) {
     latched_ = false;
     match_epoch_ = epoch;

@@ -552,11 +552,71 @@ def test_ul_home_highland_preset():
             rclpy.shutdown()
 
 
+@pytest.mark.parametrize('league', ['ul', 'uc'])
+def test_full_hp_supply_exit_and_new_match_clear_hysteresis(league):
+    init_test_ros()
+    a = Arena.__new__(Arena)
+    try:
+        a.__init__(league, 'full-hp-and-new-match')
+        a.game.game_progress = 4
+        target = (4.5, -3.2) if league == 'ul' else (3.5, 0.)
+        a.goal(*target)
+        a.status.current_hp = 100
+        a.goal(0., 0., after=len(a.accepted()))
+        a.status.current_hp = 380
+        time.sleep(.3)
+        assert a.accepted()[-1]['xy'][-1] == [0., 0.]
+        a.status.current_hp = a.status.maximum_hp
+        a.goal(*target, after=len(a.accepted()))
+        a.check('满血且无补给RFID时解除回补')
+        a.status.current_hp = 100
+        a.goal(0., 0., after=len(a.accepted()))
+        index = len(a.events)
+        a.game.game_progress = 0
+        a.stopped(index)
+        a.status.current_hp = 250
+        time.sleep(.2)
+        before = len(a.accepted())
+        a.game.game_progress = 4
+        a.goal(*target, after=before)
+        a.check('新局不继承上一局的低血量滞回')
+    finally:
+        try:
+            if hasattr(a, 'node'):
+                a.close()
+        finally:
+            rclpy.shutdown()
+
+
+def test_ul_neutral_contest_respects_hp_and_enemy_control():
+    init_test_ros()
+    a = Arena.__new__(Arena)
+    try:
+        a.__init__('ul', 'neutral-contest')
+        a.field.center_control = 0
+        a.field.center_gain_point_status = 2
+        a.game.game_progress = 4
+        a.goal(4.5, -3.2)
+        a.status.current_hp = 240
+        a.goal(3., -3.2, after=len(a.accepted()))
+        a.status.current_hp = 300
+        a.goal(4.5, -3.2, after=len(a.accepted()))
+        a.field.center_control = 2
+        a.goal(3., -3.2, after=len(a.accepted()))
+        a.check('中立点争夺遵循血量门槛且敌控时回退')
+    finally:
+        try:
+            if hasattr(a, 'node'):
+                a.close()
+        finally:
+            rclpy.shutdown()
+
+
 def test_ul_center_control_activation_freshness_and_supply_priority():
     init_test_ros()
     a = Arena.__new__(Arena)
     try:
-        a.__init__('ul', 'center-fallback')
+        a.__init__('ul', 'center-fallback', overrides={'ul_contest_neutral': 'false'})
         a.game.game_progress = 4
         a.goal(4.5, -3.2)
         for control, activation, target in [
