@@ -436,7 +436,7 @@ def main():
             if not node.wait_ready(args.wait_odom):
                 print(f"\n[中止] 等了 {args.wait_odom:.0f}s 仍没拿到 /odometry（或云台角），没有世界系参照，"
                       "**不发任何速度**。\n"
-                      "        先起导航栈（./script/start_real_nav.sh），确认 `ros2 topic hz /odometry` 有数，"
+                      "        先起导航栈（./scripts/bringup/start_real_nav.sh），确认 `ros2 topic hz /odometry` 有数，"
                       "或者直接加大 --wait-odom 后重跑。")
                 return 2
             node.stop(0.5, args.rate)

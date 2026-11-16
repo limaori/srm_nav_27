@@ -42,7 +42,7 @@
 #   ./debug_tools/plot_lio_gt_yaw.py --duration 30 --stats-only
 #
 #   典型流程（复现"前进变后退"）：
-#     终端A: ./script/start_sim_nav.sh -w rmuc_2025 -m rmuc_2025 --yaw-mode spin --lio
+#     终端A: ./scripts/bringup/start_sim_nav.sh -w rmuc_2025 -m rmuc_2025 --yaw-mode spin --lio
 #     终端B: ./debug_tools/plot_lio_gt_yaw.py --duration 60 --headless --save /tmp/lio_yaw.png
 #     终端C: 发目标/发速度；看图上 ② 什么时候开始离开 0、④ 两条线是否同号
 #

@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_navigation</name>
+  <version>1.3.2</version>
+  <description>Metapackage for the complete SRM27 navigation stack.</description>
+  <maintainer email="lihanchen2004@163.com">Lihan Chen</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>behaviortree_ros2</exec_depend>
+  <exec_depend>btcpp_ros2_interfaces</exec_depend>
+  <exec_depend>fake_vel_transform</exec_depend>
+  <exec_depend>frontend</exec_depend>
+  <exec_depend>ign_sim_pointcloud_tool</exec_depend>
+  <exec_depend>livox_ros_driver2</exec_depend>
+  <exec_depend>localization_interfaces</exec_depend>
+  <exec_depend>loam_interface</exec_depend>
+  <exec_depend>point_lio</exec_depend>
+  <exec_depend>pointcloud_to_laserscan</exec_depend>
+  <exec_depend>rm_decision_interfaces</exec_depend>
+  <exec_depend>sensor_scan_generation</exec_depend>
+  <exec_depend>small_gicp_relocalization</exec_depend>
+  <exec_depend>srm27_behavior</exec_depend>
+  <exec_depend>srm27_chassis_control</exec_depend>
+  <exec_depend>srm27_costmap_plugins</exec_depend>
+  <exec_depend>srm27_gazebo_simulator</exec_depend>
+  <exec_depend>srm27_localization_adapter</exec_depend>
+  <exec_depend>srm27_minco_controller</exec_depend>
+  <exec_depend>srm27_minco_core</exec_depend>
+  <exec_depend>srm27_minco_vendor</exec_depend>
+  <exec_depend>srm27_nav_behavior_plugins</exec_depend>
+  <exec_depend>srm27_nav_bringup</exec_depend>
+  <exec_depend>srm27_nav_protocol</exec_depend>
+  <exec_depend>srm27_nav_tools</exec_depend>
+  <exec_depend>srm27_omni_pid_controller</exec_depend>
+  <exec_depend>srm27_qpoases_vendor</exec_depend>
+  <exec_depend>srm27_robot_description</exec_depend>
+  <exec_depend>srm27_teleop_twist_joy</exec_depend>
+  <exec_depend>terrain_analysis</exec_depend>
+  <exec_depend>terrain_analysis_ext</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

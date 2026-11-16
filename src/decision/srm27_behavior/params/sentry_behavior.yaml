@@ -1,0 +1,74 @@
+srm27_behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    robot_base_frame: gimbal_yaw # 与 main 的云台系导航/定位一致
+    action_name: srm27_behavior         # Optional
+    tick_frequency: 20                          # Optional (defaults to 100 Hz)
+    groot2_port: 1667                           # Optional (defaults to 1667)
+    ros_plugins_timeout: 1000                   # Optional (defaults to 1000 ms)
+    use_cout_logger: false                      # Optional (defaults to false)
+    # Empty in deployed runs. Set explicitly in a developer session to export Groot2 models.
+    models_output_path: ""
+
+    dry_run: false             # true 时仅计算策略，不发导航/自转/许可/姿态请求
+    waypoints_calibrated: true # 按当前场地和己方颜色标定后设 true
+    status_topic: /srm/sefdefined
+    supply_timeout: 25.0
+    supply_retry: 15.0
+    navigation_timeout: 45.0 # 单次 Action 最长运行时间；超时取消，退避后重试
+    navigation_completion_tolerance: 0.8 # 独立于自转滞回；需覆盖 Nav2 XY 容差及栅格端点误差
+
+    input_timeout_sec: 3.0    # 裁判、身份状态和定位的新鲜度期限（秒）；过期撤销运动许可
+    waypoints_file: params/waypoints.yaml
+
+    # ==========================================
+    # RMUL (3v3) 决策参数
+    # ==============================
+    ul:
+      control_waypoint: rmul_center  # 改 rmul_home_highland 可切己方高地预案
+      fallback_waypoint: rmul_center_fallback # 中心被敌方控制/独占激活，或反馈失效时架枪；需实测标定
+      hold_radius: 0.5          # 相对预设驻守点的最大偏离距离，不以 Nav2 停车位置代替
+      semantic_map_file: params/rmul_semantic_map.yaml
+      hp_trigger: 150
+      hp_exit: 360
+      contest_neutral: true     # 中心仍中立(control==0)且血量充沛时允许进点争夺，不因敌方单独激活就立刻撤退
+      contest_hp_min: 250       # 进点争夺的最低生命值要求
+
+    # ==========================================
+    # RMUC (7v7) 决策参数
+    # ==============================
+    uc:
+      semantic_map_file: params/rmuc_semantic_map.yaml
+      resupply_enabled: true   # 仅开赛满 1 分钟后的免费弹量回补；不发购买指令
+      enemy_base_enabled: false # 基地阵地施压需单独验收路线
+      hp_trigger: 140
+      hp_exit: 360
+      ammo_trigger: 30
+      ammo_exit: 150
+      attack_hp: 250
+      base_defense_hp: 2000
+      early_remain: 240
+      endgame_remain: 60
+
+    # 转速/到点阈值可热改；max_accel/max_jerk/seed 需重启
+    spin:
+      moving_speed: 2.5       # 前往目标点/巡航移动中的慢速小陀螺 (rad/s)
+      arrived_speed: 7.0      # 到达目标点后的快速小陀螺 (rad/s)
+      supply_speed: 2.0       # 补给区回血/补弹转速 (rad/s)
+      evasion_speed: 8.0      # 掉血反制随机目标的上限(rad/s)，目标范围为其75%~100%
+      max_accel: 8.0          # 随机变速及平滑退出的角加速度上限(rad/s²)，需实车标定
+      max_jerk: 40.0          # 角加加速度上限(rad/s³)
+      seed: 2027             # 与 match_epoch 合成种子，便于复现实验；不保证不可预测
+      arrive_tolerance: 0.35  # 判定已到达目标点的距离阈值 (m)
+      leave_tolerance: 0.55   # 滞回离开阈值 (m, 避免边界定位抖动引起慢/快切换震荡)
+
+    plugins:
+      - srm27_behavior/bt_plugins
+
+    behavior_trees:
+      - srm27_behavior/decision_trees
+
+srm27_behavior_client:
+  ros__parameters:
+    use_sim_time: true
+    target_tree: rmul_2027

@@ -1,0 +1,1025 @@
+# srm_nav_27
+
+> **状态：历史资料（2026-11-14 归档）**
+> **当前是否适用：否**——这是重构前的完整 README，入口/脚本路径已变化。
+> **替代入口：** 仓库根 [`README.md`](../../README.md) 与
+> [`docs/architecture/launch_matrix.md`](../architecture/launch_matrix.md)。
+
+深圳北理莫斯科大学北极熊战队哨兵机器人 ROS 2 工作空间。
+
+本文以**框架架构**为主：分层、包职责、数据流、TF 链和启动入口。具体现场操作步骤见 [`docs/`](..)。
+
+---
+
+## 1. 项目概览
+
+| 项 | 内容 |
+| --- | --- |
+| 目标平台 | RoboMaster 哨兵机器人（SRM 实车 + Gazebo 仿真） |
+| 操作系统 | Ubuntu 22.04 |
+| 中间件 | ROS 2 Humble |
+| 仿真器 | Ignition Gazebo Fortress |
+| 主传感器 | Livox Mid-360（网口，点云 + 内置 IMU） |
+| 决策框架 | BehaviorTree.CPP 4.x + BehaviorTree.ROS2 |
+| 导航框架 | Nav2（Theta\* 全局规划 + 自研全向 PID 局部控制） |
+| 仿真执行 | `srm27_gazebo_simulator`（SRM 模型、自有速度插件、速度适配器） |
+
+工作空间同时承载**实车**与**仿真**两条链路，二者共用同一套导航栈，只在传感器来源、里程计来源和坐标系命名上不同。
+
+---
+
+## 2. 架构总览
+
+### 2.1 分层
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ 决策层    srm27_behavior                                           │
+│   BehaviorTree.CPP 服务端 + 行为树插件（条件 / 动作 / 控制 / 装饰）    │
+│   输入：裁判系统、RFID、受击状态    输出：导航目标、云台角、底盘转速     │
+└──────────────────────────────┬─────────────────────────────────────┘
+                               │ NavigateToPose / NavigateThroughPoses
+┌──────────────────────────────v─────────────────────────────────────┐
+│ 导航层    srm27_nav_bringup（Nav2）                                 │
+│   bt_navigator → planner(Theta*) → smoother → controller(OmniPID)  │
+│   代价地图：static + intensity_voxel + inflation                    │
+│   行为恢复：Spin / BackUpFreeSpace / DriveOnHeading / Wait          │
+└───────┬──────────────────────────────────────────┬─────────────────┘
+        │ TF、代价地图、里程计                       │ 速度出口（实车 / 仿真分叉）
+┌───────v────────────────────────────┐   ┌─────────v──────────────────────┐
+│ 定位与感知层                        │   │ 实车：cmd_vel_controller        │
+│   point_lio            激光惯性里程计│   │        → /cmd_vel              │
+│   small_gicp_reloc.    先验图重定位  │   │        → srm27_nav_protocol│
+│   slam_toolbox         二维建图      │   │ 仿真：cmd_vel_nav              │
+│   terrain_analysis(_ext) 地形分析    │   │        → srm_cmd_mux           │
+│   sensor_scan_generation  odom→base  │   │        → cmd_vel_sim           │
+│   loam_interface / livox_ros_driver2 │   │        → srm_velocity_adapter  │
+└───────┬──────────────────────────────┘   │        → SrmVelocitySystem     │
+        │ 传感器数据                        └────────────────────────────────┘
+┌───────v────────────────────────────────────────────────────────────┐
+│ 硬件 / 仿真层                                                       │
+│   实车：Livox Mid-360、下位机 C 板                                   │
+│   仿真：srm27_gazebo_simulator（SRM 模型、速度执行、传感器桥接）       │
+│         同包提供世界 SDF、GUI 配置、MID-360 等场地素材              │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+跨层契约由 `interfaces/rm_decision_interfaces` 统一提供（裁判系统、决策、云台消息）。
+
+### 2.2 工作空间布局
+
+```text
+srm_nav_27/
+├── src/
+│   ├── srm27_bringup/        实车总启动入口、node_params、RViz 配置
+│   ├── srm27_behavior/       行为树服务端 / 客户端 / 插件
+│   ├── srm27_navigation/     导航相关 ROS 包集合（每个子目录是独立包）
+│   ├── srm27_robot_description/  SRM 几何与外参的唯一定义（URDF/SDF 生成）
+│   ├── srm27_chassis_control/    速度合成（srm_cmd_mux）与独立自转控制
+│   ├── srm27_gazebo_simulator/   SRM 仿真入口、速度执行、场地与传感器素材
+│   ├── srm27_nav_protocol/  下位机串口通信
+│   ├── interfaces/           统一消息接口
+│   ├── tools/                开发工具（pcd2pgm、录包、键盘云台）
+│   └── dependencies/         第三方依赖（vcs 拉取，勿手改）
+├── script/                   现场启动与诊断脚本
+├── debug_tools/              调试期波形/排查脚本（不进 colcon，见 debug_tools/README.md）
+├── docs/                     使用指南与设计记录
+├── maps/                     实车场地地图（按场地名分目录）
+├── build/ install/ log/      colcon 构建输出
+└── dependencies.repos        vcs 依赖清单
+```
+
+关于 `maps/` 与包内 `map/`、`pcd/` 的分工：**包内目录是随包发布的默认数据**（如 `srm27_nav_bringup/map/real/srm_site_01.*`），**工作区根 `maps/` 是现场采集的场地地图**。两者都可用 `--map`（仿真脚本为 `-m/--map`）指定；仿真与实车一键脚本都会先查包内目录、再查工作区根 `maps/`。
+
+### 2.3 包清单
+
+**决策层**
+
+| 包 | 职责 |
+| --- | --- |
+| `srm27_behavior` | 行为树服务端与客户端；SRM 自定义 BT 插件（条件/动作/控制/装饰节点） |
+
+**导航层**
+
+| 包 | 职责 |
+| --- | --- |
+| `srm27_nav_bringup` | Nav2 启动、参数、地图、PCD、RViz、行为树 XML |
+| `srm27_nav_plugins` | Nav2 扩展插件：`srm27_nav_behaviors/BackUpFreeSpace`、`srm27_nav_costmap::IntensityVoxelLayer` |
+| `srm27_omni_pid_controller` | 全向底盘 PID 路径跟踪控制器 `OmniPidPursuitController` |
+| `srm27_teleop_twist_joy` | 手柄速度与云台控制 |
+| `srm27_navigation` | 导航包集合的元包（meta package） |
+
+**定位与感知层**
+
+| 包 | 职责 |
+| --- | --- |
+| `point_lio` | 激光惯性里程计（LOAM 系） |
+| `small_gicp_relocalization` | 用先验 PCD 做 GICP 配准，发布 `map → odom` |
+| `sensor_scan_generation` | 生成传感器系下的扫描，发布 `odom → base` |
+| `loam_interface` | Point-LIO 等里程计算法的接口层 |
+| `terrain_analysis` / `terrain_analysis_ext` | 车体 4 m 内 / 外的地形分析，把障碍离地高度写入点云 `intensity` |
+| `fake_vel_transform` | 旧步兵链路：构造不随云台旋转的虚拟底盘系 `gimbal_yaw_fake`。**SRM 仿真已不再使用**（见 §3.3），仅为 `nav2_params_upstream.yaml` / `srm27_bringup` 的旧配置保留 |
+| `livox_ros_driver2` | Mid-360 驱动 |
+| `ign_sim_pointcloud_tool` | 仿真点云转 Velodyne 格式（补 `ring` 与相对时间） |
+| `pointcloud_to_laserscan` | 点云降维为二维激光（仅 SLAM 模式使用） |
+
+**通信与接口**
+
+| 包 | 职责 |
+| --- | --- |
+| `srm27_nav_protocol` | 下位机串口协议；实车 `/cmd_vel` 的唯一消费者，同时发布关节状态用于整车 TF |
+| `rm_decision_interfaces` | 统一的裁判系统、决策、云台消息接口 |
+
+**仿真与工具**
+
+| 包 | 职责 |
+| --- | --- |
+| `srm27_robot_description` | SRM 几何与外参的**唯一定义**：`config/srm27_sentry_geometry.yaml`（数值来源，供 SDF 生成）+ `urdf/srm27_sentry.urdf.xacro`（**唯一 URDF**，实车建图/导航/独立调试/仿真显示/viz 全部读这一份）。两者数值一致性由测试强制保证 |
+| `srm27_chassis_control` | 速度合成与独立自转：`srm_cmd_mux`（导航平移 + 独立自转，`cmd_vel_sim` 的唯一发布者）、`rotation_controller`、`rotation_test_sender`，含纯逻辑 gtest |
+| `srm27_gazebo_simulator` | SRM 仿真入口 `srm_sim.launch.py`、自有 Gazebo 速度插件 `srm_velocity_system`、速度适配器 `srm_velocity_adapter`、空场世界 `worlds/srm_empty.sdf`，以及 `resource/` 下的比赛场地、GUI 配置和 MID-360 模型 |
+| `pcd2pgm` | `.pcd` 转 `.pgm` 栅格图 |
+| `rosbag2_composable_recorder` | 按裁判系统状态触发录包 |
+| `teleop_gimbal_keyboard` | 键盘控制云台 |
+
+> [!NOTE]
+> 仿真与实车的速度出口不同：**实车**是
+> `controller_server → cmd_vel_controller → velocity_smoother → cmd_vel_nav2_result → fake_vel_transform → cmd_vel_chassis → srm27_nav_protocol`；
+> **仿真**是 `cmd_vel_nav → srm_cmd_mux → cmd_vel_sim → srm_velocity_adapter → SrmVelocitySystem`。
+> 注意底盘串口节点订阅的是 **`cmd_vel_chassis`**（不是 `/cmd_vel`，见 `srm27_nav_protocol.cpp`），
+> `fake_vel_transform` 就是这一级改名的地方；若绕过它，必须把导航出口话题直接设成 `cmd_vel_chassis`，
+> 否则链路断开、车不动。
+
+---
+
+## 3. 数据流
+
+### 3.1 实车链路
+
+2026-11-06 起实车默认链路与仿真**同构**（MINCO + fakeyaw + mux），旧 Omni 链路仍可用
+`./script/start_real_nav.sh -c omni` 启动。两条实车链路的差别只在"导航是否拥有 wz"：
+
+```text
+Livox Mid-360 ──► livox_ros_driver2 ──► Point-LIO 或 ZLIO ──► loam_interface / zlio_bridge
+                        │                                │              │
+                        │                                │              v
+                        │                                │      registered_scan（odom 系）
+                        │                                v
+                        │                       sensor_scan_generation ──► odom → base_link
+                        v
+                 terrain_analysis ──► terrain_map      ─┐
+                 terrain_analysis_ext ──► terrain_map_ext ─┤
+                                                          v
+                                              代价地图 intensity_voxel_layer
+                                                          │
+  ┌───────────────────────────────────────────────────────┘
+  v
+Theta* 全局规划 ──► SimpleSmoother ──► MINCO-MPC（或 OmniPID）局部控制
+                                            │
+                                            v
+                     ╔══════════════════════════════════════════════════╗
+                     ║ 迁移链（默认，云台系 / 导航只出平移，wz 归决策层）║
+                     ║  cmd_vel_nav_fake → fake_vel_transform(nav_se2)   ║
+                     ║   → cmd_vel_nav_body → srm_cmd_mux ◄─ rotation_cmd║
+                     ║   → cmd_vel_chassis → srm27_nav_protocol → 串口    ║
+                     ╚══════════════════════════════════════════════════╝
+                     ╔══════════════════════════════════════════════════╗
+                     ║ 旧链（-c omni，导航不控自转）                      ║
+                     ║  cmd_vel_nav2_result → fake_vel_transform(legacy) ║
+                     ║   → cmd_vel_chassis → srm27_nav_protocol → 串口    ║
+                     ╚══════════════════════════════════════════════════╝
+                                                                   │
+                                                                   v
+                                               下位机 C 板（按云台执行 vx/vy，wz 转底盘）
+```
+
+迁移链的四个要点（细节见 [`docs/云台系改造实施记录(ai).md`](云台系改造实施记录%28ai%29.md) 与
+[`docs/仿真云台系改造实施记录(ai).md`](仿真云台系改造实施记录%28ai%29.md)）：
+
+1. **导航参考系 = `gimbal_yaw_fake`**（与 odom 平行、朝向稳定）：`odom → gimbal_yaw` 只依赖
+   固定外参（`livox → gimbal_yaw`），不经过云台关节角；TF 树反过来
+   （URDF `gimbal_is_root:=true`，`gimbal_yaw → base_link` 只给 RViz）；
+2. **MINCO 输出 odom 对齐的平移速度**，唯一一次 `R(-yaw)` 在 `fake_vel_transform`（`nav_se2`）里做；
+   控制器与转换器都做就是"重复旋转"（车头 ≈ 90° 时前进变侧移）；
+3. **`wz` 与导航完全解耦**：`yaw_policy.mode=xy_only`（导航只出平移），底盘 wz 由决策层发
+   `rotation_cmd`，在 `srm_cmd_mux` 里合成；`se2` 在云台系下没有意义（导航的 yaw 是云台，
+   wz 转的是底盘）；
+4. **`srm_cmd_mux` 是 `cmd_vel_chassis` 的唯一发布者**：负责限幅、双输入超时清零与
+   `stop_all`/`resume_all` 软件闸。速度限幅仍只有一处：`config/real/speed_limits.yaml`
+   （`@fakeyaw` 段把 smoother 的 yaw 钳 0，`srm_cmd_mux` 段给出 `wz_max`）。
+
+⚠ 云台自转（仿真 `--gimbal-spin`；实车由下位机驱动、协议 0x0010 回传关节角/陀螺仪转速）
+已支持：关节角经 `gimbal_joint_state_relay` 进 `/joint_states`，导航不再受它影响。
+
+### 3.2 仿真链路
+
+> **2026-11-12 更新**：仿真导航已改为**云台系 + 决策层 wz**（与实车链同构）：
+> 导航参考系 `gimbal_yaw_fake`、只出平移、`rotation_cmd → srm_cmd_mux`、仿真执行端按云台系
+> 解释 vx/vy。下文 2026-10 的 `rotation_test_sender/rotation_velocity` 图与旧限幅（0.5 m/s）
+> **已过时**，现行链路见 [`docs/仿真云台系改造实施记录(ai).md`](仿真云台系改造实施记录%28ai%29.md)。
+
+传感器来源与执行方式与实车不同：Gazebo 提供点云与真值，速度经合成后由自有插件执行。
+
+```text
+Gazebo ──┬─► livox/lidar ──► ign_sim_pointcloud_tool ──► velodyne_points
+         │                                                      │
+         │                                         terrain_analysis(_ext)
+         │                                                      │
+         └─► chassis_odometry_gt（真值 50 Hz）                  v
+                     │                              代价地图 / 规划 / 控制
+                     v                                          │
+   simulation_ground_truth_odometry                             v
+                     ├─► odometry                     cmd_vel_nav（导航平移）
+                     └─► odom → base_link                       │
+                                                                v
+   rotation_test_sender ─► rotation_controller ─► rotation_velocity ─┐
+                                                                     ├─ srm_cmd_mux
+                                     cmd_vel_nav ────────────────────┘      │
+                                                                            v
+                                                    cmd_vel_sim（200 Hz，车体系）
+                                                                            │
+                                                                            v
+                                           srm_velocity_adapter（校验 + 超时清零）
+                                                                            │
+                                                                            v
+                                      SrmVelocitySystem（Gazebo Transport cmd_vel）
+                                                                            │
+                                                                            v
+                                                                         Gazebo
+```
+
+速度链路规则（详见 [`docs/SRM仿真与自转控制实现(ai).md`](SRM仿真与自转控制实现%28ai%29.md)）：
+
+```text
+Nav2 controller ─ cmd_vel_nav ─┐
+                               ├─ srm_cmd_mux ─ cmd_vel_sim ─► srm_velocity_adapter ─► Gazebo
+自转测试链路 ─ rotation_velocity ┘
+```
+
+- 导航链路只输出 `vx`、`vy`（`enable_rotation: false`、`use_rotate_to_heading: false`）；
+  `srm_cmd_mux` **丢弃**导航输入的 `angular.z` 并计数，`wz` 只来自 `rotation_velocity`。
+- 合成限幅：`vx/vy` 先单轴限到 0.5 m/s，再按向量模长限到 `v_max=0.5 m/s`；`wz` 限到 2.0 rad/s。
+- 超时清零：导航输入 0.3 s、自转输入 0.1 s（mux），执行适配器 0.1 s；计时用单调时钟，
+  波形相位用仿真时间。
+- `cmd_vel_sim` 的**唯一发布者**是 `srm_cmd_mux`；适配器把车体系 Twist 转成
+  `ignition.msgs.Twist` 直接写 Gazebo Transport（不走 `ros_gz_bridge`，以免绕过校验）。
+- 急停服务：`/<ns>/srm_cmd_mux/stop_all` 与 `/<ns>/srm_cmd_mux/resume_all`。
+
+### 3.3 坐标系（TF 链）
+
+**实车**（SRM 自建模型，`config/real/nav2_params_srm_minco_fakeyaw.yaml`；2026-11-08 起云台系）
+
+```text
+map ──► odom ──► gimbal_yaw ──┬─► livox_frame ──► livox_imu
+                              ├─► livox_scan
+                              └─► base_link（云台关节角）──► wheel_*
+```
+
+- `odom → gimbal_yaw`：`sensor_scan_generation` 直接发布（`publish_robot_base_tf`，
+  `livox → gimbal_yaw` 是固定外参，不经过关节角）；`map → odom` 由定位方式决定，见 §5.3
+- `gimbal_yaw → base_link`：`robot_state_publisher` + `gimbal_joint_state_relay`
+  （下位机回传的关节角），**只给 RViz 显示底盘**；断了导航不受影响
+- `base_link → *`：`robot_state_publisher` 发布的静态外参，模型来自**唯一**的
+  `srm27_robot_description/urdf/srm27_sentry.urdf.xacro`，由
+  `srm27_nav_bringup/scripts/srm_robot_description.py` 展开（建图/导航/独立调试三条
+  入口用的是同一个函数，TF 必然一致）
+- `chassis_mark` / `gimbal_mark`：底盘与云台圆柱上的**纯显示**叶子 frame（无惯性、无
+  碰撞、不参与任何导航/定位计算）。两个圆柱都是绕 z 轴的旋转体，没有标记就看不出是
+  谁在转，所以各挂了一组红/蓝标记（侧壁竖条 + 顶面指针 + 定位球），且都朝 +x：标记
+  对齐 = 底盘与云台零位对齐，云台一转蓝标记就相对红标记错开。模型用
+  `show_rotation_marks:=false` 展开时这两条 link 不生成（仿真 SDF 不受影响）。
+
+**仿真**（SRM 生成模型，`config/simulation/nav2_params_srm_fakeyaw.yaml`；2026-11-12 起云台系）
+
+```text
+map ──► odom ──► gimbal_yaw ──┬─► front_mid360
+                              ├─► gimbal_yaw_fake（fake_vel_transform，导航参考系）
+                              └─► base_link ──► wheel_*（关节角只在这条边上）
+```
+
+- 导航的"车"是 `gimbal_yaw`：`odom → gimbal_yaw` 只依赖固定外参（`livox → gimbal_yaw`），
+  不经过云台关节角；`gimbal_yaw_fake` 与 odom 平行、朝向稳定，供 Nav2 / 代价地图使用。
+- `base_link` 仍与底盘刚性固定、**随底盘自转**，但只用于 RViz 显示与点云自车过滤（`ground_frame`）。
+- `chassis_mark` / `gimbal_mark`：与实车同一份 URDF 生成，同样是**纯显示**叶子 frame
+  （仿真用的 SDF 由 `model_builder.build_sdf()` 生成，Gazebo 是按 visual 上材质，所以
+  那三块标记直接画在 `base_link` / `gimbal_yaw` 上，不多出 link）。
+- 轮组与雷达帧名与实车**同一套**（都由唯一模型的 xacro 生成，仿真只是把雷达帧名换成
+  `front_mid360`、轮子换成连续关节）；`gimbal_yaw` 是固定的示意包络，没有云台关节链。
+- 模型里**没有** `base_footprint`、`chassis`、`gimbal_yaw_fake` 这些中间坐标系：
+  旧步兵链路的 `base_footprint → chassis → gimbal_yaw → gimbal_yaw_fake` 已从 SRM 模型与仿真参数中删除。
+- `odom → base_link`：默认（静态地图 + 真值）由 `simulation_ground_truth_odometry` 发布（50 Hz）；
+  启用 `use_lio_odometry` / `use_pcd_localization` / `slam` 时由 `sensor_scan_generation` +
+  对应定位链路提供，真值里程计随之关闭。
+- `base_link → front_mid360` 与轮组 TF：`robot_state_publisher` 按生成的 URDF 发布。
+
+> [!IMPORTANT]
+> frame 命名必须与参数文件配套。**SRM 仿真与实车都用 `base_link`**；上游对照版
+> （`config/simulation/nav2_params.yaml`、`config/real/nav2_params_upstream.yaml`）与
+> `srm27_bringup/params/node_params.yaml` 仍保留旧步兵的
+> `base_footprint / gimbal_yaw / gimbal_yaw_fake`（**旧链路**），与 SRM 参数混用会满屏 TF 报错且重定位卡死。
+
+---
+
+## 4. 导航栈内部
+
+| 环节 | 实现 |
+| --- | --- |
+| 全局规划 | `nav2_theta_star_planner/ThetaStarPlanner` |
+| 路径平滑 | `nav2_smoother::SimpleSmoother` |
+| 局部控制 | `srm27_omni_pid_controller::OmniPidPursuitController` |
+| 代价地图图层 | `static_layer` + `intensity_voxel_layer` + `inflation_layer` |
+| 恢复行为 | `behavior_server` 插件：`Spin` / `BackUpFreeSpace` / `DriveOnHeading` / `Wait` / `AssistedTeleop`；行为树实际使用的是 `ClearEntireCostmap` + `BackUp`（`BackUpFreeSpace`），**脱困只用平移、不涉及旋转** |
+| 流程编排 | Nav2 `bt_navigator` + 行为树 XML |
+| 速度出口 | `controller → cmd_vel_controller → velocity_smoother → cmd_vel_nav`（SRM 仿真）；`use_velocity_smoother:=False` 时由 controller 直接发布（详见 §3.2） |
+
+全局代价地图以 `map` 为全局坐标系；局部代价地图以 `odom` 为全局坐标系并跟随车体滚动，
+机器人参考系统一为 `base_link`（SRM 仿真参数中 `robot_radius` 取整车碰撞包络 0.33 m）。
+
+对上层暴露的标准 Nav2 action 为 `NavigateToPose` 与 `NavigateThroughPoses`，决策层通过它们下发目标。
+
+---
+
+## 5. 启动入口
+
+### 5.1 启动文件命名约定
+
+`srm27_nav_bringup/launch/` 分**入口层**（直接运行）和**内部层**（被入口 include），前缀即用途：
+
+| 启动文件 | 层 | 用途 |
+| --- | --- | --- |
+| `nav_real_launch.py` | 入口 | 实车导航（雷达 + 导航栈 + RViz + 手柄） |
+| `nav_srm_simulation_launch.py` | 入口 | **SRM 仿真导航（当前入口）**：点云转换 + 真值里程计 + Nav2 + 速度合成/自转 + RViz，可选一并拉起 Gazebo |
+| `nav_simulation_launch.py` | 入口（**已弃用**） | 旧步兵仿真入口，现只转发到 `nav_srm_simulation_launch.py`，默认参数文件已改为 `nav2_params_srm.yaml` |
+| `nav_multi_simulation_launch.py` | 入口 | 多机仿真导航 |
+| `real_mapping_launch.py` | 入口 | 实车 MID360 建图 |
+| `real_robot_state_publisher_launch.py` | 入口 | 实车整车 TF（SRM 模型 + 雷达外参） |
+| `standalone_robot_state_publisher_launch.py` | 入口 | 独立调试用备用 TF（同一份唯一 URDF，与建图/导航完全一致） |
+| `nav2_stack_launch.py` | 内部 | Nav2 主栈，按 `slam` 参数二选一拉起建图或定位，并透传速度出口参数 |
+| `nav2_slam_launch.py` | 内部 | `slam:=True` 分支（slam_toolbox + map_saver + Point-LIO） |
+| `localization_launch.py` | 内部 | `slam:=False` 分支（静态 TF / small_gicp 重定位 / 纯 LIO） |
+| `navigation_launch.py` | 内部 | 控制器、规划器与行为服务器；速度出口由 `use_velocity_smoother` 与 `cmd_vel_nav_topic` 决定 |
+| `rviz_launch.py` / `joy_teleop_launch.py` | 内部 | RViz 与手柄遥控 |
+
+`srm27_nav_bringup/nav_srm_simulation_launch.py` 的关键参数：`namespace`（默认 `red_standard_robot1`）、
+`world`、`map`、`params_file`（默认 `config/simulation/nav2_params_srm.yaml`）、`slam`、
+`use_pcd_localization`、`use_lio_odometry`、`use_sim_time`、`use_rviz`、`use_velocity_smoother`、
+`cmd_vel_nav_topic`（默认 `cmd_vel_nav`）、`start_simulation`（默认 `False`）、
+`start_chassis_control`、`start_rotation_sender` 与自转波形参数。
+
+`srm27_gazebo_simulator/srm_sim.launch.py` 的关键参数：`config_file`（默认 `config/srm_sim.yaml`）、
+`robot_name`（默认取配置里的 `red_standard_robot1`）、`world`、`world_sdf`、`gui`、
+`run_immediately`（launch 自身默认 `false`，Gazebo 以暂停状态启动；
+`script/start_sim_nav.sh` 默认传 `true`，即起来就自动运行，`--no-run` 可改回暂停）。
+
+`srm27_chassis_control/srm_chassis_control.launch.py` 的关键参数：`namespace`、`use_sim_time`、
+`params_file`、`start_rotation_sender`、`rotation_mode`、`rotation_speed`、`rotation_offset`、
+`rotation_amplitude`、`rotation_period`、`rotation_phase`、`rotation_sine_wave`。
+
+`srm27_robot_description/robot_description_launch.py` 用 `config/srm27_sentry_geometry.yaml`
+现场生成 URDF 并启动 `robot_state_publisher`（参数：`namespace`、`use_sim_time`）。
+
+`srm27_bringup` 是**整车总入口**，把串口、雷达、导航、行为树、RViz 和录包组装在一起。
+
+> [!NOTE]
+> 旧仿真包已删除，所需场地、GUI 和 MID-360 资源均迁入 `srm27_gazebo_simulator/resource/`。
+> `ros2 launch srm27_gazebo_simulator gazebo.launch.py` 可单独启动场地世界和时钟桥接
+> （不含机器人，默认 `resource/worlds/rmul_2024_world.sdf`，用 `world_sdf_path:=` 指定其他世界）。
+
+### 5.2 脚本入口（推荐现场使用）
+
+`script/` 下当前提供的脚本：
+
+| 脚本 | 用途 |
+| --- | --- |
+| `script/start_real_nav.sh` | **SRM 实车导航**一键启动：标签页依次为雷达驱动 → 车体 TF → 底盘串口 → Nav2 导航栈 → RViz（→ 可选手柄）。默认 `--lio`、地图自动选择 |
+| `script/start_real_slam.sh` | **SRM 实车 SLAM 建图**一键启动 + 一键存图：`real_mapping_launch.py`（雷达驱动 / 车体 TF / Point-LIO / loam_interface / sensor_scan_generation / pointcloud_to_laserscan / slam_toolbox / RViz）+ 底盘串口（→ 可选手柄）。`--save <名字>` 存成与 `maps/` 现有布局一致的四件套；`--record-bag` 建图同时录原始点云/IMU（见 §5.2 三维 PCD 那节） |
+| `script/record_mapping_bag.sh` | **建图同步录包**（供 `start_real_slam.sh --record-bag` 调用，也可单独跑）：默认录 `/livox/lidar`(CustomMsg) + `/livox/imu` + `/tf` + `/tf_static`，自己等 `/livox/lidar` 出现、查磁盘余量、拒绝往非空目录混录，退出时检查 `metadata.yaml` 是否写出（缺了就是废包）。`--derived` 追加派生话题，`--map-name` 让目录名带上地图名 |
+| `script/build_pcd_from_bag.sh` | **从录包离线重建三维 PCD 并转成地图系**：起回放链路（`start_lidar:=False use_sim_time:=True save_pcd:=True`）→ 等 `/point_lio` **真的订阅上**点云/IMU → 放包 → SIGINT 让 Point-LIO 落盘 → 校验完整性 → 落 `maps/pcd/<名字>.pcd` → **自动调 `pcd_to_mapframe.py` 转出 `maps/pcd/<名字>_mapframe.pcd`**（`--no-mapframe` 可关）。跑之前会保住旧的 `point_lio/PCD/scans.pcd`，并拒绝在已有建图链路运行时启动 |
+| `script/pcd_to_mapframe.py` | **把 `camera_init` 系点云转到 pgm 地图系**，输出与输入同目录的 `<名字>_mapframe.pcd`：用墙点对占据栅格的最近邻评分三段式搜 (yaw, dx, dy)，只做平面变换不动 z，头部按 `srm_site_01.pcd` 的格式标注坐标系与所用变换，残差超门限或输入已转过时拒绝输出。不转系直接 `--reloc` 会让车差 90° 而 GICP 不报错 |
+| `script/show_pcd.sh` | **在 RViz 里看一份 PCD**（先验点云/重建点云）：给名字或路径即可。自动剔除 MVS 的 `LD_LIBRARY_PATH`（否则 `libpcl_io` 加载失败直接 Aborted）、补 `world -> <点云 frame>` 静态变换（否则 RViz 一直 `queue is full` 什么都不显示）、默认按 5 cm 体素降采样并缓存 `<名字>_view.pcd`（700 万点的单条消息 RViz 吃不下），`--rviz` 顺便用自带配置 `rviz/pcd_view.rviz` 起 RViz（Fixed Frame 已是 `world`）。`--raw` 发原文件、`--frame/--world` 改坐标系、`--no-tf` 表示已有 TF；`--map <名字>` 再用 `nav2_map_server` 把 2D 栅格图发成 `/map`，RViz 配置里已有 Map 显示，可点云+栅格叠加看 |
+| `script/start_waypoints.sh` | **航点任务**（包装 `waypoint_mission.py`）：RViz 点选航点后逐个下发 `NavigateToPose`，每个点独立重试/超时/跳过，支持 `--loop`；`--pass-through` 则除最后一个点（终点）外都当途径点、一次 `navigate_through_poses` 下发，**途径点不刹车**；实车/仿真通用（仿真命名空间自动探测，`--namespace` 可显式指定） |
+| `script/start_sim_nav.sh` | **SRM 仿真导航**一键启动：标签页 1 = `srm_sim.launch.py`（Gazebo + SRM 模型），标签页 2 = `nav_srm_simulation_launch.py`（导航 + 速度合成 + RViz），标签页 3 = 可选手柄自转。默认 `rmuc_2025` + 隧道地图、默认不自转 |
+| `script/kill_nav.sh` | 清理残留的 Nav2 导航栈（入口 launch 进程 + 整棵子进程树 + 命名空间匹配的孤儿节点）。改完膨胀半径/限速等 configure 期参数后必须重启导航栈，否则跑的还是旧值 |
+| `script/kill_gzb.sh` / `kill_rviz.sh` | 清理残留的 Gazebo / RViz 进程（`kill_gzb.sh` 已覆盖 `srm27_gazebo_simulator`、`srm_velocity_adapter` 等新进程名） |
+
+实车：
+
+```bash
+./script/start_real_nav.sh -h                    # 打印脚本头部的完整用法
+./script/start_real_nav.sh                       # 默认：MINCO 控制器 + --reloc + 自动选地图
+./script/start_real_nav.sh -m xjl0914            # 指定地图（maps/ 下的名字）
+./script/start_real_nav.sh --prior-pcd /abs/prior.pcd   # 指定重定位先验点云
+./script/start_real_nav.sh --no-reloc            # 不用重定位：LIO + 静态 map->odom，不需要先验 PCD
+./script/start_real_nav.sh --lio                 # 同上（等价写法）
+./script/start_real_nav.sh -c omni               # 换回 Omni 控制器
+./script/start_real_nav.sh --slam                # 边建图边导航
+./script/start_real_nav.sh --map-to-odom 0 0 0   # 起步位姿（map 系；只对静态 map->odom 生效）
+./script/start_real_nav.sh --list-maps           # 列出可用地图与先验 PCD
+./script/start_real_nav.sh -n                    # 只解析并打印将执行的命令
+./script/start_real_nav.sh --stop                # 先发零速，再结束实车链路节点
+```
+
+> **默认值（2026-10-11 改）**：控制器默认 **MINCO**（等价 `-c minco`，参数文件 `config/real/nav2_params_srm_minco.yaml`），
+> 定位方式默认 **`--reloc`**（`small_gicp` 与先验 PCD 配准后发布 `map→odom`）。两点后果要注意：
+> ① 默认启动**要求该地图存在先验点云** `maps/pcd/<地图名>_mapframe.pcd`，没有会直接报错并列出查找路径
+> （加 `--no-reloc` 或 `--lio` 可退回静态 `map->odom`，此时**不需要 PCD**，`map->odom` 取 `--map-to-odom`
+> 的值，默认 `0 0 0`，即车停在 map 原点朝 +x；`--no-reloc` 会压过环境变量 `START_RELOC=1`，
+> 与 `--reloc` 同时给时以命令行里靠后的那个为准）；② MINCO 会自动关闭 `fake_vel_transform`、把导航出口对准
+> `cmd_vel_chassis`，并跑一轮 MINCO 专属预检（插件可解析 / `use_sim_time` 一致 / 各层限速自洽 /
+> 里程计频率与 `state_timeout` 匹配）。`-c auto` 仍可用；**只给 `-p` 而不给 `-c`** 时按参数文件里的
+> `FollowPath.plugin` 自动判定，所以把 `-p` 指到 Omni 文件不会因默认值是 minco 而被拦下。
+> `--map-to-odom` 只影响静态 `map->odom`，在 `--reloc` 下不生效（重定位初值来自参数文件里的 `init_pose`）。
+
+> **实车链已同步仿真链的两项优化（2026-10-09，见 `docs/minco实车迁移实施记录(ai).md` §4.11）**
+> ① 两份实车 params（`config/real/nav2_params_srm.yaml`、`..._minco.yaml`）的
+> `default_nav_through_poses_bt_xml` 都换成 `navigate_through_poses_route_aware.xml`、
+> `plugin_lib_names` 都加了 `srm27_remove_passed_goals_bt_node`（多目标航点不再"回头折返"）；
+> ② `config/real/nav2_params_srm_minco.yaml` 的代价地图 `robot_radius` 0.33 → **0.40**
+> （= MINCO 硬要求的 0.38 + 0.02；Omni 那份不动，保持车体外廓 0.33 以便走窄道）。
+> 上机前**必须先** `colcon build --packages-select srm27_nav_plugins srm27_nav_bringup`：
+> 行为树由 bringup 提供、自研 BT 节点的 `.so` 由 plugins 提供，都是 `bt_navigator` 启动时
+> 按 `plugin_lib_names` 里的库名 `dlopen` 的。`start_real_nav.sh` 现在会在启动前检查这两样东西
+> 是否已在本工作区，缺了直接拒绝启动并提示重编哪个包。
+
+实车建图（SLAM）：
+
+```bash
+./script/start_real_slam.sh -h                   # 打印脚本头部的完整用法
+./script/start_real_slam.sh                      # 起建图链路（雷达驱动 + Point-LIO + slam_toolbox + RViz + 底盘串口）
+./script/start_real_slam.sh --joy                # 顺带起手柄，推杆走车、边走边建图
+./script/start_real_slam.sh --no-rviz            # 无头 NUC（无图形界面）
+./script/start_real_slam.sh --save xjl0914       # 存图 -> maps/xjl0914/{pgm,yaml,posegraph,data}
+./script/start_real_slam.sh --save xjl0914 --force
+./script/start_real_slam.sh --save xjl0914 --wait 30   # 服务还没就绪时最多等 30 秒
+./script/start_real_slam.sh --save-pcd           # 另让 Point-LIO 退出时落盘累积点云
+./script/start_real_slam.sh --record-bag         # 建图同时录原始点云/IMU（事后能重建三维 PCD）
+./script/start_real_slam.sh --record-bag --bag-name xjl0914 --bag-derived
+./script/start_real_slam.sh --list-maps          # 列出工作区现有地图
+./script/start_real_slam.sh -n                   # 只解析并打印将执行的命令
+./script/start_real_slam.sh --stop               # 先发零速，再结束建图链路节点（录包进程先收尾再退）
+```
+
+> [!IMPORTANT]
+> 存图是**两步**：先起链路并保持运行（车跑一圈），再在另一个终端 `--save`。
+> `--save` 只是调用 `slam_toolbox` 的在线服务，把内存里的位姿图写到磁盘，它不会自己起链路。
+> 链路没跑时脚本会说清是「没在跑」还是「跑了但没开 `use_map_saver`」——两种情况处理办法不同。
+
+存图由 `slam_toolbox` 的两个服务共同完成：`/slam_toolbox/save_map` 写 `.pgm` + `.yaml`（Nav2 用），
+`/slam_toolbox/serialize_map` 写 `.posegraph` + `.data`（位姿图）。脚本按 `maps/<名字>/` 落盘，
+并以"四个文件是否都非空"判定成败，同时回显两个服务的响应码便于排查。
+服务是否可用用 `--no-daemon` 做全新发现来判断：ros2 daemon 缓存里会留下已退出节点的服务名，
+查缓存会得到假阳性，进而对着不存在的服务发请求并挂住。
+建图与导航都会发布 `map → odom`，两者不能并行；脚本启动前会检测导航栈并在冲突时拒绝启动。
+
+**三维 PCD 从哪来（`--record-bag`，2026-10-11 增）**：`maps/<名字>/` 那四件套里**没有点云**，
+转不出 PCD。`slam_toolbox` 只吃 `pointcloud_to_laserscan` 拍平后的 `/scan`
+（`mapping_params.yaml` 里 `scan_topic: /scan`，`livox_scan` 高度上切一条水平线，0.5–20 m、720 束），
+`.posegraph` / `.data` 是 OpenKarto 的 boost 序列化，内容只有 `karto::LocalizedRangeScan`、
+`karto::LaserRangeFinder`、`karto::Pose2` 这类二维对象。三维点云只有两个来源：
+① `--save-pcd` 让 Point-LIO 在**正常退出**时把累积点云写到
+`src/srm27_navigation/point_lio/PCD/scans.pcd`（文件名写死、覆盖式，`kill -9` 不落盘，参数不对只能重跑）；
+② `--record-bag` 建图时顺手录原始数据，事后随时离线重建。
+录包由 `script/record_mapping_bag.sh` 承担（`--record-bag` 只负责起一个标签页），默认录
+`/livox/lidar`（`xfer_format: 4` 下这里是 **CustomMsg**，带逐点 `offset_time`，重建点云的关键）
++ `/livox/imu` + `/tf` + `/tf_static`，约 240 MB/分钟；`--bag-derived` 追加
+`/cloud_registered`、`/aft_mapped_to_init`、`/scan`、`/map`（省掉重跑 LIO，体积翻倍）。
+落盘在 `log_diag/mapping_bag_<地图名|时间戳>/`（该目录整体被 `.gitignore` 忽略）。
+重建**一条命令就够**（`script/build_pcd_from_bag.sh`，2026-10-11 增）：它自己起回放链路、放包、SIGINT 收尾、
+校验 PCD 完整性，再**接着调用 `script/pcd_to_mapframe.py` 转成地图系**（默认开，`--no-mapframe` 关），
+最后在 `maps/pcd/` 下留两份：
+
+```bash
+./script/build_pcd_from_bag.sh --name 227_1011     # 一条命令
+
+# 产出:
+#   maps/pcd/227_1011.pcd            camera_init 系原始件 (Point-LIO 产物)
+#   maps/pcd/227_1011_mapframe.pcd   地图系成品  <- --reloc 用这份
+```
+
+```bash
+./script/build_pcd_from_bag.sh                  # 不给 --name 就从录包目录名自动推
+./script/build_pcd_from_bag.sh --no-mapframe    # 只重建, 不转系
+./script/build_pcd_from_bag.sh --map-yaml <路径> # 转系用别的地图 yaml
+./script/build_pcd_from_bag.sh --force          # 覆盖已存在的同名产出
+./script/build_pcd_from_bag.sh -n               # 只打印将执行的步骤
+```
+
+转系这步**默认自动做**是有原因的：不转就 `--reloc`，车会被定位到差约 90° 的姿态上而 GICP 不报错，
+这种事不该靠人记。地图 yaml（`maps/<名字>/<名字>.yaml`）不存在时（还没 `--save`）只告警并给出手动命令。
+
+它顺手挡掉的几个坑（都是手工做时踩到的）：先确认包里真有 `/livox/lidar` + `/livox/imu`（缺 IMU 的包
+Point-LIO 跑不起来）；把已存在的 `point_lio/PCD/scans.pcd` 改名成 `scans_<改动时间>.pcd` **保住**再跑
+（那条路径由编译期 `ROOT_DIR` 写死、是覆盖式的，之前就这么丢过一份）；拒绝在已有建图链路运行时启动
+（两个 `point_lio` 抢同一条 TF，出来的图必然错）；只回放 `/livox/lidar` + `/livox/imu`、**不回放 `/tf`**
+（链路自己会发 `odom->base_link` 与 `base_link->livox_frame`）。
+
+`start_real_nav.sh` 的 `--prior-pcd <名字>` 与 `--list-maps` 按下面的顺序找先验点云
+（`**_mapframe` 版必须排在原始件前面**，否则会静默挑到 `camera_init` 系那份）：
+
+```text
+maps/<名字>_mapframe.pcd          已转地图系（旧布局，仍兼容）
+maps/pcd/<名字>_mapframe.pcd      已转地图系（现行产品）
+maps/pcd/<名字>.pcd               Point-LIO camera_init 系原始件（退路；选中时会告警）
+maps/<名字>.pcd
+<包>/pcd/real/<名字>.pcd
+```
+
+手工重建（不用脚本时的等价步骤）：
+
+```bash
+# 1) 只放原始话题，别放 /tf —— 新起的链路自己会发 odom->base_link 与 base_link->livox_frame
+ros2 bag play log_diag/mapping_bag_xjl0914_<时间戳> --clock --topics /livox/lidar /livox/imu
+# 2) 另开终端：不起雷达驱动、用仿真时间、开落盘
+ros2 launch srm27_nav_bringup real_mapping_launch.py start_lidar:=False use_sim_time:=True save_pcd:=True
+# 3) 放完 Ctrl+C 正常退出 -> point_lio/PCD/scans.pcd（再自己挪到 maps/pcd/<名字>.pcd）
+```
+
+两种情况产出的 PCD 都在 Point-LIO 自己的 `camera_init` 系（建图起点雷达位姿），**不是** `map` 系；
+`--reloc` 需要的是地图系点云，两类点云的区别与实测偏差见
+`config/real/nav2_params_srm.yaml` 中 `small_gicp_relocalization` 那段的注释（情况一/情况二）。
+
+**从 `camera_init` 转到地图系（`script/pcd_to_mapframe.py`，2026-10-11 增）**：`camera_init` 与 pgm 地图系
+相差一个**固定的平面旋转**——雷达相对 `base_link` 装了 −90°（launch 的 `lidar_rpy`）。直接拿原始点云
+`--reloc`，车会被定位到差 90° 的姿态上，**而且 GICP 不会报错**。工具用「点云的墙点 vs pgm 的占据栅格」
+做最近邻评分，三段式搜 (yaw, dx, dy) 并烘进点云，输出**与输入同目录的 `<名字>_mapframe.pcd`**
+（原始件不动，两种点云靠名字区分系别）：
+
+```bash
+python3 script/pcd_to_mapframe.py \
+    --pcd maps/pcd/227_1011.pcd \
+    --map maps/227_1011/227_1011.yaml
+# -> maps/pcd/227_1011_mapframe.pcd
+# 实测 227_1011: identity 处中位最近邻 0.5533 m -> 搜出 yaw=-90.50°, dx=0.240, dy=-0.120
+#                -> 0.0261 m（参照 srm_site_01.pcd 与 srm_site_01.pgm 是 0.026 m）
+```
+
+搜出来的 **−90.50°** 与挂载外参的平面量（−90.00°）一致到 0.5° 以内，是自洽的。工具按仓库既有约定
+只做平面 yaw+平移、**不动 z**，并在头部标注坐标系与所用变换（与 `pcd/real/srm_site_01.pcd` 同一格式；
+`start_real_nav.sh` 启动时的"头部未标注坐标系"告警靠这个消掉）。名字里的 `_mapframe` 是名字那层的防线，
+头部注释是第二层：工具靠它识破"已经转过了"——对已转好的点云再跑一次会被**拒绝**（退出码 1，除非
+`--force`），防止再多转 90°。其它保护：残差超门限**拒绝输出**而不是给一个看着像成功的错文件；
+先写临时文件、回读复核通过才原子替换。
+
+搜索用的是「粗段找 yaw 候选 → 逐 yaw **连续**细化平移（坐标下降）→ yaw 也连续细化」。平移必须连续细化
+而不是走固定网格：评分面在 0.1 m 量级就非常陡（同一 yaw 下 (0.2,−0.1) 是 0.030 m，挪到网格节点
+(0.25,0.0) 就是 0.068 m），峰顶落在网格节点之间时所有 yaw 的分数会被拉平，yaw 分辨力丢失，
+搜索会锁在错的 yaw 上交出"看着能用、其实歪了 2°"的结果（这个 bug 实测出现过：−88.00°/0.0406 m，
+改成坐标下降后是 −90.50°/0.0261 m）。已知变换时可用 `--no-search --yaw/--dx/--dy` 跳过搜索，
+`--dry-run` 只评估。原始件随时可由录包重建：`./script/build_pcd_from_bag.sh --name <名字> --force`。
+
+⚠️ 每次重新 `build_pcd_from_bag.sh` 重建出来的点云**不是逐点可复现的**（实测两趟：1872905 点 /
+x 跨度 16.34 m vs 1892437 点 / 12.82 m，原点落点不同），所以**重建之后必须重新转一次系**，
+不能把旧的 `_mapframe.pcd` 配新的原始件用。`build_pcd_from_bag.sh` 现在会等 `/point_lio`
+**真的订阅上** `/livox/lidar` + `/livox/imu` 才放包（只等节点上线不够：DDS 的 reader-writer 匹配
+比节点上线晚，这时放包会静默丢掉开头几秒，原点就跑到轨迹中途去了）。
+
+于是实车重定位就是：
+
+```bash
+./script/start_real_nav.sh --reloc -m 227_1011 --prior-pcd 227_1011
+```
+
+`--prior-pcd 227_1011` 实测命中的是 `maps/pcd/227_1011_mapframe.pcd`（`_mapframe` 版在搜索顺序里
+排在原始件前面）。**不要把 `lidar_frame` 改回 `livox_imu`**：那是给"情况二"用的挂载变换，
+与已转系的地图系点云凑一起会再绕 Z 多转 −90°。
+录包必须靠 Ctrl+C 或 `--stop` 结束：rosbag2 只在 SIGINT 收尾时写 `metadata.yaml`，
+缺了它的目录无法回放（用 `ros2 bag reindex <目录>` 可救回）；`--stop` 会给录包进程单独留 30 秒收尾
+（`BAG_FINALIZE_WAIT` 可调）再强杀，并在结束时逐个报告 bag 目录是否完整。
+
+航点任务（导航栈起来之后用）：
+
+```bash
+./script/start_waypoints.sh                       # 点选模式：RViz 点航点，再调 ~/start 开始
+./script/start_waypoints.sh --file m.yaml         # 直接执行文件里的航点（每个点都停车）
+./script/start_waypoints.sh --file m.yaml --pass-through   # 途径点模式：除最后一个点外都不停车
+./script/start_waypoints.sh --save-file m.yaml    # 只收集，~/save 存盘（教点模式）
+./script/start_waypoints.sh --retry 2 --timeout 30 --on-failure skip --loop
+```
+
+服务：`/waypoint_mission/{start,stop,clear,save}`（`std_srvs/srv/Trigger`）；
+RViz 点选用工具栏的 **Publish Point**（发 `/clicked_point`）或 **2D Goal Pose**（发 `/goal_pose`），
+航点会以 latched `MarkerArray` 发布在 `/waypoint_mission/waypoints` 上便于核对。
+
+> [!WARNING]
+> Nav2 面板里那个 **Nav2 Goal**（rviz 插件 `nav2_rviz_plugins/GoalTool`）**不发 `/goal_pose`**——
+> 它直接下发 `navigate_to_pose` action，所以航点脚本收不到任何点选（点了像没反应），而且车会立刻自己走。
+> `rviz/nav2_default_view.rviz` 原本工具栏里只有它，现已补上 `Publish Point` 与 `2D Goal Pose`
+> （改 `.rviz` 不用 `colcon build`，但**要重启 RViz**）。
+> 另外 `srm27_behavior` 的 `PubNav2Goal` 也往 `goal_pose` 发 `PoseStamped`，同时跑行为树时它的目标会被脚本当成航点记录。
+
+它用**逐个航点独立导航**（每个点一个 `NavigateToPose`）替代面板途经点模式的
+`NavigateThroughPoses`，所以 `RemovePassedGoals` 与"路径绕回旧航点"的折返问题不存在；
+代价是每个点会各自收敛一次（点密时全程略慢）。速度仍走 Nav2 → velocity_smoother →
+fake_vel_transform → `/cmd_vel_chassis` 这条链路，底盘限幅与看门狗照旧生效。
+因为它不经过 `RemovePassedGoals`，`xy_goal_tolerance` 与航点删除半径的耦合约束也随之消失，
+收紧到达容差不再有副作用。
+
+**途径点模式（`--pass-through`，默认关闭）**：把整个列表一次交给 `navigate_through_poses`——
+前 N-1 个点只是途径点，第 N 个是终点。全局路径一次规划穿过所有点，控制器只在**路径末端（终点）**
+做减速与到达判定（`OmniPidPursuitController` 的 `approach_velocity_scaling_dist` 也是按路径末点算的），
+所以**途径点不刹车，到终点才停**；终点精度与逐点模式相同（都用 `general_goal_checker`，`xy_goal_tolerance` 0.4 m）。
+用的是 `behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml`，其中
+`RemovePassedGoals(radius="0.35")` 与 `general_goal_checker.xy_goal_tolerance`、控制器前瞻
+（`min/max_lookahead_dist` 0.3/0.6）是一组耦合参数，要调一起调（xml 里有注释）。
+失败时按 `--retry` **重发还没开过的剩余点**（车已开过的点不会再被当成目标，靠 TF 跟踪，
+判定半径 `--passed-radius`，默认 0.8 m），retry 用完再按 `--on-failure abort/skip`；
+只剩终点一个点时自动退回 `NavigateToPose`，保证终点精确到达。
+
+**回头检测（`--backtrack-guard`，途径点模式默认开）**：2026-10-09 在空场仿真里实测发现，
+nav2 的 `RemovePassedGoals`（负责"车开过哪个途径点就把它从目标列表里删掉"，radius=0.35）
+在这套部署上**不生效**：车贴着途径点 0.05~0.34 m 开过去，点照样留着（车离 #3 只有 0.01 m 时全局
+路径里 #3 还在；2 点最小实验里车离第一个点 0.09 m，路径里仍带着"回头去它"的腿）。于是 3 Hz 重规划
+每次生成一条回头腿，车就在两个点之间来回绕（剩余距离 5.8↔9.3 m 反复跳，一个 7 点任务跑 93 s、
+9 次 recovery）。排除过：`map↔odom` 重合（launch 默认 0，实测恒等）、跟踪偏差（平均 0.05 m /
+最大 0.18 m）、控制器轨迹校验（0 次失败）。
+所以脚本不再指望 nav2 删点：反馈里的 `distance_remaining` 比"本段最好成绩"回退了
+`--backtrack-gain`（默认 1.0 m）**且车确实在远离它当前该去的那个点**（二次确认，见下）就判定折返
+→ 取消当前航段 → 按自己的进度（`--passed-radius` 默认 0.8 m）**只重发还没开过的点**，被卡住的点
+自然出局。同一个点连续 `--backtrack-limit`（默认 3）次无进展就交给常规失败策略，避免无限重发。
+`--no-backtrack-guard` 可关掉。代价：每次介入会让车停一下（本来就在原地折返，所以是净赚）。
+
+> **二次确认那半条判据不能删（2026-10-09 深夜实测）**：`distance_remaining` 自己会跳 —— 车开到
+> #1/#2 一带时它先从 ~10 m 掉到 **2.93 m**、再跳回 **7.85 m**（退了 4.9 m）。这是 nav2 对
+> `navigate_through_poses` 的反馈按"当前那条规划路径"算出来的，计划一变它就跳，跟用不用自研
+> BT 节点无关（同一起点、数值一模一样：`2.98 → 7.94`）。只看它就判折返的话**每个任务都会在
+> 同一个地方误报一次**，于是"取消航段 + 只重发脚本以为还没开过的点"把计划越切越短 ——
+> 现场看到的就是**"跑到第 2/3 个点就直冲最后那个终点"**。真折返有个抖动没有的特征：车在
+> **远离当前目标点**，所以脚本再要求"车到当前目标的距离比历史最近值远 ≥ gain 米"。
+
+**根治版：`RemovePassedGoalsByRoute`（自研 BT 节点，仿真 MINCO 已启用）**
+`srm27_nav_plugins` 里新增了一个行为树节点，替代 nav2 的 `RemovePassedGoals`。判据：
+① 车离该点 ≤ `radius`（0.6 m）——车就在它旁边；
+② "到过又走开"：车曾进到该点 `approach_radius`（1.0 m）以内（这个记忆只挂在**当前队首**上，
+队首换人就清零），现在离它 ≥ `route_margin`（0.3 m）**并且比下一个点更近**（即正朝路线后面走）
+—— 覆盖"路径被障碍膨胀推开、贴不到点上"的情况。两个条件必须同时满足。
+另外两条硬规矩：**只删列表头部的连续前缀**（非队首的点只有"车已经在它旁边"且前面都删掉时才一起删），
+**最后一个点（终点）永不删除**（到达仍由 goal checker 判定，于是"radius 必须小于 `xy_goal_tolerance`"
+那条耦合约束也不存在了）。
+
+> 为什么不用"按路线弧长投影"（2026-10-09 现场踩了两次，别再改回去）：8 字任务
+> `missions/227_1006_waypoint1.yaml` 里车起点离 #1 有 1.09 m、离**终点**只有 0.86 m（八字的头和尾
+> 几乎贴在一起），"整条路线取最近点"的全局投影会落到路线末端 ⇒ 判定"车已经走过整条路线" ⇒
+> 6 个途径点在 3.6 s 内被删光、车 7.4 s 冲终点，**八字跑不了**。改成"限窗 + 单调弧长进度"后
+> 又翻车：车抄近道从八字中间穿过去时，它到 #3→#4 那一小段的垂距只有 0.98 m（任何能容纳障碍绕行的
+> 走廊阈值都会放行），于是没到过的 #3 又被判成"走过"，第一瓣照样被切掉。现在只认"物理上靠近过"。
+
+配套改动：
+- 新行为树 `behavior_trees/navigate_through_poses_route_aware.xml`（只把那个节点换掉，其余与旧 BT 一致），
+  只有 `config/simulation/nav2_params_srm_minco.yaml` 指过去；同文件的 `plugin_lib_names` 里加了
+  `srm27_remove_passed_goals_bt_node`（nav2 的 bt_navigator 是按库名直接 `dlopen` 自注册的，
+  **编译时必须定义 `BT_PLUGIN_EXPORT`**，否则符号不导出、加载时报找不到节点）。
+- 同一份 params 的代价地图 `robot_radius` 由 0.45 回调到 **0.40**：planner_server 判"起点/终点这一格
+  是不是障碍"用的就是它，0.45 会把"车自己那一格"也判成障碍 → `Either of the start or goal pose are
+  an obstacle!`（实测：车开到 #2 一带时 planner 连续 8 次规划失败、控制器 `Failed to make progress`）
+  → BT 清代价地图重试（现场表现为在 #2/#3/#4 附近进 recovery）。车实际离障碍的距离由控制器决定
+  （≥0.38 m），所以两个需求把它夹在 0.38 附近，取 0.40。
+- 单元测试 `srm27_nav_plugins/test/test_remove_passed_goals_by_route.cpp`（16 个用例：两条判据各自的
+  正/反例、只删连续前缀、队列记忆不跨队首、无 TF 不乱删、连判两拍稳定，以及 4 个"八字被切掉"的实测
+  场景回归 + 末端节点"这棵 BT 用到的每个节点名都在已加载的库里注册过"）。
+- 其它三份参数文件（仿真 Omni、实车 Omni/MINCO）**本次未切换**，仍用 nav2 原版节点；要切的话改两处：
+  `default_nav_through_poses_bt_xml` 指向新 BT + `plugin_lib_names` 加自研库名。
+
+实测（空场仿真 `-w srm_empty -m 227_1006`，车起点离终点 #7 只有 0.88 m —— 就是以前跑不动的那个位置，
+用 `script/waypoint_mission.py --pass-through` 跑）：7 个航点一个 `navigate_through_poses` 下发，
+**0 次 recovery、0 次规划失败、0 次回头检测**，10.8 s 跑完，7 个点按顺序依次通过（最近通过距离
+0.13~0.44 m）；节点日志每拍只删 1 个点，删的时候车离它 0.36~0.60 m。
+（对比修复前：同一任务 7.4 s"成功"，6 个途径点在 3.6 s 内被删光，车直接冲终点。）
+
+仿真（Gazebo）里跑同一套航点：
+
+```bash
+./script/start_sim_nav.sh                        # 先起仿真 + 导航栈（默认命名空间 red_standard_robot1）
+./script/start_waypoints.sh --file m.yaml        # 命名空间自动探测，直接这样跑
+./script/start_waypoints.sh --file m.yaml --namespace red_standard_robot1   # 也可以显式指定
+./script/start_waypoints.sh --save-file m.yaml   # 仿真里教点，一样能存盘
+```
+
+- 仿真导航栈跑在命名空间下，导航 action 在 `/<ns>/navigate_to_pose`、`/<ns>/navigate_through_poses`，
+  TF 话题在 `/<ns>/tf`（nav2 与仿真两边的 launch 都有 `SetRemap("/tf", "tf")`）。
+  `start_waypoints.sh` 会从 `ros2 action list` 自动认出这个命名空间（根命名空间没有 `/navigate_to_pose`
+  而恰好有一个 `/<ns>/navigate_to_pose` 时），也可以 `--namespace` 显式给；显式给时不探测。
+  脚本只把**导航 action 与 TF** 挂到命名空间下，自己的服务仍在 `/waypoint_mission/*`，所以实车/仿真命令写法一致。
+- 点选不用改：`.rviz` 里 `2D Goal Pose`/`Publish Point` 填的是绝对话题 `/goal_pose`、`/clicked_point`
+  （仿真 RViz 也发这两个绝对话题），脚本同时订阅绝对名与 `/<ns>/` 名，谁发就收谁的。
+- 坐标系不用改：仿真 params 里 `global_frame=map`、`robot_base_frame=base_link`，没有加前缀。
+- 仿真里**不要**加 `--use-sim-time`：Gazebo 暂停时脚本会跟着 `/clock` 冻住（没有 `/clock` 时则静默不干活）；
+  本脚本只发导航目标、不依赖仿真时间，不加反而更稳。只有回放 rosbag 才需要它。
+- ⚠ `--pass-through` 依赖一组互相耦合的参数：共享 BT 的 `RemovePassedGoals radius=0.35` 必须**小于**
+  `general_goal_checker.xy_goal_tolerance`（否则终点会在判定到达前被删掉），又要**大于**车切内弯擦过途径点的
+  实际偏移量（否则擦过的点删不掉会折返），而后者由控制器前瞻决定。实车与仿真两份 Omni 参数现在都是
+  **容差 0.4 + 前瞻 0.6/0.3/0.6**，这组关系两边都成立（2026-10-09 之前仿真是 0.15 + 1.0/0.5/1.0，仿真里末端会判失败）。
+  改动其中任一项都要重新核对这三者的关系（详见 BT xml 里的注释）。
+
+> [!WARNING]
+> `srm27_nav_protocol` 带看门狗（协议 §6.3，`cmd_timeout_sec` 默认 0.5 s）：超过该时间没收到新的
+> `cmd_vel` 就把控制量归零，启动时也先发零速帧。所以旧文档里"杀掉发速度的节点后车不会自己停"
+> 的说法已不成立——但这只是兜底，不要把车身安全寄托在它上面：停节点前仍先发零速
+> （`ros2 topic pub -r 20 /cmd_vel_chassis geometry_msgs/msg/Twist "{}"`），物理急停始终是第一手段；
+> `--stop` 已内置"先发零速再结束进程"。（`start_real_nav.sh` 头部与结尾仍写着旧说法，待同步。）
+
+仿真：
+
+```bash
+./script/start_sim_nav.sh -h                    # 打印脚本头部的完整用法
+./script/start_sim_nav.sh                       # 默认 rmuc_2025 + 隧道地图，不自转
+./script/start_sim_nav.sh -m rmuc_2025          # 换普通场地地图
+./script/start_sim_nav.sh -w srm_empty          # 空场（Gazebo 默认起来就自动运行）
+./script/start_sim_nav.sh --no-run              # Gazebo 保持暂停，手动点播放
+./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
+./script/start_sim_nav.sh --rotation-mode periodic \
+    --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
+./script/start_sim_nav.sh --no-rviz --no-rotation
+DRY_RUN=1 ./script/start_sim_nav.sh             # 只打印将执行的命令
+```
+
+常用参数：`-w/--world`（`rmuc_2025` / `rmuc_2024` / `rmul_2024` / `rmul_2025` / `srm_empty`）、
+`-m/--map`（地图名或 YAML 绝对路径）、`-p/--params`（默认 `config/simulation/nav2_params_srm.yaml`）、
+`--gui/--no-gui`、`--run/--no-run`（默认 `--run`：Gazebo 直接开始运行）、
+`--smoother/--no-smoother`、`--rviz/--no-rviz`、
+`--rotation-mode/-speed/-offset/-amplitude/-period/-phase/-wave`、`--rotation/--no-rotation`、
+`--teleop/--no-teleop`。
+
+`-m` 只给名字时（不带 `/`）按以下顺序解析，全部落空会打印可用地图清单后退出：
+
+```text
+src/srm27_navigation/srm27_nav_bringup/map/simulation/<名字>.yaml   # 包内仿真地图
+maps/<名字>/<名字>.yaml                                              # 工作空间根目录 maps/ 下按目录存放
+maps/<名字>.yaml                                                     # 或直接平铺在 maps/ 下
+```
+
+`maps/` 是工作空间根目录下放现场采集 / SLAM 新出地图的地方，`start_sim_nav.sh` 与 `start_real_nav.sh`
+用的是同一套搜索规则，所以新图不必再拷进包内 `map/simulation/`。两个目录出现同名地图时以包内
+`map/simulation/` 优先，仿真默认地图不会被 `maps/` 里的同名文件顶掉；`maps/<目录>/<其它名字>.yaml`
+（例如 rosbag 的 `metadata.yaml`）不会被误当成地图。
+
+仿真脚本除了按顺序拉起各节点，还多了几层保护：`flock` 保证 Gazebo 单实例启动、清理上次 `ros2 launch`
+遗留的孤儿节点（避免新旧 `/clock` 同时发布）、地图与参数文件的存在性校验（`--params` 必须是绝对路径）、
+以及从 `srm27_gazebo_simulator/config/srm_sim.yaml` 读取世界名并与 `-w` 做一致性检查。
+
+`start_sim_nav.sh` 固定使用**导航模式**（`slam:=False`、`use_pcd_localization:=False`），只加载现成栅格图；
+建图与重定位需另起 launch，不能与它并行。它默认启动自转测试发送器但模式为 `stop`（零自转），
+要真正自转需显式指定 `--rotation-mode`。
+
+> [!NOTE]
+> 实车一键脚本 `script/start_real_nav.sh` 与实车建图脚本 `script/start_real_slam.sh` 均已回到工作区（见 §5.2 与 §7.3）。两个仿真脚本（`start_slam.sh`、`start_nav_reloc.sh`）仍不在工作区中（git 历史里可找回）。实车建图用 `start_real_slam.sh`；只想"边建图边导航"可用 `start_real_nav.sh --slam`（不产出可保存的地图文件）。
+
+### 5.3 四种定位方式（互斥）
+
+区别只在**谁发布 `map → odom`**（下表左列是实车一键脚本的写法，对应 launch 参数为 `slam` 与 `use_pcd_localization`）：
+
+| 方式 | `map → odom` 来源 | 需要先验数据 | 说明 |
+| --- | --- | --- | --- |
+| `--slam` | `slam_toolbox` | 否 | 边跑边建图，不需要先验地图 |
+| `--reloc` | `small_gicp_relocalization` | 先验 PCD | 与先验点云做 GICP 配准 |
+| `--lio` | 静态 TF | 否 | 只用 Point-LIO 里程计（`use_lio_odometry:=True`），**实车推荐**；`start_real_nav.sh` 的默认方式 |
+| `--lio`（仿真默认 ZLIO） | 静态 TF | 否 | **仿真：`--lio` 自 2026-11-05 起默认由 ZLIO（z-localization 的 `frontend` 包）产生里程计**，坐标系改写与换代锚定由 `zlio_bridge` 承担、`loam_interface` 不启动。需先构建 `localization_interfaces` + `frontend`（没构建时脚本会自动退回 Point-LIO 并告警）。回退：`--lio-frontend point_lio`。见 [实施方案](../design/仿真LIO前端替换Z-LIO实施方案%28ai%29.md) 与 [实施记录](仿真LIO前端替换Z-LIO实施记录%28ai%29.md) |
+| `--static` | 静态 TF | 先验栅格图 | 只加载栅格图、没有任何里程计来源，仅当车体模块自己发 `odom → base_link` 时可用 |
+| 默认 | 静态 TF | 先验栅格图 | `map_server` 加载 PGM，需要外部里程计；SRM 仿真下由 `simulation_ground_truth_odometry` 提供 `odom → base_link`，即 `start_sim_nav.sh` 使用的模式 |
+
+> [!WARNING]
+> `slam`、`use_pcd_localization`、`use_lio_odometry` 三者与默认模式互斥，否则会有多个节点争抢
+> `map → odom` 或 `odom → base_link`。仿真真值里程计只在三者都不启用时才启动。
+> `start_real_nav.sh` 把四个模式做成显式互斥开关，同时给两个会直接报错退出（而不是后者覆盖前者）；
+> `--lio` / `--static` 下 `map → odom` 是静态 TF，其数值 `--map-to-odom X Y YAW` 表示
+> **起步点在地图坐标系里的位姿**，车不停在地图原点时必须显式指定，否则 RViz 与全局代价地图都会错位。
+
+---
+
+## 6. 配置与数据组织
+
+`src/srm27_navigation/srm27_nav_bringup/` 下按**实车 / 仿真**分目录：
+
+```text
+config/real/          nav2_params_srm.yaml        SRM 实车导航参数（当前使用）
+                      nav2_params_upstream.yaml   上游原版参数（对照保留，旧 gimbal 链路）
+                      mapping_params.yaml         实车建图参数
+                      mid360_user_config.json     雷达网络配置
+config/simulation/    nav2_params_srm.yaml        SRM 仿真导航参数（当前使用）
+                      nav2_params.yaml            旧步兵仿真参数（对照保留，含 gimbal_yaw_fake）
+map/real/  pcd/real/          实车栅格图与先验点云
+map/simulation/  pcd/simulation/  仿真栅格图与先验点云
+rviz/                 mapping.rviz / nav2_default_view.rviz
+behavior_trees/       Nav2 行为树 XML
+meshes/               mid360.stl                        历史遗留的雷达 mesh（当前模型不用）
+```
+
+本次新增包各自带自己的配置，跨包只通过话题与服务交互：
+
+```text
+src/srm27_robot_description/config/srm27_sentry_geometry.yaml   几何与外参（唯一来源）
+src/srm27_chassis_control/config/srm_chassis_control.yaml       mux / 自转控制器 / 波形默认参数
+src/srm27_gazebo_simulator/config/srm_sim.yaml                  世界名、SRM 初始位姿、速度执行参数
+src/srm27_gazebo_simulator/config/ros_gz_bridge.yaml            /clock、真值里程计、joint_states、雷达
+src/srm27_gazebo_simulator/worlds/srm_empty.sdf                 空场调试世界（物理步长 1 ms）
+src/srm27_gazebo_simulator/resource/                           比赛场地、MID-360 模型与 GUI 配置
+```
+
+实车参数有两份，用途写在文件名里：**`nav2_params_srm.yaml` 是 SRM 车实际使用的那份**，`nav2_params_upstream.yaml` 仅作上游对照，两者的 frame 体系不兼容。仿真参数同样是两份：**`nav2_params_srm.yaml` 是当前使用的那份**（`robot_base_frame: base_link`），`nav2_params.yaml` 是旧步兵链路对照版。
+
+车体模型**只有一份**：`src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro`（几何取自 `SRM全向轮哨兵.STEP` 的 CAD 实测）。实车建图、实车导航、独立调试、仿真显示、`viz/` 看模型，全部读它，只有坐标系契约参数不同：
+
+| 用途 | 关键参数 | 说明 |
+| --- | --- | --- |
+| 实车（建图/导航/独立调试） | `root_frame:=base_link`、`wheel_joint_type:=fixed`、`gimbal_joint_type:=fixed`、`lidar_link_name:=livox_frame` | 原点在地面；实车没有 `/joint_states` 发布者，关节必须 fixed |
+| 仿真显示（`model_builder.build_urdf()`） | `wheel_joint_type:=continuous`、`lidar_link_name:=front_mid360` | 轮子是连续关节，关节名与 Gazebo SDF 一致 |
+| 看 CAD 原稿（`viz/` 的 `cad_view:=true`） | `root_frame:=base_footprint`、continuous + revolute | base_link 离地 0.1009 m，与 CAD 装配体一致 |
+
+Gazebo 的 SDF 仍由 `model_builder.build_sdf()` 从 `config/srm27_sentry_geometry.yaml` 生成（需要插件/传感器/摩擦等 SDF 专属内容），几何数值同样来自那份 YAML。
+
+**改尺寸必须两处一起改**（`urdf/srm27_sentry.urdf.xacro` 的默认值与 `config/srm27_sentry_geometry.yaml`）。仓库里不再有自动化用例把关，改完自己跑一遍这条自查：
+
+```bash
+# 把两份模型的关节数值并排打出来，肉眼比一下即可
+xacro src/srm27_robot_description/urdf/srm27_sentry.urdf.xacro \
+  | grep -E "<origin xyz|wheel_.*_joint" | head -20
+python3 -c "import yaml;d=yaml.safe_load(open('src/srm27_robot_description/config/srm27_sentry_geometry.yaml'));print(d['chassis'], d['wheel']['positions'], d['lidar']['xyz'], d['lidar']['rpy'])"
+```
+
+---
+
+## 7. 构建与运行
+
+### 7.1 依赖
+
+```bash
+sudo apt install git-lfs
+sudo pip install vcstool2
+vcs import --recursive . < dependencies.repos
+```
+
+另有源码依赖需自行安装：[small_gicp](https://github.com/koide3/small_gicp)。
+
+### 7.2 构建
+
+```bash
+rosdep install -r --from-paths src --ignore-src --rosdistro $ROS_DISTRO -y
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --parallel-workers 2
+```
+
+> [!NOTE]
+> 推荐 `--symlink-install`：本工作空间大量使用 `launch.py` 和 YAML，改参数后通常只需重启节点。
+> `--parallel-workers` **不要调大**：`point_lio`、`livox_ros_driver2`、`rmoss_gz_*` 是重模板 C++ 包，并发过高会打满内存导致系统卡死。
+
+### 7.3 运行
+
+实车：推荐一键脚本 `script/start_real_nav.sh`（用法见 §5.2；`--lio` / `--reloc` / `--slam` / `--static`
+四者互斥，见 §5.3，默认 `--lio`）。它内部等价于按顺序启动六层：
+
+```bash
+# 1) 雷达驱动（nav2_stack_launch.py 不负责起驱动，必须单独启动）
+ros2 run livox_ros_driver2 livox_ros_driver2_node --ros-args \
+  -r __node:=livox_ros_driver2 \
+  --params-file /absolute/path/to/config/real/nav2_params_srm.yaml \
+  -p user_config_path:=/absolute/path/to/config/real/mid360_user_config.json
+
+# 2) 整车 TF：SRM 车体模型 + 雷达外参，参数必须用 SRM 那份
+ros2 launch srm27_nav_bringup real_robot_state_publisher_launch.py \
+  use_sim_time:=False \
+  params_file:=/absolute/path/to/config/real/nav2_params_srm.yaml
+
+# 3) 底盘串口：/cmd_vel_chassis 的唯一消费者
+ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
+
+# 4) 导航栈：slam / use_pcd_localization / use_lio_odometry 按 §5.3 选择
+ros2 launch srm27_nav_bringup nav2_stack_launch.py \
+  map:=/absolute/path/to/<YOUR_MAP>.yaml \
+  params_file:=/absolute/path/to/config/real/nav2_params_srm.yaml \
+  use_sim_time:=False
+
+# 5) RViz / 6) 手柄：见 §5.1 的入口层 launch 列表
+```
+
+> [!NOTE]
+> 雷达驱动那两行不是多余的：驱动代码里的节点名是 `livox_driver_node`，而参数文件顶层键是
+> `livox_ros_driver2`，ROS 2 按节点名匹配 `--params-file`，对不上时整段参数被忽略；且参数里
+> `user_config_path` 用的是 launch 专有的 `$(find-pkg-share ...)` 语法，`ros2 run` 不会展开。
+> `start_real_nav.sh` 已内置这两处处理。
+
+整车总入口：
+
+```bash
+ros2 launch srm27_bringup bringup.launch.py \
+  map:=/absolute/path/to/<YOUR_MAP>.yaml \
+  params_file:=/absolute/path/to/node_params.yaml \
+  use_rviz:=True
+```
+
+> [!NOTE]
+> `srm27_bringup/params/node_params.yaml` 目前仍是**旧步兵链路**配置（`fake_vel_transform` +
+> `gimbal_yaw_fake`），本次 SRM 仿真改动未涉及它。
+
+**SRM 仿真**（推荐一键脚本，内部包含下面两条 launch）：
+
+```bash
+./script/start_sim_nav.sh                    # 默认 rmuc_2025 + 隧道地图，不自转
+./script/start_sim_nav.sh -m rmuc_2025       # 换普通场地地图
+./script/start_sim_nav.sh -w srm_empty      # 空场调试（Gazebo 起来就自动运行）
+```
+
+等价的拆开手动启动方式：
+
+```bash
+# 终端 1：Gazebo 世界 + SRM 模型 + 传感器桥接 + 速度适配器
+ros2 launch srm27_gazebo_simulator srm_sim.launch.py
+
+# 终端 2：点云转换 + 真值里程计 + Nav2 + 速度合成 + RViz
+ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py \
+  namespace:=red_standard_robot1 world:=rmuc_2025 \
+  map:=/absolute/path/to/map/simulation/rmuc_2025_tunnel.yaml \
+  params_file:=/absolute/path/to/config/simulation/nav2_params_srm.yaml \
+  slam:=False use_pcd_localization:=False use_sim_time:=True use_rviz:=True
+```
+
+> [!NOTE]
+> `map`、`prior_pcd_file`、`params_file` 一律使用**绝对路径**。
+> `nav_simulation_launch.py` 已改为**弃用壳**（转发到 `nav_srm_simulation_launch.py`），
+> 旧仿真包已删除，仿真统一使用 `srm27_gazebo_simulator srm_sim.launch.py`。
+
+### 7.4 自转测试模式
+
+自转由独立链路产生，与导航平移在 `srm_cmd_mux` 里合成，因此**不影响导航状态**：
+
+```text
+rotation_test_sender ─ rotation_cmd ─► rotation_controller ─ rotation_velocity ─┐
+                                                                                ├─ srm_cmd_mux
+Nav2 controller ──────────────────────────────── cmd_vel_nav ──────────────────┘
+```
+
+| 模式 | 含义 | 相关参数 |
+| --- | --- | --- |
+| `stop` | 持续输出零角速度（默认） | — |
+| `constant` | 恒速自转 | `rotation_speed`（有符号，rad/s） |
+| `periodic` | 周期自转（正弦或方波） | `rotation_offset`、`rotation_amplitude`、`rotation_period`、`rotation_phase`、`rotation_sine_wave` |
+
+同一组参数在三个位置出现，含义一致：脚本参数 `--rotation-mode/-speed/-offset/-amplitude/-period/-phase/-wave`、
+`nav_srm_simulation_launch.py` 的 `rotation_*` launch 参数、`rotation_test_sender` 的节点参数。
+波形时间取**仿真时间**，从启用或参数改变时开始计算；周期性发布本身不重置相位。
+
+```bash
+# 恒速自转 1.0 rad/s
+./script/start_sim_nav.sh --rotation-mode constant --rotation-speed 1.0
+
+# 正弦周期：1.0 ± 0.5 rad/s，周期 4 s
+./script/start_sim_nav.sh --rotation-mode periodic \
+  --rotation-offset 1.0 --rotation-amplitude 0.5 --rotation-period 4.0
+
+# 方波换向
+./script/start_sim_nav.sh --rotation-mode periodic \
+  --rotation-offset 0.0 --rotation-amplitude 1.0 --rotation-wave square
+```
+
+运行中切换（无需重启）：
+
+```bash
+ros2 service call /<ns>/rotation_test_sender/disable std_srvs/srv/Trigger
+ros2 param set /<ns>/rotation_test_sender rotation_mode periodic
+ros2 param set /<ns>/rotation_test_sender offset 1.0
+ros2 param set /<ns>/rotation_test_sender amplitude 0.5
+ros2 param set /<ns>/rotation_test_sender period 4.0
+ros2 service call /<ns>/rotation_test_sender/enable std_srvs/srv/Trigger
+```
+
+急停与自查：
+
+```bash
+ros2 service call /<ns>/srm_cmd_mux/stop_all std_srvs/srv/Trigger     # 两路清零并保持零输出
+ros2 service call /<ns>/srm_cmd_mux/resume_all std_srvs/srv/Trigger  # 重新启用两路输入
+ros2 service call /<ns>/rotation_controller/clear_rotation std_srvs/srv/Trigger
+
+ros2 topic echo /<ns>/cmd_vel_nav --once        # 导航平移速度（angular.z 应为 0）
+ros2 topic echo /<ns>/rotation_velocity --once  # 独立自转速度
+ros2 topic echo /<ns>/cmd_vel_sim --once        # 合成后的最终执行命令
+ros2 topic hz   /<ns>/cmd_vel_sim               # 应约 200 Hz
+ros2 topic echo /<ns>/diagnostics --once        # 超时 / 限幅 / 丢弃计数
+```
+
+`<ns>` 默认 `red_standard_robot1`。诊断消息里 `nav_wz_dropped_count` 表示被 mux 丢弃的导航角速度次数，
+`translation_scale` / `clamped` 表示平移是否被模长限幅，`non_finite_*_count` 表示 NaN/Inf 输入次数。
+限幅与超时的完整默认值见 [`docs/SRM仿真与自转控制实现(ai).md`](SRM仿真与自转控制实现%28ai%29.md)。
+
+雷达网卡配置（`192.168.1.50/24`）与驱动验证见 [`docs/mid360使用指南.md`](../operations/mid360使用指南.md)。
+
+---
+
+## 8. 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/mid360使用指南.md`](../operations/mid360使用指南.md) | Mid-360 网络配置与驱动启动 |
+| [`docs/SRM仿真与导航自转控制实施方案.md`](../design/SRM仿真与导航自转控制实施方案.md) | 本次 SRM 仿真与自转控制重构的权威方案 |
+| [`docs/SRM仿真与自转控制实现(ai).md`](SRM仿真与自转控制实现%28ai%29.md) | **（AI 生成）** 落地说明：三个新包的职责、速度/自转接口表、合成与安全优先级、启动方式、测试矩阵与实测结论 |
+| [`docs/仿真数据流(ai).md`](../architecture/仿真数据流%28ai%29.md) | 仿真链路各模块算法与数据流详解（已按 SRM 链路更新） |
+| [`docs/仿真链迁移实车实施记录(ai).md`](仿真链迁移实车实施记录%28ai%29.md) | **（AI 生成）** 仿真链（fakeyaw + mux + 小陀螺 + ZLIO）迁移到实车的实施记录：改动清单、上电验收步骤、wz/云台接口缺口与回退 |
+| [`docs/minco实车迁移实施记录(ai).md`](minco实车迁移实施记录%28ai%29.md) | MINCO 控制器的实车迁移与分阶段验收（本迁移的控制器前置） |
+| [`docs/哨兵导航TF与下位机数据接口(ai).md`](../architecture/哨兵导航TF与下位机数据接口%28ai%29.md) | MID-360 安装与底盘自旋的组合、传感器分工及上下位机通信约定 |
+| [`docs/局部规划器相关(ai).md`](../design/局部规划器相关%28ai%29.md) | 当前控制器实现与候选方案对比 |
+| [`docs/局部规划器迁移MINCO_MPC方案(ai).md`](../design/局部规划器迁移MINCO_MPC方案%28ai%29.md) | 局部规划器迁移 MINCO/MPC 的分阶段方案 |
+| [`docs/TF与fake底盘详解(ai).md`](../archive/TF与fake底盘详解%28ai%29.md) | 旧步兵 fake 虚拟底盘与 TF 详解（历史资料） |
+| [`docs/tdt开源.md`](../archive/tdt开源.md) | 上游导航实现调研记录 |
+| [`src/srm27_navigation/README.md`](README_full_20261114.md) | 导航包集合详细说明（含完整启动参数表） |
+| [`src/srm27_behavior/README.md`](README_full_20261114.md) | 行为树框架与插件开发说明 |
+
+---
+
+## 9. 许可
+
+Apache-2.0。第三方依赖各自遵循其原始许可；`rm_decision_interfaces` 中合入的消息版权见该包内 `LICENSE.pb_rm_interfaces`。

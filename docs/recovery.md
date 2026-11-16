@@ -25,7 +25,7 @@
 执行：
 
 ```bash
-./script/validate_recovery.sh
+./tests/recovery/validate_recovery.sh
 ```
 
 脚本使用独立 Docker 容器，网络关闭，不挂载设备或实车连接。首次构建导航测试镜像，之后复用；已有包含 ROS 2 Humble、Nav2、Gazebo Fortress、ROS-Gazebo bridge 和编译依赖的镜像可以通过 `SRM_RECOVERY_IMAGE` 指定。
@@ -40,7 +40,7 @@
 
 所有源码只读挂载，输出保存在 `.cache/recovery-validation/`：`manifest.json`、JUnit、各包测试结果、场景日志、实际轨迹、诊断、净空和传感器计数。断言失败会使脚本非零退出，不会生成新的成功清单。测试使用真实 ROS Action 和插件；外部输入仅替换为独立地图、平面运动模型或 Gazebo。
 
-`script/inject_recovery_stuck.py` 用于隔离仿真中的地图故障注入。它直接处理 ROS OccupancyGrid 的行序：x、y 从地图原点递增；图片文件的翻转规则不能用于消息数据。脚本打印的环形端点净空仅供参考，最终速度还要经过控制器的整段通行检查。
+`tests/recovery/inject_recovery_stuck.py` 用于隔离仿真中的地图故障注入。它直接处理 ROS OccupancyGrid 的行序：x、y 从地图原点递增；图片文件的翻转规则不能用于消息数据。脚本打印的环形端点净空仅供参考，最终速度还要经过控制器的整段通行检查。
 
 ## 验收边界
 
@@ -48,7 +48,7 @@
 
 ## 本次验证记录
 
-2026-11-16，WSL 上执行完整入口 `./script/validate_recovery.sh`，专用镜像从导航测试 Dockerfile 构建。结果：
+2026-11-16，WSL 上执行完整入口 `./tests/recovery/validate_recovery.sh`，专用镜像从导航测试 Dockerfile 构建。结果：
 
 - 35 个定向 CTest 程序全部通过，其中 C++ gtest 共 365 个用例。
 - 地图注入脚本 3 个回归用例全部通过。

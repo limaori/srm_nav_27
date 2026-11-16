@@ -20,7 +20,6 @@ Our main goals are:
 
 - [ROS Behavior Wrappers](behaviortree_ros2/ros_behavior_wrappers.md)
 - [TreeExecutionServer](behaviortree_ros2/tree_execution_server.md)
-- [Sample Behaviors](btcpp_ros2_samples/README.md)
 
 Note that this library is compatible **only** with:
 

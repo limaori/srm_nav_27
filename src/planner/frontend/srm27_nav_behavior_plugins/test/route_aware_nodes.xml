@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<root BTCPP_format="3" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RemovePassedGoalsByRoute input_goals="{input}" output_goals="{output}"
+                              approach_radius="0.35" route_margin="0.12" keep_last="true" />
+  </BehaviorTree>
+</root>

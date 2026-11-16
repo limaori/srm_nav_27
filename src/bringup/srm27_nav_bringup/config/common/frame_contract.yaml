@@ -1,0 +1,29 @@
+version: 1
+
+frames:
+  global: map
+  odometry: odom
+  profiles:
+    standard:
+      localization_base: base_link
+      navigation_base: base_link
+    fakeyaw:
+      localization_base: gimbal_yaw
+      navigation_base: gimbal_yaw_fake
+
+tf_ownership:
+  - parent: map
+    child: odom
+    active_publishers: 1
+  - parent: odom
+    child: localization_base
+    active_publishers: 1
+
+localization_modes:
+  exactly_one_active: [point_lio, zlio, gicp, ground_truth]
+
+velocity_topics:
+  fakeyaw_nav_input: cmd_vel_nav_fake
+  fakeyaw_body_output: cmd_vel_nav_body
+  simulation_output: cmd_vel_sim
+  real_output: cmd_vel_chassis
