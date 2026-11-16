@@ -4,27 +4,27 @@ frame_id: map
 
 named_waypoints:
   # --- RMUL 3v3 ---
-  rmul_supply:
+  rmul_supply: # 家
     x: 0.0
     y: 0.0
     yaw: 0.0
-  rmul_home_highland:  # UL 己方高地控区预案，按实图标定
+  rmul_home_highland:  # 自家高地架枪点
     x: 2.0
     y: -1.0
     yaw: 0.0
-  rmul_supply_shelter:  # 回补超时暂避；标定在己方安全区，不等同于补给 RFID
+  rmul_supply_shelter:  # 补给区门前暂避点：如果回补区被敌车挡住进不去（超过 25s），先退到这里喘口气冷清 15s，防止在补给区门口撞墙。
     x: 1.0
     y: 0.0
     yaw: 0.0
-  rmul_evasion:
+  rmul_evasion: # 避险点
     x: 3.8
     y: -2.8
     yaw: 0.0
-  rmul_center:
+  rmul_center: # 争夺中心
     x: 4.5
     y: -3.2
     yaw: 0.0
-  rmul_center_fallback: # 示例：己方侧掩体/架枪位置，必须实测路线、射界与驻守安全性
+  rmul_center_fallback: # 中心台边缘掩体：中心台被敌方占满时，先在边缘掩体架枪，等队友打残敌人再反踩。
     x: 3.0
     y: -3.2
     yaw: 0.0

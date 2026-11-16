@@ -8,8 +8,8 @@ srm27_behavior_server:
     ros_plugins_timeout: 1000                   # Optional (defaults to 1000 ms)
     use_cout_logger: false                      # Optional (defaults to false)
 
-    dry_run: true             # 默认仅计算策略，不发导航/自转/许可/姿态请求
-    waypoints_calibrated: false # 按当前场地和己方颜色标定后设 true
+    dry_run: false             # 默认仅计算策略，不发导航/自转/许可/姿态请求
+    waypoints_calibrated: true # 按当前场地和己方颜色标定后设 true
     status_topic: /srm/sefdefined
     supply_timeout: 25.0
     supply_retry: 15.0
