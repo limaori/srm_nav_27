@@ -12,19 +12,15 @@ named_waypoints:
     x: 2.0
     y: -1.0
     yaw: 0.0
-  rmul_supply_shelter:  # 补给区门前暂避点：如果回补区被敌车挡住进不去（超过 25s），先退到这里喘口气冷清 15s，防止在补给区门口撞墙。
+  rmul_supply_shelter:  # 回补超时后的冷却暂避目标（示例，须实测选点）
     x: 1.0
     y: 0.0
-    yaw: 0.0
-  rmul_evasion: # 避险点
-    x: 3.8
-    y: -2.8
     yaw: 0.0
   rmul_center: # 争夺中心
     x: 4.5
     y: -3.2
     yaw: 0.0
-  rmul_center_fallback: # 中心台边缘掩体：中心台被敌方占满时，先在边缘掩体架枪，等队友打残敌人再反踩。
+  rmul_center_fallback: # 中心敌控、独占激活且不满足争夺条件，或反馈失效时的回退目标（示例）
     x: 3.0
     y: -3.2
     yaw: 0.0
@@ -54,22 +50,8 @@ named_waypoints:
     x: 2.5
     y: 1.5
     yaw: 0.0
-  rmuc_outpost_fallback:
-    x: 6.2
-    y: 1.8
-    yaw: 0.0
-  rmuc_fortress_fallback:
-    x: 2.0
-    y: 0.0
-    yaw: 0.0
 
 waypoint_groups:
-  # RMUL 中心控制区多点巡防
-  rmul_patrol:
-    - {x: 4.65, y: -3.50, yaw: 0.0}
-    - {x: 4.20, y: -3.10, yaw: 0.0}
-    - {x: 4.50, y: -3.00, yaw: 0.0}
-
   # RMUC 0x000D 开关触发前哨推进点
   rmuc_outpost_push:
     - {x: 6.20, y: 1.80, yaw: 0.0}

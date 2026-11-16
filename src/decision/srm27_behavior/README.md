@@ -35,7 +35,7 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 
 `waypoints_file`、`ul.control_waypoint`、`ul.semantic_map_file`、`uc.semantic_map_file` 都是服务端参数，在 `sentry_behavior.yaml` 中已按 `ul:` 与 `uc:` 分块维护（且兼容 `ul_*` / `uc_*` 扁平传参），支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
 
-所有随包航点、区域多边形都是示例，需按当前场地 map 原点和己方颜色标定。目标朝向单位 rad。无效路线整体拒绝，不跳过错误点继续执行。
+点位表仅保留当前策略及高地预案使用的点/路线；语义地图仅保留自转仲裁查询的 `slope` / `tunnel` 类型。所有随包航点、区域多边形都是示例，需按当前场地 map 原点和己方颜色标定；UL 还须补充实测 `type: tunnel` 多边形，查询不到区域会继续普通自转。目标朝向单位 rad。无效路线整体拒绝，不跳过错误点继续执行。
 
 两份 2027 XML 均采用单文件内 `SubTree`：主树只展示模块入口，所有 `BehaviorTree` 定义留在本文件，不依赖外部模块。Groot 中打开 `Project.btproj`，选择 `rmul_2027` / `rmuc_2027`，Ctrl+单击子树卡片，在独立页签中查看。UL 顶层为比赛门控、回补解虚弱、中心回退、持续占守；UC 顶层为比赛门控、回补、紧急防御、阵地攻守、巡逻兜底。所有子树调用使用 `_autoremap="true"`，全局 `{@key}` / `@key` 仍直达全局黑板；原有 Reactive 抢占顺序保持不变。服务端加载目录和 Groot 工程引用无需改动。
 

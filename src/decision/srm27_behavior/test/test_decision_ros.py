@@ -467,6 +467,9 @@ def test_match_lifecycle_and_strategies(arena):
     a.game.game_progress = 5
     time.sleep(0.4)
     a.status.current_hp = 200
+    # HP and game status arrive on separate topics; establish next-match HP first.
+    wait_for(lambda: a.reports and a.reports[-1]['hp'] == 200 and a.reports[-1]['mode'] == 'wait',
+             'next-match HP not observed before match start')
     a.game.game_progress = 4
     a.game.stage_remain_time = 299 if a.league == "ul" else 419
     a.goal(*target, after=len(a.accepted()))
