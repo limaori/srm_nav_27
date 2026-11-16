@@ -14,7 +14,7 @@
        HP/弹量阈值、转速和超时见 params/sentry_behavior.yaml；点/路线见 params/waypoints.yaml。
        UC/UL 语义地图由对应的 semantic_map_file 参数提供，区域和航点均须按场地实测标定。
 
-       自转仲裁（见本文件各战术 Spin 子树）：优先坡道，再隧道，命中时采用地图 zone_max_spin；
+       自转仲裁（见本文件各战术 Spin 子树）：优先隧道限转，命中时采用地图 zone_max_spin；
        普通战术按 nav_arrived 切换到点快转/赶路慢转；回补按 rfid_supply 或 nav_arrived
        切换补给驻留/赶路转速；掉血反制采用 evasion_speed。语义区始终优先于这些速度。
        语义查询 FAILURE 会继续下一个自转候选，并非全局停车；语义区约束需保证地图正确。
@@ -111,7 +111,7 @@
     </ReactiveFallback>
   </BehaviorTree>
 
-  <!-- P1 中心回退：仅中心预案启用，回补优先。
+  <!-- P1 中心回退：回补优先。
        2027 UL §3.3.4.1 / 通信协议表1-9：激活与控制权独立；双方激活只暂停进度。
        敌方控制或敌方单独激活且非双方争夺时架枪，反馈失效也先回退。
        中立点允许在开启争夺且血量达到 contest_hp_min 时主动进点。
@@ -119,8 +119,7 @@
        回退点需标定安全路线和射界，不能由示例坐标保证。 -->
   <BehaviorTree ID="Sub_RmulCenterFallback">
     <ReactiveSequence name="RmulCenterFallback">
-      <ScriptCondition code="@ul_control_waypoint == 'rmul_center'
-                             &amp;&amp; (!@ul_center_valid || (@ul_center_activation != 3
+      <ScriptCondition code="(!@ul_center_valid || (@ul_center_activation != 3
                                &amp;&amp; (@ul_center_control == 2 || (@ul_center_activation == 2
                                  &amp;&amp; ((@ul_center_control != 0) || (@ul_contest_neutral == false)
                                    || (@hp &lt; @ul_contest_hp_min))))))"/>
@@ -132,7 +131,7 @@
     </ReactiveSequence>
   </BehaviorTree>
 
-  <!-- P2 正常占守：中心无回退条件时进点；高地预案不受中心状态影响。
+  <!-- P2 正常占守：中心无回退条件时进点。
        自转优先级：语义区限转 > 掉血>=10锁存2.5s的正向随机平滑变速 > 到点快转 > 移动慢转。
        随机目标为 spin.evasion_speed 的 75%~100%，受 spin.max_accel/max_jerk 约束，不推断受击方向。
        两种驻守分支都按预设目标检查 ul.hold_radius（默认0.5m），偏离后重新导航；
@@ -142,23 +141,17 @@
       <Script code="@decision_mode := 'control'; @decision_reason := 'ul_continuous_control'"/>
       <SubTree ID="Sub_RmulControlHoldSpin" _autoremap="true"/>
       <NavigationTransitionGate hold_radius="{@ul_hold_radius}">
-        <SendNav2Goal waypoint_name="{@ul_control_waypoint}" action_name="navigate_to_pose"/>
+        <SendNav2Goal waypoint_name="rmul_center" action_name="navigate_to_pose"/>
       </NavigationTransitionGate>
     </ReactiveSequence>
   </BehaviorTree>
   <BehaviorTree ID="Sub_RmulHealWeaknessSpin">
     <Fallback name="SupplySpin">
       <Sequence name="SemanticSpinGuard">
-        <Fallback>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="slope"
-            matched_zone="{supply_matched_zone}"
-            zone_max_spin="{supply_zone_max_spin}"/>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="tunnel"
-            matched_zone="{supply_matched_zone}"
-            zone_max_spin="{supply_zone_max_spin}"/>
-        </Fallback>
+        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+          zone_type="tunnel"
+          matched_zone="{supply_matched_zone}"
+          zone_max_spin="{supply_zone_max_spin}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{supply_zone_max_spin}"
           spin_mode="SEMANTIC_ZONE"
@@ -181,16 +174,10 @@
   <BehaviorTree ID="Sub_RmulHealWeaknessShelterSpin">
     <Fallback name="SupplySpin">
       <Sequence name="SemanticSpinGuard">
-        <Fallback>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="slope"
-            matched_zone="{shelter_matched_zone}"
-            zone_max_spin="{shelter_zone_max_spin}"/>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="tunnel"
-            matched_zone="{shelter_matched_zone}"
-            zone_max_spin="{shelter_zone_max_spin}"/>
-        </Fallback>
+        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+          zone_type="tunnel"
+          matched_zone="{shelter_matched_zone}"
+          zone_max_spin="{shelter_zone_max_spin}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{shelter_zone_max_spin}"
           spin_mode="SEMANTIC_ZONE"
@@ -213,16 +200,10 @@
   <BehaviorTree ID="Sub_RmulCenterFallbackSpin">
     <Fallback name="SpinArbitration">
       <Sequence name="SemanticSpinGuard">
-        <Fallback>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="slope"
-            matched_zone="{fallback_matched_zone}"
-            zone_max_spin="{fallback_zone_max_spin}"/>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="tunnel"
-            matched_zone="{fallback_matched_zone}"
-            zone_max_spin="{fallback_zone_max_spin}"/>
-        </Fallback>
+        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+          zone_type="tunnel"
+          matched_zone="{fallback_matched_zone}"
+          zone_max_spin="{fallback_zone_max_spin}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{fallback_zone_max_spin}"
           spin_mode="SEMANTIC_ZONE"
@@ -253,16 +234,10 @@
   <BehaviorTree ID="Sub_RmulControlHoldSpin">
     <Fallback name="SpinArbitration">
       <Sequence name="SemanticSpinGuard">
-        <Fallback>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="slope"
-            matched_zone="{control_matched_zone}"
-            zone_max_spin="{control_zone_max_spin}"/>
-          <IsInSemanticZone map_file="{@ul_semantic_map_file}"
-            zone_type="tunnel"
-            matched_zone="{control_matched_zone}"
-            zone_max_spin="{control_zone_max_spin}"/>
-        </Fallback>
+        <IsInSemanticZone map_file="{@ul_semantic_map_file}"
+          zone_type="tunnel"
+          matched_zone="{control_matched_zone}"
+          zone_max_spin="{control_zone_max_spin}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{control_zone_max_spin}"
           spin_mode="SEMANTIC_ZONE"

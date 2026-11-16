@@ -25,7 +25,6 @@ srm27_behavior_server:
     # RMUL (3v3) 决策参数
     # ==============================
     ul:
-      control_waypoint: rmul_center  # 改 rmul_home_highland 可切己方高地预案
       fallback_waypoint: rmul_center_fallback # 中心被敌方控制/独占激活，或反馈失效时架枪；需实测标定
       hold_radius: 0.5          # 相对预设驻守点的最大偏离距离，不以 Nav2 停车位置代替
       semantic_map_file: params/rmul_semantic_map.yaml

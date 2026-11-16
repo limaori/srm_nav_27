@@ -299,11 +299,19 @@ class Arena:
 
 
 @pytest.fixture(params=["ul", "uc"])
-def arena(request):
+def arena(request, tmp_path):
     init_test_ros()
     a = Arena.__new__(Arena)
     try:
-        a.__init__(request.param, request.node.originalname)
+        overrides = {}
+        if request.param == "ul":
+            # Isolated tunnel geometry exercises UL limits without field coordinates.
+            semantic_map = tmp_path / "ul_tunnel.yaml"
+            semantic_map.write_text(
+                "frame_id: map\nzones:\n  - code: test_tunnel\n    type: tunnel\n"
+                "    max_spin: 0.0\n    polygon: [[100, 100], [102, 100], [102, 102], [100, 102]]\n")
+            overrides["ul_semantic_map_file"] = str(semantic_map)
+        a.__init__(request.param, request.node.originalname, overrides=overrides)
         yield a
     finally:
         try:
@@ -534,25 +542,6 @@ def test_goal_acceptance_timeout_stops_ambiguous_navigation(arena):
     assert len(a.accepted()) == 1, "ambiguous acceptance caused duplicate navigation"
     assert a.outputs and a.outputs[-1].linear.x == 0. and a.outputs[-1].angular.z == 0.
     a.check("lost_or_delayed_acceptance_latches_stop_without_duplicate_goal")
-
-
-def test_ul_home_highland_preset():
-    init_test_ros()
-    a = Arena.__new__(Arena)
-    try:
-        a.__init__("ul", "home-highland", overrides={"ul_control_waypoint": "rmul_home_highland"})
-        a.game.game_progress = 4
-        a.field.center_control = 2
-        a.field.center_gain_point_status = 2
-        a.goal(2., -1.)
-        assert not a.postures
-        a.check("ul_home_highland_preset_from_configuration")
-    finally:
-        try:
-            if hasattr(a, "executor"):
-                a.close()
-        finally:
-            rclpy.shutdown()
 
 
 @pytest.mark.parametrize('league', ['ul', 'uc'])

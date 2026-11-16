@@ -251,7 +251,6 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   declare_scoped_param("ul.contest_neutral", "ul_contest_neutral", true);
 
   for (const auto & [scoped_name, legacy_name, default_val] : std::vector<std::tuple<std::string, std::string, std::string>>{
-      {"ul.control_waypoint", "ul_control_waypoint", "rmul_center"},
       {"ul.fallback_waypoint", "ul_fallback_waypoint", "rmul_center_fallback"},
       {"ul.semantic_map_file", "ul_semantic_map_file", "params/rmul_semantic_map.yaml"},
       {"uc.semantic_map_file", "uc_semantic_map_file", "params/rmuc_semantic_map.yaml"}}) {

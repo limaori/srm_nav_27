@@ -8,10 +8,6 @@ named_waypoints:
     x: 0.0
     y: 0.0
     yaw: 0.0
-  rmul_home_highland:  # 自家高地架枪点
-    x: 2.0
-    y: -1.0
-    yaw: 0.0
   rmul_supply_shelter:  # 回补超时后的冷却暂避目标（示例，须实测选点）
     x: 1.0
     y: 0.0
