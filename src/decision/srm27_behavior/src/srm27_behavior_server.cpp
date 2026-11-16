@@ -133,7 +133,7 @@ void SentryBehaviorServer::initDynamicParameters()
                      double enter, double leave) {
     return std::isfinite(moving) && std::isfinite(arrived) && std::isfinite(supply) &&
            std::isfinite(evasion) && std::isfinite(enter) && std::isfinite(leave) &&
-           moving > 0.0 && arrived > 0.0 && supply > 0.0 && evasion > 0.0 &&
+           moving > 0.0 && arrived > 0.0 && supply >= 0.0 && evasion > 0.0 &&
            enter >= 0.05 && leave >= enter;
   };
   if (!validate(spin_tracker_->moving_speed, spin_tracker_->arrived_speed,
@@ -170,7 +170,8 @@ void SentryBehaviorServer::initDynamicParameters()
       }
       result.successful = validate(moving, arrived, supply, evasion, enter, leave);
       if (!result.successful) {
-        result.reason = "Speeds must be finite and positive; 0.05 <= arrive_tolerance <= leave_tolerance";
+        result.reason = "Speeds must be finite and positive (supply may be zero); "
+          "0.05 <= arrive_tolerance <= leave_tolerance";
         return result;
       }
       // Apply only committed parameters in the tick loop; another callback may still reject this batch.
