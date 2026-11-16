@@ -110,7 +110,7 @@
             <input_port name="gimbal_vel_pitch" default="0.000000" type="float">Pitch velocity (rad/s)</input_port>
         </Action>
         <Action ID="PublishRotationCmd">
-            <input_port name="oscillation_period" default="0.0" type="double">Signed sine period in seconds; 0 keeps constant speed</input_port>
+            <input_port name="randomize" default="false" type="bool">掉血反制使用正向随机平滑变速</input_port>
             <input_port name="spin_speed" default="0.000000" type="double">Angular Z velocity on rotation_cmd (rad/s)</input_port>
             <input_port name="spin_mode" default="" type="std::string">Optional mode tag for behavior/spin_state</input_port>
             <input_port name="topic_name" default="rotation_cmd" type="std::string">Twist topic name</input_port>

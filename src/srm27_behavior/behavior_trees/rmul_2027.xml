@@ -133,8 +133,8 @@
   </BehaviorTree>
 
   <!-- P2 正常占守：中心无回退条件时进点；高地预案不受中心状态影响。
-       自转优先级：语义区限转 > 掉血>=10锁存2.5s的正弦交变 > 到点快转 > 移动慢转。
-       交变峰值/周期由 spin.evasion_speed/evasion_period 提供，不推断受击方向。
+       自转优先级：语义区限转 > 掉血>=10锁存2.5s的正向随机平滑变速 > 到点快转 > 移动慢转。
+       随机目标为 spin.evasion_speed 的 75%~100%，受 spin.max_accel/max_jerk 约束，不推断受击方向。
        两种驻守分支都按预设目标检查 ul.hold_radius（默认0.5m），偏离后重新导航；
        不以实际停车点代替目标，不重置定位，Nav2 XY 容差应小于驻守半径。 -->
   <BehaviorTree ID="Sub_RmulControlHold">
@@ -232,7 +232,7 @@
         <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{@spin_evasion_speed}"
-          oscillation_period="{@spin_evasion_period}"
+          randomize="true"
           spin_mode="HP_DROP_EVASION"
           topic_name="rotation_cmd"/>
       </Sequence>
@@ -272,7 +272,7 @@
         <IsHpDropping hp_drop_threshold="10" hold_duration_ms="2500" key_port="{@referee_robotStatus}"/>
         <PublishRotationCmd _successIf="@dry_run"
           spin_speed="{@spin_evasion_speed}"
-          oscillation_period="{@spin_evasion_period}"
+          randomize="true"
           spin_mode="HP_DROP_EVASION"
           topic_name="rotation_cmd"/>
       </Sequence>

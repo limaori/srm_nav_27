@@ -147,6 +147,21 @@ class Nav2Arena(Arena):
                                  "node_names:=[controller_server, planner_server, smoother_server, behavior_server, bt_navigator]"])
 
 
+def check_random_spin_with_real_navigation(a):
+    before = len(a.spin_requests)
+    output_start = len(a.outputs)
+    for _ in range(6):
+        a.status.current_hp -= 10
+        time.sleep(.65)
+    requests = a.spin_requests[before:]
+    assert len(requests) > 40
+    assert min(requests) > 0. and max(requests) <= 8.00001
+    assert max(requests) - min(requests) > .1
+    assert min(v.angular.z for v in a.outputs[output_start:]) >= 0.
+    assert max(v.angular.z for v in a.outputs[output_start:]) > 4.
+    a.check("positive_random_spin_with_real_nav2_minco_fakeyaw_and_mux")
+
+
 @pytest.mark.parametrize("league", ["ul", "uc"])
 def test_real_navigation_closed_loop(league):
     init_test_ros()
@@ -199,6 +214,7 @@ def test_real_navigation_closed_loop(league):
             wait_for(lambda: abs(a.outputs[-1].linear.x) < .02 and abs(a.outputs[-1].linear.y) < .02
                      and abs(a.outputs[-1].angular.z-7.) < .1, 'center reentry did not finish in stationary hold')
             a.check("nav2_contested_center_reentry")
+            check_random_spin_with_real_navigation(a)
         else:
             wait_for(lambda: math.hypot(a.x-5., a.y-1.2) < arrival_bound,
                      "MINCO did not reach enemy outpost control point", timeout=65)
@@ -212,6 +228,7 @@ def test_real_navigation_closed_loop(league):
                      math.hypot(a.x-3.5, a.y) < arrival_bound,
                      "MINCO did not recover own outpost", timeout=35)
             a.check("nav2_restore_own_outpost_preempts_hold")
+            check_random_spin_with_real_navigation(a)
             a.ally.ally_base_hp = 1000
             wait_for(lambda: math.hypot(a.x-.8, a.y) < arrival_bound,
                      "real UC base defense failed", timeout=35)

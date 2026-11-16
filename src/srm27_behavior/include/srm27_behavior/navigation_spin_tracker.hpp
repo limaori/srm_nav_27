@@ -21,6 +21,8 @@
 #include <sstream>
 #include <string>
 
+#include "srm27_behavior/spin_reference.hpp"
+
 #include "behaviortree_cpp/blackboard.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 
@@ -40,6 +42,11 @@ struct NavigationSpinTracker
   double arrived_speed = 7.0;
   double supply_speed = 2.0;
   double evasion_speed = 8.0;
+  double spin_max_accel = 8.0;
+  double spin_max_jerk = 40.0;
+  unsigned spin_seed = 2027;
+  SpinReference spin_reference;
+  bool evasion_smoothing = false;
   double arrive_tolerance = 0.35;
   double leave_tolerance = 0.55;
   double completion_tolerance = 0.8;

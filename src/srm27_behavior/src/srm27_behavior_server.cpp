@@ -110,7 +110,7 @@ void SentryBehaviorServer::initDynamicParameters()
   node()->declare_parameter("spin.arrived_speed", spin_tracker_->arrived_speed);
   node()->declare_parameter("spin.supply_speed", spin_tracker_->supply_speed);
   node()->declare_parameter("spin.evasion_speed", spin_tracker_->evasion_speed);
-  node()->declare_parameter("spin.evasion_period", 1.2);
+
   node()->declare_parameter("spin.arrive_tolerance", spin_tracker_->arrive_tolerance);
   node()->declare_parameter("spin.leave_tolerance", spin_tracker_->leave_tolerance);
 
@@ -127,18 +127,27 @@ void SentryBehaviorServer::initDynamicParameters()
   }
 
   auto validate = [](double moving, double arrived, double supply, double evasion,
-                     double enter, double leave, double period) {
+                     double enter, double leave) {
     return std::isfinite(moving) && std::isfinite(arrived) && std::isfinite(supply) &&
            std::isfinite(evasion) && std::isfinite(enter) && std::isfinite(leave) &&
-           enter >= 0.05 && leave >= enter && std::isfinite(period) && period >= 0.2;
+           moving > 0.0 && arrived > 0.0 && supply > 0.0 && evasion > 0.0 &&
+           enter >= 0.05 && leave >= enter;
   };
   if (!validate(spin_tracker_->moving_speed, spin_tracker_->arrived_speed,
                 spin_tracker_->supply_speed, spin_tracker_->evasion_speed,
-                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance,
-                node()->get_parameter("spin.evasion_period").as_double())) {
+                spin_tracker_->arrive_tolerance, spin_tracker_->leave_tolerance)) {
     throw std::invalid_argument("Invalid spin speeds or arrival tolerances");
   }
-  globalBlackboard()->set("spin_evasion_period", node()->get_parameter("spin.evasion_period").as_double());
+  rcl_interfaces::msg::ParameterDescriptor fixed;
+  fixed.read_only = true;
+  spin_tracker_->spin_max_accel = node()->declare_parameter("spin.max_accel", 8.0, fixed);
+  spin_tracker_->spin_max_jerk = node()->declare_parameter("spin.max_jerk", 40.0, fixed);
+  const int seed = node()->declare_parameter("spin.seed", 2027, fixed);
+  if (!std::isfinite(spin_tracker_->spin_max_accel) || spin_tracker_->spin_max_accel <= 0.0 ||
+      !std::isfinite(spin_tracker_->spin_max_jerk) || spin_tracker_->spin_max_jerk <= 0.0 || seed < 0) {
+    throw std::invalid_argument("Spin acceleration/jerk must be positive; seed must be nonnegative");
+  }
+  spin_tracker_->spin_seed = static_cast<unsigned>(seed);
   param_cb_handle_ = node()->add_on_set_parameters_callback(
     [this, validate](const std::vector<rclcpp::Parameter> & params) {
       rcl_interfaces::msg::SetParametersResult result;
@@ -147,7 +156,6 @@ void SentryBehaviorServer::initDynamicParameters()
       double moving = values[0].as_double(), arrived = values[1].as_double();
       double supply = values[2].as_double(), evasion = values[3].as_double();
       double enter = values[4].as_double(), leave = values[5].as_double();
-      double period = node()->get_parameter("spin.evasion_period").as_double();
       for (const auto & p : params) {
         const auto & n = p.get_name();
         if (n == "spin.moving_speed") { moving = p.as_double(); }
@@ -156,11 +164,10 @@ void SentryBehaviorServer::initDynamicParameters()
         else if (n == "spin.evasion_speed") { evasion = p.as_double(); }
         else if (n == "spin.arrive_tolerance") { enter = p.as_double(); }
         else if (n == "spin.leave_tolerance") { leave = p.as_double(); }
-        else if (n == "spin.evasion_period") { period = p.as_double(); }
       }
-      result.successful = validate(moving, arrived, supply, evasion, enter, leave, period);
+      result.successful = validate(moving, arrived, supply, evasion, enter, leave);
       if (!result.successful) {
-        result.reason = "Speeds must be finite; 0.05 <= arrive_tolerance <= leave_tolerance; evasion_period >= 0.2s";
+        result.reason = "Speeds must be finite and positive; 0.05 <= arrive_tolerance <= leave_tolerance";
         return result;
       }
       // Apply only committed parameters in the tick loop; another callback may still reject this batch.
@@ -280,6 +287,12 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
 void SentryBehaviorServer::stopOutputs()
 {
   spin_tracker_->clearGoal();
+  {
+    std::lock_guard<std::mutex> lock(spin_tracker_->mutex);
+    spin_tracker_->spin_reference.reset();
+    spin_tracker_->evasion_smoothing = false;
+    spin_tracker_->last_cmd_wz = 0.0;
+  }
   if (!rclcpp::ok() || globalBlackboard()->get<bool>("dry_run")) { return; }
   rotation_pub_->publish(geometry_msgs::msg::Twist{});
   hold_spin_pub_->publish(std_msgs::msg::Float64{});
@@ -339,7 +352,6 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
     spin_tracker_->evaluateLocked();
     spin_tracker_->syncToBlackboard();
   }
-  bb->set("spin_evasion_period", node()->get_parameter("spin.evasion_period").as_double());
   std_msgs::msg::Float64 hold;
   bool stationary = false;
   const bool enabled = !dry_run && bb->get<bool>("guard_ready") && bb->get<bool>("motion_allowed") &&

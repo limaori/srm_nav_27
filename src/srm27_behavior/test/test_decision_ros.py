@@ -695,44 +695,54 @@ def test_ul_repositions_from_requested_point_instead_of_completion_anchor(fallba
         rclpy.shutdown()
 
 
-def test_hp_drop_sine_spin_preserves_navigation_semantic_and_stop_gates(arena):
+def test_hp_drop_random_spin_preserves_navigation_semantic_and_stop_gates(arena):
     a = arena
     a.game.game_progress = 4
-    a.goal(*( (4.5, -3.2) if a.league == 'ul' else (3.5, 0.) ))
+    a.goal(*((4.5, -3.2) if a.league == 'ul' else (3.5, 0.)))
     time.sleep(.3)  # Establish the real HP-difference condition's baseline.
-    assert not a.set_parameters({'spin.evasion_period': .1})
-    assert not a.set_parameters({'spin.evasion_period': math.nan})
-    assert a.set_parameters({'spin.evasion_period': 1.0})
+    for name in ('spin.moving_speed', 'spin.arrived_speed', 'spin.supply_speed', 'spin.evasion_speed'):
+        assert not a.set_parameters({name: -1.})
+        assert not a.set_parameters({name: math.nan})
+    assert not a.set_parameters({'spin.max_accel': 0.})
+    assert not a.set_parameters({'spin.max_jerk': 20.})  # Read-only until restart.
+    assert a.set_parameters({'spin.evasion_speed': 8.0})
     before = len(a.spin_requests)
     output_start = len(a.outputs)
-    a.status.current_hp = 380
-    wait_for(lambda: any(v > 2. for v in a.spin_requests[before:]) and
-                    any(v < -2. for v in a.spin_requests[before:]), 'sine spin did not reverse', timeout=2)
-    assert max(abs(v) for v in a.spin_requests[before:]) <= 8.01
-    wait_for(lambda: len(a.outputs) > output_start + 10 and
-                    max(v.angular.z for v in a.outputs[output_start:]) -
-                    min(v.angular.z for v in a.outputs[output_start:]) > .5,
-             'real mux output did not respond to the sine requests', timeout=2)
-    assert max(abs(v.angular.z) for v in a.outputs[output_start:]) <= 9.01
+    for _ in range(6):
+        a.status.current_hp -= 10
+        time.sleep(.65)  # Renew the real damage window while observing several random segments.
+    requests = a.spin_requests[before:]
+    assert len(requests) >= 40
+    assert min(requests) > 0 and max(requests) <= 8.00001
+    assert max(requests) - min(requests) > 1.
+    assert 'HP_DROP_EVASION' in a.spins[-1]
+    assert max(v.angular.z for v in a.outputs[output_start:]) > 4.
+    assert min(v.angular.z for v in a.outputs[output_start:]) >= 0.
     if a.league == 'ul':
         assert a.accepted()[-1]['xy'][-1] == [4.5, -3.2]
         assert not a.postures
     else:
         a.goal(2.5, 1.5)
-    a.check('hp_drop_signed_sine_and_real_mux_slew_limited_response')
+    (a.out / 'random-spin.json').write_text(json.dumps({
+        'requests': requests,
+        'mux_wz': [v.angular.z for v in a.outputs[output_start:]],
+        'target_range': [6., 8.], 'max_accel': 8., 'max_jerk': 40.,
+    }, indent=2) + '\n')
+    a.check('hp_drop_positive_random_spin_reaches_real_mux_without_changing_navigation')
     a.x, a.y = 101., 101. if a.league == 'ul' else 100.5
     wait_for(lambda: 'SEMANTIC_ZONE' in a.spins[-1] and 'wz=0.00' in a.spins[-1],
              'semantic limit did not override attack spin')
-    a.check('semantic_spin_limit_preempts_sine')
+    a.check('semantic_spin_limit_preempts_random_spin')
     a.x, a.y = -2., 0.
-    a.status.current_hp = 360
+    a.status.current_hp -= 10
     wait_for(lambda: 'HP_DROP_EVASION' in a.spins[-1], 'attack spin did not resume')
     a.manual_stop()
     wait_for(lambda: a.outputs and a.outputs[-1].linear.x == 0. and a.outputs[-1].angular.z == 0.,
              'manual stop did not override attack spin')
-    a.check('manual_stop_preempts_sine')
-    wait_for(lambda: 'HP_DROP_EVASION' not in a.spins[-1], 'sine spin survived HP-drop window', timeout=4)
-    a.check('sine_expires_with_hp_drop_window')
+    a.check('manual_stop_preempts_random_spin')
+    wait_for(lambda: 'HP_DROP_EVASION' not in a.spins[-1], 'random spin survived HP-drop window', timeout=4)
+    wait_for(lambda: 'wz=2.50' in a.spins[-1], 'constant moving spin did not resume', timeout=4)
+    a.check('random_spin_expires_and_smoothly_returns_to_constant_speed')
 
 
 def test_feedback_flood_does_not_starve_action_responses(arena):

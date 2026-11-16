@@ -30,7 +30,7 @@ ros2 launch srm27_behavior srm27_behavior_launch.py target_tree:=rmul_2027 use_s
 | 一个战术的条件/动作、比赛门控、自转仲裁 | 直接编辑对应赛制 XML 内的命名子树，附中文注释 |
 | 坐标、巡逻路线 | `params/waypoints.yaml`；命名点 `named_waypoints`，连续路线 `waypoint_groups` |
 | 回补阈值、早期时段、UL 中心/高地预案 | `params/sentry_behavior.yaml` |
-| UL 架枪回退点、回位半径、受击交变周期 | `ul.fallback_waypoint`、`ul.hold_radius`、`spin.evasion_period`；坐标在 `waypoints.yaml` |
+| UL 架枪回退点、回位半径、受击变速约束 | `ul.fallback_waypoint`、`ul.hold_radius`、`spin.evasion_speed/max_accel/max_jerk/seed`；坐标在 `waypoints.yaml` |
 | 坡道/隧道限制 | `params/rmuc_semantic_map.yaml`、`params/rmul_semantic_map.yaml` |
 
 `waypoints_file`、`ul.control_waypoint`、`ul.semantic_map_file`、`uc.semantic_map_file` 都是服务端参数，在 `sentry_behavior.yaml` 中已按 `ul:` 与 `uc:` 分块维护（且兼容 `ul_*` / `uc_*` 扁平传参），支持在自有 `params_file:=...` 中覆盖。UL 默认 `rmul_center`，改 `rmul_home_highland` 即用己方高地控区预案。修改策略参数、XML 或 YAML 后重启决策服务；**仅 `spin.*` 支持运行中热更新**。
@@ -74,9 +74,13 @@ flowchart TD
 
 仿真云台系 Nav2 的 XY 容差改为 `0.40m`，为驻守半径留出 `0.10m` 栅格端点误差余量，同时保留与连续巡逻 `0.35m` 过点半径的兼容；实车云台系原有 `0.20m` 配置保持原值。仿真示例架枪点仅对平面测试地图验证进退路线，不能替代实际赛场的路线、全车净空和射界标定。
 
-**掉血交变自转**：有效 HP 相邻采样下降至少 10，反制窗口维持 2.5 秒。UL 在中心/回退/高地目标处交变，不另选躲避点；UC 保留原来的 `rmuc_hp_evasion` 脱困路线。窗口内输出 `evasion_speed × sin(2πt / evasion_period)`，相位使用单调时钟；默认峰值 `8 rad/s`、周期 `1.2s`（可热更新，最小 `0.2s`）。窗口结束恢复普通速度，语义区限转、低血回补和所有运动门控优先。HP 掉血可能包含碰撞等伤害，不能据此确定射手方向；正弦交变降低敌方预测效果的实战收益尚需评估，反转加速度与底盘负载须实测。
+**掉血随机变速**：有效 HP 相邻采样下降至少 10，反制窗口维持 2.5 秒，再次掉血会续时。UL 保持中心/回退/高地目标，不另选躲避点；UC 保留原来的 `rmuc_hp_evasion` 路线。仅此反制窗口使用随机变速，移动、驻守、补给维持原恒速目标。
 
-这里的峰值和周期描述的是 `rotation_cmd` 请求。mux 仍按 `wz_max` 限幅、按 `wz_ramp` 限坡；当前默认 `wz_ramp=4.5 rad/s²`，而理想 `8 rad/s / 1.2s` 正弦的最大斜率约为 `41.9 rad/s²`，实际出口会被限坡，从已有高速自转进入时，2.5 秒内也不保证完成顺逆反转。必须结合电控实测设置峰值、周期和 XML 中的反制时长，不能绕过限坡或宣称已达到理想波形。
+参考生成器提取自 `feat/ul-motion-optimization`：在 `0.75 × evasion_speed` 至 `evasion_speed` 中随机选正转速目标，默认 **6~8 rad/s**。用五次多项式连接前后转速，段首尾角加速度与角加加速度均为零；每段至少随机取 0.7~1.2 秒，按 `spin.max_accel=8 rad/s²`、`spin.max_jerk=40 rad/s³` 延长到可行时长，段后随机停留 0.2~0.8 秒。随机目标、过渡时长和停留时间使它没有固定正弦周期；这不代表敌方算法无法估计或预测。
+
+从原转速平滑进入，并在窗口结束后平滑回到恒速目标；过渡时允许低于 6 rad/s，启动和安全停车允许为零，正常变速不反转。语义区禁转、低血回补和运动门控继续优先，安全归零不等待平滑过渡。参数 `spin.evasion_period` 已由加速度/加加速度约束取代，`oscillation_period` 节点端口改为 `randomize`；UC、UL 均使用新参考，不保留正弦模式。转速上限可热改，加速度、加加速度和 `spin.seed` 为启动参数，修改需重启。种子与 `match_epoch` 合成，便于复现实验，不用于保密或保证不可预测。
+
+这些参数约束的是 `rotation_cmd` 请求。实际出口仍受 mux 的 `wz_max/wz_ramp` 限制：生产配置为 `8.5 rad/s`、`25 rad/s²`，mux 单独启动的缺省限坡为 `4.5 rad/s²`。实车还须验收负载、打滑和跟随误差，不能用参考曲线平滑代替底盘能力标定。
 
 受击方向接口继续使用 `RobotStatus.damage_info_valid/is_attacked/armor_id/hp_deduction_reason` 和现有 `IsAttacked` 插件；聚合字段转发及断流失效已补齐。当前串口没有有效装甲伤害来源，云台没有执行接口，故不装配自动云台对齐，也不根据 HP 差分编造方向。
 

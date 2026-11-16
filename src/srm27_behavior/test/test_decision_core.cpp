@@ -136,3 +136,74 @@ TEST(DecisionCore, DistantNavigationSuccessNeverCreatesStationarySpin)
   tracker.arrive_tolerance = tracker.leave_tolerance = .05;
   EXPECT_TRUE(tracker.markGoalFinished());  // Spin tuning must not change Nav2 completion acceptance.
 }
+
+TEST(DecisionCore, SpinReferenceIsBoundedSmoothReproducibleAndResets)
+{
+  SpinReference a, b;
+  double prev = 0.0, prev_accel = 0.0;
+  constexpr double dt = 0.001;
+  double low = 8.0, high = 0.0;
+  for (int i = 0; i < 20000; ++i) {
+    const double now = i * dt;
+    const double request = i < 7000 ? 7.0 : (i < 14000 ? 2.5 : 8.0);
+    const bool variable = i < 7000 || i >= 14000;
+    const double v = a.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0);
+    EXPECT_DOUBLE_EQ(v, b.sample(now, request, variable, 8.0, 1, 42, 8.0, 40.0));
+    EXPECT_GE(v, 0.0);
+    EXPECT_LE(v, 8.0);
+    const double accel = (v - prev) / dt;
+    if (i > 1) {
+      EXPECT_LE(std::abs(accel), 8.001);
+      EXPECT_LE(std::abs((accel - prev_accel) / dt), 40.02);
+    }
+    if (i > 3000 && i < 7000) { low = std::min(low, v); high = std::max(high, v); }
+    prev = v;
+    prev_accel = accel;
+  }
+  EXPECT_GT(high - low, 0.2);
+  EXPECT_LE(a.sample(20.0, 8.0, true, 2.0, 1, 42, 8.0, 40.0), 2.0);
+  EXPECT_DOUBLE_EQ(a.sample(20.001, 0.0, true, 8.0, 1, 42, 8.0, 40.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(20.002, 7.0, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(22.0, 7.0, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
+  EXPECT_DOUBLE_EQ(a.sample(22.001, NAN, true, 8.0, 2, 42, 8.0, 40.0), 0.0);
+}
+
+TEST(DecisionCore, RandomSpinStartsFromPreviousSpeedAndRejectsInvalidInputs)
+{
+  SpinReference reference;
+  reference.reset(2.5);
+  EXPECT_DOUBLE_EQ(reference.sample(0.0, 8.0, true, 8.0, 1, 42, 8.0, 40.0), 2.5);
+  double previous = 2.5;
+  for (int i = 1; i <= 200; ++i) {
+    const double value = reference.sample(i * .01, 8.0, true, 8.0, 1, 42, 8.0, 40.0);
+    EXPECT_GT(value, 0.0);
+    EXPECT_LE(std::abs(value - previous), .080001);
+    previous = value;
+  }
+  EXPECT_DOUBLE_EQ(reference.sample(2.01, -8.0, true, 8.0, 1, 42, 8.0, 40.0), 0.0);
+  EXPECT_DOUBLE_EQ(reference.sample(2.02, 8.0, true, 8.0, 1, 42, 0.0, 40.0), 0.0);
+  EXPECT_DOUBLE_EQ(reference.sample(2.03, 8.0, true, 8.0, 1, 42, 8.0, NAN), 0.0);
+}
+
+TEST(DecisionCore, RandomSpinHasNoFixedPeriodAndCanReturnToConstantSpeed)
+{
+  SpinReference reference;
+  std::vector<double> samples;
+  double now = 0.0;
+  for (int i = 0; i < 12000; ++i) {
+    now = i * .01;
+    samples.push_back(reference.sample(now, 8.0, true, 8.0, 1, 42, 8.0, 40.0));
+  }
+  // 排除 0.2~5 秒的重复周期；这不代表对任意预测器都不可预测。
+  for (int lag = 20; lag <= 500; ++lag) {
+    double squared_error = 0.0;
+    for (size_t i = 1000; i + lag < samples.size(); ++i) {
+      squared_error += std::pow(samples[i + lag] - samples[i], 2);
+    }
+    EXPECT_GT(squared_error / (samples.size() - 1000 - lag), .001);
+  }
+  for (int i = 1; i <= 500; ++i) {
+    reference.sample(now + i * .01, 2.5, false, 8.0, 1, 42, 8.0, 40.0);
+  }
+  EXPECT_TRUE(reference.settled(2.5));
+}

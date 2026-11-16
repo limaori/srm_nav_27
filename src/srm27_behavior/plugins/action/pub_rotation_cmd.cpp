@@ -17,6 +17,7 @@
 #include <memory>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 #include "srm27_behavior/navigation_spin_tracker.hpp"
 
@@ -33,7 +34,7 @@ BT::PortsList PublishRotationCmdAction::providedPorts()
 {
   return providedBasicPorts({
     BT::InputPort<double>("spin_speed", 0.0, "Angular Z velocity on rotation_cmd (rad/s)"),
-    BT::InputPort<double>("oscillation_period", 0.0, "Signed sine period in seconds; 0 keeps constant speed"),
+    BT::InputPort<bool>("randomize", false, "Use positive nonperiodic spin for HP-drop evasion"),
     BT::InputPort<std::string>("spin_mode", "", "Optional label recorded in behavior/spin_state"),
     BT::InputPort<std::shared_ptr<NavigationSpinTracker>>(
       "tracker_port", "{@nav_spin_tracker}", "Shared NavigationSpinTracker on blackboard"),
@@ -46,25 +47,36 @@ bool PublishRotationCmdAction::setMessage(geometry_msgs::msg::Twist & msg)
   std::string spin_mode;
   getInput("spin_speed", spin_speed);
   getInput("spin_mode", spin_mode);
-  const double period = getInput<double>("oscillation_period").value();
-  if (!std::isfinite(spin_speed) || !std::isfinite(period) || period < 0.0 ||
-      (period > 0.0 && period < 0.2)) {
-    RCLCPP_ERROR(node_->get_logger(), "Spin speed must be finite; oscillation period must be 0 or >= 0.2s");
+  const bool randomize = getInput<bool>("randomize").value();
+  if (!std::isfinite(spin_speed) || spin_speed < 0.0) {
+    RCLCPP_ERROR(node_->get_logger(), "Spin speed must be finite and nonnegative");
     return false;
-  }
-  if (period > 0.0) {
-    const double now = std::chrono::duration<double>(
-      std::chrono::steady_clock::now().time_since_epoch()).count();
-    spin_speed *= std::sin(2.0 * M_PI * std::fmod(now, period) / period);
   }
 
   std::shared_ptr<NavigationSpinTracker> tracker;
   if (getInput("tracker_port", tracker) && tracker) {
     std::lock_guard<std::mutex> lock(tracker->mutex);
+    const double now = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (randomize || tracker->evasion_smoothing) {
+      int epoch = 0;
+      (void)config().blackboard->rootBlackboard()->get("match_epoch", epoch);
+      const double request = spin_speed;
+      spin_speed = tracker->spin_reference.sample(now, request, randomize,
+        std::numeric_limits<double>::infinity(), epoch, tracker->spin_seed,
+        tracker->spin_max_accel, tracker->spin_max_jerk);
+      tracker->evasion_smoothing = randomize || !tracker->spin_reference.settled(request);
+    } else {
+      // 保留普通恒速请求，并作为受击平滑变速的起点。
+      tracker->spin_reference.reset(spin_speed);
+    }
     tracker->last_cmd_wz = spin_speed;
     if (!spin_mode.empty()) {
       tracker->last_spin_mode = spin_mode;
     }
+  } else if (randomize) {
+    RCLCPP_ERROR(node_->get_logger(), "Random spin requires the shared navigation spin tracker");
+    return false;
   }
 
   msg.linear.x = 0.0;

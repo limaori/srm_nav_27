@@ -24,7 +24,7 @@ namespace srm27_behavior
 {
 
 /**
- * @brief Single-tick publisher of chassis spin request (Twist.angular.z) to MINCO rotation_cmd.
+ * @brief Single-tick publisher of chassis spin request (Twist.angular.z) directly to the mux rotation_cmd input.
  * Uses RosTopicPubNode so it returns SUCCESS in one tick without halting sibling actions in
  * ReactiveSequence.
  */
