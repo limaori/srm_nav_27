@@ -1,0 +1,455 @@
+# 配置 ZLIO 后端；默认使用 rmuc 先验地图及 UWB 辅助定位。
+common:
+  # 使用 ZLIO 原子观测与高频预测协议。
+  frontend: zlio
+  # 全局地点描述子类型，可选 scan_context 或 gprobe。
+  descriptor_type: scan_context
+  # 前端里程计坐标系。
+  odom_frame: odom
+  # 同步观测和预测使用的传感器坐标系。
+  sensor_frame: imu
+  # 原子同步观测话题。**相对名**：仿真带 namespace 启动时随命名空间解析；
+  # 使用绝对名会让两个命名空间下的后端抢同一条话题（上游默认 /frontend/frame）。
+  frame_topic: frontend/frame
+  # 高频前端预测话题。
+  prediction_topic: frontend/odometry
+  # 前端进程与代次通知话题。
+  session_topic: frontend/session
+  # ZLIO 去畸变点云位于 IMU 局部坐标系。
+  input_cloud_in_local_frame: true
+  body:
+    rotation:
+      # sensor 到 body 固定外参的滚转角，单位为度。
+      roll_deg: -14.94
+      # sensor 到 body 固定外参的俯仰角，单位为度。
+      pitch_deg: 0.523
+      # sensor 到 body 固定外参的偏航角，单位为度。
+      yaw_deg: -150.6
+    offset:
+      # sensor 原点指向 body 原点的 X 分量，在 body 系表达，单位为米。
+      x: -0.098
+      # sensor 原点指向 body 原点的 Y 分量，在 body 系表达，单位为米。
+      y: 0.094
+      # sensor 原点指向 body 原点的 Z 分量，在 body 系表达，单位为米。
+      z: 0.0
+    # 车体输出坐标系名称。
+    frame: body
+  scan_context:
+    # 是否启用 Scan Context 描述子。
+    enabled: true
+    # Scan Context 径向环数量。
+    num_rings: 30
+    # Scan Context 方位扇区数量。
+    num_sectors: 90
+    # 描述子覆盖的最大水平半径，单位为米。
+    max_radius: 80.0
+    # 描述子输入点云的体素边长，单位为米。
+    downsample: 0.6
+    # 描述子使用的雷达安装高度，单位为米。
+    # 必须与建包时的 `--sc-lidar-height`（不显式给时等于 `--sensor-z`）逐位一致：
+    # storage.cpp 按 1e-6 比较几何配置，不一致会在启动时 FATAL
+    # "failed to load Scan Context descriptors"。取 URDF 的雷达离地高度
+    # 0.346388 m → 0.3464，与所有文档里的 `--sc-lidar-height 0.3464` 对齐。
+    lidar_height: 0.3464
+    # 一个描述子栅格成为有效栅格所需的最少点数。
+    min_bin_points: 1
+    # 每个关键帧的描述子总数，包含原始描述子。
+    augment_count: 3
+    # 相邻横向增强之间的位移，单位为米。
+    lateral_shift: 2.0
+    # 粗航向附近的精搜索范围占整周的比例，范围为 0 到 1。
+    search_ratio: 1.0
+    # 回环检索时排除的最近关键帧数量。
+    exclude_recent: 15
+    # 描述子检索返回的最大候选数量。
+    candidates: 15
+    # 允许进入几何验证的最大描述子距离。
+    distance_threshold: 0.8
+    # 构造描述子前是否用前端 roll/pitch 整平点云。
+    level_with_odom_roll_pitch: true
+  # 全局地图坐标系名称。
+  map_frame: map
+  # 后端维护调度周期，单位为秒。
+  maintenance_period: 0.2
+prior_map:
+  # 是否加载并冻结不可变先验地图；入口 --zloc-prior 显式开启。
+  enabled: false
+  # 先验地图包目录。必须由入口以**绝对路径**传入（backend.launch.py 的 prior_map:=）。
+  # 上游默认 pcd/rmuc 相对进程 CWD 解析，本工作区不允许这种隐式依赖。
+  directory: ""
+  # 加载先验地图后的可视化体素边长，单位为米。
+  voxel_resolution: 0.15
+trajectory:
+  # 运行轨迹地图包的保存目录。由入口以**绝对路径**传入（trajectory_directory:=）；
+  # 先验地图定位模式不会写轨迹，建图模式必须显式给绝对目录。
+  save_directory: ""
+  keyframe:
+    # 关键帧平移触发距离，单位为米；非正值关闭该触发器。
+    distance: -1.0
+    # 关键帧旋转触发角度，单位为度；非正值关闭该触发器。
+    angle_deg: -1.0
+    # 相邻关键帧允许的最小时间间隔，单位为秒。
+    min_interval: 0.0
+    # 关键帧最大时间间隔，单位为秒；非正值关闭定时触发。
+    max_interval: 0.5
+  # 无先验图时是否在正常退出时保存运行轨迹地图。
+  save_on_shutdown: false
+  # 保存地图包时是否额外输出合并后的全局 PCD。
+  save_global_pcd: true
+  # 合并运行地图时使用的体素边长，单位为米。
+  map_voxel_resolution: 0.15
+registration:
+  # 共享点到面配准的输入体素边长，单位为米。
+  voxel_resolution: 0.4
+  # 每个配准层允许的最大求解迭代次数。
+  max_iterations: 16
+  # 点到目标平面锚点的最大对应距离，单位为米。
+  max_correspondence_distance: 1.0
+  # 平面邻域最远点允许的最大距离，单位为米；0 表示不限制。
+  max_plane_neighbor_distance: 1.2
+  # 候选几何验证要求的最小对应点比例。
+  min_correspondence_ratio: 0.5
+  # 细层支撑低于该比例时允许按需启动粗层。
+  coarse_trigger_min_correspondence_ratio: 0.35
+  # 恢复、回环和标定的最大点到面 RMSE，单位为米。
+  max_rmse: 0.25
+  # Huber 损失函数的残差转折尺度，单位为米。
+  huber_delta: 0.25
+  # 预计算目标平面时使用的近邻点数量。
+  plane_knn: 8
+  # 平面最小与最大特征值允许的最大比值。
+  max_plane_eigenvalue_ratio: 0.2
+  # 平面中间与最大特征值要求的最小比值，用于排除线结构。
+  min_plane_middle_eigenvalue_ratio: 0.08
+  # 构造合法点到面似然所需的最少对应点数。
+  min_correspondences: 80
+  # 由残差估计观测噪声时使用的标准差下限，单位为米。
+  residual_std_floor: 0.03
+  # 地图、平面和相关对应造成的局部位姿共模平移标准差下限，单位为米；0 表示关闭。
+  measurement_translation_std_floor: 0.005
+  # 局部位姿共模旋转标准差下限，单位为度；0 表示关闭。
+  measurement_rotation_std_floor_deg: 0.02
+  # 候选几何验证要求覆盖的最少水平扇区数。
+  min_coverage_sectors: 6
+  # Schur 条件数阈值；同时控制预条件器，不抬升图观测信息。
+  degeneracy_condition_threshold: 10.0
+tracking:
+  # 先验图目标子图最多包含的空间近邻关键帧数。
+  target_keyframes: 11
+  # 先验图目标子图的空间搜索半径，单位为米；0 表示不限。
+  target_radius: 8.0
+  # 选择先验参考关键帧的最大空间距离，单位为米；0 表示不限。
+  nearest_reference_radius: 7.0
+  source:
+    # 一次观测最多累计的因果点云帧数。
+    max_frames: 5
+    # 累计窗口允许的最大时间跨度，单位为秒；0 表示不限制。
+    max_time: 0.5
+    # 累计窗口允许的最大相对旋转，单位为度；0 表示不限制。
+    max_rotation_deg: 0.0
+    # 一次观测成立所需的最少因果点云帧数。
+    min_frames: 1
+    # 累计窗口允许的最大相对平移，单位为米；0 表示不限制。
+    max_translation: 1.5
+  # NORMAL 状态全局观测周期，单位为秒。
+  correction_period: 0.5
+  # 切换先验参考关键帧前要求的距离优势，单位为米。
+  target_hysteresis_distance: 0.5
+  # 常规全局校正允许的最大平移变化，单位为米；0 表示不限。
+  max_translation_correction: 1.5
+  # 常规全局校正允许的最大旋转变化，单位为度；0 表示不限。
+  max_rotation_correction_deg: 15.0
+  # 直接进入 SUSPECT 的线速度阈值，单位为米每秒。
+  suspicious_linear_speed: 10.0
+  # 直接进入 SUSPECT 的角速度阈值，单位为弧度每秒。
+  suspicious_angular_speed: 30.0
+recovery:
+  # SUSPECT 围绕最后可信位置的候选搜索半径，单位为米。
+  suspect_search_radius: 30.0
+  # LOST 描述子候选的宽域搜索半径，单位为米；0 表示不限。
+  lost_search_radius: 35.0
+  source:
+    # 一次观测成立所需的最少因果点云帧数。
+    min_frames: 2
+    # 一次观测最多累计的因果点云帧数。
+    max_frames: 5
+    # 累计窗口允许的最大时间跨度，单位为秒；0 表示不限制。
+    max_time: 0.5
+    # 累计窗口允许的最大相对平移，单位为米；0 表示不限制。
+    max_translation: 1.5
+    # 累计窗口允许的最大相对旋转，单位为度；0 表示不限制。
+    max_rotation_deg: 0.0
+  # 初始化阶段允许的最大描述子距离；0 表示不设门。
+  initial_max_descriptor_distance: 0.8
+  # SUSPECT/LOST 恢复允许的最大描述子距离；0 表示不设门。
+  descriptor_distance_limit: 0.8
+  # 无可信航向时一周内均匀生成的 yaw 假设数量。
+  yaw_sweep_count: 6
+  # 恢复阶段允许并行验证的候选数量；0 表示按硬件线程数。
+  parallel_candidates: 16
+  # 每次恢复最多进入几何验证的候选数量。
+  max_candidates: 15
+  # 恢复目标子图最多包含的先验关键帧数。
+  target_keyframes: 11
+  # 恢复目标子图的空间搜索半径，单位为米；0 表示不限。
+  target_radius: 8.0
+  # 恢复尝试的最小调度周期，单位为秒。
+  period: 0.2
+  # 局部召回失败后额外尝试的全局候选数量。
+  global_fallback_candidates: 5
+  # SUSPECT 升级到 LOST 所需的连续恢复失败次数。
+  suspect_failures_before_lost: 3
+  # LOST 状态是否持续自动尝试全局恢复。
+  automatic_when_lost: true
+uwb:
+  # 是否接入 UWB 位置观测，入口 --zloc-uwb 显式开启。
+  # 下列外参/时间偏置沿用迁入基线，须按现场硬件核对；开关不代表已完成标定。
+  enabled: false
+  # 是否信任并使用 UWB 的 Z 方向观测。
+  use_z: false
+  # 有先验图时是否在线联合估计 UWB 坐标系到 map 的变换。
+  estimate_zero_pose_online: true
+  # UWB 消息时刻到物理运动时刻的固定偏置，满足 t_motion=t_header+dt。
+  time_offset_seconds: -0.15
+  antenna_position_body:
+    # UWB 天线相位中心在 body 坐标系中的 X 位置，单位为米。
+    x: -0.245
+    # UWB 天线相位中心在 body 坐标系中的 Y 位置，单位为米。
+    y: -0.0
+    # UWB 天线相位中心在 body 坐标系中的 Z 位置，单位为米。
+    z: 0.0
+  # 单次 UWB 水平位置观测的标准差，单位为米。
+  position_std_xy: 0.15
+  # 原始 UWB 天线位置输入话题。
+  topic: /uwb_pose
+  # UWB 解算位置所属的真实坐标系名称。
+  frame: uwb
+  zero_pose:
+    # 固定或初始 T_map_uwb 的 X 平移，单位为米。
+    x: 0.0
+    # 固定或初始 T_map_uwb 的 Y 平移，单位为米。
+    y: 0.0
+    # 固定或初始 T_map_uwb 的 Z 平移，单位为米。
+    z: 0.0
+    # 固定或初始 T_map_uwb 的水平偏航角，单位为度。
+    yaw_deg: 0.0
+  # UWB 物理解的有效频率，单位为 Hz；用于识别高频保持重发。
+  effective_rate_hz: 1.0
+  # 有先验图时是否在线联合估计共享静态时间偏置。
+  estimate_time_offset_online: false
+  # 在线时间偏置状态的先验标准差，单位为秒。
+  time_offset_prior_std_seconds: 0.1
+  # 单次 UWB 解算随机时间抖动的标准差，单位为秒。
+  time_jitter_std_seconds: 0.05
+  # 恢复使用 UWB 解算允许的最大年龄，单位为秒。
+  max_age: 0.25
+  # UWB 物理时刻到真实前端位姿端点的最大时间差，单位为秒。
+  odom_sync_tolerance: 0.25
+  # 以 UWB 位置召回先验关键帧的搜索半径，单位为米。
+  recovery_search_radius: 2.0
+  # UWB 位置召回最多保留的先验关键帧数量。
+  recovery_candidates: 8
+  # 单次 UWB 高度观测或固定高度规范的标准差，单位为米。
+  position_std_z: 0.3
+  bootstrap:
+    # UWB/里程计启动对齐保留的最大时间配对数量。
+    max_pairs: 120
+    # 尝试 UWB/里程计启动对齐所需的最少时间配对数量。
+    min_pairs: 5
+    # UWB/里程计启动对齐要求的最小水平运动基线，单位为米。
+    min_baseline: 3.0
+    # UWB 启动对齐一致性内点阈值，单位为米。
+    inlier_threshold: 0.75
+    # 接受 UWB 启动对齐的最大内点 RMSE，单位为米。
+    max_rmse: 0.45
+    # 接受 UWB 启动对齐的最大 yaw 标准差，单位为度。
+    max_yaw_std_deg: 10.0
+    # 启动放行前要求连续稳定的对齐解数量。
+    stable_solutions: 2
+    # 相邻稳定对齐解允许的最大平移差，单位为米。
+    stable_translation_delta: 0.25
+    # 相邻稳定对齐解允许的最大 yaw 差，单位为度。
+    stable_yaw_delta_deg: 3.0
+    # 无先验 UWB 图保持前端重力轴的 roll/pitch 标准差，单位为度。
+    gravity_alignment_std_deg: 1.0
+loop:
+  # 是否启用运行轨迹回环；可与先验和 UWB 共存，入口 --zloc-loop 显式开启。
+  enabled: false
+  # 回环目标子图最多包含的历史关键帧数。
+  target_keyframes: 17
+  # 回环目标子图的空间搜索半径，单位为米；0 表示不限。
+  target_radius: 12.0
+  # 成功回环后再次检索所需的最少关键帧间隔。
+  cooldown_keyframes: 5
+  # 回环候选允许的最大优化位姿距离，单位为米；0 表示不限。
+  candidate_max_distance: 7.0
+  # 回环最佳与次佳描述子距离的比值上限。
+  descriptor_ratio_threshold: 1.0
+  source:
+    # 一次观测成立所需的最少因果点云帧数。
+    min_frames: 1
+    # 一次观测最多累计的因果点云帧数。
+    max_frames: 4
+    # 累计窗口允许的最大时间跨度，单位为秒；0 表示不限制。
+    max_time: 0.0
+    # 累计窗口允许的最大相对平移，单位为米；0 表示不限制。
+    max_translation: 0.0
+    # 累计窗口允许的最大相对旋转，单位为度；0 表示不限制。
+    max_rotation_deg: 0.0
+  # 单周期允许并行执行的回环候选验证数量。
+  max_parallel_verifications: 4
+  # PCM 和可视化保留的已接受回环数量；0 表示不限。
+  history_size: 200
+  validation:
+    # 回环测量允许的最大平移长度，单位为米。
+    max_translation: 3.0
+    # 回环测量允许的最大垂直位移，单位为米。
+    max_z: 0.5
+    # 回环测量允许的最大 roll/pitch，单位为度。
+    max_roll_pitch_deg: 10.0
+    # 回环几何 yaw 与描述子 seed 允许的最大差值，单位为度。
+    max_yaw_residual_deg: 60.0
+    # 计算独立几何重叠率时的点邻近距离，单位为米。
+    overlap_distance: 0.5
+    # 接受回环要求的最小独立几何重叠率。
+    min_overlap_ratio: 0.45
+  pcm:
+    # 是否启用回环成对一致性最大团验证。
+    enabled: true
+    # PCM 闭合误差允许的最大平移，单位为米。
+    translation_threshold: 1.0
+    # PCM 闭合误差允许的最大旋转，单位为度。
+    rotation_threshold_deg: 15.0
+    # 提交回环要求的最少历史一致边数量，达到即停止历史检查；无适用历史时允许启动。
+    min_consistent_loops: 1
+    # 同源候选批次要求的最小一致团规模。
+    min_candidate_clique_size: 1
+graph:
+  odom_noise:
+    # 里程计边每秒累计的旋转过程方差。
+    rotation_variance_per_second: 1.0e-06
+    # 里程计边每秒累计的平移过程方差。
+    translation_variance_per_second: 0.0005
+    # 里程计边每弧度运动附加的旋转过程方差。
+    rotation_variance_per_radian: 3.0e-07
+    # 里程计边每米运动附加的平移过程方差。
+    translation_variance_per_meter: 0.0002
+  # 不需历史回环时保留位姿变量的固定滞后时长，单位为秒；0 使用完整图。
+  fixed_lag_seconds: 30.0
+  # 图规范先验的各轴旋转方差，单位为弧度平方。
+  prior_rotation_variance: 0.0001
+  # 图规范先验的各轴平移方差，单位为米平方。
+  prior_translation_variance: 0.01
+  robust:
+    # 是否为机会型回环因子启用图内鲁棒核。
+    enabled: true
+    # 机会型回环使用的鲁棒核名称。
+    kernel: cauchy
+    # 鲁棒核按白化残差分量 RMS 定义的阈值。
+    size: 0.5
+reset:
+  # 执行前端重置事务的服务。本工作区由 zlio_bridge 的 backend 输出代理提供：
+  # 它转发给前端 /zlio/reset_internal，并把回复里的坐标边界改写为“适配后 odom 连续”
+  # 的恒等边界（见 srm27_localization_adapter/scripts/zlocalization_backend_adapter.py）。
+  service: zlocalization/reset_frontend
+  # reset 响应超时重试间隔，单位为秒；重试沿用同一事务 ID。
+  response_timeout: 5.0
+  # 两次新 reset 事务之间的最小时间间隔，单位为秒。
+  min_gap: 10.0
+  # 无有效坐标边界的停车 reset 在途平移标准差，单位为米。
+  stationary_translation_std: 0.05
+  # 无有效坐标边界的停车 reset 在途旋转标准差，单位为度。
+  stationary_rotation_std_deg: 1.0
+startup_hint:
+  # 是否提供 epoch 0 时 body 在 map 中的近似启动位姿。
+  enabled: false
+  # 有先验图时是否持续只用启动提示做几何验证直至成功。
+  force_until_matched: true
+  # 启动提示中 body 在 map 下的 X 坐标，单位为米。
+  x: 4.6
+  # 启动提示中 body 在 map 下的 Y 坐标，单位为米。
+  y: 7.5
+  # 启动提示中 body 在 map 下的 Z 坐标，单位为米。
+  z: 0.15
+  # 启动提示中 body 在 map 下的偏航角，单位为度。
+  yaw_deg: 0.0
+innovation:
+  # 联合 NIS 卡方上尾概率低于该值时判定观测冲突。
+  rejection_probability: 0.001
+  # 从 OBS_DEGRADED 升级到 SUSPECT 所需的连续冲突次数。
+  conflicts_before_suspect: 7
+pure_odometry:
+  # 纯 odom 时 odom 原点在 map 中的 X 坐标，单位为米。
+  origin_x: 0.0
+  # 纯 odom 时 odom 原点在 map 中的 Y 坐标，单位为米。
+  origin_y: 0.0
+visualization:
+  # 是否启用后端 RViz 可视化输出。
+  enabled: false
+  # 是否发布不可变先验地图。
+  publish_prior_map: false
+  # 是否发布运行轨迹累计地图。
+  publish_runtime_map: false
+  # 是否发布地图关键帧坐标轴标记。
+  publish_map_axes: false
+  # 是否发布前端轨迹与优化轨迹。
+  publish_paths: false
+  # 是否发布最近一次配准的 source/target 调试点云。
+  publish_debug_registration: false
+  # 地图类可视化的最小发布周期，单位为秒。
+  map_publish_period: 2.0
+services:
+  # 保存当前运行轨迹地图包的服务名。
+  save_map: ~/save_map
+  # 手动全局重定位服务名。
+  relocalize: ~/relocalize
+  # 统一协调前端 reset 的公开服务名。相对名随 namespace 解析。
+  reset: localization_reset
+output:
+  legacy:
+    # 是否启用旧 robot_navigation 兼容接口。
+    # 本工作区没有任何消费者，且 publish_tf 会额外发布一条 map→body，
+    # 让 map 出现两个孩子节点 —— 必须关闭（方案 §3.2 第 7、8 条）。
+    enabled: false
+    # 兼容接口是否发布定位位姿。
+    publish_pose: true
+    # 兼容接口是否发布 map 系速度。
+    publish_twist: true
+    # 兼容接口是否发布有界历史路径。
+    publish_path: false
+    # 兼容接口是否发布 map 到 body TF。本工作区 TF 树里没有 body，
+    # 且 map→odom 必须唯一所有者，故保持 false。
+    publish_tf: false
+    # INITIALIZING 时兼容接口是否发布输出。
+    publish_initializing: false
+    # SUSPECT/LOST 时兼容接口是否发布冻结输出。
+    publish_untrusted: false
+    # 兼容定位位姿输出话题。
+    pose_topic: /tdt_lio_pose
+    # 兼容速度输出话题。
+    twist_topic: /tdt_lio_twist
+    # 兼容路径输出话题。
+    path_topic: /tdt_lio_path
+    # 兼容定位危险码输出话题。
+    danger_topic: /LAM_danger_situation
+    # 兼容路径采样周期，单位为秒。
+    path_period: 0.1
+    # 兼容路径保留的最大位姿数量。
+    path_max_size: 2000
+  world_cloud:
+    # 是否发布变换到 map 坐标系的实时点云。
+    # 无消费者；每帧把整帧点云变换到 map 系是纯 CPU/DDS 开销，默认关闭。
+    enabled: false
+    # 实时 map 系点云最小发布周期，单位为秒；0 表示每帧。
+    publish_period: 0.0
+    # INITIALIZING 时是否发布实时 map 系点云。
+    publish_initializing: false
+    # SUSPECT/LOST 时是否发布冻结位姿下的实时点云。
+    publish_untrusted: false
+    # 实时 map 系点云输出话题。
+    topic: /localization/lio_world_cloud
+storage:
+  # 原始点云缓存保留预算，单位为 MiB；0 表示不保留缓存。
+  cloud_cache_mb: 64
+  # 子图和派生几何的缓存预算，单位为 MiB；0 表示不保留缓存。
+  submap_cache_mb: 64

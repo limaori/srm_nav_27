@@ -12,6 +12,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_test REQUIRED)
   foreach(test_name test_fakeyaw_launch_wiring test_fakeyaw_real_wiring
                     test_cli_parity test_lio_frontend_wiring
+                    test_localization_backend_wiring test_zlocalization_cli
                     test_gimbal_tree_direction test_frame_contract)
     ament_add_test(${test_name}
       GENERATE_RESULT_FOR_RETURN_CODE_ZERO

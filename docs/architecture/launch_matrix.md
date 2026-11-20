@@ -6,13 +6,16 @@
 >
 > 本文件是 launch 入口的**唯一权威表**。新增/修改入口时先改这里，再改代码；
 > 其他文档里的入口说明若与本表冲突，以本表为准。
+>
+> 定位后端实验模式（`--zloc-backend`，默认关闭）的接口与所有权契约见
+> [localization_backend.md](localization_backend.md)；它不改变本表的四个正式入口。
 
 ## 1. 四个正式入口
 
 | # | 用途 | 推荐命令 | 入口 launch | 默认控制器 | 默认定位/前端 | 默认参数 | 速度出口 |
 |---|---|---|---|---|---|---|---|
-| 1 | 实车导航 | `./scripts/bringup/start_real_nav.sh` | `nav_srm_real_launch.py` | MINCO (`srm27_minco_controller::MincoMpcController`) | 未显式指定时走 `--lio`：`zlio` + 静态 `map->odom`；`--reloc` 才用 small_gicp + 先验 PCD | `config/real/current/nav2_params_srm_minco_fakeyaw.yaml` | `cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_chassis → srm27_nav_protocol` |
-| 2 | 仿真导航 | `./scripts/bringup/start_sim_nav.sh` | `nav_srm_simulation_launch.py` | MINCO（唯一支持；`-c omni` 已拒绝） | 默认 Gazebo 真值里程计；`--lio` 切 ZLIO（默认前端）或 `--lio-frontend point_lio`；`--gicp` 用先验 PCD | `config/simulation/current/nav2_params_srm_fakeyaw.yaml` | `cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_sim → 适配器 → Gazebo` |
+| 1 | 实车导航 | `./scripts/bringup/start_real_nav.sh` | `nav_srm_real_launch.py` | MINCO (`srm27_minco_controller::MincoMpcController`) | 未显式指定时走 `--lio`：`zlio` + 静态 `map->odom`；`--reloc` 才用 small_gicp + 先验 PCD；`--zloc-backend` 用 backend（实验） | `config/real/current/nav2_params_srm_minco_fakeyaw.yaml` | `cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_chassis → srm27_nav_protocol` |
+| 2 | 仿真导航 | `./scripts/bringup/start_sim_nav.sh` | `nav_srm_simulation_launch.py` | MINCO（唯一支持；`-c omni` 已拒绝） | 默认 Gazebo 真值里程计；`--lio` 切 ZLIO（默认前端）或 `--lio-frontend point_lio`；`--gicp` 用先验 PCD；`--zloc-backend --zloc-prior --zloc-map <dir>`（可叠加 `--zloc-loop` / `--zloc-uwb`）用 backend（实验） | `config/simulation/current/nav2_params_srm_fakeyaw.yaml` | `cmd_vel_nav_fake → fake_vel_transform → cmd_vel_nav_body → srm_cmd_mux → cmd_vel_sim → 适配器 → Gazebo` |
 | 3 | 实车建图 | `./scripts/bringup/start_real_slam.sh` | `real_mapping_launch.py` | 不涉及（建图链路） | `zlio`（`--lio-frontend point_lio` 回退） | `config/real/current/mapping_params.yaml` + `zlio_mid360.yaml` | 不涉及导航；底盘串口由 `srm27_nav_protocol` 单独启动 |
 | 4 | 仿真建图 | `./scripts/bringup/start_sim_slam.sh` | `sim_slam_launch.py` | 不涉及（建图链路） | Point-LIO | `config/simulation/current/nav2_params_srm.yaml` + Point-LIO `mid360.yaml` | 不涉及导航；Gazebo 由脚本单独拉起 |
 
@@ -55,6 +58,29 @@
 - 退出时 Point-LIO 写 `~/srm_nav_27_data/generated_pcd/point_lio/scans.pcd`；
   `--collect` 收到 `maps/pcd/<name>.pcd`。
 - 2D 栅格图用 `map_saver` 服务另存；脚本会打印现成命令。
+
+## 1.1 `map -> odom` 的五个候选所有者（互斥）
+
+| 模式 | 命令开关 | `map -> odom` 发布者 | 状态 |
+|---|---|---|---|
+| LIO + 静态 TF | `--lio`（zlio 前端时的默认） | `tf2_ros static_transform_publisher` | current |
+| GICP 重定位 | `--reloc` / `--gicp` | `small_gicp_relocalization` | current |
+| SLAM | `--slam` | `slam_toolbox` | current |
+| 静态地图 | `--static` | `tf2_ros static_transform_publisher`（无里程计） | current |
+| 定位后端 | `--zloc-backend --zloc-prior --zloc-map <绝对目录>`（回环/UWB 另加 `--zloc-loop` / `--zloc-uwb`） | `srm27_zlocalization_backend_node` | **experimental（默认关闭）** |
+
+约束（三层检查，任何一层不满足都在启动前失败，不会出现两个发布者抢 TF）：
+
+1. `start_*_nav.sh`：开关互斥；backend 还要求 `--lio` + `--lio-frontend zlio` + 绝对路径的地图包。
+2. `nav2_stack_launch.py`：backend 与 `slam:=True` 互斥。
+3. `localization_launch.py`：backend 与 `use_pcd_localization` 互斥，且静态 `map->odom`
+   的 `IfCondition` 会同时排除 `use_pcd_localization` 与 `use_zlocalization_backend`。
+
+backend 模式还改两处前端行为（详见 [localization_backend.md](localization_backend.md) §4）：
+
+- `zlio.coordinated_reset` 从 `false` 翻成 `true`（等后端协调换代，而不是自己换代）；
+- `zlio_bridge.backend_enabled=true`：同一节点额外发布 `frontend/frame|odometry|session`
+  并代理 reset 事务（`T_off` 只有一个所有者，因此必须在同一节点内）。
 
 ## 2. launch 文件分类（16 个 canonical + 16 个前缀别名）
 
@@ -101,6 +127,7 @@ start_real_nav.sh
     ├── real_robot_state_publisher_launch.py   (可选，脚本分步启动时)
     ├── nav2_stack_launch.py
     │   ├── localization_launch.py  (slam:=False)
+    │   │   └── srm27_zlocalization_backend/backend.launch.py  (仅 --zloc-backend)
     │   └── nav2_slam_launch.py     (slam:=True)
     │       └── navigation_launch.py
     └── rviz_launch.py

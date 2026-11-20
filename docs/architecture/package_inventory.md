@@ -1,10 +1,10 @@
-# ROS 包清点（2026-11-16）
+# ROS 包清点（2026-11-16，Z-Localization backend 迁入后）
 
-统计口径：`colcon list` / `src/**/package.xml`，共 **33** 个 ROS 包。
+统计口径：`colcon list` / `src/**/package.xml`，共 **34** 个 ROS 包。
 
 | 分类 | 数量 | 说明 |
 |---|---:|---|
-| 项目自有/维护 | 21 | `srm27_*`、`frontend`、`localization_interfaces`、`rm_decision_interfaces` |
+| 项目自有/维护 | 22 | `srm27_*`、`frontend`、`localization_interfaces`、`rm_decision_interfaces` |
 | 集成/改造的第三方导航包 | 10 | Point-LIO、ZLIO 周边、fake_vel_transform、terrain_analysis 等 |
 | 外部依赖 | 2 | `src/dependencies/BehaviorTree.ROS2` 下的 BT 运行库与接口 |
 
@@ -18,7 +18,7 @@
 | 目录 | 包数 | 内容 |
 |---|---:|---|
 | `interfaces` | 2 | 定位协议、决策/裁判/云台消息 |
-| `localization` | 8 | 前端 5 + 后端 3 |
+| `localization` | 9 | 前端 5 + 后端 4（含迁入的 `srm27_zlocalization_backend`） |
 | `planner` | 8 | 前端 5 + 后端 3 |
 | `controller` | 6 | 控制器、速度变换、底盘、串口、手柄 |
 | `decision` | 1 | 行为树 |
@@ -26,7 +26,7 @@
 | `bringup` | 3 | Nav2 装配、工具与导航元包 |
 | `dependencies` | 2 | BehaviorTree.ROS2 |
 
-## 项目自有/维护（21）
+## 项目自有/维护（22）
 
 | 包 | 路径 | 角色 |
 |---|---|---|
@@ -48,7 +48,8 @@
 | `srm27_costmap_plugins` | `src/planner/frontend/srm27_costmap_plugins` | 强度体素代价地图层 |
 | `srm27_nav_behavior_plugins` | `src/planner/frontend/srm27_nav_behavior_plugins` | Nav2 脱困行为、目标检查器、路线途经点 BT 节点 |
 | `srm27_nav_plugins` | `src/planner/frontend/srm27_nav_plugins` | 兼容元包；依赖上述两个拆分插件包 |
-| `srm27_localization_adapter` | `src/localization/backend/srm27_localization_adapter` | ZLIO 消息桥接与 IMU 饱和保护 |
+| `srm27_localization_adapter` | `src/localization/backend/srm27_localization_adapter` | ZLIO 消息桥接、IMU 饱和保护、backend 输入适配与 reset 代理 |
+| `srm27_zlocalization_backend` | `src/localization/backend/srm27_zlocalization_backend` | Z-Localization backend 迁入版：因子图定位、6 个地图/标定工具（GPL-2.0-only，实验模式默认关闭） |
 | `srm27_omni_pid_controller` | `src/controller/srm27_omni_pid_controller` | Omni Pure Pursuit 控制器（实车回退链） |
 | `srm27_teleop_twist_joy` | `src/controller/srm27_teleop_twist_joy` | 底盘/云台手柄遥控 |
 

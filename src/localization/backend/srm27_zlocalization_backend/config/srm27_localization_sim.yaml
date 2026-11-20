@@ -1,0 +1,8 @@
+# 本工作区仿真先验地图定位 profile。
+#
+# 只覆盖“跑起来需要的接线”，算法参数一律沿用 backend.yaml（上游基线）。
+extends: backend.yaml
+
+common:
+  # 仿真的 ZLIO body_frame / IMU 与雷达同 link，是 front_mid360。
+  sensor_frame: front_mid360

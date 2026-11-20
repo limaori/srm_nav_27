@@ -1271,6 +1271,15 @@ zlio_bridge:
     session_topic: "zlio/session"
     epoch_topic: "zlio_bridge/epoch"
     events_topic: "zlio_bridge/events"
+    # ---- Z-Localization backend 实验模式（默认关闭，2026-11-16 迁入）----
+    # 只在 launch 的 use_zlocalization_backend:=True 时由 launch 注入
+    #   backend_enabled / backend_sensor_frame(= 上面的 lidar_frame)
+    # 打开后本节点额外发布 frontend/frame|odometry|session 给 backend，并代理 reset 事务
+    # （把前端的坐标边界改写成"适配后 odom 连续"的恒等边界）。其余 backend 参数
+    # （话题/服务/队列深度）用节点内默认值，见
+    #   srm27_localization_adapter/scripts/zlocalization_backend_adapter.py
+    # ⚠ backend 模式下 anchor_on_epoch_change 必须保持 True：odom 的连续性由本节点提供，
+    #   backend 只按恒等边界接手 —— 关掉就是"两个补偿都少一半"。
     matches_topic: "zlio_bridge/matches"
     tf_timeout: 0.5
     anchor_on_epoch_change: True

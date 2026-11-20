@@ -16,6 +16,7 @@
 ## architecture
 
 - [启动入口矩阵（唯一入口表）](architecture/launch_matrix.md) —— 四个正式入口、16 个 launch 的 current/compat/deprecated 分类、参数文件分类、fake_vel_transform 当前职责。
+- [Z-Localization backend 接入契约](architecture/localization_backend.md) —— backend 模式的 TF 所有权、输入契约、reset/epoch 唯一所有权、配置与回退（实验模式，默认关闭）。
 - [ROS 包清点](architecture/package_inventory.md) —— 29 个包的分类、路径与职责。
 - [仿真数据流](architecture/仿真数据流%28ai%29.md) —— 仿真链的话题、frame、控制路径（AI 生成，已按 SRM 链更新）。
 - [哨兵导航 TF 与下位机数据接口](architecture/哨兵导航TF与下位机数据接口%28ai%29.md) —— MID-360 安装、传感器分工、上下位机约定。
@@ -26,6 +27,8 @@
 - [导航恢复与仿真验证](recovery.md)：两层恢复的职责、安全约束、参数入口与一键验证。
 
 - [MID360 使用指南](operations/mid360使用指南.md) —— 网络配置与驱动启动。
+- [Z-Localization Backend 功能验收](operations/Z-Localization后端功能验收.md) —— 假设输入链路正常，直接验地图定位、跟踪、错误地图拒绝、reset 与导航接管。
+- [Z-Localization 后端继续验收方案](operations/Z-Localization后端继续验收方案.md) —— 在输出位姿稳定的基线上，继续验 reset/状态机、输出尖峰/时间同步、回环 A/B、导航联动与长跑开销。
 - [导航速度调试指南](operations/导航速度调试指南.md) —— 限速、加速度、前瞻、PID。
 - [导航避障调试指南](operations/导航避障调试指南.md) —— 代价地图、膨胀、净空、恢复行为。
 - [分支合并说明](operations/分支合并说明.md) —— `--no-ff` 合并与 CLion 操作。
@@ -42,12 +45,14 @@
 - [GICP 初始重定位仿真验证方案](design/GICP初始重定位仿真验证方案.md) —— 地图对齐、误差矩阵、验收指标。
 - [仿真 LIO 前端替换 Z-LIO 实施方案](design/仿真LIO前端替换Z-LIO实施方案%28ai%29.md) —— ZLIO 接入与三级回退。
 - [Z-Localization 算法原理与迁移学习指南](design/Z-Localization算法原理与迁移学习指南.md) —— 前端 LIO、后端因子图、全局观测与迁移时的数据语义。
+- [Z-Localization 整体迁移实施方案](design/Z-Localization整体迁移实施方案.md) —— backend 迁入范围、分阶段验证、在线接管门槛与回退策略。
 - [Z-Localization 剩余部分整体迁移问题分析](design/Z-Localization剩余部分整体迁移问题分析%28ai%29.md) —— 迁移风险与三档路线。
 
 ## records
 
 - [2026-11-14 工作区清理记录](records/2026-11-14-workspace-cleanup.md) —— 本轮数据迁移、脚本/launch/docs 重整与 Git 清理。
 - [2026-11-15 ROS 包目录模块化重组](records/2026-11-15-module-reorg.md) —— 七模块 + 支撑层的包目录调整、路径修正与验证。
+- [2026-11-16 Z-Localization backend 迁入](records/2026-11-16-zlocalization-backend-migration.md) —— backend 包迁入、输入适配、reset 所有权、构建/测试/地图包验证证据。
 - [MINCO 迁移实施记录](records/minco迁移实施记录%28ai%29.md)
 - [MINCO 实车迁移实施记录与上电验收清单](records/minco实车迁移实施记录%28ai%29.md)
 - [MINCO 脱困机制迁移实施记录](records/minco脱困机制迁移实施记录%28ai%29.md)

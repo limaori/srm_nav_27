@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<!-- 声明定位后端的构建与运行依赖。 -->
+<package format="3">
+  <name>srm27_zlocalization_backend</name>
+  <version>0.0.1</version>
+  <description>融合前端里程计、点云地图、回环和 UWB 的因子图定位后端（Z-Localization backend 迁入版）。</description>
+
+  <maintainer email="zhujunheng2005@gmail.com">mozihe</maintainer>
+  <author email="zhujunheng2005@gmail.com">mozihe</author>
+  <license>GPL-2.0-only</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>eigen</depend>
+  <depend>tbb</depend>
+  <build_depend>libpcl-all-dev</build_depend>
+  <exec_depend>libpcl-common</exec_depend>
+  <exec_depend>libpcl-io</exec_depend>
+  <exec_depend>libpcl-filters</exec_depend>
+  <exec_depend>libpcl-kdtree</exec_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_eigen</depend>
+  <depend>pcl_conversions</depend>
+  <build_depend>libnanoflann-dev</build_depend>
+  <depend>message_filters</depend>
+  <depend>localization_interfaces</depend>
+  <depend version_gte="4.2.0" version_lt="4.3.0">gtsam</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>rcl_interfaces</test_depend>
+  <test_depend>domain_coordinator</test_depend>
+  <test_depend>sensor_msgs_py</test_depend>
+  <test_depend>python3-numpy</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

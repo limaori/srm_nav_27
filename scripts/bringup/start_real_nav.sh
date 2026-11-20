@@ -9,12 +9,14 @@
 #   步骤 5: RViz
 #   步骤 6: 手柄遥控 (可选, 默认关闭)
 #
-# 定位方式 (四者互斥, 区别只在 map->odom 由谁发布):
+# 定位方式 (五者互斥, 区别只在 map->odom 由谁发布):
 #   --lio     (默认) Point-LIO 只提供里程计, map->odom 用静态 TF —— 实车推荐
 #   --reloc   small_gicp 与先验 PCD 做 GICP 配准, 由它发布 map->odom (需要 --prior-pcd)
 #   --slam    slam_toolbox 边跑边建图, 由它发布 map->odom (不需要先验地图)
 #   --static  只加载先验栅格图 + 静态 map->odom, 没有任何里程计来源
 #             (仅当车体模块自己发 odom->base_link 时可用; 直接用本脚本起车不会动)
+#   --zloc-backend  实验模式: srm27_zlocalization_backend 发布 map->odom
+#             (需要 --lio + --lio-frontend zlio；先验/回环/UWB 默认关，独立选择)
 #
 # 实车速度链路（2026-11-06 起与仿真同构；见 docs/仿真链迁移实车实施记录(ai).md）:
 #
@@ -119,6 +121,18 @@
 #       --map-to-odom X Y YAW   静态 map->odom 初值 (m, m, rad), 即"车现在停的位置
 #                               在地图坐标系里的位姿"; 默认 0 0 0 (车在 map 原点)
 #       --slam / --reloc / --static   其余定位方式（与 --lio/--gicp 同一组互斥开关）
+#       --zloc-backend          Z-Localization backend 实验模式（默认关闭）:
+#                               backend_node 统一融合并发布 map->odom；
+#                               需要 --lio + --lio-frontend zlio；三项融合能力独立选择。
+#                               与 --reloc/--slam/--static 互斥（同一时刻只能有一个
+#                               map->odom 所有者）。验收未通过前不要用于正式比赛。
+#       --zloc-prior            启用先验配准（默认关闭；需要 --zloc-map）
+#       --zloc-loop             启用运行轨迹回环（默认关闭，可与先验/UWB 同开）
+#       --zloc-uwb              启用 UWB 融合（默认关闭；需配置实际话题/坐标/外参）
+#       --zloc-config <文件>    backend YAML 绝对路径（可用 extends 继承默认配置）
+#       --zloc-map <目录>       先验地图包绝对路径，仅指定路径，不隐式启用先验
+#                               必须已在地图系下（由 _mapframe.pcd 生成，不是 camera_init）
+#       --zloc-trajectory <目录> backend 轨迹地图包输出目录（仅建图模式需要）
 #       --no-reloc              等价于 --lio
 #       --gimbal-joint-topic <话题>   云台关节角回传话题（中继成 /joint_states）
 #       --mux / --no-mux        是否串 srm_cmd_mux（默认串）
@@ -163,7 +177,8 @@
 #                               (--lio-frontend zlio 与 --reloc/--slam 互斥)
 #       --mux / --no-mux         是否串 srm_cmd_mux (默认串)。关掉时导航出口变成
 #                               cmd_vel_nav_body, 而串口节点订阅 cmd_vel_chassis —— 车不会动。
-#       --slam / --reloc / --lio / --static   定位方式, 四者互斥 (默认 --reloc)
+#       --slam / --reloc / --lio / --static / --zloc-backend
+#                               定位方式, 五者互斥 (默认 --reloc)
 #       --no-reloc              等价于 --lio: LIO 里程计 + 静态 map->odom, 不需要先验 PCD。
 #       --lidar-xyz "X Y Z"     临时覆盖雷达安装位置, 米 (默认空 = 用 URDF 模型里的值)
 #       --lidar-rpy "R P Y"     临时覆盖雷达安装角, 弧度 (默认空 = 用 URDF 模型里的值)
@@ -329,6 +344,10 @@ BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
 # ⚠ 数据断了 relay 会在 timeout_sec(0.3 s) 后停发 /joint_states，TF 停在最后一帧。
 # 注意用 ${VAR-default} 而不是 ${VAR:-default}：后者会把"显式设为空"也当成未设置，
 # 那样 GIMBAL_JOINT_TOPIC= 就没法关掉回传了。
+# 是否由用户显式指定（CLI 或环境变量）。--no-chassis 时只把**默认值**退回 constant，
+# 显式给过的话题保持不动（可能是另起了 srm27_nav_protocol 在发）。
+# 必须在下面填默认值**之前**判断：填完之后 ${VAR+set} 永远为真。
+if [ -n "${GIMBAL_JOINT_TOPIC+set}" ]; then GIMBAL_JOINT_TOPIC_GIVEN=1; else GIMBAL_JOINT_TOPIC_GIVEN=0; fi
 GIMBAL_JOINT_TOPIC="${GIMBAL_JOINT_TOPIC-gimbal_joint_angle}"
 
 # 里程计前端 (point_lio / zlio) 与 ZLIO 算法配置。
@@ -345,6 +364,18 @@ START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
 START_LIO="${START_LIO:-0}"
 START_STATIC="${START_STATIC:-0}"
+# Z-Localization backend 实验模式（默认关闭）。它是 map->odom 的第五个候选所有者，
+# 与其余四个互斥；backend 只吃 ZLIO 的 FrontendFrame，所以必须 --lio + zlio 前端。
+START_ZLOC="${START_ZLOC:-0}"
+# 三项能力仅由本次 CLI 显式开启，不继承环境变量中的历史开关。
+ZLOC_PRIOR=0
+ZLOC_LOOP=0
+ZLOC_UWB=0
+ZLOC_CONFIG=""
+# 先验地图包目录（必须绝对路径，且必须由 maps/pcd/<site>_mapframe.pcd 生成）。
+ZLOC_MAP="${ZLOC_MAP:-}"
+# backend 轨迹地图包输出目录（先验定位模式不写轨迹，只有建图模式需要）。
+ZLOC_TRAJECTORY_DIR="${ZLOC_TRAJECTORY_DIR:-}"
 
 # ---- 与 start_sim_nav.sh 共用的环境变量别名 ----
 # 仿真脚本用 USE_GICP / USE_LIO_ODOMETRY / ROBOT_NS / INIT_POSE 这些名字。
@@ -644,6 +675,15 @@ while [ $# -gt 0 ]; do
     --no-reloc)       START_RELOC=0; NO_RELOC=1; MODE_GIVEN=1; shift ;;
     --lio|--lio-only) START_LIO=1; MODE_GIVEN=1; shift ;;
     --static)         START_STATIC=1; MODE_GIVEN=1; shift ;;
+    --zloc-backend|--backend) START_ZLOC=1; MODE_GIVEN=1; shift ;;
+    --zloc-prior) ZLOC_PRIOR=1; shift ;;
+    --zloc-loop)  ZLOC_LOOP=1; shift ;;
+    --zloc-uwb)   ZLOC_UWB=1; shift ;;
+    --zloc-config) ZLOC_CONFIG="${2:?--zloc-config 需要配置文件}"; shift 2 ;;
+    # 空路径交给启用先验时的自检统一报告，避免未设置 BUNDLE 时难以理解的 bash 错误。
+    --zloc-map)       ZLOC_MAP="${2:-}"
+                      if [ $# -ge 2 ]; then shift 2; else shift; fi ;;
+    --zloc-trajectory) ZLOC_TRAJECTORY_DIR="${2:?--zloc-trajectory 需要目录}"; shift 2 ;;
     # ${2?} 而不是 ${2:?}: 允许显式给空串, 含义是"这一项跟随 URDF 模型"。
     --lidar-xyz)      LIDAR_XYZ="${2?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
     --lidar-rpy)      LIDAR_RPY="${2?--lidar-rpy 需要 \"R P Y\"}"; shift 2 ;;
@@ -696,8 +736,9 @@ while [ $# -gt 0 ]; do
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_CLI_GIVEN=1; shift ;;
     --behavior)       BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
     --no-behavior)    BEHAVIOR_TREE=""; shift ;;
-    --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"; shift 2 ;;
-    --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; shift ;;
+    --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"
+                      GIMBAL_JOINT_TOPIC_GIVEN=1; shift 2 ;;
+    --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; GIMBAL_JOINT_TOPIC_GIVEN=1; shift ;;
     --lio-frontend)   LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"
                       LIO_FRONTEND_CLI_GIVEN=1; shift 2 ;;
     # --- 与 start_sim_nav.sh 对齐的参数面（同一条命令两边通用）---
@@ -723,6 +764,18 @@ while [ $# -gt 0 ]; do
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+# --no-chassis 时没人发 gimbal_joint_angle（只有 srm27_nav_protocol 发），云台中继按
+# float32 模式等 0.3 s 就停发 /joint_states；而 gimbal_yaw->base_link 这条 TF **只**来自
+# /joint_states，于是 zlio_bridge 一直"等待 T(gimbal_yaw←base_link)"并丢掉每一帧
+# （连 /odometry 都出不来），RViz 里底盘那一支也从 TF 树上断开。
+# 台架/无底盘时把中继退回 constant 0 度（等价 fixed），并在终端说清楚。
+if [ "$USE_CHASSIS" != "1" ] && [ "$GIMBAL_JOINT_TOPIC_GIVEN" != "1" ] \
+   && [ -n "$GIMBAL_JOINT_TOPIC" ]; then
+  GIMBAL_JOINT_TOPIC=""
+  echo "[提示] --no-chassis: 没有节点发布 gimbal_joint_angle → 云台中继改 constant 0 度"
+  echo "[提示]   （否则 gimbal_yaw->base_link 没有 TF, zlio_bridge 会丢光所有帧）"
+fi
 
 # ---------- 航向策略 / 小陀螺 ----------
 case "$YAW_MODE" in
@@ -863,6 +916,17 @@ SLAM_ON="$(to01 "$START_SLAM")"
 RELOC_ON="$(to01 "$START_RELOC")"
 LIO_ON="$(to01 "$START_LIO")"
 STATIC_ON="$(to01 "$START_STATIC")"
+ZLOC_ON="$(to01 "$START_ZLOC")"
+# backend 模式也是一种"map->odom 所有者"，不参与 --lio/--reloc 的二选一计数，
+# 但必须与 --reloc/--slam/--static 互斥，且自身要求 LIO 提供里程计。
+if [ "$ZLOC_ON" = "1" ] && { [ "$RELOC_ON" = "1" ] || [ "$SLAM_ON" = "1" ] || [ "$STATIC_ON" = "1" ]; }; then
+  cat >&2 <<'EOF2'
+[错误] --zloc-backend 与 --reloc / --slam / --static 互斥:
+[错误]   它们都决定 map->odom 由谁发布（任一时刻只能有一个所有者）。
+[错误]   backend 模式: 先验地图包 -> backend_node 发 map->odom, LIO 只负责 odom->base_link。
+EOF2
+  exit 1
+fi
 
 # --no-reloc: 把重定位关掉 (即使 START_RELOC 被环境变量打开), 于是**不需要先验 PCD**。
 if is_true "$NO_RELOC"; then
@@ -907,11 +971,62 @@ if [ $((SLAM_ON + RELOC_ON + LIO_ON + STATIC_ON)) -gt 1 ]; then
 [错误]   --reloc : small_gicp 与先验 PCD 配准后发布 map->odom
 [错误]   --lio   : Point-LIO 只给里程计, map->odom 用静态 TF
 [错误]   --static: 只加载栅格图, map->odom 用静态 TF, 且没有里程计来源
+[错误]   --zloc-backend: backend_node 用先验地图包发 map->odom
 [错误] 同时开启会导致 TF 冲突。
 [错误] 只选一个; 若没在命令行给多个, 检查环境变量 START_SLAM / START_RELOC /
 [错误] START_LIO / START_STATIC 是否被导出过。
 EOF
   exit 1
+fi
+
+# ---------- Z-Localization backend 模式自检 ----------
+# 这些条件缺一条的表现都**不是报错**而是"车定位到错的地方":
+#   * 没有 --lio: backend 拿不到 FrontendFrame，输出永远 INITALIZING；
+#   * 前端不是 zlio: legacy/point_lio 输入没有本仓库的 odom/T_off 契约；
+#   * 启用先验却未给地图包，或地图坐标系错误: backend 无法建立可信地图定位。
+if [ "$ZLOC_ON" != "1" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_LOOP" = "1" ] || [ "$ZLOC_UWB" = "1" ] || [ -n "$ZLOC_CONFIG" ]; }; then
+  echo "[错误] --zloc-prior / --zloc-loop / --zloc-uwb / --zloc-config 需要 --zloc-backend。" >&2
+  exit 2
+fi
+if [ "$ZLOC_ON" = "1" ]; then
+  _zloc_problems=()
+  [ "$LIO_ON" = "1" ] || _zloc_problems+=("需要 --lio（backend 依赖 ZLIO 的 FrontendFrame 输入）")
+  [ "$LIO_FRONTEND" = "zlio" ] || _zloc_problems+=("需要 --lio-frontend zlio（当前: $LIO_FRONTEND）")
+  if [ "$ZLOC_PRIOR" = "1" ]; then
+    if [ -z "$ZLOC_MAP" ]; then
+      _zloc_problems+=("需要 --zloc-map <先验地图包目录>（写成 \"\$BUNDLE\" 时, 先确认它在本 shell 里已 export）")
+    elif [ ! -d "$ZLOC_MAP" ]; then
+      _zloc_problems+=("--zloc-map 目录不存在: $ZLOC_MAP")
+    elif [ ! -f "$ZLOC_MAP/keyframes.txt" ]; then
+      _zloc_problems+=("--zloc-map 不是地图包（缺 keyframes.txt）: $ZLOC_MAP")
+    fi
+  fi
+  # --zloc-map 只提供路径；没开 --zloc-prior 时它不生效。放在这里提示，避免
+  # "命令行里明明写了地图包" 却按无先验跑（只开回环时最容易踩）。
+  if [ -n "$ZLOC_MAP" ] && [ "$ZLOC_PRIOR" != "1" ]; then
+    echo "[提示] 给了 --zloc-map 但没开 --zloc-prior: 先验配准不会启用（--zloc-map 只给路径）。" >&2
+  fi
+  case "$ZLOC_MAP" in
+    /*) ;;
+    "") ;;
+    *) _zloc_problems+=("--zloc-map 必须是绝对路径（相对路径会随进程 CWD 解析）: $ZLOC_MAP") ;;
+  esac
+  if [ -n "$ZLOC_CONFIG" ]; then
+    [ -f "$ZLOC_CONFIG" ] || _zloc_problems+=("--zloc-config 文件不存在: $ZLOC_CONFIG")
+    case "$ZLOC_CONFIG" in
+      /*) ;;
+      *) _zloc_problems+=("--zloc-config 必须是绝对路径: $ZLOC_CONFIG") ;;
+    esac
+  fi
+  if [ "${#_zloc_problems[@]}" -gt 0 ]; then
+    echo "[错误] --zloc-backend 模式配置不完整:" >&2
+    for _p in "${_zloc_problems[@]}"; do echo "[错误]   - $_p" >&2; done
+    echo "[错误] 参考: docs/architecture/localization_backend.md" >&2
+    exit 1
+  fi
+  echo "[提示] --zloc-backend: map->odom 由 srm27_zlocalization_backend 发布,"
+  echo "[提示]   静态 TF / small_gicp / slam_toolbox 都不会启动（launch 里也有冲突检查）。"
+  echo "[提示]   这是**实验模式**（默认关闭）: 验收通过前请保留 --lio 作为现场回退。"
 fi
 
 if [ "$STATIC_ON" = "1" ]; then
@@ -1251,6 +1366,9 @@ if [ "$DRY_RUN" != "1" ]; then
   fi
   if [ "$LIO_FRONTEND" = "zlio" ]; then
     WS_CHECK_PKGS+=(frontend localization_interfaces srm27_localization_adapter)
+    if [ "$ZLOC_ON" = "1" ]; then
+      WS_CHECK_PKGS+=(srm27_zlocalization_backend)
+    fi
   else
     WS_CHECK_PKGS+=(point_lio loam_interface sensor_scan_generation)
   fi
@@ -1301,10 +1419,12 @@ fi
 # 本仓库的 params 里 default_nav_through_poses_bt_xml 指向 nav2_bt/
 # navigate_through_poses_route_aware.xml, 它用自研 BT 节点 RemovePassedGoalsByRoute
 # 代替 nav2 的 RemovePassedGoals(nav2 那个在这套部署上实测不删已过的途径点)。
-# 树由 srm27_nav_bringup 提供、节点由 srm27_nav_plugins 的 .so 提供, 两者都是 **启动时**
-# 由 bt_navigator 按 plugin_lib_names 里的库名 dlopen 的 —— 只改参数文件而没重新编译部署
+# 树由 srm27_nav_bringup 提供、节点库由 **srm27_nav_behavior_plugins** 提供
+# （2026-11-15 模块重组把原来的 srm27_nav_plugins 拆掉了，现在的 srm27_nav_plugins
+# 只是空元包，.so 在 srm27_nav_behavior_plugins/lib 下），两者都是 **启动时** 由
+# bt_navigator 按 plugin_lib_names 里的库名 dlopen 的 —— 只改参数文件而没重新编译部署
 # 这两个包时, 报错要到 bt_navigator 启动时才出现(现场表现: 多目标导航直接不可用/加载报错)。
-# 所以这里提前拦住, 并写清楚要重编哪两个包。
+# 所以这里提前拦住, 并写清楚要重编哪个包。
 if [ "$DRY_RUN" != "1" ]; then
   BT_REL="$(sed -n 's|.*default_nav_through_poses_bt_xml:.*nav2_bt/\([^ ]*\).*|\1|p' \
     "$PARAMS_FILE" | head -1)"
@@ -1321,12 +1441,26 @@ if [ "$DRY_RUN" != "1" ]; then
       exit 1
     fi
     if grep -q "srm27_remove_passed_goals_bt_node" "$PARAMS_FILE"; then
-      BT_LIB_DIR="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; \
-        ros2 pkg prefix srm27_nav_plugins 2>/dev/null" || true)"
-      if [ -z "$BT_LIB_DIR" ] || [ ! -f "$BT_LIB_DIR/lib/libsrm27_remove_passed_goals_bt_node.so" ]; then
+      # 提供这个 .so 的包：重组后是 srm27_nav_behavior_plugins；保留 srm27_nav_plugins
+      # 作为兼容回退（万一又拆回去），最后再扫一遍 install/*/lib。
+      BT_LIB=""
+      for _provider in srm27_nav_behavior_plugins srm27_nav_plugins; do
+        _prefix="$(bash -c "source '$WS_DIR/install/setup.bash' >/dev/null 2>&1; \
+          ros2 pkg prefix $_provider 2>/dev/null" || true)"
+        if [ -n "$_prefix" ] && [ -f "$_prefix/lib/libsrm27_remove_passed_goals_bt_node.so" ]; then
+          BT_LIB="$_prefix/lib/libsrm27_remove_passed_goals_bt_node.so"
+          break
+        fi
+      done
+      if [ -z "$BT_LIB" ]; then
+        for _cand in "$WS_DIR"/install/*/lib/libsrm27_remove_passed_goals_bt_node.so; do
+          if [ -f "$_cand" ]; then BT_LIB="$_cand"; break; fi
+        done
+      fi
+      if [ -z "$BT_LIB" ]; then
         echo "[错误] 参数里要求自研 BT 节点库 libsrm27_remove_passed_goals_bt_node.so," >&2
-        echo "       但在本工作区没找到 (srm27_nav_plugins 解析到: ${BT_LIB_DIR:-未找到})。" >&2
-        echo "       先重新编译部署: colcon build --packages-select srm27_nav_plugins" >&2
+        echo "       但在本工作区没找到。" >&2
+        echo "       先重新编译部署: colcon build --packages-select srm27_nav_behavior_plugins" >&2
         echo "       (缺这个库时 bt_navigator 会在启动时报找不到节点, 多目标导航不可用。)" >&2
         exit 1
       fi
@@ -1507,6 +1641,25 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   else
     NAV_CMD="$NAV_CMD use_lio_odometry:=True"
   fi
+  if [ "$ZLOC_ON" = "1" ]; then
+    # 唯一 map->odom 所有者 = backend_node。空的 backend 配置走包内默认 profile
+    # （localization_launch 会按平台选 real/sim 那份）。
+    NAV_CMD="$NAV_CMD use_zlocalization_backend:=True"
+    NAV_CMD="$NAV_CMD zlocalization_prior_enabled:=$ZLOC_PRIOR"
+    NAV_CMD="$NAV_CMD zlocalization_loop_enabled:=$ZLOC_LOOP"
+    NAV_CMD="$NAV_CMD zlocalization_uwb_enabled:=$ZLOC_UWB"
+    if [ -n "$ZLOC_CONFIG" ]; then
+      NAV_CMD="$NAV_CMD zlocalization_backend_config:=$(q "$ZLOC_CONFIG")"
+    fi
+    if [ -n "$ZLOC_MAP" ]; then
+      NAV_CMD="$NAV_CMD zlocalization_prior_map:=$(q "$ZLOC_MAP")"
+    fi
+    if [ -n "$ZLOC_TRAJECTORY_DIR" ]; then
+      NAV_CMD="$NAV_CMD zlocalization_trajectory_directory:=$(q "$ZLOC_TRAJECTORY_DIR")"
+    fi
+  else
+    NAV_CMD="$NAV_CMD use_zlocalization_backend:=False"
+  fi
   NAV_CMD="$NAV_CMD odometry_frontend:=$LIO_FRONTEND"
   NAV_CMD="$NAV_CMD zlio_config:=$(q "$ZLIO_CONFIG")"
   NAV_CMD="$NAV_CMD map:=$(q "$MAP_YAML")"
@@ -1601,6 +1754,8 @@ if [ "$SLAM_ON" = "1" ]; then
   MODE_DESC="SLAM 建图 (slam_toolbox 发布 map->odom)"
 elif [ "$RELOC_ON" = "1" ]; then
   MODE_DESC="先验 PCD 重定位 (small_gicp 发布 map->odom)"
+elif [ "$ZLOC_ON" = "1" ]; then
+  MODE_DESC="$LIO_LABEL 里程计 + Z-Localization backend 发布 map->odom (实验)"
 elif [ "$LIO_ON" = "1" ]; then
   MODE_DESC="$LIO_LABEL 里程计 + 静态 map->odom"
 else
@@ -1639,6 +1794,10 @@ echo "================= SRM 实车 NAV 导航测试 ================="
 echo "  工作空间    : $WS_DIR"
 echo "  定位方式    : $MODE_DESC"
 echo "  slam        : $SLAM_ARG   use_pcd_localization: $RELOC_ARG   use_lio_odometry: $LIO_ARG$([ "$MINCO_FAKEYAW_CHAIN" = "1" ] && echo '   (迁移链按定位方式自动定 use_lio_odometry)')"
+if [ "$ZLOC_ON" = "1" ]; then
+  echo "  zloc 先验图 : $ZLOC_MAP"
+  echo "  zloc 开关   : prior=$ZLOC_PRIOR loop=$ZLOC_LOOP uwb=$ZLOC_UWB (1=开, 0=关)"
+fi
 echo "  地图 (yaml) : $MAP_YAML$([ "$SLAM_ON" = "1" ] && echo '   (SLAM 模式未加载)')"
 if [ "$RELOC_ON" = "1" ]; then
   echo "  先验 PCD    : $PRIOR_PCD"
@@ -1814,7 +1973,12 @@ for i in "${!STEP_TITLES[@]}"; do
   printf '[%d/%d] 启动 %s...\n' "$((i + 1))" "$TOTAL" "$title"
 
   if process_running "$pattern"; then
+    # 复用"已经在跑"的实例很方便（分步调试时），但**旧实例可能带着旧参数/旧二进制**：
+    # 典型现场症状是后面等 /rotation_cmd 订阅者一直等不到（旧 nav 栈没起 mux 或 mux 挂了），
+    # 或者 RViz 里看到的还是上一次的 TF。所以这里明确提示，并给出清干净的办法。
     echo "[跳过] 已检测到正在运行的进程: $title"
+    echo "       ⚠ 复用的是**之前启动**的实例（参数/二进制可能不是这次的）"
+    echo "       如需干净重启：先 ./scripts/bringup/start_real_nav.sh --stop，再重新启动"
     continue
   fi
 

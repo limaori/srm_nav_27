@@ -26,6 +26,9 @@ srm_cmd_mux ◄── rotation_cmd（决策层底盘自转，只取 angular.z）
 
 定位/感知：Livox MID-360 → Point-LIO 或 ZLIO → loam_interface / zlio_bridge
           → sensor_scan_generation（odom→gimbal_yaw）→ 代价地图 / Nav2
+
+map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--slam）
+          | srm27_zlocalization_backend（--zloc-backend，实验、默认关闭）
 ```
 
 关键点：
@@ -89,7 +92,7 @@ srm_cmd_mux ◄── rotation_cmd（决策层底盘自转，只取 angular.z）
 
 ## 定位与控制模式
 
-实车导航（四者互斥，区别是 `map→odom` 由谁发布）：
+实车导航（五者互斥，区别是 `map→odom` 由谁发布）：
 
 | 模式 | 命令 | 说明 |
 |---|---|---|
@@ -97,6 +100,7 @@ srm_cmd_mux ◄── rotation_cmd（决策层底盘自转，只取 angular.z）
 | GICP 重定位 | `--reloc`（默认前端 `point_lio` 时） | small_gicp 与 `maps/pcd/<site>_mapframe.pcd` 配准 |
 | SLAM | `--slam` | `slam_toolbox` 发布 `map→odom`，边建图边导航 |
 | 静态地图 | `--static` | 只加载栅格图 + 静态 TF；仅当外部提供 `odom→base_link` 时可用 |
+| 定位后端 | `--zloc-backend --zloc-prior --zloc-map <目录>` | Z-Localization backend 用先验地图包发布 `map→odom`；**实验模式，默认关闭** |
 
 仿真导航：
 
@@ -106,6 +110,11 @@ srm_cmd_mux ◄── rotation_cmd（决策层底盘自转，只取 angular.z）
 | ZLIO | `--lio`（默认前端） | `frontend` + `zlio_bridge` |
 | Point-LIO | `--lio --lio-frontend point_lio` | 回退前端 |
 | GICP | `--gicp --prior-pcd <pcd>` | 先验点云重定位 |
+| 定位后端 | `--lio --zloc-backend --zloc-prior --zloc-map <目录>` | backend 用先验地图包发布 `map→odom`（实验，默认关闭） |
+
+backend 模式的 TF 所有权、输入契约与 reset 语义见
+[`docs/architecture/localization_backend.md`](docs/architecture/localization_backend.md)。
+它需要 GTSAM 4.2.x，本机没有 root 时用 `./scripts/setup/install_gtsam_4_2.sh` 装到用户目录。
 
 控制器：
 
@@ -124,6 +133,19 @@ rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
+
+`srm27_zlocalization_backend`（Z-Localization backend 迁入版）额外依赖 GTSAM 4.2.x。
+系统里没有时用仓库脚本装到用户目录，不需要 root：
+
+```bash
+./scripts/setup/install_gtsam_4_2.sh     # 默认 ~/.local/gtsam-4.2.0
+# 家目录不可写时装到工作区（本机现有安装就在这，backend 的 build 缓存也指着它）：
+GTSAM_PREFIX=$PWD/.deps/gtsam-4.2.0 ./scripts/setup/install_gtsam_4_2.sh
+source scripts/setup/env_srm27.sh        # ROS + 本工作区 + GTSAM（自动探测前缀）
+colcon build --packages-select srm27_zlocalization_backend
+```
+
+它默认**不参与**导航（`--zloc-backend` 之外的入口行为不变）；包缺失时默认链路照常启动。
 
 只改导航 bringup 时可增量构建：
 

@@ -1,0 +1,11 @@
+# 本工作区实车先验地图定位 profile。
+#
+# 只覆盖“跑起来需要的接线”，算法参数一律沿用 backend.yaml（上游基线），
+# 便于把算法调参与工程接线分开评审。
+extends: backend.yaml
+
+common:
+  # 实车 ZLIO 的 body_frame 是 livox_imu（见 nav2_params_srm_minco_fakeyaw.yaml 的
+  # zlio_bridge.lidar_frame）。后端逐帧校验
+  # `odometry.child_frame_id == common.sensor_frame`，写错会静默丢帧。
+  sensor_frame: livox_imu

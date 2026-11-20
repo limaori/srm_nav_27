@@ -1,0 +1,54 @@
+=== 节点 (应各 1 份) ===
+/behavior_server
+/bt_navigator
+/bt_navigator_navigate_through_poses_rclcpp_node
+/bt_navigator_navigate_to_pose_rclcpp_node
+/controller_server
+/fake_vel_transform
+/gimbal_joint_state_relay
+/global_costmap/global_costmap
+/imu_saturation_guard
+/lifecycle_manager_localization
+/lifecycle_manager_navigation
+/livox_ros_driver2
+/local_costmap/local_costmap
+/map_server
+/nav2_container
+/planner_server
+/robot_state_publisher
+/sensor_scan_generation
+/smoother_server
+/srm_cmd_mux
+/static_transform_publisher_map2odom
+/terrain_analysis
+/terrain_analysis_ext
+/velocity_smoother
+/waypoint_follower
+/zlio
+/zlio_bridge
+=== /odometry ===
+average rate: 9.848
+	min: 0.003s max: 0.299s std dev: 0.02777s window: 64
+=== /zlio/frame ===
+average rate: 8.831
+	min: 0.000s max: 0.299s std dev: 0.04662s window: 38
+=== lifecycle ===
+map_server                       active [3]
+controller_server                active [3]
+planner_server                   active [3]
+bt_navigator                     active [3]
+behavior_server                  active [3]
+velocity_smoother                active [3]
+waypoint_follower                active [3]
+smoother_server                  active [3]
+local_costmap/local_costmap      active [3]
+global_costmap/global_costmap    active [3]
+=== map -> gimbal_yaw_fake ===
+At time 1794896727.932328514
+- Translation: [0.235, -0.110, 0.268]
+- Rotation: in Quaternion (xyzw) [0.000, 0.000, 0.000, 1.000]
+- Rotation: in RPY (radian) [0.000, -0.000, 0.000]
+=== ZLIO 输入中断次数 ===
+0
+=== 其他 ERROR ===
+cleanup done

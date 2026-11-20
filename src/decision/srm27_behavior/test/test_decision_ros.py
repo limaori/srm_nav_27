@@ -130,12 +130,15 @@ class Arena:
         mux_limits = [] if navigation == "fake" else ["-p", "vx_max:=2.6", "-p", "vy_max:=2.6", "-p", "v_max:=2.6"]
         self.spawn("mux", ["ros2", "run", "srm27_chassis_control", "cmd_mux", "--ros-args",
                            "-p", "wz_max:=9.0", "-p", "nav_topic:=cmd_vel_test_nav", "-p", "output_topic:=cmd_vel_test_output"] + mux_limits)
-        params = str(Path(get_package_share_directory("srm27_behavior")) / "params/sentry_behavior.yaml")
+        params_dir = Path(get_package_share_directory("srm27_behavior")) / "params"
+        overrides = dict(overrides or {})
+        if league == "ul":
+            overrides.setdefault("waypoints_file", Path(__file__).resolve().with_name("ul_waypoints.yaml"))
         self.spawn("server", ["ros2", "run", "srm27_behavior", "srm27_behavior_server", "--ros-args",
-                              "--params-file", params, "-r", "__node:=srm27_behavior_server",
+                              "--params-file", str(params_dir / "sentry_behavior.yaml"), "-r", "__node:=srm27_behavior_server",
                               "-p", "use_sim_time:=false", "-p", "status_topic:=test/referee_identity",
                               "-p", "dry_run:=false", "-p", "waypoints_calibrated:=true"] +
-                   [part for key, value in (overrides or {}).items() for part in ("-p", f"{key}:={value}")])
+                   [part for key, value in overrides.items() for part in ("-p", f"{key}:={value}")])
         self.client = ActionClient(self.node, ExecuteTree, "srm27_behavior")
         assert self.client.wait_for_server(timeout_sec=12), "decision server unavailable"
         self.tree = self.send_tree()

@@ -128,6 +128,7 @@ import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -294,10 +295,16 @@ class _Rigid:
 
 
 class ZlioBridge(Node):
-    """把 ZLIO 的 `FrontendFrame` 改写成 `registered_scan` + `lidar_odometry`。"""
+    """把 ZLIO 的 `FrontendFrame` 改写成 `registered_scan` + `lidar_odometry`。
 
-    def __init__(self):
-        super().__init__("zlio_bridge")
+    `backend_enabled:=true` 时同一个节点还承担 `srm27_zlocalization_backend` 的输入
+    适配（`zlocalization_backend_adapter.BackendInputAdapter`）：**必须**是同一个节点，
+    因为 backend 的 `map→odom` 与本节点发布的 `lidar_odometry` 共用同一个 `T_off`，
+    两个节点各抓一次"第一帧"会让两个 odom 系差一个常量变换（见该模块 docstring）。
+    """
+
+    def __init__(self, node_name="zlio_bridge"):
+        super().__init__(node_name)
 
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
@@ -356,6 +363,27 @@ class ZlioBridge(Node):
         # 事后只能从图上猜发生在哪一秒 —— 有了事件流，时刻是确定的。
         self.declare_parameter("events_topic", "zlio_bridge/events")
 
+        # ---- Z-Localization backend 输入适配（默认关闭，默认行为逐位不变）----
+        # 打开后本节点额外发布 frontend/frame|odometry|session 给 backend，并代理
+        # backend 的 reset 事务。四个定位模式仍互斥：backend 模式不能同时起静态
+        # map->odom / small_gicp / slam_toolbox（冲突检查在 localization_launch.py）。
+        self.declare_parameter("backend_enabled", False)
+        # backend 订阅的话题；相对名随 namespace 解析（与 backend.yaml 一致）。
+        self.declare_parameter("backend_frame_topic", "frontend/frame")
+        self.declare_parameter("backend_prediction_topic", "frontend/odometry")
+        self.declare_parameter("backend_session_topic", "frontend/session")
+        # 前端的预测话题（本节点在 backend 模式下自己订一份）。
+        self.declare_parameter("backend_prediction_input_topic", "zlio/frontend_odometry")
+        # backend 的 common.sensor_frame；空 = 用本节点的 lidar_frame。
+        self.declare_parameter("backend_sensor_frame", "")
+        self.declare_parameter("backend_odom_frame", "")
+        # backend 调的重置服务（= backend.yaml 的 reset.service）与它转发到的前端服务。
+        self.declare_parameter("backend_reset_service", "zlocalization/reset_frontend")
+        self.declare_parameter("backend_frontend_reset_service", "/zlio/reset_internal")
+        self.declare_parameter("backend_frame_depth", 50)
+        self.declare_parameter("backend_prediction_depth", 200)
+        self.declare_parameter("backend_reset_timeout", 15.0)
+
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.ground_frame = str(self.get_parameter("ground_frame").value)
@@ -388,6 +416,22 @@ class ZlioBridge(Node):
             self.get_parameter("reject_implausible_jump").value
         )
         events_topic = str(self.get_parameter("events_topic").value)
+
+        # ---- backend 输入适配的接线参数 ----
+        self.backend_enabled = bool(self.get_parameter("backend_enabled").value)
+        backend_sensor_frame = str(self.get_parameter("backend_sensor_frame").value)
+        backend_odom_frame = str(self.get_parameter("backend_odom_frame").value)
+        backend_frame_topic = str(self.get_parameter("backend_frame_topic").value)
+        backend_prediction_topic = str(self.get_parameter("backend_prediction_topic").value)
+        backend_session_topic = str(self.get_parameter("backend_session_topic").value)
+        backend_prediction_input_topic = str(
+            self.get_parameter("backend_prediction_input_topic").value)
+        backend_reset_service = str(self.get_parameter("backend_reset_service").value)
+        backend_frontend_reset_service = str(
+            self.get_parameter("backend_frontend_reset_service").value)
+        backend_frame_depth = int(self.get_parameter("backend_frame_depth").value)
+        backend_prediction_depth = int(self.get_parameter("backend_prediction_depth").value)
+        backend_reset_timeout = float(self.get_parameter("backend_reset_timeout").value)
 
         # ---- PCD 累积状态 ----
         self.pcd_save_en = bool(self.get_parameter("pcd_save_en").value)
@@ -450,6 +494,48 @@ class ZlioBridge(Node):
         session_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(FrontendSession, session_topic, self._on_session, session_qos)
 
+        # ---- backend 输入适配 ----
+        # 与上面的 publisher/subscription 共用同一个节点：T_off 只有一份，
+        # backend 的 map→odom 与 registered_scan/lidar_odometry 才逐位自洽。
+        self.backend = None
+        if self.backend_enabled:
+            from zlocalization_backend_adapter import BackendInputAdapter
+
+            # reset 服务回调要等前端回复：客户端回调和它必须能在不同线程执行，
+            # 所以各自放一个 Reentrant 组，main() 里配 MultiThreadedExecutor。
+            # rclpy Humble 没有 Node.create_callback_group：直接把 CallbackGroup 实例
+            # 交给 create_service/create_client（执行器会从实体里收集这些组）。
+            service_group = ReentrantCallbackGroup()
+            client_group = ReentrantCallbackGroup()
+            self.backend = BackendInputAdapter(
+                self,
+                sensor_frame=backend_sensor_frame or self.lidar_frame,
+                odom_frame=backend_odom_frame or self.odom_frame,
+                frame_topic=backend_frame_topic,
+                prediction_topic=backend_prediction_topic,
+                session_topic=backend_session_topic,
+                prediction_input_topic=backend_prediction_input_topic,
+                reset_service=backend_reset_service,
+                frontend_reset_service=backend_frontend_reset_service,
+                pose_provider=self._backend_pose_provider,
+                frame_depth=backend_frame_depth,
+                prediction_depth=backend_prediction_depth,
+                reset_timeout_seconds=backend_reset_timeout,
+                service_callback_group=service_group,
+                client_callback_group=client_group,
+            )
+            if not self.anchor_on_epoch_change:
+                # 这是本链路唯一允许的"关闭锚定"入口：backend 模式下仍必须锚定，
+                # 否则 map→odom 的恒等边界就不成立了（会变成双重错误）。
+                self.get_logger().error(
+                    "backend_enabled=true 需要 anchor_on_epoch_change=true："
+                    "适配后 odom 的连续性由本节点锚定提供，backend 只按恒等边界接手"
+                )
+            self.get_logger().warn(
+                "backend 模式已启用：map->odom 的唯一发布者是 backend_node；"
+                "静态 TF / small_gicp / slam_toolbox 必须关闭（launch 已做冲突检查）"
+            )
+
         self.get_logger().info(
             f"ZLIO 桥接已启动: 订阅 {frame_topic} / {session_topic}, 用 "
             f"T({self.base_frame}←{self.lidar_frame}) 把位姿改写到 {self.odom_frame} 系; "
@@ -507,6 +593,9 @@ class ZlioBridge(Node):
     # -- 输入 ------------------------------------------------------------------
     def _on_session(self, msg: FrontendSession):
         self._session_epoch = msg.epoch
+        # backend 需要 instance/epoch/reset_required/failed 来闭合会话，原样转发。
+        if self.backend is not None:
+            self.backend.on_session(msg)
         if msg.failed:
             self.get_logger().error(
                 f"ZLIO 会话失败 (instance={msg.instance_id}, epoch={msg.epoch}): "
@@ -515,17 +604,41 @@ class ZlioBridge(Node):
             return
         if msg.reset_required:
             # coordinated_reset=true 时前端不会自己换代，只发这个标志等后端协调。
-            # 本链路没有后端，方案要求 coordinated_reset:=false；这里把它显式暴露出来。
-            self.get_logger().warn(
-                f"ZLIO 报告 reset_required (instance={msg.instance_id}, epoch={msg.epoch}): "
-                "coordinated_reset 必须为 false, 否则前端不会自己换代"
-            )
+            if self.backend is None:
+                # 非 backend 模式：本链路没有后端，方案要求 coordinated_reset:=false；
+                # 这里把配置错误显式暴露出来（否则前端永远不会自己换代）。
+                self.get_logger().warn(
+                    f"ZLIO 报告 reset_required (instance={msg.instance_id}, "
+                    f"epoch={msg.epoch}): coordinated_reset 必须为 false, 否则前端不会自己换代"
+                )
+            else:
+                # backend 模式：由 backend 发起 /localization_reset 事务，本节点代理转发
+                # 并把坐标边界改成恒等边界（见 zlocalization_backend_adapter）。
+                self.get_logger().warn(
+                    f"ZLIO 报告 reset_required (instance={msg.instance_id}, "
+                    f"epoch={msg.epoch}): 等待 backend 发起协调重置"
+                )
             return
         if self.epoch is not None and msg.epoch != self.epoch:
             # 新代次已经宣告但还没有该代次的 frame；下一帧会自动锚定。
             self.get_logger().info(
                 f"ZLIO 会话换代: epoch {self.epoch} -> {msg.epoch} (等待该代次的首帧)"
             )
+
+    def _backend_pose_provider(self, raw_pose):
+        """给 backend 适配层提供当帧 `(T_off, 适配位姿, 随体偏置)`。
+
+        位姿与 `_publish()` 里发布的 `lidar_odometry` 用**同一个** `self.t_off`
+        与同一段随体偏置补偿，因此 backend 算出的 map→odom 与本节点的 odom 系
+        严格同源。还没抓到 T_off 时返回 None（适配层据此丢帧，绝不发单位变换）。
+        """
+        if self.t_off is None:
+            return None
+        pose = self.t_off * _Rigid.from_pose(raw_pose)
+        offset = self.pose_body_offset
+        if offset is not None:
+            pose = pose * offset
+        return self.t_off, pose, None if offset is None else offset.t
 
     def _on_frame(self, msg: FrontendFrame):
         stamp = Time.from_msg(msg.odometry.header.stamp)
@@ -757,6 +870,11 @@ class ZlioBridge(Node):
 
     # -- 输出 ------------------------------------------------------------------
     def _publish(self, msg: FrontendFrame, pose: _Rigid, stamp: Time, cloud_pose=None):
+        """发布 registered_scan + lidar_odometry；backend 模式下再发一份适配观测。
+
+        返回 True 表示这一帧确实发布了（点云变换失败时返回 False，backend 侧也不发，
+        避免"导航没有、backend 有"的两套观测）。
+        """
         odometry = Odometry()
         odometry.header.stamp = msg.odometry.header.stamp
         odometry.header.frame_id = self.odom_frame
@@ -793,7 +911,7 @@ class ZlioBridge(Node):
         except Exception as ex:  # noqa: BLE001 - 库异常类型不稳定, 一律按"整帧丢弃"处理
             self._warn_throttle("cloud_transform", f"点云变换失败, 丢弃该帧: {ex}")
             self.dropped += 1
-            return
+            return False
 
         # 方案 §4.5：这两项必须显式设置，不依赖库对 header 的处理
         # （实测 do_transform_cloud 会把 stamp 清成 0，而 sensor_scan_generation 的
@@ -811,6 +929,12 @@ class ZlioBridge(Node):
         self.odom_pub.publish(odometry)
         self.cloud_pub.publish(cloud)
         self.frames += 1
+        if self.backend is not None:
+            # 位姿传的就是上面发出去的 pose（含 pose_body_offset），协方差按同一个
+            # R_off 旋转；点云仍是局部系，由 backend 自己搬到 map 系。
+            self.backend.on_frame(
+                msg, self.t_off, pose,
+                None if self.pose_body_offset is None else self.pose_body_offset.t)
         if self.frames == 1 or self.frames % 200 == 0:
             self.get_logger().info(
                 f"已转发 {self.frames} 帧 (丢弃 {self.dropped}), epoch={self.epoch}, "
@@ -818,6 +942,7 @@ class ZlioBridge(Node):
                 + (f" (拦下 {self.rejected_jumps})" if self.rejected_jumps else "")
                 + f", odom←lidar t=({pose.t[0]:.3f}, {pose.t[1]:.3f}, {pose.t[2]:.3f})"
             )
+        return True
 
 
     # ------------------------------------------------------------------
@@ -910,14 +1035,29 @@ def main(args=None):
         print(f"[zlio_bridge] 初始化失败: {ex}", file=sys.stderr)
         rclpy.shutdown()
         return 1
+    # backend 模式：reset 代理的服务回调要等前端服务回复，回复回调必须在另一个线程
+    # 执行，单线程执行器会自锁死。非 backend 模式保持原来的单线程语义不变。
+    if node.backend is not None:
+        from rclpy.executors import MultiThreadedExecutor
+
+        executor = MultiThreadedExecutor(num_threads=3)
+        executor.add_node(node)
+        spin = executor.spin
+    else:
+        spin = lambda: rclpy.spin(node)  # noqa: E731 - 两种模式只差执行器
     try:
-        rclpy.spin(node)
+        spin()
     except KeyboardInterrupt:
         pass
     finally:
         # Ctrl-C / SIGINT 走后正常落盘（与 Point-LIO 的 pcd_save 同一语义：
         # kill -9 不会执行到这里，这一趟的累积点云就丢了）。
         node.save_pcd_if_enabled()
+        if node.backend is not None:
+            frames, predictions, resets = node.backend.summary()
+            node.get_logger().info(
+                f"backend 输入适配统计: 帧={frames} 预测={predictions} reset={resets}"
+            )
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -15,19 +15,44 @@
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
+from launch.actions import (
+    DeclareLaunchArgument,
+    GroupAction,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    SetEnvironmentVariable,
+)
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import LoadComposableNodes, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile, ParameterValue
 from nav2_common.launch import RewrittenYaml
 
 
+def _backend_package_share():
+    """backend 包是可选的实验依赖：没装（例如本机没有 GTSAM）时整条默认链路仍要能起。
+
+    只在 use_zlocalization_backend:=true 时把"包缺失"变成启动错误，
+    否则这里返回空串，默认的 --lio/--reloc/静态 TF 链路完全不受影响。
+    """
+    try:
+        return get_package_share_directory("srm27_zlocalization_backend")
+    except PackageNotFoundError:
+        return ""
+
+
 def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory("srm27_nav_bringup")
+    backend_share = _backend_package_share()
+    default_backend_config = (
+        os.path.join(backend_share, "config", "srm27_localization_sim.yaml")
+        if backend_share
+        else ""
+    )
 
     namespace = LaunchConfiguration("namespace")
     map_yaml_file = LaunchConfiguration("map")
@@ -67,6 +92,19 @@ def generate_launch_description():
     map_to_odom_x = LaunchConfiguration("map_to_odom_x")
     map_to_odom_y = LaunchConfiguration("map_to_odom_y")
     map_to_odom_yaw = LaunchConfiguration("map_to_odom_yaw")
+    # Z-Localization backend 实验模式（默认关闭）。打开后 map->odom 的唯一发布者
+    # 由静态 TF / small_gicp 换成 backend_node —— 三者互斥，冲突在启动前就失败。
+    use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
+    zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
+    # 空 = 用包内默认 profile（入口脚本不关心平台细节时不用传）。
+    effective_backend_config = PythonExpression(
+        ["'", zlocalization_backend_config, "' or '", default_backend_config, "'"]
+    )
+    zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
+    zlocalization_loop_enabled = LaunchConfiguration("zlocalization_loop_enabled")
+    zlocalization_uwb_enabled = LaunchConfiguration("zlocalization_uwb_enabled")
+    zlocalization_prior_map = LaunchConfiguration("zlocalization_prior_map")
+    zlocalization_trajectory_directory = LaunchConfiguration("zlocalization_trajectory_directory")
 
     lifecycle_nodes = ["map_server"]
 
@@ -157,6 +195,46 @@ def generate_launch_description():
     declare_map_to_odom_x_cmd = DeclareLaunchArgument("map_to_odom_x", default_value="0.0")
     declare_map_to_odom_y_cmd = DeclareLaunchArgument("map_to_odom_y", default_value="0.0")
     declare_map_to_odom_yaw_cmd = DeclareLaunchArgument("map_to_odom_yaw", default_value="0.0")
+
+    declare_use_zlocalization_backend_cmd = DeclareLaunchArgument(
+        "use_zlocalization_backend",
+        default_value="False",
+        description=(
+            "用 srm27_zlocalization_backend 发布 map->odom（实验模式，默认关闭）。"
+            "要求 use_lio_odometry:=True + odometry_frontend:=zlio；先验/回环/UWB 独立选择；"
+            "与 use_pcd_localization / 静态 map->odom / slam 互斥"
+        ),
+    )
+    declare_zlocalization_backend_config_cmd = DeclareLaunchArgument(
+        "zlocalization_backend_config",
+        default_value=default_backend_config,
+        description=(
+            "backend 算法配置（继承包内 backend.yaml；"
+            "实车入口默认 srm27_localization_real.yaml，仿真用 sim 那份）"
+        ),
+    )
+    declare_zlocalization_prior_enabled_cmd = DeclareLaunchArgument(
+        "zlocalization_prior_enabled", default_value="False",
+        description="启用先验配准，独立开关，默认关闭",
+    )
+    declare_zlocalization_loop_enabled_cmd = DeclareLaunchArgument(
+        "zlocalization_loop_enabled", default_value="False",
+        description="启用运行轨迹回环，独立开关，默认关闭",
+    )
+    declare_zlocalization_uwb_enabled_cmd = DeclareLaunchArgument(
+        "zlocalization_uwb_enabled", default_value="False",
+        description="启用UWB 融合，独立开关，默认关闭",
+    )
+    declare_zlocalization_prior_map_cmd = DeclareLaunchArgument(
+        "zlocalization_prior_map",
+        default_value="",
+        description="先验地图包目录（keyframes.txt + clouds/ + 描述子），必须是绝对路径",
+    )
+    declare_zlocalization_trajectory_directory_cmd = DeclareLaunchArgument(
+        "zlocalization_trajectory_directory",
+        default_value="",
+        description="backend 轨迹地图包绝对目录；先验定位模式不写轨迹，建图模式必填",
+    )
 
     # 条件表达式里必须**显式加括号**：PythonExpression 拼出来的是一整串 Python 表达式，
     # `A or B and C` 的优先级会让 and 只挂在最后一个操作数上（旧版本的坑）。
@@ -308,10 +386,14 @@ def generate_launch_description():
             {"publish_tf": False},
             {"world_frame": "odom"},
             {"body_frame": zlio_body_frame},
-            # warm 重置保留速度/倾角/零偏；coordinated_reset 必须 false —— 本链路没有后端，
-            # 前端需要自己在输入中断后换代（bridge 的锚定正是为此准备）。
+            # warm 重置保留速度/倾角/零偏。
+            # coordinated_reset 的语义（frontend/apps/node.cpp:346-353）：
+            #   false -> 输入中断后前端**自己**换代（非 backend 模式需要这样，
+            #            bridge 的锚定正是为此准备）；
+            #   true  -> 只置 reset_required 等后端协调（backend 模式必须这样，
+            #            否则一次断流会触发两次换代，问题分析 §B5）。
             {"reset_mode": "warm"},
-            {"coordinated_reset": False},
+            {"coordinated_reset": ParameterValue(use_zlocalization_backend, value_type=bool)},
         ],
         remappings=[
             ("odometry", "zlio/odometry"),
@@ -334,7 +416,15 @@ def generate_launch_description():
         executable="zlio_bridge.py",
         name="zlio_bridge",
         output="screen",
-        parameters=[configured_params],
+        parameters=[
+            configured_params,
+            # backend 输出适配必须长在这个节点里：它和 lidar_odometry 共用同一个
+            # T_off，另起一个节点会各自抓"第一帧"，两个 odom 系差一个常量变换。
+            {"backend_enabled": ParameterValue(use_zlocalization_backend, value_type=bool)},
+            # backend 的 common.sensor_frame 必须等于前端的 body_frame，
+            # 否则它逐帧静默丢帧。
+            {"backend_sensor_frame": zlio_body_frame},
+        ],
         arguments=["--ros-args", "--log-level", log_level],
     )
 
@@ -343,7 +433,12 @@ def generate_launch_description():
         executable="static_transform_publisher",
         name="static_transform_publisher_map2odom",
         output="screen",
-        condition=IfCondition(PythonExpression(["not ", use_pcd_localization])),
+        # backend 模式下 map->odom 由 backend_node 发布：静态 TF 必须同时关掉，
+        # 否则两个发布者会抢同一条 TF（问题分析 §B1）。
+        condition=IfCondition(
+            PythonExpression(["not (", use_pcd_localization, " or ",
+                              use_zlocalization_backend, ")"])
+        ),
         arguments=[
             "--x", map_to_odom_x, "--y", map_to_odom_y, "--z", "0.0",
             "--roll", "0.0", "--pitch", "0.0", "--yaw", map_to_odom_yaw,
@@ -431,6 +526,77 @@ def generate_launch_description():
         ],
     )
 
+    # backend 实验模式：定位后端整条链路由包内 launch 起（配置/地图/可视化都在那里），
+    # 这里只负责"按本仓库的接线传参"。
+    # backend 包缺失时不生成该动作；use_zlocalization_backend:=true 会在冲突检查里
+    # 给出明确报错，而不是让整条默认链路一起起不来。
+    start_zlocalization_backend = None
+    if backend_share:
+        start_zlocalization_backend = IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(backend_share, "launch", "backend.launch.py")
+            ),
+            condition=IfCondition(use_zlocalization_backend),
+            launch_arguments={
+                "config_file": effective_backend_config,
+                "prior_enabled": zlocalization_prior_enabled,
+                "loop_enabled": zlocalization_loop_enabled,
+                "uwb_enabled": zlocalization_uwb_enabled,
+                "prior_map": zlocalization_prior_map,
+                "trajectory_directory": zlocalization_trajectory_directory,
+                # backend 的 odom 就是本仓库 odom（与 zlio_bridge 的 odom_frame 一致）。
+                "odom_frame": "odom",
+                # 前端的 body_frame 就是 backend 的传感器系（livox_imu / front_mid360）。
+                "sensor_frame": zlio_body_frame,
+                "use_sim_time": use_sim_time,
+                "rviz": "false",
+            }.items(),
+        )
+
+    # 启动前冲突检查：backend 模式与另外三种 map->odom 所有者互斥，且必须是
+    # ZLIO 纯 LIO 链路（backend 只吃 FrontendFrame，point_lio/legacy 输入没有
+    # 本仓库的 odom/T_off 契约）。宁可启动失败，也不要两个发布者抢同一条 TF。
+    def _validate_zlocalization_backend(context):
+        def flag(name, default="False"):
+            value = context.launch_configurations.get(name, default)
+            return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+        if not flag("use_zlocalization_backend"):
+            return []
+        problems = []
+        if not backend_share:
+            problems.append(
+                "未找到 srm27_zlocalization_backend 包（先构建它；它需要 GTSAM 4.2.x）"
+            )
+        if flag("use_pcd_localization"):
+            problems.append("use_pcd_localization:=True（small_gicp 也要发 map->odom）")
+        if not flag("use_lio_odometry"):
+            problems.append("use_lio_odometry:=False（backend 需要前端里程计链路）")
+        frontend = str(context.launch_configurations.get("odometry_frontend", "")).strip()
+        if frontend != "zlio":
+            problems.append(f"odometry_frontend:={frontend or '<empty>'}（backend 只接 ZLIO 观测）")
+        config_file = (
+            str(context.launch_configurations.get("zlocalization_backend_config", "")).strip()
+            or default_backend_config
+        )
+        if not config_file:
+            problems.append("backend 配置为空且包内没有默认 profile")
+        elif not os.path.isfile(config_file):
+            problems.append(f"backend 配置不存在: {config_file}")
+        prior_map = str(context.launch_configurations.get("zlocalization_prior_map", "")).strip()
+        if flag("zlocalization_prior_enabled") and not prior_map:
+            problems.append("zlocalization_prior_map 为空（启用先验配准需要先验地图包）")
+        elif prior_map and not os.path.isabs(prior_map):
+            problems.append(f"zlocalization_prior_map={prior_map} 不是绝对路径")
+        if problems:
+            raise RuntimeError(
+                "use_zlocalization_backend:=True 需要: use_lio_odometry:=True + "
+                "odometry_frontend:=zlio（启用先验时还需绝对路径的地图包）；"
+                "且不能与 GICP/静态 TF/slam 同时启用 map->odom。冲突项: "
+                + "; ".join(problems)
+            )
+        return []
+
     # Create the launch description and populate
     ld = LaunchDescription()
 
@@ -464,6 +630,13 @@ def generate_launch_description():
     ld.add_action(declare_map_to_odom_x_cmd)
     ld.add_action(declare_map_to_odom_y_cmd)
     ld.add_action(declare_map_to_odom_yaw_cmd)
+    ld.add_action(declare_use_zlocalization_backend_cmd)
+    ld.add_action(declare_zlocalization_backend_config_cmd)
+    ld.add_action(declare_zlocalization_prior_enabled_cmd)
+    ld.add_action(declare_zlocalization_loop_enabled_cmd)
+    ld.add_action(declare_zlocalization_uwb_enabled_cmd)
+    ld.add_action(declare_zlocalization_prior_map_cmd)
+    ld.add_action(declare_zlocalization_trajectory_directory_cmd)
 
     # Add the actions to launch all of the localiztion nodes
     ld.add_action(start_point_lio_node)
@@ -474,5 +647,8 @@ def generate_launch_description():
     ld.add_action(load_nodes)
     ld.add_action(load_composable_nodes)
     ld.add_action(load_pcd_localization_node)
+    ld.add_action(OpaqueFunction(function=_validate_zlocalization_backend))
+    if start_zlocalization_backend is not None:
+        ld.add_action(start_zlocalization_backend)
 
     return ld

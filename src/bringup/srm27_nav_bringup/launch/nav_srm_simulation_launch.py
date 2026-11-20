@@ -246,6 +246,14 @@ def generate_launch_description():
     map_to_odom_x = LaunchConfiguration("map_to_odom_x")
     map_to_odom_y = LaunchConfiguration("map_to_odom_y")
     map_to_odom_yaw = LaunchConfiguration("map_to_odom_yaw")
+    # Z-Localization backend 实验模式（默认关闭）：只透传，接线在 localization_launch。
+    use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
+    zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
+    zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
+    zlocalization_loop_enabled = LaunchConfiguration("zlocalization_loop_enabled")
+    zlocalization_uwb_enabled = LaunchConfiguration("zlocalization_uwb_enabled")
+    zlocalization_prior_map = LaunchConfiguration("zlocalization_prior_map")
+    zlocalization_trajectory_directory = LaunchConfiguration("zlocalization_trajectory_directory")
 
     use_fakeyaw_transform = LaunchConfiguration("use_fakeyaw_transform")
     command_frame = LaunchConfiguration("command_frame")
@@ -417,6 +425,13 @@ def generate_launch_description():
             "map_to_odom_x": map_to_odom_x,
             "map_to_odom_y": map_to_odom_y,
             "map_to_odom_yaw": map_to_odom_yaw,
+            "use_zlocalization_backend": use_zlocalization_backend,
+            "zlocalization_backend_config": zlocalization_backend_config,
+            "zlocalization_prior_enabled": zlocalization_prior_enabled,
+            "zlocalization_loop_enabled": zlocalization_loop_enabled,
+            "zlocalization_uwb_enabled": zlocalization_uwb_enabled,
+            "zlocalization_prior_map": zlocalization_prior_map,
+            "zlocalization_trajectory_directory": zlocalization_trajectory_directory,
         }.items(),
     )
 
@@ -683,6 +698,55 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument("map_to_odom_x", default_value="0.0"))
     ld.add_action(DeclareLaunchArgument("map_to_odom_y", default_value="0.0"))
     ld.add_action(DeclareLaunchArgument("map_to_odom_yaw", default_value="0.0"))
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_zlocalization_backend",
+            default_value="False",
+            description=(
+                "用 srm27_zlocalization_backend 发布 map->odom（实验模式，默认关闭）。"
+                "要求 use_lio_odometry:=True + odometry_frontend:=zlio；先验/回环/UWB 独立选择；"
+                "与 use_pcd_localization / 静态 map->odom / slam 互斥"
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "zlocalization_backend_config",
+            default_value="",
+            description=(
+                "backend 算法配置绝对路径；空 = 由 localization_launch 用包内默认"
+                "（仿真 srm27_localization_sim.yaml）"
+            ),
+        )
+    )
+    ld.add_action(DeclareLaunchArgument(
+        "zlocalization_prior_enabled", default_value="False",
+        description="启用先验配准，独立开关，默认关闭",
+    ))
+    ld.add_action(DeclareLaunchArgument(
+        "zlocalization_loop_enabled", default_value="False",
+        description="启用运行轨迹回环，独立开关，默认关闭",
+    ))
+    ld.add_action(DeclareLaunchArgument(
+        "zlocalization_uwb_enabled", default_value="False",
+        description="启用UWB 融合，独立开关，默认关闭",
+    ))
+    ld.add_action(
+        DeclareLaunchArgument(
+            "zlocalization_prior_map",
+            default_value="",
+            description=(
+                "先验地图包绝对目录（keyframes.txt + clouds/ + 描述符）。"
+                "由 start_*_nav.sh 的 --zloc-map 传入"
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "zlocalization_trajectory_directory", default_value="",
+            description="backend 轨迹地图包绝对目录（先验定位模式不使用）",
+        )
+    )
     ld.add_action(
         DeclareLaunchArgument(
             "start_simulation",

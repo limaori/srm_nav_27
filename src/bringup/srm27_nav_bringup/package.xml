@@ -53,6 +53,10 @@
   <exec_depend>srm27_minco_vendor</exec_depend>
   <exec_depend>srm27_qpoases_vendor</exec_depend>
   <exec_depend>small_gicp_relocalization</exec_depend>
+  <!-- Z-Localization backend 实验模式（默认关闭）：只有显式
+       use_zlocalization_backend:=True 时才需要此包。missing 时默认链路仍然可用，
+       但 rosdep 仍应体现依赖（它需要 GTSAM 4.2.x，见 docs/architecture/localization_backend.md）。 -->
+  <exec_depend>srm27_zlocalization_backend</exec_depend>
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>rviz2</exec_depend>
