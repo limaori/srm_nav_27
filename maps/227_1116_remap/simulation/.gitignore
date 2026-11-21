@@ -1,0 +1,7 @@
+# Rebuilt by build_scene.py with absolute paths for this checkout.
+/world.sdf
+/occupied_cells.stl
+/sim.yaml
+/nav2_params_srm_tdt_fakeyaw.yaml
+/scene_manifest.json
+/scene_preview.png

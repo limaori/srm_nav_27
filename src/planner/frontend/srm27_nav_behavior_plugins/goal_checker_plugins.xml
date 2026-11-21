@@ -1,6 +1,9 @@
 <?xml version="1.0"?>
 <class_libraries>
   <library path="srm27_goal_checkers">
+    <class name="srm27_nav_plugins/OmniStoppedGoalChecker" type="srm27_nav_plugins::OmniStoppedGoalChecker" base_class_type="nav2_core::GoalChecker">
+      <description>Omnidirectional stopped goal checker from the SRM navigation plugin package.</description>
+    </class>
     <class type="srm27_nav_plugins::OmniStoppedGoalChecker" base_class_type="nav2_core::GoalChecker">
       <description>
         全向底盘用的停稳到点判定：位置 + 航向 + 平动停稳；角速度不参与判定

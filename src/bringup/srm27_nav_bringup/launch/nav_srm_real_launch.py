@@ -67,6 +67,8 @@
 import os
 import sys
 
+import yaml
+
 from ament_index_python.packages import (
     PackageNotFoundError,
     get_package_prefix,
@@ -277,6 +279,30 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
+class RealNavParams(RewrittenYaml):
+    def perform(self, context):
+        path = super().perform(context)
+        if not _as_bool(LaunchConfiguration("use_tdt_planner").perform(context)):
+            return path
+
+        with open(path, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        planner = config.get("planner_server", {}).get("ros__parameters", {})
+        if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
+            raise RuntimeError("use_tdt_planner requires planner_server with a single GridBased planner")
+        planner["GridBased"] = {
+            "plugin": "tdt_nav_kit::TdtGlobalPlanner",
+            "occupancy_threshold": 252,
+            "treat_unknown_as_obstacle": True,
+            "save_point_max_radius": 0.4,
+            "goal_snap_max_radius": 0.0,
+            "path_resample_step": 0.20,
+        }
+        with open(path, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream)
+        return path
+
+
 def _default_backend_config(profile):
     """backend 是可选实验包：没装时返回空串，由 localization_launch 在真正启用时报错。"""
     try:
@@ -342,7 +368,7 @@ def generate_launch_description():
     # 控制），StoppedGoalChecker 的角速度判停永远不会通过，必须换成只看平移的
     # OmniStoppedGoalChecker（方案 §4.2）。
     effective_goal_checker = PythonExpression([
-        "'srm27_nav_plugins::OmniStoppedGoalChecker' if '", yaw_mode_arg,
+        "'srm27_nav_plugins/OmniStoppedGoalChecker' if '", yaw_mode_arg,
         "' in ('spin', 'xy_only', 'auto', 'se2') "
         "else 'nav2_controller::StoppedGoalChecker'",
     ])
@@ -350,7 +376,7 @@ def generate_launch_description():
     # Nav2 栈的参数文件：在通用文件之上注入航向策略与判停器（点分全路径，
     # 见 nav2_common RewrittenYaml 的 substitute_params "total path" 分支）。
     # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装。
-    nav_stack_params = RewrittenYaml(
+    nav_stack_params = RealNavParams(
         source_file=params_file,
         root_key=None,
         param_rewrites={
@@ -556,6 +582,14 @@ def generate_launch_description():
                 bringup_dir, "config", "real", "nav2_params_srm_minco_fakeyaw.yaml"
             ),
             description="实车迁移链参数文件（MINCO + gimbal_yaw 云台系）",
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_tdt_planner",
+            default_value="False",
+            choices=["True", "False"],
+            description="Use YAstar as the GridBased global planner for real navigation",
         )
     )
     ld.add_action(

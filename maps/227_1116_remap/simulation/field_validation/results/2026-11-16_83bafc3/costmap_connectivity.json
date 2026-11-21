@@ -1,0 +1,114 @@
+{
+  "resolution": 0.05000000074505806,
+  "origin": [
+    -7.83,
+    -8.29
+  ],
+  "size": [
+    225,
+    344
+  ],
+  "unknown_as_obstacle": false,
+  "occupancy_threshold": 252,
+  "probes": [
+    {
+      "name": "spawn",
+      "xy": [
+        -1.905,
+        1.235
+      ],
+      "cost": 0,
+      "component": 1,
+      "connected_to_spawn": true,
+      "clearance_to_blocked_centers": 0.5590170027049498
+    },
+    {
+      "name": "south_exit",
+      "xy": [
+        -4.305,
+        -2.615
+      ],
+      "cost": 0,
+      "component": 5,
+      "connected_to_spawn": false,
+      "clearance_to_blocked_centers": 0.15000000223517418
+    },
+    {
+      "name": "south_entry",
+      "xy": [
+        -3.955,
+        -1.615
+      ],
+      "cost": 253,
+      "component": 0,
+      "connected_to_spawn": false,
+      "clearance_to_blocked_centers": 0.0
+    },
+    {
+      "name": "north_inner",
+      "xy": [
+        -2.405,
+        2.435
+      ],
+      "cost": 0,
+      "component": 1,
+      "connected_to_spawn": true,
+      "clearance_to_blocked_centers": 0.14142135834465194
+    },
+    {
+      "name": "north_corridor",
+      "xy": [
+        -2.955,
+        5.985
+      ],
+      "cost": 0,
+      "component": 2,
+      "connected_to_spawn": false,
+      "clearance_to_blocked_centers": 0.7516648301193241
+    },
+    {
+      "name": "east",
+      "xy": [
+        0.695,
+        0.685
+      ],
+      "cost": 205,
+      "component": 1,
+      "connected_to_spawn": true,
+      "clearance_to_blocked_centers": 0.07071067917232597
+    },
+    {
+      "nearest_connected_to": [
+        -4.3,
+        -2.6
+      ],
+      "xy": [
+        -5.354999963119626,
+        -4.764999947473406
+      ],
+      "clearance": 0.5000000074505806
+    },
+    {
+      "nearest_connected_to": [
+        -3,
+        6
+      ],
+      "xy": [
+        -2.3549999184161425,
+        1.835000150874258
+      ],
+      "clearance": 0.5000000074505806
+    },
+    {
+      "nearest_connected_to": [
+        0.7,
+        0.7
+      ],
+      "xy": [
+        0.39500012256205075,
+        0.23500012703240003
+      ],
+      "clearance": 0.5147815147201923
+    }
+  ]
+}

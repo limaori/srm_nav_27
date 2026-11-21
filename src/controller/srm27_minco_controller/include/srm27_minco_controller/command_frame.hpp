@@ -16,9 +16,16 @@
 #define SRM27_MINCO_CONTROLLER__COMMAND_FRAME_HPP_
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "srm27_minco_core/kinematics.hpp"
+
+namespace srm27_minco_core
+{
+class Esdf2D;
+}
 
 namespace srm27_minco_controller
 {
@@ -60,6 +67,73 @@ inline Eigen::Vector2d velocityInCommandFrame(
   // fake 系与 odom 平行：平移分量直接沿用，交给 fake_vel_transform 做唯一一次转换。
   return _velocity_odom;
 }
+
+struct PlanarCommandLimits
+{
+  double speed;
+  double accel;
+};
+
+/// In a rotating frame, maintaining a world velocity consumes |yaw_rate| * speed
+/// of the serial acceleration budget. Reserve at least half for steering/braking.
+inline PlanarCommandLimits rotatingFrameLimits(double _speed, double _accel, double _yaw_rate)
+{
+  const double frame_rate = std::abs(_yaw_rate);
+  if (frame_rate * _speed <= 0.5 * _accel) {
+    return {_speed, _accel - frame_rate * _speed};
+  }
+  return {0.5 * _accel / frame_rate, 0.5 * _accel};
+}
+
+/// Look for a narrow section within the distance traveled while yaw brakes.
+bool shouldInhibitSpin(
+  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const Eigen::Vector2d & _velocity, double _lookahead, double _clearance);
+
+/// Limit only inward velocity so reaction travel plus braking distance fits
+/// the available clearance: v*tau + v^2/(2*a) <= distance - required_clearance.
+/// Tangential and outward motion retain the original speed limit.
+inline Eigen::Vector2d clearanceLimitedVelocity(
+  const Eigen::Vector2d & _velocity, const Eigen::Vector2d & _gradient, double _distance,
+  double _required_clearance, double _braking_deceleration, double _reaction_latency)
+{
+  if (!_velocity.allFinite() || !_gradient.allFinite() || !std::isfinite(_distance) ||
+    !std::isfinite(_required_clearance) || _required_clearance < 0.0 ||
+    !std::isfinite(_braking_deceleration) || _braking_deceleration <= 0.0 ||
+    !std::isfinite(_reaction_latency) || _reaction_latency < 0.0)
+  {
+    return Eigen::Vector2d::Zero();
+  }
+  const double norm = _gradient.norm();
+  if (norm < 1.0e-6) {
+    if (_distance < _required_clearance) {
+      return Eigen::Vector2d::Zero();
+    }
+    return _velocity;
+  }
+  const Eigen::Vector2d normal = _gradient / norm;
+  const double inward = -_velocity.dot(normal);
+  const double room = std::max(0.0, _distance - _required_clearance);
+  const double denominator = _reaction_latency +
+    std::sqrt(_reaction_latency * _reaction_latency + 2.0 * room / _braking_deceleration);
+  const double allowed = denominator > 0.0 ? 2.0 * room / denominator : 0.0;
+  if (inward > allowed) {
+    return _velocity + (inward - allowed) * normal;
+  }
+  return _velocity;
+}
+
+/// Limit a command against obstacles along its reaction and braking path.
+Eigen::Vector2d brakingPathLimitedVelocity(
+  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const Eigen::Vector2d & _velocity, double _required_clearance,
+  double _braking_deceleration, double _reaction_latency);
+
+/// Account for existing motion when limiting an approach to an obstacle.
+Eigen::Vector2d limitExecutionVelocity(
+  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const Eigen::Vector2d & _requested, const Eigen::Vector2d & _measured,
+  double _required_clearance, double _braking_deceleration, double _reaction_latency);
 
 /// \brief 命令系语义的名字（诊断用；具体的 frame 名以 `command_frame` 参数为准）。
 inline const char * toString(const CommandFrameMode _mode)

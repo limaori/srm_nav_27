@@ -1,0 +1,13 @@
+{
+  "test_cases": 402,
+  "failures": 0,
+  "errors": 0,
+  "disabled": 0,
+  "packages": {
+    "tdt_nav_kit": 43,
+    "srm27_nav_plugins": 30,
+    "srm27_chassis_control": 27,
+    "srm27_minco_core": 225,
+    "srm27_minco_controller": 77
+  }
+}

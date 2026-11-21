@@ -53,6 +53,13 @@ bool TerminalStop::update(double _distance, double _goal_tolerance)
   }
   entry_tolerance_ = std::max(0.0, tolerance);
   exit_tolerance_ = entry_tolerance_ + config_.exit_margin;
+  // A stop latch must never keep the robot outside the goal checker's success
+  // region. Prediction error or physical coast can otherwise leave it parked
+  // between xy_goal_tolerance and the old hysteresis exit, unable to finish.
+  if (std::isfinite(_goal_tolerance) && _goal_tolerance > 0.0) {
+    entry_tolerance_ = std::min(entry_tolerance_, _goal_tolerance);
+    exit_tolerance_ = std::min(exit_tolerance_, _goal_tolerance);
+  }
 
   if (!config_.enabled || !(entry_tolerance_ > 0.0)) {
     active_ = false;

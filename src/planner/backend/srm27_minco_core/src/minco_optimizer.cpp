@@ -333,6 +333,10 @@ double MincoOptimizer::evaluate(
   const double safety_distance = safetyDistance();
   const double max_speed_sq = limits_max_speed_sq_;
   const double max_accel_sq = limits_max_accel_sq_;
+  // Keep the hinge sharp at low limits, where an equally large relative
+  // overrun has a much smaller magnitude in squared SI units.
+  const double speed_scale_sq = std::clamp(max_speed_sq, 1.0e-6, 1.0);
+  const double accel_scale_sq = std::clamp(max_accel_sq, 1.0e-6, 1.0);
   const int samples = config_.samples_per_piece;
   const double quadrature_weight = 1.0 / static_cast<double>(samples);
   const double beta = config_.soft_hinge_beta;
@@ -428,28 +432,28 @@ double MincoOptimizer::evaluate(
         }
       }
 
-      // 7.2 速度软约束：h = ||v||^2 - v_max^2。
+      // 7.2 速度软约束。
       if (config_.w_velocity > 0.0) {
         const double speed_sq = velocity.squaredNorm();
         double value = 0.0;
         double derivative = 0.0;
-        if (!softplusHinge(speed_sq - max_speed_sq, beta, value, derivative)) {
+        if (!softplusHinge((speed_sq - max_speed_sq) / speed_scale_sq, beta, value, derivative)) {
           return std::numeric_limits<double>::infinity();
         }
         integrand += config_.w_velocity * value;
-        grad_velocity += config_.w_velocity * derivative * 2.0 * velocity;
+        grad_velocity += config_.w_velocity * derivative * (2.0 / speed_scale_sq) * velocity;
       }
 
-      // 7.3 加速度软约束：h = ||a||^2 - a_max^2。
+      // 7.3 加速度软约束。
       if (config_.w_acceleration > 0.0) {
         const double accel_sq = acceleration.squaredNorm();
         double value = 0.0;
         double derivative = 0.0;
-        if (!softplusHinge(accel_sq - max_accel_sq, beta, value, derivative)) {
+        if (!softplusHinge((accel_sq - max_accel_sq) / accel_scale_sq, beta, value, derivative)) {
           return std::numeric_limits<double>::infinity();
         }
         integrand += config_.w_acceleration * value;
-        grad_acceleration += config_.w_acceleration * derivative * 2.0 * acceleration;
+        grad_acceleration += config_.w_acceleration * derivative * (2.0 / accel_scale_sq) * acceleration;
       }
 
       sample_value[static_cast<std::size_t>(j)] = integrand;

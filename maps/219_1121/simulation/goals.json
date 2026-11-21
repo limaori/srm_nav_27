@@ -1,0 +1,6 @@
+[
+  {"name": "short_diagonal", "xy": [0.69, 0.04]},
+  {"name": "cross_room", "xy": [0.24, 1.44]},
+  {"name": "around_obstacles", "xy": [0.59, 1.34]},
+  {"name": "return_spawn", "xy": [0.985, 0.885]}
+]

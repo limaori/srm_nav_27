@@ -1,0 +1,204 @@
+{
+  "completed_round_trips": 5,
+  "navigation_successes": 10,
+  "navigation_legs": 10,
+  "all_arrivals_within_0_5_m": true,
+  "minimum_envelope_margin_m": 0.0426969270321359,
+  "required_envelope_margin_m": 0.05,
+  "clearance_acceptance_passed": false,
+  "peak_gt_speed_mps": 2.51975615366197,
+  "nav2_recovery_count": 0,
+  "controller_recovery_entries_from_log": 3,
+  "home_error_min_m": 0.3768,
+  "home_error_max_m": 0.4258,
+  "repeat_goal_max_endpoint_shift_m": 0.0,
+  "snapshot_path_check_scope": "Initial costmap was captured before movement; overlap counts are descriptive only and cannot prove collision on a later planning snapshot. Source-map occupied/unknown checks use the unchanged PGM.",
+  "snapshot_path_checks": [
+    {
+      "name": "cycle_01_out",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1184,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1316,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 8.565206733760782e-06
+    },
+    {
+      "name": "cycle_01_home",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 949,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 25,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1054,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 26,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.0019608195954017387
+    },
+    {
+      "name": "cycle_02_out",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 973,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1093,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.0019611827442762137
+    },
+    {
+      "name": "cycle_02_home",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1145,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 200,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 2189,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 429,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.0019591444740506675
+    },
+    {
+      "name": "cycle_03_out",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1080,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1801,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.08489860076198885
+    },
+    {
+      "name": "cycle_03_home",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1065,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 27,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 2005,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 42,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.001959517510156892
+    },
+    {
+      "name": "cycle_04_out",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1065,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1790,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 1.5605359464542168e-05
+    },
+    {
+      "name": "cycle_04_home",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1151,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 169,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 2245,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 346,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.0012699305628416108
+    },
+    {
+      "name": "cycle_05_out",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 981,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1100,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 0,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 1.3326492436344347e-05
+    },
+    {
+      "name": "cycle_05_home",
+      "raw_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 953,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 25,
+        "unknown_source_map_samples": 0
+      },
+      "smoothed_path": {
+        "occupied_source_map_samples": 0,
+        "samples_2mm": 1054,
+        "outside_map": 0,
+        "initial_costmap_overlap_samples": 26,
+        "unknown_source_map_samples": 0
+      },
+      "max_gt_speed_final_0_3_sim_s": 0.0014210310422551953
+    }
+  ],
+  "recovery_log_entries": [
+    "[controller_server-16] [WARN] [1794820823.957879413] [red_standard_robot1.controller_server]: MincoMpcController: 进入脱困（触发=gradient，进入净空 0.350 m < 0.40 m，方向 -126.4 deg，速度 1.00 m/s，窗口 3.00 s，成功阈值 0.50 m）",
+    "[controller_server-16] [WARN] [1794820832.147115775] [red_standard_robot1.controller_server]: MincoMpcController: 进入脱困（触发=gradient，进入净空 0.380 m < 0.40 m，方向 64.5 deg，速度 1.00 m/s，窗口 3.00 s，成功阈值 0.50 m）",
+    "[controller_server-16] [WARN] [1794820863.127674629] [red_standard_robot1.controller_server]: MincoMpcController: 进入脱困（触发=gradient，进入净空 0.382 m < 0.40 m，方向 44.9 deg，速度 1.00 m/s，窗口 3.00 s，成功阈值 0.50 m）"
+  ],
+  "verdict": "NEEDS_ATTENTION: arrivals passed; minimum geometric envelope margin failed 5 cm criterion"
+}

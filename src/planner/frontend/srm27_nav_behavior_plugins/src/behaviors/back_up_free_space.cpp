@@ -65,6 +65,9 @@ void BackUpFreeSpace::onConfigure()
     node, "early_exit_min_time", rclcpp::ParameterValue(1.0));
   nav2_util::declare_parameter_if_not_declared(
     node, "early_exit_require_obstacles", rclcpp::ParameterValue(true));
+  // 包络净空地板（安全限位）：与 early_exit 方向相反，低于它立即停止后退。
+  nav2_util::declare_parameter_if_not_declared(
+    node, "min_clearance", rclcpp::ParameterValue(0.36));
 
   node->get_parameter("global_frame", global_frame_);
   node->get_parameter("max_radius", max_radius_);
@@ -80,6 +83,7 @@ void BackUpFreeSpace::onConfigure()
   node->get_parameter("early_exit_min_travel", early_exit_min_travel_);
   node->get_parameter("early_exit_min_time", early_exit_min_time_);
   node->get_parameter("early_exit_require_obstacles", early_exit_require_obstacles_);
+  node->get_parameter("min_clearance", min_clearance_);
 
   // 参数来自 yaml，畸形值一律夹到安全侧而不是抛异常：抛异常会让整个 behavior_server
   // configure 失败，代价远大于"用一个保守默认值继续跑"。
@@ -93,6 +97,12 @@ void BackUpFreeSpace::onConfigure()
   if (!std::isfinite(early_exit_min_time_) || early_exit_min_time_ < 0.0) {
     early_exit_min_time_ = 0.0;
   }
+  // 净空地板：NaN 回默认值，负值按"关闭"处理（0 也是关闭）。
+  if (!std::isfinite(min_clearance_)) {
+    min_clearance_ = 0.36;
+  } else if (min_clearance_ < 0.0) {
+    min_clearance_ = 0.0;
+  }
 
   if (escape_direction_mode_ != "esdf_gradient" && escape_direction_mode_ != "costmap_gap") {
     RCLCPP_WARN(
@@ -102,6 +112,8 @@ void BackUpFreeSpace::onConfigure()
   }
 
   costmap_client_ = node->create_client<nav2_msgs::srv::GetCostmap>(service_name_);
+  spin_inhibit_pub_ = node->create_publisher<std_msgs::msg::Empty>("navigation_spin_inhibit", 1);
+  spin_inhibit_pub_->on_activate();
 
   if (visualize_) {
     marker_pub_ = node->template create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -113,6 +125,7 @@ void BackUpFreeSpace::onConfigure()
 void BackUpFreeSpace::onCleanup()
 {
   costmap_client_.reset();
+  spin_inhibit_pub_.reset();
   marker_pub_.reset();
   early_exit_hold_count_ = 0;
 }
@@ -120,6 +133,7 @@ void BackUpFreeSpace::onCleanup()
 nav2_behaviors::Status BackUpFreeSpace::onRun(
   const std::shared_ptr<const BackUpAction::Goal> command)
 {
+  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
   while (!costmap_client_->wait_for_service(std::chrono::seconds(1))) {
     if (!rclcpp::ok()) {
       RCLCPP_ERROR(logger_, "Interrupted while waiting for the service. Exiting.");
@@ -197,6 +211,7 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
 
 nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
 {
+  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
   rclcpp::Duration time_remaining = end_time_ - clock_->now();
   if (time_remaining.seconds() < 0.0 && command_time_allowance_.seconds() > 0.0) {
     stopRobot();
@@ -230,6 +245,24 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   pose.x = current_pose.pose.position.x;
   pose.y = current_pose.pose.position.y;
   pose.theta = tf2::getYaw(current_pose.pose.orientation);
+
+  // === 包络净空地板（安全限位）：越推越贴障碍就立刻停 ===
+  // 与下面的 early_exit 是两个方向：early_exit 防"已经安全了还在盲推"，
+  // 这里防"方向不对、把车体包络压进障碍"。因此不受 early_exit 的时间/位移护栏
+  // 限制，每个周期都检查；净空数据不可信（NaN）时按"不知道"跳过。
+  if (min_clearance_ > 0.0) {
+    const double current = queryCurrentClearance(pose);
+    if (std::isfinite(current) && current < min_clearance_) {
+      stopRobot();
+      RCLCPP_WARN(
+        logger_,
+        "后退触发包络净空限位：自身净空 %.3f m < %.3f m（已走 %.2f m / %.2f s），"
+        "停止后退交回重规划。",
+        current, min_clearance_, static_cast<double>(distance),
+        (clock_->now() - early_exit_start_stamp_).seconds());
+      return nav2_behaviors::Status::SUCCEEDED;
+    }
+  }
 
   // === 提前退出（P1）：已经站在正常空地就停，不再盲推满 backup_dist ===
   //

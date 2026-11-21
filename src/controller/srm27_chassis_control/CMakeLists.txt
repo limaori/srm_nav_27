@@ -12,6 +12,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 
@@ -35,6 +36,7 @@ target_link_libraries(cmd_mux
   rclcpp::rclcpp
   ${geometry_msgs_TARGETS}
   ${diagnostic_msgs_TARGETS}
+  ${std_msgs_TARGETS}
   ${std_srvs_TARGETS}
   ${rcl_interfaces_TARGETS}
 )

@@ -33,6 +33,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -42,6 +43,7 @@
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/point_cloud2_iterator.hpp"
 #include "sensor_scan_generation/sensor_scan_generation.hpp"
 #include "tf2_msgs/msg/tf_message.hpp"
 #include "tf2_ros/static_transform_broadcaster.h"
@@ -86,7 +88,7 @@ protected:
   /// \param _publish_robot_base_tf TF 树反转模式（发 odom->gimbal_yaw，不碰 base_link）
   void start(
     bool _cache_robot_base_transform, bool _publish_robot_base_tf = false,
-    bool _with_joint_tf = false)
+    bool _with_joint_tf = false, bool _publish_tf = true)
   {
     rclcpp::NodeOptions options;
     options.parameter_overrides(
@@ -94,7 +96,7 @@ protected:
         rclcpp::Parameter("lidar_frame", std::string("livox_imu")),
         rclcpp::Parameter("base_frame", std::string("base_link")),
         rclcpp::Parameter("robot_base_frame", std::string("gimbal_yaw")),
-        rclcpp::Parameter("publish_tf", true),
+        rclcpp::Parameter("publish_tf", _publish_tf),
         rclcpp::Parameter("cache_robot_base_transform", _cache_robot_base_transform),
         rclcpp::Parameter("publish_robot_base_tf", _publish_robot_base_tf),
       });
@@ -293,6 +295,60 @@ TEST_F(OdometryWithoutJointTfTest, RobotBaseTfModePublishesGimbalAndNeverBaseLin
   // z 若被压平成 0，底盘（子节点 z=-0.268）会整块沉到地面以下 —— RViz 里一眼可见。
   EXPECT_NEAR(last_odometry_z_, 0.26805, 1e-3)
     << "odom->gimbal_yaw 的 z 必须是云台离地高度，不能压成 0（否则底盘沉到地下）";
+}
+
+TEST_F(OdometryWithoutJointTfTest, RegistersRawCloudAtItsStampDuringFastYaw)
+{
+  start(true, true, true, false);
+  std::atomic<int> scans_received{0};
+  std::atomic<float> point_y{0.0f};
+  auto scan_subscriber = driver_->create_subscription<sensor_msgs::msg::PointCloud2>(
+    "sensor_scan", 2, [&](const sensor_msgs::msg::PointCloud2 & cloud) {
+      point_y = *sensor_msgs::PointCloud2ConstIterator<float>(cloud, "y");
+      ++scans_received;
+    });
+
+  tf2_ros::TransformBroadcaster ground_truth(driver_);
+  const auto stamp = driver_->now();
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.frame_id = "odom";
+  transform.child_frame_id = "gimbal_yaw";
+  transform.header.stamp = stamp - rclcpp::Duration::from_seconds(0.02);
+  transform.transform.rotation.w = 1.0;
+  ground_truth.sendTransform(transform);
+  transform.header.stamp = stamp + rclcpp::Duration::from_seconds(0.02);
+  transform.transform.rotation.w = std::cos(0.17);
+  transform.transform.rotation.z = std::sin(0.17);
+  ground_truth.sendTransform(transform);
+
+  nav_msgs::msg::Odometry odometry;
+  odometry.header.frame_id = "odom";
+  odometry.child_frame_id = "livox_imu";
+  odometry.header.stamp = stamp;
+  odometry.pose.pose.orientation.w = 1.0;
+
+  sensor_msgs::msg::PointCloud2 scan;
+  scan.header.frame_id = "livox_imu";
+  scan.header.stamp = stamp;
+  sensor_msgs::PointCloud2Modifier points(scan);
+  points.setPointCloud2FieldsByString(1, "xyz");
+  points.resize(1);
+  *sensor_msgs::PointCloud2Iterator<float>(scan, "x") = 2.0f;
+  odom_pub_->publish(odometry);
+  scan_pub_->publish(scan);
+  waitFor(800ms, [&]() {return scans_received.load() > 0;});
+  EXPECT_EQ(scans_received.load(), 1);
+  EXPECT_NEAR(point_y.load(), 2.0 * std::sin(0.17), 1e-3);
+
+  // A later scan cannot be registered with the last known yaw sample.
+  const auto outside_tf_history = stamp + rclcpp::Duration::from_seconds(0.10);
+  odometry.header.stamp = outside_tf_history;
+  scan.header.stamp = outside_tf_history;
+  odom_pub_->publish(odometry);
+  scan_pub_->publish(scan);
+  std::this_thread::sleep_for(250ms);
+  stop();
+  EXPECT_EQ(scans_received.load(), 1);
 }
 
 }  // namespace

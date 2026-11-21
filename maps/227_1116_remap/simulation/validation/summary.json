@@ -1,0 +1,302 @@
+{
+  "fix": "Preserve the actually emitted zero command and timestamp as the next acceleration/slew-rate baseline, including the planning-grace and trajectory-rejection paths. Preserve spin-mode angular command history. Filter actual inward velocity using measured ESDF clearance and the reaction-plus-braking distance bound; keep tangential/outward motion. Improve interior local reference points toward the existing optimizer clearance target with bounded monotonic ESDF ascent before clipping; preserve requested endpoints and independent hard validation.",
+  "parameters_changed": {
+    "optimization_clearance_margin_m": [
+      0.1,
+      0.15
+    ],
+    "speed_and_acceleration_limits_unchanged": true,
+    "collision_threshold_unchanged": true
+  },
+  "speed_limit_mps": 2.6,
+  "acceleration_limit_mps2": 7.0,
+  "required_clearance_m": 0.38,
+  "envelope_radius_m": 0.33,
+  "before": {
+    "source_map_sha256": "2923d7b519a4df9be1cd266228f0b1016e6390cd09ea9bc1738b916b9aab443c",
+    "envelope_radius_m": 0.33,
+    "method": "Distance to occupied-cell axis-aligned square faces; subtract robot envelope radius; interpolate recorded XY segments at <=2mm spacing. This is a geometric replay check, not contact-sensor evidence.",
+    "legs": [
+      {
+        "name": "short_diagonal",
+        "status": "SUCCEEDED",
+        "endpoint_error_m": 0.4007,
+        "max_gt_speed_mps": 2.204587456610689,
+        "wall_s": 0.88,
+        "actual_distance_m": 0.9643367155262843,
+        "center_clearance_m": 0.5354698865560882,
+        "envelope_margin_m": 0.20546988655608817,
+        "minimum_xy": [
+          -2.365410301769622,
+          0.41192757892315396
+        ],
+        "gt_samples": 61,
+        "nav2_recoveries": 0,
+        "internal_recovery_max_enter_count": 0
+      },
+      {
+        "name": "cross_room",
+        "status": "SUCCEEDED",
+        "endpoint_error_m": 0.3549,
+        "max_gt_speed_mps": 2.196970788502137,
+        "wall_s": 4.74,
+        "actual_distance_m": 2.6782160951849434,
+        "center_clearance_m": 0.4112765723190567,
+        "envelope_margin_m": 0.08127657231905666,
+        "minimum_xy": [
+          -0.31485643612664355,
+          1.0214615069600814
+        ],
+        "gt_samples": 122,
+        "nav2_recoveries": 0,
+        "internal_recovery_max_enter_count": 0
+      },
+      {
+        "name": "around_obstacles",
+        "status": "SUCCEEDED",
+        "endpoint_error_m": 0.3821,
+        "max_gt_speed_mps": 2.464790114289711,
+        "wall_s": 1.93,
+        "actual_distance_m": 3.3170667959327638,
+        "center_clearance_m": 0.35638690236994935,
+        "envelope_margin_m": 0.02638690236994934,
+        "minimum_xy": [
+          -1.116519996834279,
+          1.1057252005981701
+        ],
+        "gt_samples": 71,
+        "nav2_recoveries": 0,
+        "internal_recovery_max_enter_count": 0
+      },
+      {
+        "name": "return_spawn",
+        "status": "SUCCEEDED",
+        "endpoint_error_m": 0.385,
+        "max_gt_speed_mps": 2.5300163862986644,
+        "wall_s": 1.0,
+        "actual_distance_m": 1.3287262455753415,
+        "center_clearance_m": 0.579107718775896,
+        "envelope_margin_m": 0.24910771877589594,
+        "minimum_xy": [
+          -2.366146910971398,
+          0.2929405443696367
+        ],
+        "gt_samples": 54,
+        "nav2_recoveries": 0,
+        "internal_recovery_max_enter_count": 0
+      }
+    ],
+    "all_succeeded": true,
+    "minimum_envelope_margin_m": 0.02638690236994934,
+    "maximum_observed_speed_mps": 2.5300163862986644,
+    "minimum_margin_goal_m": 0.05,
+    "margin_goal_met": false
+  },
+  "validation_runs": [
+    {
+      "source_map_sha256": "2923d7b519a4df9be1cd266228f0b1016e6390cd09ea9bc1738b916b9aab443c",
+      "envelope_radius_m": 0.33,
+      "method": "Distance to occupied-cell axis-aligned square faces; subtract robot envelope radius; interpolate recorded XY segments at <=2mm spacing. This is a geometric replay check, not contact-sensor evidence.",
+      "legs": [
+        {
+          "name": "short_diagonal",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3878,
+          "max_gt_speed_mps": 2.1502803110886983,
+          "wall_s": 0.92,
+          "actual_distance_m": 1.005218211351833,
+          "center_clearance_m": 0.5516440093830121,
+          "envelope_margin_m": 0.22164400938301204,
+          "minimum_xy": [
+            -2.357335207818148,
+            0.383555594870037
+          ],
+          "gt_samples": 146,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "cross_room",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3691,
+          "max_gt_speed_mps": 2.3747008362951334,
+          "wall_s": 2.27,
+          "actual_distance_m": 2.771605570983012,
+          "center_clearance_m": 0.4222481206535686,
+          "envelope_margin_m": 0.09224812065356858,
+          "minimum_xy": [
+            -0.3802422749687309,
+            1.038252092526648
+          ],
+          "gt_samples": 214,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "around_obstacles",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3771,
+          "max_gt_speed_mps": 2.438606001062388,
+          "wall_s": 2.7,
+          "actual_distance_m": 3.4861699410552656,
+          "center_clearance_m": 0.4193647865905131,
+          "envelope_margin_m": 0.08936478659051306,
+          "minimum_xy": [
+            -0.2898956532220691,
+            0.9338009651783209
+          ],
+          "gt_samples": 233,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "return_spawn",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3594,
+          "max_gt_speed_mps": 2.483960129203232,
+          "wall_s": 1.08,
+          "actual_distance_m": 1.3634988681676974,
+          "center_clearance_m": 0.6066749218897284,
+          "envelope_margin_m": 0.27667492188972836,
+          "minimum_xy": [
+            -2.692996592861947,
+            -0.19796860349184045
+          ],
+          "gt_samples": 154,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        }
+      ],
+      "all_succeeded": true,
+      "minimum_envelope_margin_m": 0.08936478659051306,
+      "maximum_observed_speed_mps": 2.483960129203232,
+      "minimum_margin_goal_m": 0.05,
+      "margin_goal_met": true
+    },
+    {
+      "source_map_sha256": "2923d7b519a4df9be1cd266228f0b1016e6390cd09ea9bc1738b916b9aab443c",
+      "envelope_radius_m": 0.33,
+      "method": "Distance to occupied-cell axis-aligned square faces; subtract robot envelope radius; interpolate recorded XY segments at <=2mm spacing. This is a geometric replay check, not contact-sensor evidence.",
+      "legs": [
+        {
+          "name": "short_diagonal",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3697,
+          "max_gt_speed_mps": 2.165850607386959,
+          "wall_s": 1.3,
+          "actual_distance_m": 1.0215017118557659,
+          "center_clearance_m": 0.5482847697530292,
+          "envelope_margin_m": 0.21828476975302918,
+          "minimum_xy": [
+            -2.366915946473889,
+            0.366710210408445
+          ],
+          "gt_samples": 163,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "cross_room",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.2776,
+          "max_gt_speed_mps": 2.4131529789110195,
+          "wall_s": 2.12,
+          "actual_distance_m": 2.8747359592635315,
+          "center_clearance_m": 0.41563945521481094,
+          "envelope_margin_m": 0.08563945521481092,
+          "minimum_xy": [
+            -0.32496367467950416,
+            1.0204596429704904
+          ],
+          "gt_samples": 206,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "around_obstacles",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3634,
+          "max_gt_speed_mps": 2.416411999597187,
+          "wall_s": 2.65,
+          "actual_distance_m": 3.618594049040273,
+          "center_clearance_m": 0.40985334333093637,
+          "envelope_margin_m": 0.07985334333093635,
+          "minimum_xy": [
+            -0.5060214329925887,
+            1.1570281670381493
+          ],
+          "gt_samples": 231,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        },
+        {
+          "name": "return_spawn",
+          "status": "SUCCEEDED",
+          "endpoint_error_m": 0.3439,
+          "max_gt_speed_mps": 2.4277690249588058,
+          "wall_s": 1.16,
+          "actual_distance_m": 1.3936303982769784,
+          "center_clearance_m": 0.6048655183932715,
+          "envelope_margin_m": 0.2748655183932715,
+          "minimum_xy": [
+            -2.68407957929441,
+            -0.19040766898128014
+          ],
+          "gt_samples": 156,
+          "nav2_recoveries": 0,
+          "internal_recovery_max_enter_count": 0
+        }
+      ],
+      "all_succeeded": true,
+      "minimum_envelope_margin_m": 0.07985334333093635,
+      "maximum_observed_speed_mps": 2.4277690249588058,
+      "minimum_margin_goal_m": 0.05,
+      "margin_goal_met": true
+    }
+  ],
+  "functional_tests": {
+    "core_passed": 225,
+    "controller_passed": 77,
+    "new_regressions": 13,
+    "static_checks": "Existing clang config files are missing; linter tests excluded, functional gtests passed."
+  },
+  "limits": [
+    "Geometric replay of a synthetic extruded 2D map; ground-truth localization.",
+    "Metric is distance to occupied-cell faces minus a 0.33m envelope, not a physical contact measurement.",
+    "Recorded XY segments interpolated at <=2mm; baseline samples were coarser than new 100Hz samples.",
+    "Intermediate mission starts vary slightly with where the preceding goal stops."
+  ],
+  "minimum_validated_margin_m": 0.07985334333093635,
+  "maximum_observed_speed_mps": 2.483960129203232,
+  "all_goals_succeeded": true,
+  "all_runs_meet_5cm": true,
+  "config_sha256": {
+    "src/srm27_navigation/srm27_nav_bringup/config/simulation/nav2_params_srm_fakeyaw.yaml": "9b80aa44ea41c36c5be10251031cbbf13f2ff030d040b95ddf2beb0508024116",
+    "src/srm27_navigation/srm27_nav_bringup/config/simulation/speed_limits.yaml": "3dfef91a5ca3bc9f2726c1906b1b2cb9301810b69495e9c0bda2ac3403a1cd9c"
+  },
+  "goal_tolerance_m": 0.5,
+  "successful_goals": 8,
+  "nav2_recoveries_total": 0,
+  "internal_recovery_max_enter_count": 0,
+  "live_parameters": {
+    "FollowPath.limits.max_linear_speed": 2.6,
+    "FollowPath.limits.max_linear_accel": 7.0,
+    "FollowPath.minco.optimization_clearance_margin": 0.15,
+    "FollowPath.minco.w_obstacle": 500.0,
+    "FollowPath.safety.robot_radius": 0.33,
+    "FollowPath.safety.clearance_margin": 0.05,
+    "FollowPath.safety.reaction_latency": 0.1,
+    "FollowPath.mpc.command_lookahead": 0.2
+  },
+  "intermediate_retest": {
+    "directory": "guard_run2",
+    "all_goals_succeeded": true,
+    "cross_room_nav2_recoveries": 23,
+    "accepted_as_final_validation": false,
+    "reason": "Velocity guard alone left the locally clipped corner seed repeatedly invalid; added bounded clearance improvement of reference points before final runs."
+  },
+  "command_guard_samples": {
+    "seed_run1": 2,
+    "seed_run2": 1
+  }
+}
