@@ -104,4 +104,6 @@ maps/pcd/*.pcd
 /build_zloc/
 /install_zloc/
 # 先验地图包（keyframes + clouds/*.pcd + 描述子）体积大、按场地生成。
+# 现在统一放在工作空间内的 maps/pcd/map_bundles/（不再放 $HOME/srm_nav_27_data）。
 /data/map_bundles/
+/maps/pcd/map_bundles/

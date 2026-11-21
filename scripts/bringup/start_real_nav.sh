@@ -80,6 +80,10 @@
 #   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
 #   ./scripts/bringup/start_real_nav.sh --lio-frontend zlio   # 定位前端换 ZLIO (实车参数在 config/real)
 #   ./scripts/bringup/start_real_nav.sh -m xjl0914            # 指定地图 (maps/ 下的名字)
+#   ./scripts/bringup/start_real_nav.sh -m 227_1113pro -pcd 227_1113pro_mapframe
+#                                                             # 地图/先验点云都只给名字
+#   ./scripts/bringup/start_real_nav.sh -m 227_1113pro --zloc-backend --zloc-prior
+#                                                             # 先验地图包也按地图名自动找
 #   ./scripts/bringup/start_real_nav.sh --prior-pcd /abs/map.pcd      # 指定重定位先验点云
 #   ./scripts/bringup/start_real_nav.sh --no-reloc                    # 不用重定位: LIO + 静态 map->odom, 不需要先验 PCD
 #   ./scripts/bringup/start_real_nav.sh -c omni                       # 换回 Omni 旧链 (fake_vel_transform legacy)
@@ -94,7 +98,10 @@
 #
 #   ── 与 start_sim_nav.sh 同名同义 ─────────────────────────────────────────────
 #   -m, --map <名字|绝对路径>   地图名(在 maps/ 下解析)或 YAML 绝对路径; 缺省自动选择
-#       --prior-pcd <名字|路径> 重定位先验点云, 默认与地图同名
+#                               -m 227_1113pro 与 -m 227_1113pro.yaml 等价
+#   -pcd, --pcd, --prior-pcd <名字|路径>   重定位先验点云, 默认与地图同名
+#                               -pcd 227_1113pro_mapframe 会去 maps/pcd/ 下解析
+#                               (-pcd 是 --prior-pcd 的短写, 两者等价)
 #   -p, --params <绝对路径>     Nav2 参数文件（实车默认 = 迁移链那份, 见 -c）
 #   -c, --controller <auto|minco>   控制器（实车另有 omni 可选, 见下）
 #       --minco                 等价于 --controller minco
@@ -129,7 +136,9 @@
 #       --zloc-loop             启用运行轨迹回环（默认关闭，可与先验/UWB 同开）
 #       --zloc-uwb              启用 UWB 融合（默认关闭；需配置实际话题/坐标/外参）
 #       --zloc-config <文件>    backend YAML 绝对路径（可用 extends 继承默认配置）
-#       --zloc-map <目录>       先验地图包绝对路径，仅指定路径，不隐式启用先验
+#       --zloc-map <目录|名字>  先验地图包路径, 仅指定路径, 不隐式启用先验。
+#                               给裸名字(如 227_1113pro)时按 maps/pcd/map_bundles/<名字>
+#                               解析; 不给时也按 -m 的地图名自动找。
 #                               必须已在地图系下（由 _mapframe.pcd 生成，不是 camera_init）
 #       --zloc-trajectory <目录> backend 轨迹地图包输出目录（仅建图模式需要）
 #       --no-reloc              等价于 --lio
@@ -372,6 +381,12 @@ ZLOC_UWB=0
 ZLOC_CONFIG=""
 # 先验地图包目录（必须绝对路径，且必须由 maps/pcd/<site>_mapframe.pcd 生成）。
 ZLOC_MAP="${ZLOC_MAP:-}"
+# 先验地图包的根目录: 没给 --zloc-map 时按"地图名"在这里找
+#   <根>/<地图名>/{keyframes.txt,map.pcd,...}
+# 与 -m/--prior-pcd 一样支持"只写名字", 命令行不用再粘 $HOME 长路径。
+# **放在工作空间内**(maps/pcd/map_bundles), 不再依赖 $HOME 下的 srm_nav_27_data:
+# 地图包属于本项目的资产, 换机器/换用户都能原样带走。
+ZLOC_BUNDLE_ROOT="${ZLOC_BUNDLE_ROOT:-$WS_DIR/maps/pcd/map_bundles}"
 # backend 轨迹地图包输出目录（先验定位模式不写轨迹，只有建图模式需要）。
 ZLOC_TRAJECTORY_DIR="${ZLOC_TRAJECTORY_DIR:-}"
 
@@ -651,8 +666,24 @@ is_spin_rate() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -m|--map)         MAP_NAME="${2:?--map 需要地图名或绝对路径}"; shift 2 ;;
-    --prior-pcd)      PRIOR_PCD_FILE="${2:?--prior-pcd 需要名字或路径}"; shift 2 ;;
+    -m|--map)
+      MAP_NAME="${2:?--map 需要地图名或绝对路径}"
+      # 允许直接粘文件名/路径: -m 227_1113pro.yaml == -m 227_1113pro。
+      # 带 / 的一律当路径原样用, 只对"裸名字"去扩展名 (MAP_NAME 后面还要拼 .yaml,
+      # 不去掉就会出现 227_1113pro.yaml.yaml)。
+      case "$MAP_NAME" in
+        */*|/*) ;;
+        *.yaml) MAP_NAME="${MAP_NAME%.yaml}" ;;
+      esac
+      shift 2 ;;
+    # -pcd / --pcd 是 --prior-pcd 的短写 (与 -m 一样只给名字即可, 去 maps/ 下解析)。
+    -pcd|--pcd|--prior-pcd)
+      PRIOR_PCD_FILE="${2:?-pcd 需要名字或路径}"
+      case "$PRIOR_PCD_FILE" in
+        */*|/*) ;;
+        *.pcd) PRIOR_PCD_FILE="${PRIOR_PCD_FILE%.pcd}" ;;
+      esac
+      shift 2 ;;
     -p|--params)      PARAMS_FILE="${2:?--params 需要绝对路径}"; PARAMS_FILE_GIVEN=1; shift 2 ;;
     -c|--controller)  CONTROLLER="${2:?--controller 需要 auto|omni|minco}"
                       CONTROLLER_CLI_GIVEN=1; shift 2 ;;
@@ -677,7 +708,16 @@ while [ $# -gt 0 ]; do
     --zloc-config) ZLOC_CONFIG="${2:?--zloc-config 需要配置文件}"; shift 2 ;;
     # 空路径交给启用先验时的自检统一报告，避免未设置 BUNDLE 时难以理解的 bash 错误。
     --zloc-map)       ZLOC_MAP="${2:-}"
-                      if [ $# -ge 2 ]; then shift 2; else shift; fi ;;
+                      if [ $# -ge 2 ]; then shift 2; else shift; fi
+                      # 裸名字(不带 /)按地图包根目录解析, 与 -m 一样不粘长路径;
+                      # 绝对/相对路径原样保留, 交给下面的绝对路径自检报告。
+                      case "$ZLOC_MAP" in
+                        ""|/*|*/*) ;;
+                        *)
+                          if [ -d "$ZLOC_BUNDLE_ROOT/$ZLOC_MAP" ]; then
+                            ZLOC_MAP="$(readlink -f "$ZLOC_BUNDLE_ROOT/$ZLOC_MAP")"
+                          fi ;;
+                      esac ;;
     --zloc-trajectory) ZLOC_TRAJECTORY_DIR="${2:?--zloc-trajectory 需要目录}"; shift 2 ;;
     # ${2?} 而不是 ${2:?}: 允许显式给空串, 含义是"这一项跟随 URDF 模型"。
     --lidar-xyz)      LIDAR_XYZ="${2?--lidar-xyz 需要 \"X Y Z\"}"; shift 2 ;;
@@ -982,12 +1022,22 @@ if [ "$ZLOC_ON" != "1" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_LOOP" = "1" ] 
   exit 2
 fi
 if [ "$ZLOC_ON" = "1" ]; then
+  # 没给 --zloc-map 时按地图名到 ZLOC_BUNDLE_ROOT 下找地图包, 让命令行可以只写
+  # "-m 227_1113pro --zloc-prior"。只有目录确实存在且带 keyframes.txt 才采用,
+  # 否则保持 ZLOC_MAP 为空, 仍走下面"需要 --zloc-map"的明确报错 (不会瞎猜)。
+  if [ "$ZLOC_PRIOR" = "1" ] && [ -z "$ZLOC_MAP" ] && [ -n "$MAP_NAME" ]; then
+    _zloc_auto_bundle="$ZLOC_BUNDLE_ROOT/$(basename "$MAP_NAME" .yaml)"
+    if [ -d "$_zloc_auto_bundle" ] && [ -f "$_zloc_auto_bundle/keyframes.txt" ]; then
+      ZLOC_MAP="$(readlink -f "$_zloc_auto_bundle")"
+      echo "[提示] 未给 --zloc-map: 按地图名自动选用先验地图包 $ZLOC_MAP" >&2
+    fi
+  fi
   _zloc_problems=()
   [ "$LIO_ON" = "1" ] || _zloc_problems+=("需要 --lio（backend 依赖 ZLIO 的 FrontendFrame 输入）")
   [ "$LIO_FRONTEND" = "zlio" ] || _zloc_problems+=("需要 --lio-frontend zlio（当前: $LIO_FRONTEND）")
   if [ "$ZLOC_PRIOR" = "1" ]; then
     if [ -z "$ZLOC_MAP" ]; then
-      _zloc_problems+=("需要 --zloc-map <先验地图包目录>（写成 \"\$BUNDLE\" 时, 先确认它在本 shell 里已 export）")
+      _zloc_problems+=("需要 --zloc-map <先验地图包目录>（也可只给 -m <地图名>, 会到 $ZLOC_BUNDLE_ROOT/<地图名> 找）")
     elif [ ! -d "$ZLOC_MAP" ]; then
       _zloc_problems+=("--zloc-map 目录不存在: $ZLOC_MAP")
     elif [ ! -f "$ZLOC_MAP/keyframes.txt" ]; then
@@ -1528,6 +1578,12 @@ if [ "$RELOC_ON" = "1" ]; then
   fi
 else
   PRIOR_PCD="${PRIOR_PCD_FILE:-$PCD_REAL_DIR/$MAP_NAME.pcd}"   # 仅供 launch 声明
+  # 给了 -pcd 却不走重定位时它不会生效 (map->odom 由别的来源发布), 说清楚,
+  # 免得"命令行写了先验点云"被当成已经在用 GICP。
+  if [ -n "$PRIOR_PCD_FILE" ]; then
+    echo "[提示] 给了 -pcd $PRIOR_PCD_FILE 但当前不是重定位模式, 先验点云不会参与定位。" >&2
+    echo "[提示]        要用它: --lio-frontend point_lio --reloc (GICP 发布 map->odom)。" >&2
+  fi
 fi
 
 # 底盘串口: 设备存在性与权限, 只告警不阻断 (车可能还没插上 / 只做链路验证)

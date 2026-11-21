@@ -30,7 +30,7 @@ source scripts/setup/env_srm27.sh     # ROS + install/ + GTSAM（自动探测前
 
 export SITE=227_1113pro
 export PCD="$PWD/maps/pcd/${SITE}_mapframe.pcd"
-export BUNDLE="$HOME/srm_nav_27_data/zlocalization/map_bundles/${SITE}"
+export BUNDLE="$PWD/maps/pcd/map_bundles/${SITE}"
 mkdir -p "$(dirname "$BUNDLE")"
 
 ros2 run srm27_zlocalization_backend srm27_zlocalization_backend_build_pcd_map_bundle \
@@ -271,7 +271,7 @@ TF 时间戳是否重新推进，以及恢复耗时和位姿连续性。每次�
   -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
   --lio --lio-frontend zlio --zloc-backend \
   --zloc-prior --zloc-loop --zloc-uwb \
-  --zloc-map "$HOME/srm_nav_27_data/zlocalization/map_bundles/227_1113pro"
+  --zloc-map "$PWD/maps/pcd/map_bundles/227_1113pro"
 ```
 
 可附加 `--zloc-config /absolute/path/to/site.yaml` 指定现场配置（支持 `extends`）。

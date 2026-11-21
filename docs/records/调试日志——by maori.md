@@ -582,42 +582,105 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 ./debug_tools/plot_backend_correction.py --save all.png
 ```
 ### z-loc 后端脚本参数
+
+2026-11-21 起地图/先验地图包都只写名字：`-m 227_1113pro`，`--zloc-map` 整行可以省掉
+（不给时按 `-m` 的地图名到 `maps/pcd/map_bundles/` 下自动找）。下面已按新脚本改好。
+
 ```bash
 # 先验，回环，UWB全开
 ./scripts/bringup/start_real_nav.sh \
-  -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
+  -m 227_1113pro \
   --lio --lio-frontend zlio \
   --zloc-backend \
-  --zloc-prior --zloc-loop --zloc-uwb \
-  --zloc-map "$HOME/srm_nav_27_data/zlocalization/map_bundles/227_1113pro" 
+  --zloc-prior --zloc-loop --zloc-uwb
 
 # 只开先验
 ./scripts/bringup/start_real_nav.sh \
-  -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
+  -m 227_1113pro \
   --lio --lio-frontend zlio --zloc-backend \
-  --zloc-prior \
-  --zloc-map "$HOME/srm_nav_27_data/zlocalization/map_bundles/227_1113pro"
+  --zloc-prior
 
 # 只开回环
 ./scripts/bringup/start_real_nav.sh \
-  -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
+  -m 227_1113pro \
   --lio --lio-frontend zlio --zloc-backend \
   --zloc-loop
 
-
 # 只开先验+回环
 ./scripts/bringup/start_real_nav.sh \
-  -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
+  -m 227_1113pro \
   --lio --lio-frontend zlio --zloc-backend \
-  --zloc-prior --zloc-loop \
-  --zloc-map "$HOME/srm_nav_27_data/zlocalization/map_bundles/227_1113pro"
+  --zloc-prior --zloc-loop
 
 # 三后端全开+变速小陀螺
 ./scripts/bringup/start_real_nav.sh \
-  -m "$PWD/maps/227_1113pro/227_1113pro.yaml" \
+  -m 227_1113pro \
   --lio --lio-frontend zlio \
   --zloc-backend \
   --zloc-prior --zloc-loop --zloc-uwb \
-  --zloc-map "$HOME/srm_nav_27_data/zlocalization/map_bundles/227_1113pro" \
   --chassis-spin-sine --spin-max 9  --spin-min 5 --spin-period 1.5
 ```
+
+地图包名字和地图名不一样时显式给（同样只写名字，不用绝对路径）：
+`--zloc-map 227_1113pro`；换场地就是换 `-m` 的名字，其余不用动。
+
+# 2026-11-21
+### 新建图流程
+
+2026-11-13 那套 5 步不用改，末尾多一步建 backend 的先验地图包。
+
+```bash
+# ---------- 1. 建图 (两个前端任选; 开了 --record-bag 就会录原始话题) ----------
+./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio   # point-lio建图
+
+./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名                            # z-lio建图
+
+# 另起终端
+./scripts/bringup/start_real_slam.sh --save 地图名
+
+./scripts/bringup/start_real_slam.sh --stop
+
+# ---------- 2. 从包重建 pcd, 并自动转地图系 (别加 --no-mapframe) ----------
+./scripts/mapping/build_pcd_from_bag.sh --name 地图名
+#    -> maps/pcd/地图名.pcd              camera_init 系原始件
+#    -> maps/pcd/地图名_mapframe.pcd     地图系成品, 下一步只吃这份
+
+# ---------- 3. 【新增】生成 zloc backend 的先验地图包 ----------
+./scripts/mapping/build_zloc_map_bundle.sh --name 地图名
+#    -> maps/pcd/map_bundles/地图名/keyframes.txt        逐帧位姿
+#    -> maps/pcd/map_bundles/地图名/clouds/NNNNNN.pcd    逐帧点云
+#    -> maps/pcd/map_bundles/地图名/sc_descriptors.bin   Scan Context 描述子
+#    -> maps/pcd/map_bundles/地图名/map.pcd              全局显示云 (只给 rviz 看)
+```
+
+起导航，地图包按 `-m` 的名字自动找，不用再写 `--zloc-map` 长路径：
+
+```bash
+./scripts/bringup/start_real_nav.sh -m 地图名 \
+  --lio --lio-frontend zlio --zloc-backend --zloc-prior
+```
+
+只想确认 backend 能不能加载这份包（约 10 s，之后 Ctrl-C）：
+
+```bash
+source scripts/setup/env_srm27.sh
+ros2 launch srm27_zlocalization_backend backend.launch.py mode:=localization \
+  prior_map:=$PWD/maps/pcd/map_bundles/地图名 use_rviz:=false
+# 看到 loaded immutable prior: keyframes=N, descriptor=Scan Context 就对了
+```
+
+几个坑：
+
+- **名字要一致**：`--save 地图名`、`build_pcd_from_bag.sh --name`、`build_zloc_map_bundle.sh --name`
+  用同一个名字。pcd 名和地图名不一样时：
+  `build_zloc_map_bundle.sh --name 地图名 --pcd maps/pcd/pcd名_mapframe.pcd`。
+  包名要跟 `-m` 的地图名对齐，自动解析才找得到。
+- **必须用 `_mapframe.pcd` 建包**。camera_init 系的 `.pcd` 差一个雷达安装位姿，用它建出来的包
+  看着正常，车却定位到错姿态，而且 backend/GICP 都不报错。
+- **`--sc-*` 那几个几何参数必须和 `config/backend.yaml` 的 `common.scan_context.*` 逐位一致**
+  （num_rings / num_sectors / max_radius / downsample / lidar_height / min_bin_points /
+  augment_count），差一点 backend 启动就是 `FATAL: failed to load Scan Context descriptors`。
+  手敲命令时最容易错的就是这组；用上面那个脚本会自动从配置里读。
+- **裁剪范围**（`--x-min/--x-max/--y-min/--y-max`）是场地相关的。227_1113pro 用的是
+  `-8 4.5 -7.6 10.1`；换场地要么重新挑，要么不给——脚本会按点云包围盒内缩 0.1 m 自动算。
+- 地图包 23 MB 左右，`.gitignore` 里有 `/maps/pcd/map_bundles/`，默认不进版本库。

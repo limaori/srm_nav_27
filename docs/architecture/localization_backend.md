@@ -250,7 +250,7 @@ backend 需要**关键帧地图包**（`keyframes.txt` + `clouds/` + `sc_descrip
 # 入口（已在本仓库验证过 227_1113pro）
 ros2 run srm27_zlocalization_backend srm27_zlocalization_backend_build_pcd_map_bundle \
   --input maps/pcd/<site>_mapframe.pcd \
-  --out-bundle ~/srm_nav_27_data/zlocalization/map_bundles/<site> \
+  --out-bundle maps/pcd/map_bundles/<site> \
   --x-min -8 --x-max 4.5 --y-min -7.6 --y-max 10.1 \
   --sensor-z 0.3464 --query-step 2.0 --bundle-step 1.5 \
   --map-voxel 0.15 --scan-voxel 0.15 --sc-lidar-height 0.3464
