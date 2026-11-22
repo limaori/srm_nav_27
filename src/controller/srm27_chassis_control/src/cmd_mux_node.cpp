@@ -43,6 +43,7 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include "srm27_chassis_control/twist_watchdog.hpp"
@@ -114,6 +115,11 @@ public:
         this->spin_topic_, qos,
         [this](const geometry_msgs::msg::Twist::SharedPtr _msg) {
           this->onSpinCommand(*_msg);
+        });
+      this->spin_inhibit_sub_ = this->create_subscription<std_msgs::msg::Empty>(
+        "navigation_spin_inhibit", qos, [this](std_msgs::msg::Empty::ConstSharedPtr) {
+          std::lock_guard<std::mutex> lock(this->mutex_);
+          this->spin_inhibit_watchdog_.markInput(std::chrono::steady_clock::now());
         });
     }
     this->output_pub_ =
@@ -274,6 +280,7 @@ private:
         break;
       }
       const auto now = std::chrono::steady_clock::now();
+      const bool spinInhibited = this->dual_input_ && !this->spin_inhibit_watchdog_.expired(now);
 
       MixInput input;
       bool navExpired = false;
@@ -290,7 +297,7 @@ private:
           input.spin_enabled = true;
           spinExpired = this->spin_watchdog_.expired(now);
           input.spin_valid = !spinExpired;
-          input.spin_wz = spinExpired ? 0.0 : this->spin_wz_;
+          input.spin_wz = spinExpired || spinInhibited ? 0.0 : this->spin_wz_;
         }
       } else if (this->dual_input_) {
         input.spin_enabled = true;
@@ -327,6 +334,16 @@ private:
         this->wz_ramp_active_ = false;
       }
 
+      if (spinInhibited && std::abs(wzOut) > 1.0e-6) {
+        mixed.vx = 0.0;
+        mixed.vy = 0.0;
+      }
+      if (spinInhibited != this->spin_inhibit_active_) {
+        this->spin_inhibit_active_ = spinInhibited;
+        RCLCPP_INFO(
+          this->get_logger(), "%s",
+          spinInhibited ? "导航要求避障或脱困，自转减速至零" : "导航已释放自转限制");
+      }
       if (mixed.wz_clamped) {
         if (!this->wz_clamp_active_) {
           this->wz_clamp_active_ = true;
@@ -391,7 +408,8 @@ private:
         nextDiagnostics = now + std::chrono::duration_cast<
           std::chrono::steady_clock::duration>(this->diagnostics_period_);
         this->publishDiagnostics(
-          mixed, wzOut, navExpired, spinExpired, stopped, spinCount, spinWzInput, stamp);
+          mixed, wzOut, navExpired, spinExpired, spinInhibited, stopped,
+          spinCount, spinWzInput, stamp);
       }
 
       lock.lock();
@@ -400,7 +418,7 @@ private:
 
   void publishDiagnostics(
     const srm27_chassis_control::MixOutput & _mixed, double _wzOut, bool _navExpired,
-    bool _spinExpired, bool _stopped, uint64_t _spinCount, double _spinWzInput,
+    bool _spinExpired, bool _spinInhibited, bool _stopped, uint64_t _spinCount, double _spinWzInput,
     const rclcpp::Time & _stamp)
   {
     diagnostic_msgs::msg::DiagnosticArray array;
@@ -471,6 +489,7 @@ private:
       addKeyValue("spin_wz_input", std::to_string(_spinWzInput));
       addKeyValue("spin_freq_hz", std::to_string(spin_freq));
       addKeyValue("spin_valid", _spinExpired ? "false" : "true");
+      addKeyValue("spin_inhibited", _spinInhibited ? "true" : "false");
       addKeyValue("spin_timeout", std::to_string(this->spin_timeout_));
       addKeyValue("spin_timeout_count", std::to_string(this->spin_timeout_count_));
       addKeyValue("spin_input_count", std::to_string(_spinCount));
@@ -506,6 +525,7 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr nav_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr spin_inhibit_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr output_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_;
@@ -514,6 +534,8 @@ private:
 
   TwistWatchdog nav_watchdog_{0.3};
   TwistWatchdog spin_watchdog_{0.25};
+  // A hold from either navigation or recovery survives gaps between commands.
+  TwistWatchdog spin_inhibit_watchdog_{0.60};
 
   std::mutex mutex_;
   std::condition_variable condition_;
@@ -523,6 +545,7 @@ private:
   bool shutdown_{false};
   bool nav_timeout_active_{false};
   bool spin_timeout_active_{false};
+  bool spin_inhibit_active_{false};
   bool wz_clamp_active_{false};
   bool nav_wz_ignored_active_{false};
   bool wz_ramp_active_{false};

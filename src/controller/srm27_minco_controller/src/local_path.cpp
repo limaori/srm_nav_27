@@ -64,6 +64,47 @@ bool clearSegment(
 }
 }  // namespace
 
+std::vector<Eigen::Vector2d> improvePathClearance(
+  const std::vector<Eigen::Vector2d> & _path, const srm27_minco_core::Esdf2D & _esdf,
+  double _target_clearance, double _max_displacement)
+{
+  auto result = _path;
+  if (!std::isfinite(_target_clearance) || !std::isfinite(_max_displacement) ||
+    _target_clearance <= 0.0 || _max_displacement <= 0.0)
+  {
+    return result;
+  }
+  for (std::size_t i = 1; i + 1 < result.size(); ++i) {
+    double travelled = 0.0;
+    for (int step = 0; step < 12; ++step) {
+      const auto query = _esdf.query(result[i].x(), result[i].y());
+      if (!query.valid || !query.gradient_valid || !query.gradient.allFinite() ||
+        query.gradient.norm() < kEpsilon || query.distance >= _target_clearance)
+      {
+        break;
+      }
+      double length = std::min(
+        {0.05, _target_clearance - query.distance, _max_displacement - travelled});
+      bool improved = false;
+      for (int trial = 0; trial < 6 && length > kEpsilon; ++trial) {
+        const Eigen::Vector2d next = result[i] + length * query.gradient.normalized();
+        const auto candidate = _esdf.query(next.x(), next.y());
+        if (candidate.valid && candidate.distance > query.distance + kEpsilon) {
+          result[i] = next;
+          travelled += length;
+          improved = true;
+          break;
+        }
+        length *= 0.5;
+      }
+      if (!improved) {
+        break;
+      }
+    }
+  }
+  return result;
+}
+
 const char * toString(LocalPathEnd _end)
 {
   switch (_end) {
@@ -80,6 +121,40 @@ const char * toString(LocalPathEnd _end)
     default:
       return "invalid";
   }
+}
+
+Eigen::Vector2d forwardPathDirection(
+  const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position)
+{
+  if (!_position.allFinite()) {
+    return Eigen::Vector2d::Zero();
+  }
+  double nearest = std::numeric_limits<double>::infinity();
+  Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+  for (std::size_t i = 1; i < _path.size(); ++i) {
+    if (!_path[i - 1].allFinite() || !_path[i].allFinite()) {
+      return Eigen::Vector2d::Zero();
+    }
+    const Eigen::Vector2d delta = _path[i] - _path[i - 1];
+    if (delta.squaredNorm() < kEpsilon * kEpsilon) {
+      continue;
+    }
+    const double alpha =
+      std::clamp((_position - _path[i - 1]).dot(delta) / delta.squaredNorm(), 0.0, 1.0);
+    const double distance = (_path[i - 1] + alpha * delta - _position).squaredNorm();
+    const Eigen::Vector2d candidate = _path[i] - _position;
+    if (distance < nearest ||
+      (distance <= nearest + kEpsilon * kEpsilon && direction.isZero() &&
+      candidate.norm() > kEpsilon))
+    {
+      nearest = distance;
+      direction.setZero();
+      if (candidate.norm() > kEpsilon) {
+        direction = candidate.normalized();
+      }
+    }
+  }
+  return direction;
 }
 
 LocalPathResult extractLocalPath(

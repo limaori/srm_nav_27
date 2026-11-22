@@ -77,6 +77,19 @@ TEST(LocalPathTest, ClearHorizonRetainsCruiseSpeed)
   EXPECT_DOUBLE_EQ(result.terminal_speed, 0.8);
 }
 
+TEST(LocalPathTest, RecoveryDirectionKeepsUpcomingCorner)
+{
+  const std::vector<Point> path{Point(0, 0), Point(1, 0), Point(1, 1)};
+  const auto before = controller::forwardPathDirection(path, Point(.4, 0));
+  EXPECT_NEAR(before.x(), 1, 1e-9);
+  EXPECT_NEAR(before.y(), 0, 1e-9);
+  const auto corner = controller::forwardPathDirection(path, Point(1, 0));
+  EXPECT_NEAR(corner.x(), 0, 1e-9);
+  EXPECT_NEAR(corner.y(), 1, 1e-9);
+  EXPECT_TRUE(controller::forwardPathDirection({}, Point(0, 0)).isZero());
+  EXPECT_TRUE(controller::forwardPathDirection(path, Point(1, 1)).isZero());
+}
+
 TEST(LocalPathTest, FinalGoalAndNonGoalPathEndStop)
 {
   for (bool is_goal : {false, true}) {
@@ -171,4 +184,45 @@ TEST(LocalPathTest, RejectsInvalidPaths)
     EXPECT_EQ(result.end, controller::LocalPathEnd::kInvalid);
     EXPECT_TRUE(result.points.empty());
   }
+}
+
+TEST(LocalPathClearanceTest, ImprovesCloseWallSeedWithoutMovingEndpoints)
+{
+  const auto map = makeMap(6.0, 1.0);
+  const std::vector<Point> path{Point(0, -1), Point(0.65, 0), Point(0, 1)};
+  const auto improved = controller::improvePathClearance(path, map, 0.53, 0.15);
+  ASSERT_EQ(improved.size(), path.size());
+  EXPECT_TRUE(improved.front().isApprox(path.front()));
+  EXPECT_TRUE(improved.back().isApprox(path.back()));
+  EXPECT_GT(map.query(improved[1].x(), improved[1].y()).distance,
+    map.query(path[1].x(), path[1].y()).distance + 0.14);
+  EXPECT_LE((improved[1] - path[1]).norm(), 0.15 + 1.0e-9);
+}
+
+TEST(LocalPathClearanceTest, ClearReferenceIsUnchanged)
+{
+  const std::vector<Point> path{Point(0, -1), Point(0, 0), Point(0, 1)};
+  const auto improved = controller::improvePathClearance(path, makeMap(), 0.53, 0.15);
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    EXPECT_TRUE(improved[i].isApprox(path[i]));
+  }
+}
+
+TEST(LocalPathClearanceTest, InvalidMapAndInvalidReserveDoNotMoveSeed)
+{
+  const std::vector<Point> path{Point(0, -1), Point(0.65, 0), Point(0, 1)};
+  const auto no_map = controller::improvePathClearance(path, core::Esdf2D(), 0.53, 0.15);
+  const auto invalid = controller::improvePathClearance(path, makeMap(), 0.53, -1.0);
+  EXPECT_TRUE(no_map[1].isApprox(path[1]));
+  EXPECT_TRUE(invalid[1].isApprox(path[1]));
+}
+
+TEST(LocalPathClearanceTest, AdjustedSeedStillCannotCrossSolidWall)
+{
+  const auto map = makeMap(6.0, 1.0);
+  const std::vector<Point> path{Point(0, 0), Point(0.65, 0), Point(2, 0)};
+  const auto improved = controller::improvePathClearance(path, map, 0.53, 0.15);
+  const auto clipped = controller::extractLocalPath(improved, path.front(), map, config(), true);
+  EXPECT_EQ(clipped.end, controller::LocalPathEnd::kBlocked);
+  EXPECT_DOUBLE_EQ(clipped.terminal_speed, 0.0);
 }

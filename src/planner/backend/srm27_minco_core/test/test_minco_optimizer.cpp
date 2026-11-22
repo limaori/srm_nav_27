@@ -499,6 +499,21 @@ TEST(MincoOptimizerGradient, MatchesCentralDifferenceWithoutEsdf)
   RecordProperty("max_time_relative_error", formatMetric(check.max_time_error));
 }
 
+TEST(MincoOptimizerGradient, MatchesCentralDifferenceAtLowDynamicsLimits)
+{
+  MincoOptimizer optimizer;
+  const MincoOptimizerConfig config = makeGradientConfig();
+  ASSERT_TRUE(optimizer.configure(config));
+  auto limits = makeGradientLimits();
+  limits.max_linear_speed = 0.4;
+  limits.max_linear_accel = 0.6;
+  const auto check = runGradientCheck(
+    optimizer, makeGradientGuess(), limits, config.min_piece_duration,
+    kPositionEpsilon, kTimeEpsilon);
+  EXPECT_LT(check.max_point_error, 1.0e-6);
+  EXPECT_LT(check.max_time_error, 1.0e-4);
+}
+
 TEST(MincoOptimizerGradient, MatchesCentralDifferenceWithEsdfSoftCost)
 {
   MincoOptimizer optimizer;

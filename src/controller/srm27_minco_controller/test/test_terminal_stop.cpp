@@ -56,7 +56,7 @@ TEST(TerminalStopTest, TakesOverImmediatelyAtFullSpeed)
   // 目标检查器容差 0.40，距末点 0.40（刚进圈）。速度不参与判定。
   EXPECT_TRUE(stop.update(0.40, 0.40));
   EXPECT_DOUBLE_EQ(stop.entryTolerance(), 0.40);
-  EXPECT_DOUBLE_EQ(stop.exitTolerance(), 0.55);
+  EXPECT_DOUBLE_EQ(stop.exitTolerance(), 0.40);
 }
 
 /// \brief 进入时机只看位置：不因为"还很快"而推迟。
@@ -69,14 +69,34 @@ TEST(TerminalStopTest, PositionOnlyEntry)
   EXPECT_FALSE(another.update(0.401, 0.40));
 }
 
-/// \brief 滞回：略超出容差仍保持，超过 容差+滞回 才解除。
+/// \brief 显式缩小停车半径时，滞回只在目标检查器的成功圈内保持。
 TEST(TerminalStopTest, HysteresisKeepsStop)
 {
+  auto stop = makeStop(0.25);
+  ASSERT_TRUE(stop.update(0.20, 0.40));
+  EXPECT_TRUE(stop.update(0.35, 0.40));
+  EXPECT_TRUE(stop.update(0.39, 0.40));
+  EXPECT_FALSE(stop.update(0.41, 0.40));
+}
+
+TEST(TerminalStopTest, ReleasesOutsideCheckerToleranceAfterEarlyPredictionOrCoast)
+{
   auto stop = makeStop(0.0);
-  ASSERT_TRUE(stop.update(0.30, 0.40));
-  EXPECT_TRUE(stop.update(0.45, 0.40));
-  EXPECT_TRUE(stop.update(0.54, 0.40));
-  EXPECT_FALSE(stop.update(0.60, 0.40));
+  ASSERT_TRUE(stop.update(0.499, 0.50));
+  // Recorded failure: an extrapolated pose entered at .499, but the measured
+  // stopped pose stayed at .516, below the old .65 exit radius, indefinitely.
+  EXPECT_FALSE(stop.update(0.516, 0.50));
+  EXPECT_FALSE(stop.active());
+}
+
+TEST(TerminalStopTest, ExplicitStopRadiusCannotExceedCheckerSuccessRegion)
+{
+  auto stop = makeStop(0.60);
+  EXPECT_FALSE(stop.update(0.51, 0.50));
+  EXPECT_TRUE(stop.update(0.49, 0.50));
+  EXPECT_DOUBLE_EQ(stop.entryTolerance(), 0.50);
+  EXPECT_DOUBLE_EQ(stop.exitTolerance(), 0.50);
+  EXPECT_FALSE(stop.update(0.501, 0.50));
 }
 
 /// \brief 进入阈值优先用目标检查器的 xy 容差；读不到时退回兜底值。

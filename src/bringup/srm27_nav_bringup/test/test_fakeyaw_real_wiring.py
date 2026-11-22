@@ -389,6 +389,37 @@ def test_gimbal_relay_is_always_started_and_follows_the_topic_arg():
             f"话题为空时应退回 constant，实得 {_sub(empty_context, input_type)}")
 
 
+def test_tdt_planner_opt_in_preserves_the_real_navigation_chain():
+    import yaml
+
+    module = _load_launch_module()
+    base_params = yaml.safe_load(FAKEYAW_PARAMS.read_text())
+    for enabled in ("False", "True"):
+        _, context, includes, _, _ = _make_context(
+            module, {"params_file": str(FAKEYAW_PARAMS), "use_tdt_planner": enabled}
+        )
+        args = _include_arguments(includes, context, "nav2_stack_launch.py")
+        with open(args["params_file"]) as stream:
+            config = yaml.safe_load(stream)
+
+        planner = config["planner_server"]["ros__parameters"]
+        grid = planner["GridBased"]
+        expected = ("tdt_nav_kit::TdtGlobalPlanner" if enabled == "True"
+                    else "nav2_theta_star_planner/ThetaStarPlanner")
+        _assert(planner["planner_plugins"] == ["GridBased"], "BT planner ID must stay GridBased")
+        _assert(grid["plugin"] == expected, f"Unexpected global planner: {grid['plugin']}")
+        if enabled == "True":
+            _assert(grid["path_resample_step"] == 0.20, "MINCO needs a dense reference path")
+            _assert(grid["treat_unknown_as_obstacle"] is True, "Unknown space must be blocked")
+        for name in ("local_costmap", "global_costmap", "fake_vel_transform",
+                     "smoother_server", "bt_navigator"):
+            _assert(config[name] == base_params[name], f"TDT changed {name} parameters")
+        follow_path = config["controller_server"]["ros__parameters"]["FollowPath"]
+        _assert(follow_path["plugin"] == "srm27_minco_controller::MincoMpcController",
+                "TDT must keep the real-robot controller")
+        _assert(follow_path["command_frame"] == "gimbal_yaw_fake", "Unexpected command frame")
+
+
 def _run_all():
     failures = 0
     for name, function in sorted(globals().items()):

@@ -1,0 +1,7 @@
+{
+  "completed_round_trips": 3,
+  "successful_leg_messages": 6,
+  "stop_service_success": true,
+  "stop_message": "已停止 (原状态 RUNNING); 航点列表保留 2 个, 可再 start。",
+  "loop_entry_test_passed": true
+}

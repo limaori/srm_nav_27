@@ -1,0 +1,744 @@
+ign_sim_pointcloud_tool:
+  ros__parameters:
+    pcd_topic: livox/lidar
+    n_scan: 32
+    horizon_scan: 600
+    ang_bottom: 7.0
+    ang_res_y: 1.903225806451613
+    min_range: 0.1
+    max_range: 39.9
+    scan_period: 0.0
+point_lio:
+  ros__parameters:
+    use_imu_as_input: false
+    prop_at_freq_of_imu: true
+    check_satu: true
+    init_map_size: 10
+    point_filter_num: 8
+    space_down_sample: true
+    filter_size_surf: 0.3
+    filter_size_map: 0.3
+    ivox_nearby_type: 18
+    runtime_pos_log_enable: false
+    common:
+      lid_topic: velodyne_points
+      imu_topic: livox/imu
+      con_frame: false
+      con_frame_num: 1
+      cut_frame: false
+      cut_frame_time_interval: 0.05
+      time_diff_lidar_to_imu: 0.0
+    prior_pcd:
+      enable: false
+      init_pose:
+      - 3.4
+      - 9.5
+      - 0.0
+    preprocess:
+      lidar_type: 2
+      scan_line: 32
+      scan_rate: 20
+      timestamp_unit: 0
+      blind: 0.3
+    mapping:
+      imu_en: true
+      extrinsic_est_en: false
+      imu_time_inte: 0.005
+      lidar_time_inte: 0.05
+      satu_acc: 30.0
+      satu_gyro: 35.0
+      acc_norm: 9.81
+      lidar_meas_cov: 0.001
+      acc_cov_output: 500.0
+      gyr_cov_output: 1000.0
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      imu_meas_acc_cov: 0.1
+      imu_meas_omg_cov: 0.1
+      gyr_cov_input: 0.01
+      acc_cov_input: 0.1
+      plane_thr: 0.1
+      match_s: 81.0
+      ivox_grid_resolution: 0.5
+      gravity:
+      - 0.0
+      - -4.9
+      - -8.487047153776548
+      gravity_init:
+      - 0.0
+      - -4.9
+      - -8.487047153776548
+      extrinsic_T:
+      - 0.0
+      - 0.0
+      - 0.0
+      extrinsic_R:
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
+    odometry:
+      publish_odometry_without_downsample: false
+    publish:
+      path_en: false
+      scan_publish_en: true
+      scan_bodyframe_pub_en: false
+      tf_send_en: false
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+loam_interface:
+  ros__parameters:
+    use_sim_time: true
+    state_estimation_topic: aft_mapped_to_init
+    registered_scan_topic: cloud_registered
+    odom_frame: odom
+    base_frame: gimbal_yaw
+    ground_frame: base_link
+    lidar_frame: front_mid360
+    planarize_pose: false
+zlio_bridge:
+  ros__parameters:
+    use_sim_time: true
+    odom_frame: odom
+    base_frame: gimbal_yaw
+    ground_frame: base_link
+    lidar_frame: front_mid360
+    frame_topic: zlio/frame
+    session_topic: zlio/session
+    planarize_pose: false
+    tf_timeout: 0.5
+    anchor_on_epoch_change: true
+    epoch_topic: zlio_bridge/epoch
+    matches_topic: zlio_bridge/matches
+    min_matches_warn: 30
+    max_frame_jump_pos: 1.0
+    max_frame_jump_yaw: 0.5
+    reject_implausible_jump: false
+    events_topic: zlio_bridge/events
+imu_saturation_guard:
+  ros__parameters:
+    use_sim_time: true
+    input_topic: livox/imu
+    output_topic: livox/imu_saturated
+    max_acceleration: 30.0
+    max_hold_sec: 0.5
+    warn_throttle_sec: 2.0
+    report_interval_sec: 10.0
+sensor_scan_generation:
+  ros__parameters:
+    use_sim_time: true
+    lidar_frame: front_mid360
+    base_frame: base_link
+    robot_base_frame: gimbal_yaw
+    cache_robot_base_transform: true
+    publish_robot_base_tf: true
+    publish_tf: false
+    max_sample_gap: 0.6
+    max_position_jump: 0.75
+    max_yaw_jump: 1.2
+terrain_analysis:
+  ros__parameters:
+    scanVoxelSize: 0.05
+    decayTime: 0.5
+    noDecayDis: 0.0
+    clearingDis: 0.0
+    useSorting: true
+    quantileZ: 0.2
+    considerDrop: false
+    limitGroundLift: false
+    maxGroundLift: 0.3
+    clearDyObs: true
+    minDyObsDis: 0.3
+    minDyObsAngle: 0.0
+    minDyObsRelZ: -0.3
+    absDyObsRelZThre: 0.2
+    minDyObsVFOV: -28.0
+    maxDyObsVFOV: 33.0
+    minDyObsPointNum: 1
+    noDataObstacle: false
+    noDataBlockSkipNum: 0
+    minBlockPointNum: 10
+    vehicleHeight: 0.5
+    voxelPointUpdateThre: 100
+    voxelTimeUpdateThre: 1.0
+    minRelZ: -1.5
+    maxRelZ: 0.5
+    disRatioZ: 0.2
+terrain_analysis_ext:
+  ros__parameters:
+    scanVoxelSize: 0.1
+    decayTime: 0.2
+    noDecayDis: 0.0
+    clearingDis: 20.0
+    useSorting: true
+    quantileZ: 0.2
+    vehicleHeight: 0.5
+    voxelPointUpdateThre: 100
+    voxelTimeUpdateThre: 2.0
+    lowerBoundZ: -1.5
+    upperBoundZ: 0.5
+    disRatioZ: 0.2
+    checkTerrainConn: false
+    terrainUnderVehicle: -0.75
+    terrainConnThre: 0.5
+    ceilingFilteringThre: 2.0
+    localTerrainMapRadius: 4.0
+small_gicp_relocalization:
+  ros__parameters:
+    use_sim_time: true
+    num_threads: 4
+    num_neighbors: 10
+    global_leaf_size: 0.3
+    registered_leaf_size: 0.2
+    max_dist_sq: 1.5
+    registration_interval: 0.5
+    max_translation_step: 2.0
+    max_rotation_step: 0.5
+    min_inlier_ratio: 0.3
+    max_registration_rmse: 0.3
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    robot_base_frame: base_link
+    lidar_frame: front_mid360
+    init_pose:
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+    - 0.0
+pointcloud_to_laserscan:
+  ros__parameters:
+    use_sim_time: true
+    target_frame: base_link
+    min_height: -0.5
+    max_height: 6.0
+    min_intensity: 0.1
+    max_intensity: 2.0
+    angle_min: -3.1415926
+    angle_max: 3.1415926
+    angle_increment: 0.00872665
+    scan_time: 0.05
+    range_min: 0.3
+    range_max: 10.0
+    use_inf: true
+slam_toolbox:
+  ros__parameters:
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: obstacle_scan
+    use_map_saver: true
+    mode: mapping
+    debug_logging: false
+    throttle_scans: 1
+    scan_queue_size: 10
+    transform_publish_period: 0.02
+    map_update_interval: 0.5
+    resolution: 0.05
+    min_laser_range: 0.3
+    max_laser_range: 10.0
+    minimum_time_interval: 0.2
+    transform_timeout: 0.2
+    tf_buffer_duration: 10.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.1
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    loop_search_maximum_distance: 3.0
+    do_loop_closing: false
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+    loop_search_space_dimension: 8.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+    distance_variance_penalty: 5.5
+    angle_variance_penalty: 5.0
+    fine_search_angle_offset: 0.00349
+    coarse_search_angle_offset: 0.349
+    coarse_angle_resolution: 0.0349
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    use_response_expansion: true
+bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: gimbal_yaw_fake
+    odom_topic: odometry
+    bt_loop_duration: 10
+    default_server_timeout: 100
+    wait_for_service_timeout: 1000
+    default_nav_to_pose_bt_xml: /home/srm/nav_ws/srm_nav_27_tdt/src/tdt_nav_kit/behavior_trees/navigate_to_pose_w_smoothing.xml
+    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_through_poses_route_aware.xml
+    plugin_lib_names:
+    - nav2_compute_path_to_pose_action_bt_node
+    - nav2_compute_path_through_poses_action_bt_node
+    - nav2_smooth_path_action_bt_node
+    - nav2_follow_path_action_bt_node
+    - nav2_spin_action_bt_node
+    - nav2_wait_action_bt_node
+    - nav2_assisted_teleop_action_bt_node
+    - nav2_back_up_action_bt_node
+    - nav2_drive_on_heading_bt_node
+    - nav2_clear_costmap_service_bt_node
+    - srm27_remove_passed_goals_bt_node
+    - nav2_is_stuck_condition_bt_node
+    - nav2_goal_reached_condition_bt_node
+    - nav2_goal_updated_condition_bt_node
+    - nav2_globally_updated_goal_condition_bt_node
+    - nav2_is_path_valid_condition_bt_node
+    - nav2_initial_pose_received_condition_bt_node
+    - nav2_reinitialize_global_localization_service_bt_node
+    - nav2_rate_controller_bt_node
+    - nav2_distance_controller_bt_node
+    - nav2_speed_controller_bt_node
+    - nav2_truncate_path_action_bt_node
+    - nav2_truncate_path_local_action_bt_node
+    - nav2_goal_updater_node_bt_node
+    - nav2_recovery_node_bt_node
+    - nav2_pipeline_sequence_bt_node
+    - nav2_round_robin_node_bt_node
+    - nav2_transform_available_condition_bt_node
+    - nav2_time_expired_condition_bt_node
+    - nav2_path_expiring_timer_condition
+    - nav2_distance_traveled_condition_bt_node
+    - nav2_single_trigger_bt_node
+    - nav2_goal_updated_controller_bt_node
+    - nav2_is_battery_low_condition_bt_node
+    - nav2_navigate_through_poses_action_bt_node
+    - nav2_navigate_to_pose_action_bt_node
+    - nav2_remove_passed_goals_action_bt_node
+    - nav2_planner_selector_bt_node
+    - nav2_controller_selector_bt_node
+    - nav2_goal_checker_selector_bt_node
+    - nav2_controller_cancel_bt_node
+    - nav2_path_longer_on_approach_bt_node
+    - nav2_wait_cancel_bt_node
+    - nav2_spin_cancel_bt_node
+    - nav2_back_up_cancel_bt_node
+    - nav2_assisted_teleop_cancel_bt_node
+    - nav2_drive_on_heading_cancel_bt_node
+    - nav2_is_battery_charging_condition_bt_node
+controller_server:
+  ros__parameters:
+    use_sim_time: true
+    odom_topic: odometry
+    controller_frequency: 50.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins:
+    - progress_checker
+    goal_checker_plugins:
+    - general_goal_checker
+    controller_plugins:
+    - FollowPath
+    progress_checker:
+      plugin: nav2_controller::SimpleProgressChecker
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    general_goal_checker:
+      plugin: srm27_nav_plugins/OmniStoppedGoalChecker
+      stateful: true
+      xy_goal_tolerance: 0.5
+      yaw_goal_tolerance: 6.28
+      trans_stopped_velocity: 0.1
+    FollowPath:
+      plugin: srm27_minco_controller::MincoMpcController
+      planning_frame: odom
+      base_frame: gimbal_yaw
+      command_frame: gimbal_yaw_fake
+      fake_base_frame: gimbal_yaw_fake
+      odom_topic: odometry
+      replan_frequency: 10.0
+      planning_horizon: 3.0
+      planning_deadline_ms: 30.0
+      state_timeout: 0.5
+      map_timeout: 0.3
+      trajectory_max_age: 0.3
+      build_grace_period: 1.0
+      diagnostics_period: 0.5
+      publish_visualization: true
+      terminal_reached_radius: 0.2
+      goal_change_tolerance: 0.1
+      terminal:
+        enabled: true
+        tolerance: 0.0
+        exit_margin: 0.15
+      state:
+        max_sample_gap: 0.4
+        max_position_jump: 0.75
+        max_yaw_jump: 1.2
+        velocity_filter_alpha: 0.35
+      minco:
+        polynomial_order: 5
+        two_stage_optimization: true
+        enable_report_fine_heuristic: false
+        nominal_piece_duration: 0.3
+        min_piece_duration: 0.05
+        max_piece_duration: 1.0
+        pre_time_ratio_min: 0.9
+        pre_time_ratio_max: 1.1
+        samples_per_piece: 8
+        max_iterations: 150
+        gradient_tolerance: 0.0001
+        lbfgs_past: 3
+        w_jerk: 0.0
+        w_time: 25.0
+        w_obstacle: 500.0
+        w_velocity: 60.0
+        w_acceleration: 300.0
+        w_time_ratio: 1.0
+        soft_hinge_beta: 20.0
+        optimization_clearance_margin: 0.15
+        resample_step: 0.1
+        corner_speed_ratio: 0.8
+        min_pieces: 2
+        max_pieces: 12
+        terminal_speed: 0.8
+      mpc:
+        model: velocity_integrator
+        prediction_dt: 0.02
+        prediction_steps: 30
+        two_pass_reference: false
+        command_lookahead: 0.2
+        qp_deadline_ms: 5.0
+        use_hot_start: true
+        q_position: 20.0
+        q_yaw: 5.0
+        q_velocity: 1.0
+        q_omega: 0.5
+        r_translation: 1.0
+        r_angular: 1.0
+        r_input_change: 0.0
+        use_tangent_normal_weight: false
+        q_along_track: 20.0
+        q_cross_track: 40.0
+        speed_polygon_sides: 8
+        enforce_input_change: true
+      yaw_policy:
+        mode: xy_only
+        stop_rotation_on_goal: true
+        narrow_clearance_threshold: 0.6
+        allow_reverse: true
+      spin_request:
+        topic: rotation_cmd
+        timeout: 0.25
+      safety:
+        robot_radius: 0.28
+        clearance_margin: 0.02
+        narrow_linear_speed: 0.9
+        unknown_is_obstacle: true
+        braking_deceleration: 0.0
+        reaction_latency: 0.15
+      recovery:
+        fail_threshold: 10
+        cooldown_sec: 2.0
+        window_sec: 3.0
+        escape_speed: 1.0
+        stuck_clearance: 0.4
+        escaped_clearance: 0.5
+        search_radius: 0.4
+        search_samples: 36
+        repeat_guard_radius: 0.35
+        repeat_guard_angle_deg: 120.0
+        publish_visualization: true
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: gimbal_yaw_fake
+      rolling_window: true
+      width: 8
+      height: 8
+      resolution: 0.05
+      robot_radius: 0.3
+      plugins:
+      - static_layer
+      - intensity_voxel_layer
+      - inflation_layer
+      intensity_voxel_layer:
+        plugin: srm27_nav_costmap::IntensityVoxelLayer
+        enabled: true
+        track_unknown_space: true
+        footprint_clearing_enabled: true
+        publish_voxel_map: false
+        combination_method: 1
+        mark_threshold: 0
+        origin_z: 0.0
+        unknown_threshold: 5
+        z_resolution: 0.05
+        z_voxels: 16
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        min_obstacle_intensity: 0.1
+        max_obstacle_intensity: 2.0
+        observation_sources: terrain_map
+        terrain_map:
+          data_type: PointCloud2
+          topic: <robot_namespace>/terrain_map
+          sensor_frame: front_mid360
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 5.0
+          obstacle_min_range: 0.2
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.5
+      always_send_full_costmap: false
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: map
+      robot_base_frame: gimbal_yaw_fake
+      robot_radius: 0.3
+      resolution: 0.05
+      plugins:
+      - static_layer
+      - intensity_voxel_layer
+      - inflation_layer
+      intensity_voxel_layer:
+        plugin: srm27_nav_costmap::IntensityVoxelLayer
+        enabled: true
+        track_unknown_space: true
+        footprint_clearing_enabled: true
+        publish_voxel_map: false
+        combination_method: 1
+        mark_threshold: 0
+        origin_z: 0.0
+        unknown_threshold: 5
+        z_resolution: 0.05
+        z_voxels: 16
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
+        min_obstacle_intensity: 0.1
+        max_obstacle_intensity: 2.0
+        observation_sources: terrain_map_ext
+        terrain_map_ext:
+          data_type: PointCloud2
+          topic: <robot_namespace>/terrain_map_ext
+          sensor_frame: front_mid360
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 10.0
+          obstacle_min_range: 0.2
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.5
+      always_send_full_costmap: false
+map_server:
+  ros__parameters:
+    use_sim_time: true
+    yaml_filename: ''
+map_saver:
+  ros__parameters:
+    use_sim_time: true
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+planner_server:
+  ros__parameters:
+    use_sim_time: true
+    expected_planner_frequency: 10.0
+    planner_plugins:
+    - GridBased
+    GridBased:
+      plugin: tdt_nav_kit::TdtGlobalPlanner
+      occupancy_threshold: 252
+      treat_unknown_as_obstacle: false
+      mask_num_layers: 1
+      cost_inflate_radius: 1.0
+      simplify_epsilon: 0.1
+      save_point_max_radius: 0.4
+      orientation_mode: tangent
+smoother_server:
+  ros__parameters:
+    use_sim_time: true
+    smoother_plugins:
+    - tdt_smoother
+    tdt_smoother:
+      plugin: tdt_nav_kit::TdtSmoother
+      occupancy_threshold: 252
+      treat_unknown_as_obstacle: false
+      order: 5
+      max_dx: 3
+      strict_collision: false
+      backend: path
+      collision_iter: 6
+      norm_time: true
+      max_corridor_range: 2.5
+      corridor_shrink: 0.0
+      max_speed: 3.0
+      max_acc: 1.0
+      path_resample_step: 0.3
+      path_resample_max_points: 2000
+      fallback_to_resampled: true
+      corner_round_input_step: 0.8
+      corner_round_cut: 0.4
+      corner_round_min_turn_deg: 25.0
+      corner_round_sample_step: 0.2
+      init_vel_from_odom: false
+      odom_topic: odom
+      init_vel_max_age: 0.3
+      min_points: 2
+      orientation_mode: tangent
+behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins:
+    - spin
+    - backup
+    - drive_on_heading
+    - assisted_teleop
+    - wait
+    spin:
+      plugin: nav2_behaviors/Spin
+    backup:
+      plugin: srm27_nav_plugins/BackUpFreeSpace
+    drive_on_heading:
+      plugin: nav2_behaviors/DriveOnHeading
+    wait:
+      plugin: nav2_behaviors/Wait
+    assisted_teleop:
+      plugin: nav2_behaviors/AssistedTeleop
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: gimbal_yaw_fake
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    service_name: global_costmap/get_costmap
+    max_radius: 2.0
+    visualize: false
+    escape_direction_mode: esdf_gradient
+    esdf_search_radius: 0.4
+    esdf_search_samples: 36
+    esdf_unknown_is_seed: true
+    early_exit_enable: true
+    early_exit_clearance: 0.55
+    early_exit_hold_cycles: 3
+    early_exit_min_travel: 0.3
+    early_exit_min_time: 1.0
+    early_exit_require_obstacles: true
+    min_clearance: 0.32
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: true
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: wait_at_waypoint
+    wait_at_waypoint:
+      plugin: nav2_waypoint_follower::WaitAtWaypoint
+      enabled: true
+      waypoint_pause_duration: 200
+fake_vel_transform:
+  ros__parameters:
+    use_sim_time: true
+    transform_mode: nav_se2
+    robot_base_frame: gimbal_yaw
+    fake_robot_base_frame: gimbal_yaw_fake
+    odom_topic: odometry
+    input_cmd_vel_topic: cmd_vel_nav_fake
+    output_cmd_vel_topic: cmd_vel_nav_body
+    odom_timeout: 0.6
+    cmd_spin_topic: cmd_spin
+    diagnostics_period: 0.5
+    yaw_rate_source: imu
+    imu_topic: livox/imu
+    imu_target_frame: gimbal_yaw
+    gimbal_rate_topic: gimbal_yaw_rate
+    gimbal_rate_timeout: 0.1
+    actuation_delay: 0.05
+    wz_history_window: 1.0
+    yaw_debug_topic: yaw_debug
+    chassis_cmd_vel_topic: ''
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    odom_topic: odometry
+    odom_duration: 0.1
+    deadband_velocity:
+    - 0.0
+    - 0.0
+    - 0.0
+    velocity_timeout: 1.0
+srm27_teleop_twist_joy_node:
+  ros__parameters:
+    use_sim_time: true
+    robot_base_frame: base_link
+    control_mode: auto_control
+    require_enable_button: true
+    enable_button: 4
+    enable_turbo_button: 5
+    axis_chassis:
+      x: 1
+      y: 0
+      yaw: 6
+    scale_chassis:
+      x: 2.5
+      y: 2.5
+      yaw: 3.0
+    scale_chassis_turbo:
+      x: 4.0
+      y: 4.0
+      yaw: 6.0
+    axis_gimbal:
+      roll: -1
+      pitch: 4
+      yaw: 3
+    scale_gimbal:
+      roll: 0.0
+      pitch: -1.0
+      yaw: 2.5
+    scale_gimbal_turbo:
+      roll: 0.0
+      pitch: -1.5
+      yaw: 3.5

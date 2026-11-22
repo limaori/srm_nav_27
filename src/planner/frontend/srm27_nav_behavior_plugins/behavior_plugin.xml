@@ -1,5 +1,8 @@
 <class_libraries>
 	<library path="srm27_backup_free_space_behavior">
+	  <class name="srm27_nav_plugins/BackUpFreeSpace" type="srm27_nav_behaviors::BackUpFreeSpace" base_class_type="nav2_core::Behavior">
+	    <description>Back-up behavior from the SRM navigation plugin package.</description>
+	  </class>
 	  <class name="srm27_nav_behaviors/BackUpFreeSpace" type="srm27_nav_behaviors::BackUpFreeSpace" base_class_type="nav2_core::Behavior">
 	    <description>An enhanced back_up action that move toward free space.</description>
 	  </class>

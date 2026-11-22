@@ -1,0 +1,51 @@
+# =============================================================================
+# 实车速度限幅 —— 低速试跑档（新图首跑用）
+# =============================================================================
+# 与 config/real/speed_limits.yaml 同结构，只压数值：
+#   平移 2.60 -> 1.00 m/s，加速度 7.0 -> 2.5 m/s²，wz 8.50 -> 1.00 rad/s。
+# 用法: ./script/start_real_nav.sh -m <地图> --tdt-planner \
+#         --speed-limits $(pwd)/src/srm27_navigation/srm27_nav_bringup/config/real/speed_limits_slow.yaml
+controller_server@omni:
+  ros__parameters:
+    FollowPath:
+      v_linear_max: 1.00
+      v_linear_min: -1.00
+      v_angular_max: 1.00
+      v_angular_min: -1.00
+controller_server@minco:
+  ros__parameters:
+    FollowPath:
+      limits:
+        max_linear_speed: 1.00
+        max_linear_accel: 2.5
+        max_angular_speed: 1.00
+        max_angular_accel: 3.2
+velocity_smoother@omni:
+  ros__parameters:
+    max_velocity: [1.0, 1.0, 0.0]
+    min_velocity: [-1.0, -1.0, 0.0]
+    max_accel: [2.5, 2.5, 0.0]
+    max_decel: [-2.5, -2.5, 0.0]
+velocity_smoother@minco:
+  ros__parameters:
+    max_velocity: [1.0, 1.0, 0.0]
+    min_velocity: [-1.0, -1.0, 0.0]
+    max_accel: [2.5, 2.5, 0.0]
+    max_decel: [-2.5, -2.5, 0.0]
+velocity_smoother@fakeyaw:
+  ros__parameters:
+    max_velocity: [1.0, 1.0, 0.0]
+    min_velocity: [-1.0, -1.0, 0.0]
+    max_accel: [2.5, 2.5, 0.0]
+    max_decel: [-2.5, -2.5, 0.0]
+srm_cmd_mux:
+  ros__parameters:
+    vx_max: 1.00
+    vy_max: 1.00
+    v_max: 1.00
+    wz_max: 1.00
+behavior_server:
+  ros__parameters:
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2

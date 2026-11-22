@@ -254,6 +254,26 @@ void SensorScanGenerationNode::laserCloudAndOdometryHandler(
   sensor_msgs::msg::PointCloud2 out;
   if (cloud_frame == odom_frame || cloud_frame == "odom") {
     out = *pcd_msg;
+  } else if (!publish_tf_) {
+    // Ground truth already owns odom TF. ApproximateTime pairs nearby samples,
+    // so its lidar pose can be several degrees off at full chassis spin.
+    // Interpolate TF at the cloud stamp. A latest-pose fallback would mark
+    // rotated walls as new obstacles in the terrain map.
+    try {
+      const auto cloud_transform = tf_buffer_->lookupTransform(
+        odom_frame, cloud_frame,
+        rclcpp::Time(pcd_msg->header.stamp, this->get_clock()->get_clock_type()),
+        rclcpp::Duration::from_seconds(0.08));
+      tf2::Transform tf_odom_to_cloud;
+      tf2::fromMsg(cloud_transform.transform, tf_odom_to_cloud);
+      pcl_ros::transformPointCloud(odom_frame, tf_odom_to_cloud, *pcd_msg, out);
+    } catch (const tf2::TransformException & exception) {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "跳过点云：%s <- %s 在采样时刻的 TF 不可用 (%s)",
+        odom_frame.c_str(), cloud_frame.c_str(), exception.what());
+      return;
+    }
   } else if (cloud_frame == lidar_frame_) {
     pcl_ros::transformPointCloud(odom_frame, tf_odom_to_lidar, *pcd_msg, out);
   } else {

@@ -63,6 +63,7 @@
 - [仿真 LIO 前端替换 Z-LIO 实施记录](records/仿真LIO前端替换Z-LIO实施记录%28ai%29.md)
 - [调试日志——by maori](records/调试日志——by%20maori.md)
 - [旧版完整 README（2026-11-14 归档）](records/README_full_20261114.md) —— 重构前的完整项目说明，仅供追溯。
+- [TDT 场地算法验证](../maps/227_1116_remap/simulation/field_validation/README.md) —— 227_1116_remap 的分层判据、往返循环入口、A/B 配置生成与 2026-11-16 净空未通过记录。
 
 ## archive
 

@@ -29,8 +29,9 @@ srm_cmd_mux:
     # 输入 2：决策层底盘自转（geometry_msgs/Twist，只读 angular.z，rad/s，正值为俯视逆时针）。
     # 空串 = 单输入（旧行为）。决策层接口约定见方案 §4.3 / §8.2：
     #   要持续转就以 >= 10 Hz 持续发；停发 spin_timeout 秒即视为关闭；也可以直接发 0。
-    # 注意 mux 的 `rotation_cmd` 与 MINCO 的 `spin_request.topic` 同名但**互不影响**：
-    # xy_only 下 MINCO 只缓存不进线（方案 §4.3）。
+    # xy_only 下，MINCO 和 BackUpFreeSpace 通过 navigation_spin_inhibit 通知 mux
+    # 在窄区或脱困期间暂停自转。mux 先降 wz，降到零后再放行平移。最后一条通知
+    # 超过 0.60 s 后恢复处理仍在更新的 rotation_cmd。
     spin_topic: ""
     # 输出：mux 是它**唯一**的发布者。
     # 仿真 = cmd_vel_sim（速度适配器订阅）；实车入口会重写为 cmd_vel_chassis（串口节点订阅）。

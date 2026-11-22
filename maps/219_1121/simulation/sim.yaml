@@ -1,0 +1,16 @@
+world: srm_empty
+world_sdf: /home/srm/nav_ws/srm_nav_27_tdt/maps/219_1121/simulation/world.sdf
+gui_config: ''
+gui: false
+robot:
+  name: red_standard_robot1
+  x: 0.9850000000000001
+  y: 0.8850000000000002
+  z: 0.28
+  yaw: 0.0
+velocity:
+  cmd_vel_topic: cmd_vel_sim
+  gz_command_topic: cmd_vel
+  odom_topic: odometry
+  command_timeout: 2.0
+  publish_rate: 200.0

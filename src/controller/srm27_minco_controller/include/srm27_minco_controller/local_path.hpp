@@ -27,6 +27,18 @@ enum class LocalPathEnd { kInvalid, kGlobalGoal, kHorizon, kMapBoundary, kBlocke
 
 const char * toString(LocalPathEnd _end);
 
+/// Move interior reference points toward greater local ESDF clearance within
+/// a bounded distance. Keep endpoints fixed; this is only an optimizer seed,
+/// and clipping plus independent trajectory validation remain mandatory.
+std::vector<Eigen::Vector2d> improvePathClearance(
+  const std::vector<Eigen::Vector2d> & _path, const srm27_minco_core::Esdf2D & _esdf,
+  double _target_clearance, double _max_displacement);
+
+/// Direction toward the forward endpoint of the nearest path segment; keeps
+/// upcoming corners instead of steering directly toward a distant global goal.
+Eigen::Vector2d forwardPathDirection(
+  const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position);
+
 struct LocalPathConfig
 {
   double horizon{3.0};

@@ -115,7 +115,8 @@ struct RecoveryConfig
 ///
 /// 三类职责：
 ///  1. **脱困判定**：连续失败计数 + 阈值 + 冷却 + 卡死分诊（`decide()`）。
-///  2. **脱困方向规划**：ESDF 梯度上升；梯度退化时退化为环形搜索取最开阔方向。
+///  2. **脱困方向规划**：有路线偏好时先检查其前推净空；否则沿 ESDF 梯度上升，
+///     梯度退化时用环形搜索取最开阔方向。
 ///  3. **脱困成功判定**：脱困期间净空恢复到 `escaped_clearance` 以上即成功，
 ///     超过 `window_sec` 未恢复即超时（`updateRecovery()`）。
 ///
@@ -132,6 +133,13 @@ public:
 
   /// \brief 清空全部运行期状态（新目标、取消、失活、定位重置）。
   void reset();
+
+  /// Prefer the forward path direction only when the complete sampled escape
+  /// corridor has valid, nondecreasing clearance and ends with more clearance.
+  /// Zero/nonfinite disables the preference; the existing gradient/search
+  /// remains fallback.
+  void setPreferredDirection(const Eigen::Vector2d & _direction);
+  const Eigen::Vector2d & preferredDirection() const { return preferred_direction_; }
 
   // === 1) 脱困判定 ===
 
@@ -179,7 +187,8 @@ public:
   /// \return 路径是否至少走出了第一步（即"是否有可执行的脱困路径"）。
   static bool traceEscapePath(
     const Esdf2D & _esdf, const Eigen::Vector2d & _start, const RecoveryConfig & _config,
-    double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path);
+    double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path,
+    const Eigen::Vector2d & _preferred_direction = Eigen::Vector2d::Zero());
 
   // === 3) 脱困成功判定 ===
 
@@ -251,7 +260,8 @@ public:
   /// \return 无可用方向时返回 false。
   static bool planEscapeDirection(
     const Esdf2D & _esdf, const Eigen::Vector2d & _position, const RecoveryConfig & _config,
-    Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions = true);
+    Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions = true,
+    const Eigen::Vector2d & _preferred_direction = Eigen::Vector2d::Zero());
 
 private:
   /// \brief 时间是否可用（有限且非负）。
@@ -281,6 +291,7 @@ private:
 
   // 脱困会话缓存
   Eigen::Vector2d escape_velocity_{Eigen::Vector2d::Zero()};
+  Eigen::Vector2d preferred_direction_{Eigen::Vector2d::Zero()};
   Eigen::Vector2d last_escape_direction_{Eigen::Vector2d::Zero()};
   double entry_clearance_{-1.0};
 

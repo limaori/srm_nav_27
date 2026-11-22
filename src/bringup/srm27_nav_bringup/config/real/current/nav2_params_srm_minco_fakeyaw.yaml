@@ -240,7 +240,7 @@ terrain_analysis:
     limitGroundLift: False
     maxGroundLift: 0.3
     clearDyObs: True
-    minDyObsDis: 0.3
+    minDyObsDis: 0.3                    # 动态障碍清除距离（自车点改由 obstacle_min_range 0.4 过滤）
     minDyObsAngle: 0.0
     minDyObsRelZ: -0.3
     absDyObsRelZThre: 0.2
@@ -589,7 +589,7 @@ controller_server:
     #        且 |Δyaw| <= yaw_goal_tolerance 且 hypot(vx, vy) <= trans_stopped_velocity。
     # 平动那一条保留：它保证"到点"时车真的停住了，而不是高速掠过目标点。
     general_goal_checker:
-      plugin: "srm27_nav_plugins::OmniStoppedGoalChecker"
+      plugin: "srm27_nav_plugins/OmniStoppedGoalChecker"
       stateful: True
       # 与实车 Omni 配置保持一致（main 已由 0.15 放宽到 0.4）：航点跳过半径 0.35 必须小于
       # 本容差，否则最后一个航点会在判定到达前被删掉、车掉头往回走（见 nav2_bt/
@@ -798,7 +798,7 @@ controller_server:
         # ★ 2026-11-14：0.05 → 0.02（0.7 m 档）。软目标 = 0.28+0.02+0.02 = 0.32；
         #   0.69 m 缝里最大只能拿到 0.345，0.37 的老软目标在缝内不可达，优化器会
         #   一直顶着两侧挡板罚、交付值被压到硬门槛附近。0.32 在缝里可达，轨迹才会居中。
-        optimization_clearance_margin: 0.02
+        optimization_clearance_margin: 0.01             # 2026-11-21 窄道档：软目标 0.29（0.60 m 缝可达）
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
         # 依据: 实车 227_1006 那组 7 点航点（9.8 m 路径里 7 个转折）实测沿路径平均
@@ -899,7 +899,7 @@ controller_server:
         #   0.30 给出 0.69-0.60 = 0.09 m 带宽（±4.5 cm），是这台车能过的极限档。
         #   ⚠ 0.30 - 0.2743 = 2.6 cm 是**全部**物理余量（不含定位漂移），缝内必须低速。
         robot_radius: 0.28                              # 车身包络半径（米）；CAD 外廓 0.2743 + 0.6 cm
-        clearance_margin: 0.02                          # 额外净空裕量（米）；硬门槛 = 0.30
+        clearance_margin: 0.0                           # 2026-11-21 窄道档：硬门槛 = 0.28（物理极限）
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
         # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
         # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
@@ -976,9 +976,9 @@ controller_server:
         #     （三份 nav2_bt/*.xml，仿真共用），所以这条兜底同样是"慢推"，
         #     只是每次要 5 s 才走完 1.0 m —— 现场表现为"卡住后要等一会儿才动"。
         #   回退：改回 0.40（>= 0.38，不留死区）。
-        stuck_clearance: 0.30
+        stuck_clearance: 0.26                            # 2026-11-21 窄道档：0.30→0.26，0.60 m 缝内不再误判卡死
         # 脱困成功判据（米）：留 0.10 间隔避免进出一进一出振荡。
-        escaped_clearance: 0.50
+        escaped_clearance: 0.32                          # 2026-11-21 窄道档：0.50→0.32，窄道内可达（原值必然超时）
         search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
         search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
         # 重复进入抑制：上一次脱困就在附近结束、而这次要往几乎相反的方向逃 ——
@@ -1017,7 +1017,7 @@ local_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（齐平）；车体 CAD 外廓 0.2743
+      robot_radius: 0.28           # 2026-11-21 窄道档：物理外形（CAD 0.2743+padding），与硬门槛 0.28 齐平
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
@@ -1031,7 +1031,7 @@ local_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        min_obstacle_height: 0.0
+        min_obstacle_height: 0.10      # 2026-11-15: 0.25→0.10。0.25 会滤掉低矮障碍（灰色障碍块下半截），导致贴脸才标记；地面误报靠 intensity≥0.1 兜底，需实车复核
         max_obstacle_height: 2.0
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
@@ -1043,13 +1043,13 @@ local_costmap:
           # terrain_analysis 实际发布在 odom 系（源码硬编码 frame_id=odom）；
           # 这里仍按上游语义填雷达系，本车对应 livox_imu。
           sensor_frame: livox_imu
-          min_obstacle_height: 0.0
+          min_obstacle_height: 0.10    # 2026-11-15: 0.25→0.10，与层门槛一致；低矮障碍下半截进体素
           max_obstacle_height: 2.0
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
           obstacle_max_range: 5.0
-          obstacle_min_range: 0.2
+          obstacle_min_range: 0.4      # 2026-11-21：0.2→0.4，滤掉车身自反射点环（实测最近 0.22 m）
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -1065,7 +1065,7 @@ local_costmap:
         #   取 0.30 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.30。
         #   （0.45 那一档试过：253 的硬阻挡带仍是 inscribed 0.33，只是把 0.33~0.45
         #     加成高代价，0.69 m 缝里整条缝都变高代价，反而更难走。）
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        inflation_radius: 0.29          # 2026-11-21 窄道档：与 robot_radius 0.28 齐平
       always_send_full_costmap: False
 
 global_costmap:
@@ -1080,7 +1080,7 @@ global_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（齐平）；车体 CAD 外廓 0.2743
+      robot_radius: 0.28           # 2026-11-21 窄道档：物理外形（CAD 0.2743+padding），与硬门槛 0.28 齐平
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -1108,7 +1108,7 @@ global_costmap:
           min_obstacle_height: 0.0
           max_obstacle_height: 2.0
           obstacle_max_range: 10.0
-          obstacle_min_range: 0.2
+          obstacle_min_range: 0.4      # 2026-11-21：0.2→0.4，滤掉车身自反射点环（实测最近 0.22 m）
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -1121,7 +1121,7 @@ global_costmap:
         # ★ 2026-11-14：0.25 → 0.30，与 robot_radius 齐平（原因见 local_costmap 同项）。
         #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.38，
         #   中间 13 cm 的"规划器认为能走、控制器不敢走"就是 0.8 m 通道卡死的直接来源。
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        inflation_radius: 0.29          # 2026-11-21 窄道档：与 robot_radius 0.28 齐平
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -1171,7 +1171,7 @@ behavior_server:
     spin:
       plugin: "nav2_behaviors/Spin"
     backup:
-      plugin: "srm27_nav_behaviors/BackUpFreeSpace"
+      plugin: "srm27_nav_plugins/BackUpFreeSpace"
     drive_on_heading:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:
@@ -1214,6 +1214,12 @@ behavior_server:
     early_exit_min_travel: 0.30                            # 至少先真走出这么多米才有资格判"脱困了"（米）
     early_exit_min_time: 1.0                               # 至少先跑这么久（秒），同时给雷达留出重新标记时间
     early_exit_require_obstacles: True                     # 空图保护：整张图无致命障碍时不认净空结论
+
+    # === 包络净空地板（安全限位）===
+    # 与 early_exit_clearance 方向相反：后退途中自身净空低于此值立即停车并交回重规划，
+    # 不再把车体包络压进障碍。本文件控制器硬门槛 0.28（0.28 + 0.0），窄道档取
+    # 0.26（略低于门槛，允许贴障后退脱困）；设 0 关闭。
+    min_clearance: 0.26                                    # 2026-11-21 窄道档：0.32→0.26，窄道内允许后退脱困
 
 waypoint_follower:
   ros__parameters:

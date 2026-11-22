@@ -24,6 +24,7 @@
 
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "nav2_core/behavior.hpp"
 #include "nav2_core/goal_checker.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -189,7 +190,7 @@ TEST(OmniStoppedGoalCheckerTest, RejectsInvalidParameters)
 namespace
 {
 
-constexpr char kPluginClass[] = "srm27_nav_plugins::OmniStoppedGoalChecker";
+constexpr char kPluginClass[] = "srm27_nav_plugins/OmniStoppedGoalChecker";
 
 }  // namespace
 
@@ -204,12 +205,21 @@ TEST(OmniStoppedGoalCheckerPluginTest, DeclaredAsNav2GoalCheckerPlugin)
 TEST(OmniStoppedGoalCheckerPluginTest, CanBeInstantiatedThroughPluginlib)
 {
   pluginlib::ClassLoader<nav2_core::GoalChecker> loader("nav2_core", "nav2_core::GoalChecker");
+  EXPECT_EQ(loader.getClassPackage(kPluginClass), "srm27_nav_plugins");
   nav2_core::GoalChecker::Ptr instance;
   ASSERT_NO_THROW(instance = loader.createSharedInstance(kPluginClass));
   ASSERT_NE(instance, nullptr);
   // 默认参数（0.25/0.25/0.25）下：正好在容差边界上应判到达，wz 无所谓。
   EXPECT_TRUE(
     instance->isGoalReached(makePose(0.80, 0.0), makePose(1.0, 0.0), makeTwist(0.0, 0.0, 5.0)));
+}
+
+TEST(NavBehaviorPluginTest, RecoveryLoadsFromThisPackage)
+{
+  pluginlib::ClassLoader<nav2_core::Behavior> loader("nav2_core", "nav2_core::Behavior");
+  const std::string name = "srm27_nav_plugins/BackUpFreeSpace";
+  ASSERT_EQ(loader.getClassPackage(name), "srm27_nav_plugins");
+  EXPECT_NE(loader.createSharedInstance(name), nullptr);
 }
 
 int main(int argc, char ** argv)

@@ -99,7 +99,7 @@ private:
   // 只承载帧头 + seq; 速度字段每帧由 fillSpeedVector() 现填, 不在这里存状态。
   SendRobotCmdData send_robot_cmd_data_{};
 
-  // 最近一次 /cmd_vel 的原始指令值 (未限幅、未判超时)。受 send_mutex_ 保护。
+  // 最近一次 /cmd_vel_chassis 的原始指令值。受 send_mutex_ 保护。
   double cmd_vx_{0.0};
   double cmd_vy_{0.0};
   double cmd_wz_{0.0};
@@ -109,9 +109,15 @@ private:
   // 参数
   double send_rate_hz_{100.0};     // §6.1 推荐 100 Hz 定频单帧
   double cmd_timeout_sec_{0.5};    // §6.3 看门狗: 超时未更新则归零
-  double max_vx_{0.5};             // §6.5 上位机自己限幅
-  double max_vy_{0.5};
-  double max_wz_{1.0};
+  // 下位机功率档：100w（当前）/ 180w（升级后）。作为出口硬上限，
+  // 下面的 max_* 只能比档位值小，超过会被钳位并在启动时告警。
+  std::string power_profile_{"100w"};
+  double max_vx_{2.6};              // 单轴平移速度上限 (m/s)
+  double max_vy_{2.6};
+  double max_linear_speed_{2.6};    // 平移合速度上限 (m/s)
+  double max_wz_{8.5};             // 底盘角速度上限 (rad/s)
+  double max_linear_accel_{7.0};    // 平移合加速度上限 (m/s²)
+  double max_angular_accel_{25.0};   // 底盘角加速度上限 (rad/s²)
   // 速度对齐系数: 发往下位机之前把指令乘这个系数。
   // 用来修正"指令值 → 底盘实际速度"的尺度不一致 (实测依据见 config yaml 的注释)。
   // 1.0 = 不缩放(原行为)。只作用在**出口**上: cmd_vx_ 仍保存收到的原始值。
@@ -159,9 +165,11 @@ private:
   void sendData();
   void serialPortProtect();
 
-  // 每帧组装发送量: 看门狗(§6.3) + NaN/Inf 兜底(§6.4) + 限幅(§6.5)。
+  // 每帧组装发送量。启动或重连后先发送零速。
   // 调用者必须已持有 send_mutex_。
-  void fillSpeedVector(SendRobotCmdData & frame);
+  void fillSpeedVector(
+    SendRobotCmdData & frame, const SendRobotCmdData & last_sent,
+    std::chrono::steady_clock::time_point last_sent_at);
   // 退出前补发零速帧 (协议 §6.3)。由 sendData() 在循环结束后调用,
   // 此时串口仍然打开 (析构函数先 join send 线程, 之后才 close)。
   void sendZeroFramesOnExit();

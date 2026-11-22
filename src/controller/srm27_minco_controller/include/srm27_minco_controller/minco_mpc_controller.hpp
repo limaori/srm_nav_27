@@ -29,6 +29,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp_lifecycle/lifecycle_publisher.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <string>
 #include <vector>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -84,6 +85,7 @@ public:
   void setSpeedLimit(const double & _speed_limit, const bool & _percentage) override;
 
 private:
+  friend struct CommandContinuityTestPeer;
   /// \brief 声明并读取参数；非法配置直接失败并报清楚原因。
   bool loadParameters(std::string * _reason);
 
@@ -98,10 +100,12 @@ private:
 
   /// \brief 每个控制周期刷新地图快照与距离场。
   void refreshMap(double _stamp, const ControllerDiagnostics & _diagnostics);
+  void inhibitSpin();
 
   /// \brief 依据重规划策略提交一次后台规划请求。
   void requestReplan(
-    const srm27_minco_core::State2D & _state, double _now_stamp, double _now_steady);
+    const srm27_minco_core::State2D & _state, const PlanarCommandLimits & _planar,
+    double _now_stamp, double _now_steady);
 
   /// \brief 取回并提交后台规划结果。
   ///
@@ -252,6 +256,7 @@ private:
   /// （0.5 m/s 时要求 1.77 s 还能过，1.5 m/s 时要求 5.1 s 就必然失败），
   /// 所以必须显式配置并来自实测，而不是沿用优化器里的加速度上限（方案 §6.1、§10 P5）。
   double braking_deceleration_{0.0};
+  double narrow_linear_speed_{0.0};
   /// \brief 有效反应延迟（s）；<=0 表示退化为使用 `state_timeout`。
   ///
   /// 与 `state_timeout` 拆开是实车暴露出来的硬需求：`state_timeout` 必须不小于里程计
@@ -400,6 +405,7 @@ private:
   double spin_request_stamp_{-1.0};
   /// \brief 自转请求进线订阅（configure 时创建；kSpin 模式消费）。
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr spin_request_sub_{};
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::Empty>::SharedPtr spin_inhibit_pub_{};
 
   /// \brief 脱困可视化（逃逸方向箭头 + 净空球）。
   rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>::SharedPtr

@@ -58,7 +58,7 @@
 #     出生点有偏移, 用 --init-pose 直接给 map->odom 初值 (方案 §5 的 T_M_O_init)。
 #
 # 用法:
-#   ./scripts/bringup/start_sim_nav.sh                                  # rmuc_2025 + 隧道地图(默认)
+#   ./scripts/bringup/start_sim_nav.sh                                  # rmuc_2025 + 219_1121 地图(默认)
 #   ./scripts/bringup/start_sim_nav.sh -m rmuc_2025                     # 换成普通场地地图
 #   ./scripts/bringup/start_sim_nav.sh -w srm_empty                     # 空场 (Gazebo 起来自动开始运行)
 #   ./scripts/bringup/start_sim_nav.sh                                  # 默认: 云台系导航, 底盘与云台都不转
@@ -245,7 +245,7 @@ GIMBAL_SPIN_DEFAULT="-1.0"                     # --gimbal-spin 不带数值时�
 
 # 自定义 RViz 配置（留空 = 用包内 rviz/nav2_default_view.rviz；--rviz-config 覆盖）
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
-MAP_NAME="${MAP_NAME:-}"
+MAP_NAME="${MAP_NAME:-219_1121}"
 MAP_FILE="${MAP:-}"
 PARAMS_FILE="${PARAMS_FILE:-}"
 PARAMS_FILE_GIVEN=0

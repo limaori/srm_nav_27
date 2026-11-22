@@ -1,0 +1,13 @@
+{
+  "cmd": {
+    "samples": 158,
+    "max_speed_mps": 0.0,
+    "max_abs_wz": 0.0
+  },
+  "gt": {
+    "samples": 23,
+    "max_speed_mps": 0.0018928256757737726,
+    "max_abs_wz": 0.0012424629996454508
+  },
+  "passed": true
+}
