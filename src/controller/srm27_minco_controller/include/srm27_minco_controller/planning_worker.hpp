@@ -66,6 +66,8 @@ struct PlanningRequest
   double request_steady{0.0};
   /// \brief 局部路径截取视野长度（m）。
   double local_path_horizon{2.0};
+  /// \brief 局部参考路径向高净空侧预推的最大位移（m）。
+  double path_centering_max_displacement{0.01};
   /// \brief 产出轨迹的有效期（s）：`valid_until = request_stamp + validity_window`。
   double validity_window{1.0};
   /// \brief 判定"已经到达路径终点"的距离半径（m）。

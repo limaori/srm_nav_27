@@ -502,8 +502,13 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 100
     wait_for_service_timeout: 1000
-    default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_to_pose_w_replanning_and_recovery.xml
-    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_through_poses_route_aware.xml                # 用自研 RemovePassedGoalsByRoute 代替 nav2 的 RemovePassedGoals
+    # 2026-11-22 TDT 完整链路档：YAstar(稀疏输出) + TdtSmoother(MinimumSnap)。
+    # 两个 BT 都换成带 SmoothPath 的版本 —— 不换的话 smoother_server 完全不会被调用
+    # （行为树里没有 SmoothPath 节点，2026-11-16 教训）。
+    default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_to_pose_w_smoothing.xml
+    # through_poses 平滑版 = route_aware（自研 RemovePassedGoalsByRoute）+ SmoothPath，
+    # 并与 to_pose 平滑安全版一致地移除了 BackUp（规划/平滑失败只清图重试，不主动给速度）。
+    default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_through_poses_w_smoothing.xml
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
@@ -642,6 +647,22 @@ controller_server:
       #   按 2.8 m/s 估制动距离约 1.6 m（占视野 53%）。
       #   若预检报"制动走廊余量不足/制动覆盖不够"，先把本项退回 4.0。
       planning_horizon: 3.0                             # 局部路径截取视野（米）
+      # 局部参考路径向高净空侧预推的最大位移（米）。
+      # ★ 2026-11-22：0.01（仅为 optimization_clearance_margin）→ 0.10。
+      #   11-21 实车日志里 86 次 no_path 全部是 "local path is empty after clipping:
+      #   blocked"，同时 26 次 validation_failed 的最小净空只有 0.275~0.2799 m
+      #   （硬门槛 0.28）——参考路径一直贴着硬门槛，局部 ESDF 稍有偏移就被判死。
+      #   预推只沿 ESDF 梯度向更空的一侧移动，不会朝障碍物挪；0.10 覆盖两格
+      #   代价地图 + 定位残差，窄道里把参考线拉回通道中心。
+      #   仿真/默认值仍为 0.01，不影响既有仿真回归。
+      # ★ 2026-11-22 实车实验：0.10 → 0.20。北走廊 y=2.2~2.7 脊线向东漂 15~20 cm，
+      #   实测 0.10 拉不回脊线，MPC 切内弯离线 3.5 cm 后净空只剩 6 mm 判死。
+      # ★ 2026-11-22 晚：0.20 → 0.30。南侧/走廊实测平滑参考线距 ESDF 脊线最大
+      #   ~0.11 m（mouth 段），MPC 2.5 m/s 动态切弯再偏 0.10 m → 净空 0.204~0.229
+      #   被拒（差硬门槛 0.245 仅 2~4 cm）。0.30 让 improvePathClearance 把参考线
+      #   全程压在脊线上，给 MPC 的动态偏差留出余量；配合 1.0 m/s 慢速档（切弯量
+      #   按速度平方缩小）。
+      path_centering_max_displacement: 0.30
       planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）；注意：该参数目前在插件里是死参数（只做范围校验），真正的时间门槛是 mpc.qp_deadline_ms
       # 状态新鲜度门限（秒）。**实车必须比仿真大**：
       #   仿真的 /odometry 由 simulation_ground_truth_odometry 以固定 50 Hz 发布（周期 0.02 s），
@@ -798,7 +819,9 @@ controller_server:
         # ★ 2026-11-14：0.05 → 0.02（0.7 m 档）。软目标 = 0.28+0.02+0.02 = 0.32；
         #   0.69 m 缝里最大只能拿到 0.345，0.37 的老软目标在缝内不可达，优化器会
         #   一直顶着两侧挡板罚、交付值被压到硬门槛附近。0.32 在缝里可达，轨迹才会居中。
-        optimization_clearance_margin: 0.01             # 2026-11-21 窄道档：软目标 0.29（0.60 m 缝可达）
+        # ★ 2026-11-22 实车实验：0.01 → 0.02。软目标 = 0.245 + 0.02 + 0.02 = 0.285（ESDF
+        #   保守距离，约等于真实 0.32），让参考线在走廊收窄段贴住脊线。
+        optimization_clearance_margin: 0.02
         resample_step: 0.10                             # 前端弧长重采样步长（米）
         # 转角处最低速度比例。2026-10-09: 0.35 → 0.60。
         # 依据: 实车 227_1006 那组 7 点航点（9.8 m 路径里 7 个转折）实测沿路径平均
@@ -898,8 +921,13 @@ controller_server:
         #   （实测卡在 最小净空=0.3214、只比门槛高 1.4 mm）。
         #   0.30 给出 0.69-0.60 = 0.09 m 带宽（±4.5 cm），是这台车能过的极限档。
         #   ⚠ 0.30 - 0.2743 = 2.6 cm 是**全部**物理余量（不含定位漂移），缝内必须低速。
-        robot_radius: 0.28                              # 车身包络半径（米）；CAD 外廓 0.2743 + 0.6 cm
-        clearance_margin: 0.0                           # 2026-11-21 窄道档：硬门槛 = 0.28（物理极限）
+        # ★ 2026-11-22 实车实验：0.28 → 0.245。ESDF 距离本身已扣掉保守余量
+        #   sqrt(2)*0.05/2 = 0.0354 m，0.245 对应的真实净空 = 0.2804 m，正好等于
+        #   车身包络（CAD 0.2743 + 0.6 cm）。原来的 0.28 作用在保守距离上，
+        #   等价于要求真实 0.3154 m —— 北走廊 y>=2.5 最大只有 0.292~0.304，
+        #   因此永远卡在 validation_failed。物理安全半径不变，只是去掉重复打折。
+        robot_radius: 0.245                             # 车身包络半径（米）；对应真实净空 0.2804
+        clearance_margin: 0.0                           # 硬门槛 = 0.245（ESDF 保守距离）
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
         # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
         # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
@@ -927,9 +955,9 @@ controller_server:
       # 硬编码的 0.25/0.40 分诊与成功阈值）。语义与仿真那份完全一致，见
       # config/simulation/nav2_params_srm_minco.yaml 里的详细说明。
       #
-      # 实车与仿真的差异（2026-11-12 起）：escape_speed 实车 0.5 / 仿真 1.0，
-      # stuck_clearance 实车 0.30 / 仿真 0.40 —— 实车场地窄、底盘速度环慢，
-      # 先把"推得动、推得准"放前面，见下面两条 ★ 注释。
+      # 实车参数（2026-11-22 起）：escape_speed 0.2、stuck_clearance 0.28、
+      # escaped_clearance 0.29 —— 实车场地窄、底盘速度环慢，先把"推得动、推得准"
+      # 放前面；stuck 必须与控制器硬门槛 0.28 齐平，否则会出现死区，见下面 ★ 注释。
       # 若实测发现"车在动但 3 s 内走不出卡死区"，先加大 window_sec 而不是 escape_speed——
       # 提高逃逸速度会同时抬高贴障碍时的碰撞风险，而延长时间只是让它多推一会儿。
       recovery:
@@ -958,27 +986,24 @@ controller_server:
         #   提速前提：空地上按验收清单确认方向与刹车距离，再考虑 0.5 -> 0.75 -> 1.0。
         escape_speed: 0.2                               # 逃逸速度（米/秒），须 <= limits.max_linear_speed
         # 卡死分诊阈值（米）：低于它才计入失败、才脱困。
-        # ★ 2026-10-16 由 0.25 抬到 0.40（与仿真同步），原因见
-        #   simulation/nav2_params_srm_minco.yaml 同段的"核心不变量"：
-        #   阈值必须 >= 控制器硬校验要求的净空（safety.robot_radius 0.33 +
-        #   clearance_margin 0.05 = 0.38），否则 [阈值, 0.38) 是"本地重规划必败、
-        #   却判不出卡死"的死区，脱困永远不接管。
-        #   本文件代价地图 robot_radius 是 0.40（见下方 costmap 段），车心净空正常
-        #   打不到 0.25 —— 原值 0.25 在实车上等价于"静态地图永远不触发脱困"。
-        #   ⚠ 2026-11-12 实测确认：会（0.325 / 0.353 m 两次都是贴墙通过被判卡死），见下条。
-        # ★ 2026-11-12：0.40 -> 0.30，**明知会重新打开 [0.30, 0.38) 这段死区**，理由：
-        #   18:09 实车跑的 3 次脱困里有 2 次触发在 0.325 / 0.353 m，而当时车并没有真被
-        #   卡住（同周期规划还在推进）—— "贴墙正常通过"被当成了卡死。
-        #   取 0.30 后这类失败只走"前方路障"分支：继续重规划，攒满 build_grace_period
-        #   (1.0 s) 还没成轨就抛给行为树（清图 + BackUpFreeSpace）。
-        #   ⚠ 代价（必须知道）：[0.30, 0.38) 内本地重规划基本必败、链路 A 又不会脱困，
-        #     兜底全压在行为树那一路。2026-11-12 起 BT 的 backup_speed 也一并降到 0.2
-        #     （三份 nav2_bt/*.xml，仿真共用），所以这条兜底同样是"慢推"，
-        #     只是每次要 5 s 才走完 1.0 m —— 现场表现为"卡住后要等一会儿才动"。
-        #   回退：改回 0.40（>= 0.38，不留死区）。
-        stuck_clearance: 0.26                            # 2026-11-21 窄道档：0.30→0.26，0.60 m 缝内不再误判卡死
-        # 脱困成功判据（米）：留 0.10 间隔避免进出一进一出振荡。
-        escaped_clearance: 0.32                          # 2026-11-21 窄道档：0.50→0.32，窄道内可达（原值必然超时）
+        # 核心不变量：stuck_clearance 必须 >= 控制器硬校验要求的净空
+        # （safety.robot_radius 0.28 + clearance_margin 0.00 = 0.28）。
+        # 低于它就会形成 [stuck, 0.28) 死区：本地路径裁剪必 blocked，
+        # 但链路 A 不接管脱困，只能等行为树 1.0 s 后慢速 BackUp。
+        # 历史：0.25 -> 0.40 -> 0.30 -> 0.26（2026-11-21 窄道档）-> 0.28（2026-11-22）。
+        # 0.26 正是 11-21 实车 86 次 no_path 反复停走的主因之一。
+        # 北走廊 y≈2.5~2.8 的可通行段最大净空约 0.29 m，居中规划可到 0.29，
+        # >= 0.28 不会误判卡死；y>=2.9 的最窄段只有 ~0.54 m，车体 0.549 m，
+        # 本来就过不去，不要靠放低这个阈值去硬闯。
+        # ★ 2026-11-22：0.26 → 0.28，与硬门槛齐平，关掉死区。
+        # ★ 2026-11-22：0.28 → 0.245，与新的硬门槛齐平（同样作用在 ESDF 保守距离上）。
+        stuck_clearance: 0.245
+        # 脱困成功判据（米）：留 0.01 间隔避免进出一进一出振荡。
+        # ★ 2026-11-22：0.32 → 0.29。北走廊最窄段实测最大净空约 0.29 m，
+        #   0.32 在通道内永远达不到，脱困必然跑满 3 s 后超时；0.29 是"刚好能恢复
+        #   规划"的可达值，也避免盲推时冲过头撞另一侧墙。
+        # ★ 2026-11-22：0.29 → 0.255，保持与 stuck 的 0.01 间隔。
+        escaped_clearance: 0.255
         search_radius: 0.4                              # 梯度退化时的环形搜索半径（米）
         search_samples: 36                              # 环形搜索采样数量（每 10 度一个）
         # 重复进入抑制：上一次脱困就在附近结束、而这次要往几乎相反的方向逃 ——
@@ -1017,11 +1042,15 @@ local_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.28           # 2026-11-21 窄道档：物理外形（CAD 0.2743+padding），与硬门槛 0.28 齐平
+      robot_radius: 0.15           # 2026-11-22 现场档2：0.20→0.15。西线(向前→左→向前)物理缝约 0.75m，0.21 的 inscribed 膨胀仍把起点到西缝的路封死(planner 被迫绕东/直穿)。控制器硬门槛 safety.robot_radius 0.245(只看 254)不变，此处只是规划视野
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        enabled: true
+        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
+        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
+        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
+        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
+        enabled: false
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1031,8 +1060,12 @@ local_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        min_obstacle_height: 0.10      # 2026-11-15: 0.25→0.10。0.25 会滤掉低矮障碍（灰色障碍块下半截），导致贴脸才标记；地面误报靠 intensity≥0.1 兜底，需实车复核
-        max_obstacle_height: 2.0
+        min_obstacle_height: 0.15      # 2026-11-22: 0.10→0.15。地形分析在南入口输出大量 z≈0.01-0.08 的地面点，0.10 挡不住，整片 y≈1.2-1.7 变 99/100
+        # 2026-11-22: 2.0→0.35。北走廊入口 y≈2.0 上方 0.72 m 处有悬空门楣，
+        # 2.0 会让它投影成 2D 障碍，inscribed 0.25 + inflation 0.27 覆盖到 y≈2.6，
+        # 整条走廊变 99/100 的墙（planner ABORTED）。0.35 只保留车体高度以下的障碍
+        # （云台/雷达顶约 0.33 m，odom z 以地面为 0）。
+        max_obstacle_height: 0.35
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map
@@ -1043,8 +1076,8 @@ local_costmap:
           # terrain_analysis 实际发布在 odom 系（源码硬编码 frame_id=odom）；
           # 这里仍按上游语义填雷达系，本车对应 livox_imu。
           sensor_frame: livox_imu
-          min_obstacle_height: 0.10    # 2026-11-15: 0.25→0.10，与层门槛一致；低矮障碍下半截进体素
-          max_obstacle_height: 2.0
+          min_obstacle_height: 0.15    # 2026-11-22: 0.10→0.15，滤掉地形分析的地面噪点（z≈0.01-0.08）
+          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
@@ -1065,7 +1098,7 @@ local_costmap:
         #   取 0.30 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.30。
         #   （0.45 那一档试过：253 的硬阻挡带仍是 inscribed 0.33，只是把 0.33~0.45
         #     加成高代价，0.69 m 缝里整条缝都变高代价，反而更难走。）
-        inflation_radius: 0.29          # 2026-11-21 窄道档：与 robot_radius 0.28 齐平
+        inflation_radius: 0.16          # 2026-11-22 现场档2：0.22→0.16 = robot_radius 0.15 + 1 cm，配合打开西线
       always_send_full_costmap: False
 
 global_costmap:
@@ -1080,13 +1113,17 @@ global_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.28           # 2026-11-21 窄道档：物理外形（CAD 0.2743+padding），与硬门槛 0.28 齐平
+      robot_radius: 0.15           # 2026-11-22 现场档2：0.20→0.15。西线(向前→左→向前)物理缝约 0.75m，0.21 的 inscribed 膨胀仍把起点到西缝的路封死(planner 被迫绕东/直穿)。控制器硬门槛 safety.robot_radius 0.245(只看 254)不变，此处只是规划视野
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        enabled: true
+        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
+        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
+        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
+        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
+        enabled: false
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1096,8 +1133,10 @@ global_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        min_obstacle_height: 0.0
-        max_obstacle_height: 2.0
+        min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，滤掉 z≈0.01-0.08 的地面点（否则南入口整片变墙）
+        # 2026-11-22: 2.0→0.35（同 local）。terrain_map_ext 在 y≈2.0 有 z≈0.72 m 的
+        # 悬空门楣点，2.0 会把整条北走廊膨胀封死（实测 planner ABORTED、costmap 全 99/100）。
+        max_obstacle_height: 0.35
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map_ext
@@ -1105,8 +1144,8 @@ global_costmap:
           data_type: PointCloud2
           topic: <robot_namespace>/terrain_map_ext
           sensor_frame: livox_imu
-          min_obstacle_height: 0.0
-          max_obstacle_height: 2.0
+          min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，与层门槛一致
+          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
           obstacle_max_range: 10.0
           obstacle_min_range: 0.4      # 2026-11-21：0.2→0.4，滤掉车身自反射点环（实测最近 0.22 m）
       static_layer:
@@ -1121,7 +1160,7 @@ global_costmap:
         # ★ 2026-11-14：0.25 → 0.30，与 robot_radius 齐平（原因见 local_costmap 同项）。
         #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.38，
         #   中间 13 cm 的"规划器认为能走、控制器不敢走"就是 0.8 m 通道卡死的直接来源。
-        inflation_radius: 0.29          # 2026-11-21 窄道档：与 robot_radius 0.28 齐平
+        inflation_radius: 0.16          # 2026-11-22 现场档2：0.22→0.16 = robot_radius 0.15 + 1 cm，配合打开西线
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -1152,12 +1191,40 @@ planner_server:
 smoother_server:
   ros__parameters:
     use_sim_time: False
-    smoother_plugins: ["simple_smoother"]
-    simple_smoother:
-      plugin: "nav2_smoother::SimpleSmoother"
-      tolerance: 1.0e-10
-      max_its: 1000
-      do_refinement: True
+    # 2026-11-22: SimpleSmoother -> tdt_nav_kit::TdtSmoother（T-DT MinimumSnap, OSQP + SfcSquare 走廊）。
+    # 参数以仿真调优版（tdt_nav_kit/config/nav2_params_srm_tdt_smooth.yaml smoother_server 段）
+    # 为基线，仅两处实车适配：
+    #   * corner_round_cut 0.40 -> 0.30：西缝物理缝约 0.75 m、MINCO 硬净空（ESDF）0.245 m，
+    #     切角过大会把曲线顶向内角，参考线贴墙触发 MINCO validation_failed（11-21 实测教训）。
+    #   * use_sim_time: False。
+    # 平滑失败时 fallback_to_resampled 返回加密折线（不阻塞导航）；QP 失败不会动车。
+    smoother_plugins: ["tdt_smoother"]
+    tdt_smoother:
+      plugin: "tdt_nav_kit::TdtSmoother"
+      occupancy_threshold: 252                     # 253 放行会让曲线贴障碍 ~0.1 m（仿真 11-09 实测），252 严格
+      treat_unknown_as_obstacle: False             # True 时动态层留下的未观测格会让平滑恒失败
+      order: 5                                     # 多项式阶数
+      max_dx: 3                                    # 最大导数阶数
+      strict_collision: False                      # 更严格但更慢、更易失败
+      backend: "path"                              # path | close；corridor 后端在 configure 阶段已被硬拒绝
+      collision_iter: 6                            # 碰撞检测迭代次数
+      norm_time: True                              # 段内归一化时间
+      max_corridor_range: 2.5                      # 走廊最大扩张范围（米）
+      corridor_shrink: 0.0                         # 走廊收缩（米）
+      max_speed: 3.0                               # 时间分配用最大速度（只影响平顺性，不是硬约束）
+      max_acc: 1.0                                 # 时间分配用最大加速度（同上）
+      path_resample_step: 0.30                     # 平滑前按步长线性加密（稀疏路径会让样条切进膨胀层）
+      path_resample_max_points: 2000               # 加密后点数上限
+      fallback_to_resampled: True                  # 求解失败时回退加密折线，保证路径仍可跟踪
+      corner_round_input_step: 0.80                # 切角前按弧长抽稀步长（米）
+      corner_round_cut: 0.20                       # 切角长度（米），实车窄道档 0.40 -> 0.30 -> 0.20（2026-11-22：mouth 67° 弯内切顶墙，再降）
+      corner_round_min_turn_deg: 25.0              # 小于该转角不切
+      corner_round_sample_step: 0.20               # 贝塞尔采样步长（米）
+      init_vel_from_odom: False                    # 实测开启后非零起点速度让 OSQP 频繁失败
+      odom_topic: odom                             # 速度来源（相对机器人命名空间）
+      init_vel_max_age: 0.30                       # 超过该时长视为无有效里程计（秒）
+      min_points: 2                                # 两点直线路径也加密供控制器跟踪
+      orientation_mode: "tangent"                  # 由相邻点求 yaw
 
 behavior_server:
   ros__parameters:

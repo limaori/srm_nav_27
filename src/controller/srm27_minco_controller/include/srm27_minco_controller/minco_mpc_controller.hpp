@@ -226,6 +226,12 @@ private:
   double spin_request_timeout_{0.25};
   double replan_frequency_{10.0};
   double planning_horizon_{2.0};
+  /// \brief 局部参考路径向高净空侧预推的最大位移（m）。
+  ///
+  /// 全局膨胀层与局部 ESDF 在窄道里可能相差一格甚至更多；只挪 1 cm 时
+  /// 路径仍贴着硬阈值，随后在裁剪/校验处被反复判死。实车窄道可放大到
+  /// 0.10，仿真/默认保持旧行为 0.01。
+  double path_centering_max_displacement_{0.01};
   double planning_deadline_ms_{30.0};
   double state_timeout_{0.10};
   double map_timeout_{0.30};

@@ -45,12 +45,18 @@
               <ClearEntireCostmap name="ClearGlobalCostmap-Context"
                                   service_name="global_costmap/clear_entirely_global_costmap"/>
             </RecoveryNode>
-            <!-- 两套参数各注册一个平滑器，留空由 Nav2 选用该实例。 -->
+            <!-- 两套参数各注册一个平滑器，留空由 Nav2 选用该实例。
+                 check_for_collisions=false（2026-11-22 实车）：nav2 的 footprint 检查
+                 (0.15m 圆盘 vs 253) 与 planner 252 口径矛盾 —— 现场档2 inflation 只有
+                 0.16，planner 给出的合法路径贴 253 边缘时该检查必撞（实测 11-22 北走廊
+                 首目标 ABORT 全部卡在这）。贴墙安全由 MINCO 的 ESDF 硬校验
+                 (safety 0.245) + path_centering(0.20) 兜底，组合与仿真 11-09 v4
+                 （252 严格平滑 + collision off）一致。 -->
             <SmoothPath smoother_id=""
                         unsmoothed_path="{path}"
                         smoothed_path="{smoothed_path}"
                         max_smoothing_duration="1.0"
-                        check_for_collisions="true"/>
+                        check_for_collisions="false"/>
           </Sequence>
         </RateController>
         <RecoveryNode name="FollowPath"
