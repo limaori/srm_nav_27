@@ -595,6 +595,9 @@ smoother_server:
       # 加密后实测（11 点 34.46 m -> 1191 点）：path 2~17 ms 成功，close 83 ms 成功，
       # corridor 失败（OSQP 不收敛，408 ms）。输出几何一致，取最快且稳的 path。
       # 注意：加密关闭（path_resample_step: 0）时 path/corridor 都会失败。
+      # 2026-11-23 追加：上面的 corridor 失败测量发生在 P10（SfcSquare 索引 -> 世界坐标
+      # 少补原点）修正之前；修正后实车地图短路径 4 ms 收敛，长路径未复测。上游方块扩张
+      # 会跳过未检查的环、方块内可能含障碍（PATCHES.md「已知上游问题」），故仍不建议启用。
       backend: "path"                                     # path | close | corridor
       collision_iter: 6                                   # 碰撞检测迭代次数
       norm_time: true                                     # 段内归一化时间
@@ -627,6 +630,13 @@ smoother_server:
       init_vel_max_age: 0.30                             # 超过该时长(秒)视为无有效里程计
       min_points: 2                                       # 两点直线路径也需要加密供控制器跟踪
       orientation_mode: "tangent"                         # 由相邻点求 yaw
+      # SFC（方形安全飞行走廊）可视化：每次平滑后把走廊方块发成 MarkerArray。
+      # 话题默认私有名 -> /<smoother_server>/sfc_corridor；RViz 的 MarkerArray
+      # 显示已在 srm27_nav_bringup/rviz/nav2_default_view.rviz 里预置。
+      # backend=path 时走廊不是求解约束，只是「路径两侧还剩多少余量」的直观依据。
+      publish_sfc: true                                   # 总开关；关掉不影响平滑结果
+      sfc_topic: "~/sfc_corridor"                         # 发布话题
+      sfc_line_width: 0.02                                # 方块线宽（米）
 
 
 behavior_server:

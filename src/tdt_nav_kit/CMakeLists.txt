@@ -30,6 +30,7 @@ ament_auto_add_library(${PROJECT_NAME} SHARED
   src/costmap_converter.cpp
   src/path_utils.cpp
   src/planner_geometry.cpp
+  src/sfc_visualization.cpp
   src/tdt_global_planner.cpp
   src/tdt_smoother.cpp
 )
@@ -73,6 +74,12 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_sfc_origin test/test_sfc_origin.cpp)
   target_link_libraries(test_sfc_origin ${PROJECT_NAME})
+
+  ament_add_gtest(test_sfc_bound_frame test/test_sfc_bound_frame.cpp)
+  target_link_libraries(test_sfc_bound_frame ${PROJECT_NAME})
+
+  ament_add_gtest(test_sfc_markers test/test_sfc_markers.cpp)
+  target_link_libraries(test_sfc_markers ${PROJECT_NAME})
 
   ament_add_gtest(test_yastar_chain test/test_yastar_chain.cpp)
   target_link_libraries(test_yastar_chain ${PROJECT_NAME})

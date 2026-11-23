@@ -430,6 +430,25 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: plan
           Value: true
+        # TDT 平滑器（tdt_nav_kit::TdtSmoother）的方形安全飞行走廊：
+        # 每个方块 = SfcSquare::getCorridor() 给一个路径点算出的最大可扩张方形，
+        # 由 tdt_smoother 的 publish_sfc 参数控制（默认开启）。
+        # 话题名是相对名，RViz 跑在 namespace 下会自动补成
+        # /<namespace>/smoother_server/sfc_corridor。
+        # 只在平滑被调用时更新（新目标 / 重规划），显示的是最近一次的结果；
+        # 走廊变空或整块消失，说明平滑失败或目标只剩两点（没有走廊）。
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: SFC Corridor (TDT)
+          Namespaces:
+            {}
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: smoother_server/sfc_corridor
+          Value: true
         - Alpha: 1
           Class: rviz_default_plugins/Polygon
           Color: 25; 255; 0

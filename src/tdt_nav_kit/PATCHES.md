@@ -14,6 +14,7 @@
 | P6 | `vendor/src/MinimumSnapOsqp/sfcSquare.hpp` | 12-16 | 同 P5 | 否（入库不编译） |
 | P7 | `vendor/src/MinimumSnapOsqp/sfcSquare.cpp` | 46-47, 145-146, 236-237, 297-298, 356-357 | 10 行 `(x + originPos)/mapping` → `(x - originPos)/mapping` | **是，阶段二已单测验证** |
 | P8 | `yastar.hpp` / `yastar.cpp` / `sfcSquare.hpp` | 见下节 | 补齐 P5 关闭 OpenCV 后失去的隐式依赖：`<mutex>`、`<iostream>`、`u_char` | 是，编译 + 运行验证 |
+| P10 | `vendor/src/MinimumSnapOsqp/sfcSquare.cpp` | 226-231、287-292、469-474 | 3 处 `index * mapping - originPos` → `+ originPos`（索引 → 世界坐标补回原点） | **是，`test_sfc_bound_frame` + 实车地图实测** |
 
 ---
 
@@ -160,11 +161,64 @@ Costmap 的尺寸、原点与数据也在同一次互斥锁内读取，避免地
 
 回归：`test_planner_geometry` 与 `test_yastar_chain`。
 
+## P10 · SfcSquare 走廊方块的「索引 → 世界」反向换算（2026-11-23，已实测）
+
+P7 只统一了**世界 → 索引**方向，漏掉了反方向，两个方向因此不再互逆：
+
+```
+正向（P7）：idx = (x - origin) / mapping
+反向（正确）：x  = idx * mapping + origin
+反向（上游）：x  = idx * mapping - origin    ← 负原点时整块平移 2*|origin|
+```
+
+原点为 0 时三者等价（上游 `main.cpp` 正是这种情况），所以一直没暴露。实车地图原点
+`(-1.99, -2.04)`、分辨率 0.05 m，方块会整体偏 3.98 m / 4.08 m：
+
+- **RViz 里走廊与路径完全错开**——这就是「走廊画不出来 / 画歪」的直接原因；
+- `backend: corridor` 时 OSQP 的位置约束落在偏移后的方块上，与真实路径点不相容，
+  这就是 corridor 后端长期不收敛的原因：P10 之后在实车地图同一路径上，corridor 后端
+  由失败变为 3~4 ms 收敛（`round=0 bad=2/12` 后一轮即通过）。
+
+```diff
+-        static_cast<float>(left) * mapping - originPos.x(),
+-        static_cast<float>(top) * mapping - originPos.y(),
+-        static_cast<float>(right) * mapping - originPos.x(),
+-        static_cast<float>(bottom) * mapping - originPos.y()
++        static_cast<float>(left) * mapping + originPos.x(),
++        static_cast<float>(top) * mapping + originPos.y(),
++        static_cast<float>(right) * mapping + originPos.x(),
++        static_cast<float>(bottom) * mapping + originPos.y()
+```
+
+**验证**：
+
+- `test/test_sfc_bound_frame.cpp`（负原点、非整栅格原点）：`getBound()` 的方块必须包含
+  查询点、四条边落在 `origin + k*res` 上，`getCorridor()` 每块必须包含对应路径点；
+  补丁前 `BoundContainsQueryPointWithNegativeOrigin` 必然失败（实测偏移 3~5 m）。
+- 2026-11-23 实车地图端到端：`/global_costmap/costmap_raw` + 2.5 m 空闲走廊路径，
+  发布的 10 个方块全部含平滑路径点、中心到路径最近 0.28 m、中心全部落在空闲格上。
+
+### P10 暴露出的上游方块扩张缺陷（未修，登记）
+
+`_getBoundSquare2` 在某一侧贴到障碍后会**每轮把另一侧扩 2 格，却只检查 1 格**：
+
+```cpp
+if(freeTop){top--;}else{bottom++;}     // 贴顶后：bottom 先 +1
+if(freeBottom){bottom++;}else if(freeTop){top--;}   // 再 +1，共 +2
+```
+
+被跳过的那一行/列永远不会再做障碍检查，所以**方块内部可能含障碍**（实车地图实测
+约 4.5% 的方块内部采样格为障碍）。这与「SFC 不保证无碰撞」的既有登记一致，也是
+`backend: corridor` 仍不建议上车的另一半原因。本包不修它：修了会改变 corridor 后端的
+求解语义，需要单独评估；可视化里如实画出原始方块，不做美化。
+
 ## 未打补丁的已知上游问题（阶段二处理，登记备查）
 
 - `SolveInput` 默认 `backend=Close`、`collisionIteration=2`、`normTime=false`、`TL=1 s`；README 示例值与之不同，插件必须显式 set 全套。
 - `autoBackend()` 返回 `OSQPCorridor`，但仅在 `backend==Invalid` 时被调用（默认 `Close`）。
 - OSQP 未收敛 `return {}` → `success=false`，**并无** `main.cpp:163` 注释所说的闭式 fallback。
 - `strictCollision` 默认 `false`，`obstacleTolerance=2` 硬编码；SFC「安全走廊」不保证无碰撞。
+- `_getBoundSquare2` 一侧贴墙时另一侧每轮扩 2 格只查 1 格，会跳过一行/列的障碍检查，
+  方块内部可能含障碍（P10 节末实测约 4.5%），`backend: corridor` 的约束因此不严格。
 - `setDt()` 在当前 `solve()` 路径实际不生效（`lineDecoder` 每段固定采样 11 点）。
 - 上游 `CMakeLists.txt` 注释掉了 `CXX_STANDARD`，却无条件 `find_package(OpenCV REQUIRED)`；本包不使用该文件。

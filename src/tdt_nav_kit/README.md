@@ -115,6 +115,46 @@ TDT 入口默认加载与 Gazebo 世界同名的地图。从 `sim_config_file` �
 两份文件都使用 `srm27_omni_pid_controller::OmniPidPursuitController`，速度限制由
 `speed_limits.yaml` 的 `@omni` 档位提供。
 
+### SFC 方形安全飞行走廊的可视化（RViz）
+
+`TdtSmoother` 每次平滑后会把走廊发成 `visualization_msgs/msg/MarkerArray`：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `publish_sfc` | `true` | 总开关；关掉只省这一点可视化开销，**不影响平滑结果** |
+| `sfc_topic` | `"~/sfc_corridor"` | 私有名解析为 `/<smoother_server>/sfc_corridor` |
+| `sfc_line_width` | `0.02` | 方块线宽（米） |
+
+RViz 显示已在 `srm27_nav_bringup/rviz/nav2_default_view.rviz` 的 **Global Planner**
+组里预置：`SFC Corridor (TDT)`（话题按相对名 `smoother_server/sfc_corridor` 解析，
+跑在 namespace 下会自动带上命名空间）。**已开着的 RViz 不会自动出现新显示**，
+需要重启 RViz（或手动 Add → By topic → `<ns>/smoother_server/sfc_corridor`）。
+
+发布的内容取决于 `backend`：
+
+- `backend: corridor`：发求解迭代里**真正**当约束用的那组方块（可能插入过控制点、
+  被 `corridor_shrink` 收缩过），与 OSQP 的约束一一对应；
+- `backend: path` / `close`（当前实车与仿真都用 `path`）：上游把 `result.corridor`
+  填成起止相等的退化点，画出来没有面，因此改为按当前 costmap **现场生成一次**
+  `SfcSquare::getCorridor()`：每个方块由送进 MinimumSnap 的加密路径点向外扩张得到
+  （锚点一定在方块内，但不一定在正中——一侧先贴墙后，另一侧会继续长）。
+  方块边长 = 该点在 `max_corridor_range`（默认 2.5 m）内的最大可扩张方形。
+  这时走廊不是求解约束，但能直接读出「这条路径两侧还剩多少余量」，
+  窄口、门框、贴墙段一眼可见。
+
+现场判读与自检：
+
+- 方块与路径错开、整体平移 —— 先怀疑坐标换算（P10 补丁，见 `PATCHES.md`）；
+- 走廊变空 / 只剩一行点 —— 平滑失败或目标只剩两个点（`min_points`）；
+- 只在平滑被调用时更新（新目标 / 重规划），显示的是**最近一次**的结果。
+
+```bash
+# 导航中约 1~3 Hz（每次平滑一条）
+ros2 topic hz /smoother_server/sfc_corridor
+# 看方块数量（每次平滑的方块数 = 加密后的路径点数）
+ros2 topic echo --once /smoother_server/sfc_corridor --field markers[0].points
+```
+
 ### 构建机接口已核对（2026-11-04）
 
 按 `ros-navigation/navigation2` 的 `humble` 分支头文件核对并据此实现：
@@ -468,13 +508,17 @@ Nav2 按 TF 认为车在地图原点，规划出以 (0,0) 为起点的路径，�
 
 已完成：OSQP（`osqp_vendor`）+ OsqpEigen v0.8.0 接入；`minimumSnap.cpp` /
 `sfcSquare.cpp` 纳入编译；`TdtSmoother` 插件；SFC 反向语义转换与边界补圈；
-P7 原点补丁经单测验证；OSQP 失败 / 超时一律保留原路径并返回 `false`。
+P7/P10 原点补丁经单测验证；SFC 方形走廊 RViz 可视化（`~/sfc_corridor`，见上文
+[§SFC 方形安全飞行走廊的可视化](#sfc-方形安全飞行走廊的可视化rviz)）；
+OSQP 失败 / 超时一律保留原路径并返回 `false`。
 
 仍遗留（需真机或仿真数据才能定论）：
 
 - **126.7 ms 长尾**：2026 地图上 Minimum Snap 的最大求解耗时，需用真实路径采样确认是否超平滑预算；
-- **corridor 不裁剪**：上游 `_getBound()` 显式不判边界，纯自由图上走廊会外扩到 `max_corridor_range`，
-  建议在参数里限制该值（默认 1e9 等价于不限）；
+- **corridor 不裁剪 + 方块扩张跳格**：上游 `_getBound()` 显式不判边界，纯自由图上走廊会外扩到
+  `max_corridor_range`（建议限制该值，默认 1e9 等价于不限）；`_getBoundSquare2` 一侧贴墙时
+  另一侧每轮扩 2 格却只查 1 格，方块内部可能含障碍（实车地图实测约 4.5% 采样格）。
+  因此 `backend: corridor` 仍只建议用于验证，默认 `path` 不使用走廊约束；
 - **`obstacleTolerance = 2` 硬编码**：非严格模式下检测线可"擦过" 2 个障碍栅格，穿薄墙不算碰撞；
 - **`setDt()` 实际不生效**：`lineDecoder` 每段固定 11 点；
 - **与 `MincoMpcController`（`odom` 帧 / 50 Hz）叠加**：需统一帧与朝向语义后再联调；

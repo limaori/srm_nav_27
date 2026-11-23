@@ -2,6 +2,17 @@
 #include <cstddef>
 #include <utility>
 
+// [TDT-NAV-KIT PATCH P10] 走廊方块的「栅格索引 -> 世界坐标」换算补回原点。
+//
+// 上游这一方向写作 index * mapping - originPos，而上游另一方向（P7 已统一为）
+// (x - originPos) / mapping。两者互逆的正确写法是 index * mapping + originPos：
+//   world  -> cell : idx  = (x - origin) / mapping
+//   cell   -> world: x    = idx * mapping + origin
+// 上游 main.cpp 的 origin 恒为 (0,0)，加减号等价，所以这个方向一直没暴露。
+// 原点为负（Nav2 costmap 的常见情况）时，方块会整体平移 2*|origin|，
+// 不再包含它对应的路径点：RViz 里走廊与路径错开，corridor 后端也把 OSQP
+// 的位置约束放在了错误位置。详见 PATCHES.md P10 与 test/test_sfc_bound_frame.cpp。
+
 SfcSquare::SfcSquare(){
     map = Map(0, 0);
 }
@@ -223,11 +234,12 @@ SfcSquare::PointPair SfcSquare::_getBound(float x, float y, float maxRange){
     //         static_cast<float>(bottom) * mapping - originPos.y()
     //     )
     // );
+    // [TDT-NAV-KIT PATCH P10] 索引 -> 世界坐标必须补回原点（见文件头注释）。
     return {
-        static_cast<float>(left) * mapping - originPos.x(),
-        static_cast<float>(top) * mapping - originPos.y(),
-        static_cast<float>(right) * mapping - originPos.x(),
-        static_cast<float>(bottom) * mapping - originPos.y()
+        static_cast<float>(left) * mapping + originPos.x(),
+        static_cast<float>(top) * mapping + originPos.y(),
+        static_cast<float>(right) * mapping + originPos.x(),
+        static_cast<float>(bottom) * mapping + originPos.y()
     };
 }
 
@@ -284,11 +296,12 @@ SfcSquare::PointPair SfcSquare::_getBoundSquareInplace(float x, float y, float m
         right++;
     }
 out:
+    // [TDT-NAV-KIT PATCH P10] 索引 -> 世界坐标必须补回原点（见文件头注释）。
     return {
-        static_cast<float>(left) * mapping - originPos.x(),
-        static_cast<float>(top) * mapping - originPos.y(),
-        static_cast<float>(right) * mapping - originPos.x(),
-        static_cast<float>(bottom) * mapping - originPos.y()
+        static_cast<float>(left) * mapping + originPos.x(),
+        static_cast<float>(top) * mapping + originPos.y(),
+        static_cast<float>(right) * mapping + originPos.x(),
+        static_cast<float>(bottom) * mapping + originPos.y()
     };
 }
 
@@ -466,11 +479,12 @@ SfcSquare::PointPair SfcSquare::_getBoundSquare2(float x, float y, float maxRang
     //         static_cast<float>(bottom) * mapping - originPos.y()
     //     )
     // );
+    // [TDT-NAV-KIT PATCH P10] 索引 -> 世界坐标必须补回原点（见文件头注释）。
     return {
-        static_cast<float>(left) * mapping - originPos.x(),
-        static_cast<float>(top) * mapping - originPos.y(),
-        static_cast<float>(right) * mapping - originPos.x(),
-        static_cast<float>(bottom) * mapping - originPos.y()
+        static_cast<float>(left) * mapping + originPos.x(),
+        static_cast<float>(top) * mapping + originPos.y(),
+        static_cast<float>(right) * mapping + originPos.x(),
+        static_cast<float>(bottom) * mapping + originPos.y()
     };
 }
 

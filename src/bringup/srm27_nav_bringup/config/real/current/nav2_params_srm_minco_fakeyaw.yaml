@@ -1225,6 +1225,12 @@ smoother_server:
       init_vel_max_age: 0.30                       # 超过该时长视为无有效里程计（秒）
       min_points: 2                                # 两点直线路径也加密供控制器跟踪
       orientation_mode: "tangent"                  # 由相邻点求 yaw
+      # SFC（方形安全飞行走廊）可视化：每次平滑后把走廊方块发成 MarkerArray。
+      # 话题默认私有名 -> /<smoother_server>/sfc_corridor；RViz 的 MarkerArray
+      # 显示已在 srm27_nav_bringup/rviz/nav2_default_view.rviz 里预置。
+      publish_sfc: True                            # 总开关；关掉不影响平滑结果
+      sfc_topic: "~/sfc_corridor"                  # 发布话题
+      sfc_line_width: 0.02                         # 方块线宽（米）
 
 behavior_server:
   ros__parameters:

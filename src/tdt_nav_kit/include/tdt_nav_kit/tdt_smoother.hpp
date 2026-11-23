@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "nav2_core/smoother.hpp"
 #include "nav2_costmap_2d/costmap_subscriber.hpp"
@@ -17,7 +18,9 @@
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "tdt_nav_kit/costmap_converter.hpp"
+#include "tdt_nav_kit/sfc_visualization.hpp"
 #include "tf2_ros/buffer.h"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 namespace tdt_nav_kit
 {
@@ -68,6 +71,10 @@ private:
   bool init_vel_valid_{false};
 
   void onOdom(const nav_msgs::msg::Odometry & msg);
+
+  /// 发布一次走廊 MarkerArray；`boxes` 为空时发 DELETE，清掉 RViz 里上一次的方块。
+  void publishSfcMarkers(const nav_msgs::msg::Path & path, const std::vector<SfcBox> & boxes);
+
   std::shared_ptr<nav2_costmap_2d::CostmapSubscriber> costmap_sub_;
   std::shared_ptr<nav2_costmap_2d::FootprintSubscriber> footprint_sub_;
   std::string plugin_name_;
@@ -132,6 +139,20 @@ private:
   float corner_round_sample_step_{0.2f};
   /// "identity"（w=1）或 "tangent"（由相邻点求 yaw）。
   std::string orientation_mode_{"tangent"};
+
+  // —— SFC（方形安全飞行走廊）可视化 ——
+  /// 是否把走廊发成 MarkerArray 供 RViz 显示。
+  ///
+  /// 走廊本身在平滑前按当前 costmap 现场生成（`SfcSquare::getCorridor`），
+  /// `backend=path` 时它不是求解约束、只是"这条路径两侧还剩多少余量"的直观依据；
+  /// `backend=corridor` 时发布求解迭代里真正用到的那组方块（可能被插入/收缩过）。
+  bool publish_sfc_{true};
+  /// 发布话题。私有名 `~/sfc_corridor` 解析为 `/<smoother_server>/sfc_corridor`。
+  std::string sfc_topic_{"~/sfc_corridor"};
+  /// 走廊线宽（米）。
+  float sfc_line_width_{0.02f};
+  SfcMarkerStyle sfc_style_{};
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr sfc_pub_;
 };
 
 }  // namespace tdt_nav_kit

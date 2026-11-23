@@ -29,6 +29,7 @@
   <depend>tf2_ros</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
   <!-- OSQP 由 ROS 包 osqp_vendor 提供（osqp.h + libosqp）。
        OsqpEigen 没有 rosdep key，需按 README 源码安装到 /usr/local，见 package.xml 注释。 -->
   <depend>osqp_vendor</depend>

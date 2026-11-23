@@ -65,6 +65,49 @@ std::vector<Eigen::Vector2f> toPoints(const nav_msgs::msg::Path & path)
   return points;
 }
 
+std::string frameIdOf(const nav_msgs::msg::Path & path)
+{
+  return path.header.frame_id.empty() ? "map" : path.header.frame_id;
+}
+
+/// 是否至少有一个方块是真的有面积（不是退化成点）。
+bool hasArea(const std::vector<SfcSquare::PointPair> & boxes)
+{
+  return std::any_of(
+    boxes.begin(), boxes.end(), [](const SfcSquare::PointPair & box) {
+      return std::all_of(box.begin(), box.end(), [](float value) {return std::isfinite(value);}) &&
+             box[2] > box[0] && box[3] > box[1];
+    });
+}
+
+/// 选出发给 RViz 的方形走廊。
+///
+/// 优先用求解迭代里**真正**当约束用的那组方块（backend=corridor：可能插入过控制点、
+/// 收缩过）；上游在 backend=path / close 时把 result.corridor 填成起止相等的退化点，
+/// 那组方块画出来只有点没有面，所以此时按当前 costmap 现场生成一次 SFC。
+/// 这样无论用哪个后端，RViz 里都能看到「这条路径周围的方形走廊」。
+std::vector<SfcBox> selectSfcBoxes(
+  MinimumSnap & smoother,
+  const std::vector<Eigen::Vector2f> & points,
+  const std::vector<SfcSquare::PointPair> & solve_corridor,
+  float max_range,
+  float shrink)
+{
+  if (hasArea(solve_corridor)) {
+    return std::vector<SfcBox>(solve_corridor.begin(), solve_corridor.end());
+  }
+
+  SfcSquare & sfc = smoother.getSfc();
+  if (!sfc.isUseable() || points.size() < 2 || !(max_range > 0.0f)) {
+    return {};
+  }
+  // 与求解分支使用同一个夹紧值：上游 _getBound 把 maxRange/mapping 转 int，
+  // 过大的 maxRange 会溢出并越界读（见 configure 附近说明）。
+  const auto corridor = sfc.getCorridor(
+    points, std::min(max_range, kMaxCorridorRangeLimit), shrink);
+  return std::vector<SfcBox>(corridor.corridor.begin(), corridor.corridor.end());
+}
+
 /// 用平滑后的点重写 path，保留原 header（frame_id / stamp）。
 void writeBack(
   nav_msgs::msg::Path & path,
@@ -164,6 +207,10 @@ void TdtSmoother::configure(
     node, p + "init_vel_max_age", rclcpp::ParameterValue(init_vel_max_age_));
   declare_parameter_if_not_declared(
     node, p + "orientation_mode", rclcpp::ParameterValue(orientation_mode_));
+  declare_parameter_if_not_declared(node, p + "publish_sfc", rclcpp::ParameterValue(publish_sfc_));
+  declare_parameter_if_not_declared(node, p + "sfc_topic", rclcpp::ParameterValue(sfc_topic_));
+  declare_parameter_if_not_declared(
+    node, p + "sfc_line_width", rclcpp::ParameterValue(static_cast<double>(sfc_line_width_)));
 
   converter_cfg_.occupancy_threshold =
     static_cast<int>(node->get_parameter(p + "occupancy_threshold").as_int());
@@ -207,6 +254,23 @@ void TdtSmoother::configure(
     odom_sub_.reset();
   }
   orientation_mode_ = node->get_parameter(p + "orientation_mode").as_string();
+  publish_sfc_ = node->get_parameter(p + "publish_sfc").as_bool();
+  sfc_topic_ = node->get_parameter(p + "sfc_topic").as_string();
+  sfc_line_width_ = static_cast<float>(node->get_parameter(p + "sfc_line_width").as_double());
+  sfc_style_.line_width = sfc_line_width_;
+
+  // SFC 走廊：transient_local + 固定 (ns, id)，RViz 晚打开也能看到最近一次的走廊，
+  // 每次发布整体替换，方块数量变化不会留下残影。
+  if (publish_sfc_) {
+    sfc_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
+      sfc_topic_, rclcpp::QoS(1).transient_local());
+    RCLCPP_INFO(
+      node->get_logger(),
+      "TdtSmoother: SFC 方形走廊 -> %s（publish_sfc=false 可关闭）",
+      sfc_pub_->get_topic_name());
+  } else {
+    sfc_pub_.reset();
+  }
 
   // 配置自检：backend 与路径加密是强耦合的，只改一处会让平滑静默失效
   // （solve 失败 → 原样返回路径 → 行为树看不出来，只表现为"车不动"）。
@@ -222,8 +286,12 @@ void TdtSmoother::configure(
   if (backend_ == "corridor") {
     RCLCPP_WARN(
       node->get_logger(),
-      "TdtSmoother: backend=corridor 在 RMUC 2026 仿真地图上实测不收敛"
-      "（加密到 1191 点后仍失败，408 ms），建议改用 backend=path。");
+      "TdtSmoother: backend=corridor 以方形走廊为硬约束。2026-11-05 在 RMUC 2026 仿真"
+      "地图（1191 点）上曾实测不收敛（408 ms）——当时 SfcSquare 的「索引 -> 世界坐标」"
+      "少补了原点（P10），方块整体偏移 2*|origin|，约束落在真实路径之外。P10 修正后"
+      "实车地图短路径已能收敛（4 ms），但上游方块扩张会跳过未检查的环，方块内可能含"
+      "障碍（见 PATCHES.md「已知上游问题」），因此 corridor 后端仍建议只用于验证；"
+      "默认 path 不使用走廊约束，不受这两点影响。");
   }
   if (path_resample_max_points_ < 100) {
     RCLCPP_WARN(
@@ -244,6 +312,7 @@ void TdtSmoother::onOdom(const nav_msgs::msg::Odometry & msg)
 
 void TdtSmoother::cleanup()
 {
+  sfc_pub_.reset();
   costmap_sub_.reset();
   footprint_sub_.reset();
   tf_.reset();
@@ -260,6 +329,17 @@ void TdtSmoother::deactivate()
   active_ = false;
 }
 
+void TdtSmoother::publishSfcMarkers(
+  const nav_msgs::msg::Path & path, const std::vector<SfcBox> & boxes)
+{
+  if (!sfc_pub_) {
+    return;
+  }
+  // 空 boxes 会生成 DELETE 动作，把 RViz 里上一目标的方块清掉。
+  sfc_pub_->publish(
+    makeSfcMarkerArray(boxes, frameIdOf(path), clock_->now(), sfc_style_));
+}
+
 bool TdtSmoother::smooth(
   nav_msgs::msg::Path & path,
   const rclcpp::Duration & max_time)
@@ -269,6 +349,8 @@ bool TdtSmoother::smooth(
   }
   if (path.poses.size() < static_cast<std::size_t>(std::max(min_points_, 2))) {
     // 点数太少无需平滑：返回 true 表示「已完成」，保持原路径。
+    // 这类路径没有走廊，顺手清掉上一次的方块，避免 RViz 里留着与当前目标是两条路。
+    publishSfcMarkers(path, {});
     return true;
   }
 
@@ -284,6 +366,7 @@ bool TdtSmoother::smooth(
     RCLCPP_WARN_THROTTLE(
       node->get_logger(), *clock_, 2000,
       "TdtSmoother: costmap unavailable, keep original path");
+    publishSfcMarkers(path, {});
     return false;
   }
 
@@ -294,6 +377,7 @@ bool TdtSmoother::smooth(
     RCLCPP_WARN_THROTTLE(
       node->get_logger(), *clock_, 2000,
       "TdtSmoother: costmap conversion failed (%s), keep original path", e.what());
+    publishSfcMarkers(path, {});
     return false;
   }
 
@@ -378,6 +462,14 @@ bool TdtSmoother::smooth(
   MinimumSnap::SolveOutput result = smoother.solve(input);
   const double elapsed =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+  // 方形走廊可视化放在失败/超时分支**之前**：平滑失败时"此刻这张地图上的走廊
+  // 长什么样"正是排查依据，不能只在成功时画。
+  //   * backend=corridor：画求解迭代里真正当约束用的那组方块；
+  //   * backend=path/close：结果里只有退化成点的方块，改为现场生成一次 SFC。
+  publishSfcMarkers(
+    path, selectSfcBoxes(
+      smoother, points, result.corridor, max_corridor_range_, corridor_shrink_));
 
   if (!result.success || result.path.size() < 2) {
     RCLCPP_WARN_THROTTLE(
