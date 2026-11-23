@@ -48,32 +48,6 @@ bool resolveCommandFrame(
     "' 也不是 fake_base_frame='" + _fake_base_frame + "'");
 }
 
-bool shouldInhibitSpin(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
-  const Eigen::Vector2d & _velocity, double _lookahead, double _clearance)
-{
-  const auto narrowAt = [&](const Eigen::Vector2d & position) {
-    const auto query = _esdf.query(position.x(), position.y());
-    return !query.valid || query.distance <= _clearance;
-  };
-  if (narrowAt(_position)) {
-    return true;
-  }
-
-  const Eigen::Vector2d displacement = _lookahead * _velocity;
-  const double distance = displacement.norm();
-  if (!std::isfinite(distance)) {
-    return true;
-  }
-  const double step = 0.5 * _esdf.resolution();
-  for (double travel = step; travel < distance; travel += step) {
-    if (narrowAt(_position + displacement * (travel / distance))) {
-      return true;
-    }
-  }
-  return narrowAt(_position + displacement);
-}
-
 Eigen::Vector2d brakingPathLimitedVelocity(
   const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
   const Eigen::Vector2d & _velocity, double _required_clearance,

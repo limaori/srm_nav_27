@@ -81,11 +81,6 @@ bool YawPolicy::configure(const Config & _config, std::string * _reason)
   if (!std::isfinite(_config.max_angular_accel) || _config.max_angular_accel < 0.0) {
     return fail("max_angular_accel must be non-negative and finite");
   }
-  if (
-    !std::isfinite(_config.narrow_clearance_threshold) ||
-    _config.narrow_clearance_threshold < 0.0) {
-    return fail("narrow_clearance_threshold must be non-negative and finite");
-  }
   if (_config.mode != YawMode::kXyOnly && _config.max_angular_speed <= 0.0) {
     return fail("non-xy_only yaw modes require a positive angular speed limit");
   }

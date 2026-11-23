@@ -55,8 +55,6 @@ public:
     double max_angular_speed{0.3};
     /// \brief 有效角加速度上限（rad/s^2）。
     double max_angular_accel{0.5};
-    /// \brief 窄通道判定的净空阈值（m），来自地图分辨率与真实外形评估。
-    double narrow_clearance_threshold{0.60};
     /// \brief 是否允许倒向行驶（负向切向）；全向底盘默认为真。
     bool allow_reverse{true};
   };

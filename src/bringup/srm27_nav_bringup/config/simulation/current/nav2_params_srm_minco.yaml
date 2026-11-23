@@ -585,7 +585,6 @@ controller_server:
       yaw_policy:                                       # 航向策略
         mode: xy_only                                   # 阶段一：MPC 不产生自转
         stop_rotation_on_goal: True                     # 到点后停止自转参考
-        narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
 
       safety:                                           # 几何与安全

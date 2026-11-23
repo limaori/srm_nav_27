@@ -137,7 +137,6 @@ void MincoMpcController::configure(
   yaw_config.stop_rotation_on_goal = stop_rotation_on_goal_;
   yaw_config.max_angular_speed = base_limits_.max_angular_speed;
   yaw_config.max_angular_accel = base_limits_.max_angular_accel;
-  yaw_config.narrow_clearance_threshold = yaw_narrow_clearance_threshold_;
   yaw_config.allow_reverse = yaw_allow_reverse_;
   if (!yaw_policy_.configure(yaw_config, &reason)) {
     throw MincoMpcControllerError("MincoMpcController: yaw policy: " + reason);
@@ -180,10 +179,9 @@ void MincoMpcController::configure(
   // 现场可以直接只开这一条来确认"卡死时分诊是否成立、推的方向是否合理"。
   recovery_marker_pub_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
     plugin_name_ + "/recovery_markers", rclcpp::QoS(1));
-  if (command_frame_mode_ == CommandFrameMode::kOdomAlignedFake && yaw_mode_ == YawMode::kXyOnly) {
-    spin_inhibit_pub_ =
-      node->create_publisher<std_msgs::msg::Empty>("navigation_spin_inhibit", rclcpp::QoS(1));
-  }
+  // 2026-11-23：不再发布 navigation_spin_inhibit。底盘 wz 的唯一所有者是决策层
+  // （rotation_cmd -> srm_cmd_mux），控制器只负责平移；脱困/窄区也**不**再否决 wz。
+  // 原来那条线会让控制器在本仓库里对决策层的请求有事实上的否决权（方案 §4.3 的分工）。
 
   // 自转请求进线：发布端（rotation_controller）是 RELIABLE，订阅端必须同为
   // RELIABLE 才能匹配（尽力订阅匹配不上可靠发布）。回调只缓存数值与到达时刻
@@ -328,7 +326,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
 
   declare("yaw_policy.mode", std::string("xy_only"));
   declare("yaw_policy.stop_rotation_on_goal", true);
-  declare("yaw_policy.narrow_clearance_threshold", 0.60);
   declare("yaw_policy.allow_reverse", true);
 
   // 自转请求进线（阶段二小陀螺，方案 §4.1.2）：`kSpin` 模式下把外部请求喂给
@@ -340,7 +337,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("safety.clearance_margin", 0.05);
   declare("safety.unknown_is_obstacle", true);
   declare("safety.braking_deceleration", 0.0);
-  declare("safety.narrow_linear_speed", 0.0);
   // 有效反应延迟（s）。<=0 表示退化为使用 state_timeout。
   declare("safety.reaction_latency", 0.0);
 
@@ -447,8 +443,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   std::string yaw_mode_text;
   node->get_parameter(name + ".yaw_policy.mode", yaw_mode_text);
   node->get_parameter(name + ".yaw_policy.stop_rotation_on_goal", stop_rotation_on_goal_);
-  node->get_parameter(
-    name + ".yaw_policy.narrow_clearance_threshold", yaw_narrow_clearance_threshold_);
   node->get_parameter(name + ".yaw_policy.allow_reverse", yaw_allow_reverse_);
 
   node->get_parameter(name + ".spin_request.topic", spin_request_topic_);
@@ -464,7 +458,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".safety.clearance_margin", minco_config_.clearance_margin);
   node->get_parameter(name + ".safety.unknown_is_obstacle", esdf_config_.unknown_is_seed);
   node->get_parameter(name + ".safety.braking_deceleration", braking_deceleration_);
-  node->get_parameter(name + ".safety.narrow_linear_speed", narrow_linear_speed_);
   node->get_parameter(name + ".safety.reaction_latency", reaction_latency_);
 
   node->get_parameter(name + ".state.max_sample_gap", state_max_sample_gap_);
@@ -552,9 +545,6 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   if (!std::isfinite(braking_deceleration_) || braking_deceleration_ < 0.0) {
     return fail(
       "safety.braking_deceleration must be non-negative (0 = use limits.max_linear_accel)");
-  }
-  if (!std::isfinite(narrow_linear_speed_) || narrow_linear_speed_ < 0.0) {
-    return fail("safety.narrow_linear_speed must be non-negative (0 = disabled)");
   }
   if (!std::isfinite(reaction_latency_) || reaction_latency_ < 0.0) {
     return fail("safety.reaction_latency must be non-negative (0 = use state_timeout)");
@@ -663,9 +653,6 @@ void MincoMpcController::activate()
   if (recovery_marker_pub_) {
     recovery_marker_pub_->on_activate();
   }
-  if (spin_inhibit_pub_) {
-    spin_inhibit_pub_->on_activate();
-  }
   // 预热 QP：把冷启动（约 8~15 ms）挪出 50 Hz 控制回调。
   std::string warm_reason;
   if (mpc_solver_.warmUp()) {
@@ -708,9 +695,6 @@ void MincoMpcController::deactivate()
   if (recovery_marker_pub_) {
     recovery_marker_pub_->on_deactivate();
   }
-  if (spin_inhibit_pub_) {
-    spin_inhibit_pub_->on_deactivate();
-  }
 }
 
 void MincoMpcController::cleanup()
@@ -721,7 +705,6 @@ void MincoMpcController::cleanup()
   prediction_pub_.reset();
   planning_input_pub_.reset();
   diagnostics_pub_.reset();
-  spin_inhibit_pub_.reset();
   {
     std::lock_guard<std::mutex> lock(path_mutex_);
     raw_path_ = nav_msgs::msg::Path();
@@ -1109,8 +1092,8 @@ geometry_msgs::msg::TwistStamped MincoMpcController::makeEscapeCommand(
   const State2D & _state, const Eigen::Vector2d & _escape_velocity,
   const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node)
 {
-  inhibitSpin();
   // 逃逸和正常跟踪使用同一个命令坐标系；fakeyaw 链只在下游旋转一次。
+  // 脱困期间也不再否决底盘 wz：自转只归决策层的 rotation_cmd。
   Eigen::Vector2d velocity_odom = _escape_velocity;
   diagnostics_.applied_speed_scale = 1.0;
   const auto planar = rotatingFrameLimits(
@@ -1612,18 +1595,10 @@ void MincoMpcController::harvestPlanningResult(const State2D & _state, double _n
     trajectory->totalDuration(), result.min_clearance, result.total_time_ms);
 }
 
-void MincoMpcController::inhibitSpin()
-{
-  if (spin_inhibit_pub_ && spin_inhibit_pub_->is_activated()) {
-    spin_inhibit_pub_->publish(std_msgs::msg::Empty());
-  }
-}
-
 geometry_msgs::msg::TwistStamped MincoMpcController::stopCommand(
   const rclcpp_lifecycle::LifecycleNode::SharedPtr & _node, const std::string & _reason,
   double _now_stamp)
 {
-  inhibitSpin();
   geometry_msgs::msg::TwistStamped command;
   command.header.stamp = _node->now();
   command.header.frame_id = command_frame_;
@@ -1795,23 +1770,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   const double brake_deceleration = std::min(safety.braking_deceleration, planar.accel);
   const double reaction_time = safety.reaction_latency + diagnostics_.state_age;
   const double required_clearance = safety.robot_radius + safety.clearance_margin;
-  const bool narrow_speed_enabled = narrow_linear_speed_ > 0.0 && narrow_linear_speed_ < planar.speed;
-  if (spin_inhibit_pub_ || narrow_speed_enabled) {
-    const double spin_brake_time = spin_inhibit_pub_ ?
-      base_limits_.max_angular_speed / base_limits_.max_angular_accel : 0.0;
-    const double linear_brake_time = narrow_speed_enabled ?
-      std::max(0.0, state.velocity.norm() - narrow_linear_speed_) / brake_deceleration : 0.0;
-    const bool approaching_narrow_space = shouldInhibitSpin(
-      *esdf_, measured_position, state.velocity,
-      std::max(spin_brake_time, linear_brake_time) + reaction_time,
-      std::max(yaw_narrow_clearance_threshold_, required_clearance));
-    if (approaching_narrow_space) {
-      inhibitSpin();
-      if (narrow_speed_enabled) {
-        planar.speed = narrow_linear_speed_;
-      }
-    }
-  }
+  // 2026-11-23：这里原来是"窄区禁转 + 窄区平移降速"的联合判断。禁转整条线已下线
+  // （wz 只归决策层 rotation_cmd），降速档 safety.narrow_linear_speed 一并删除；
+  // 平移限速仍由上面 rotatingFrameLimits 与下面的净空限幅负责。
 
   // 5) 取回后台结果（失败会触发脱困判定，所以需要当前状态）。
   harvestPlanningResult(state, now_stamp);

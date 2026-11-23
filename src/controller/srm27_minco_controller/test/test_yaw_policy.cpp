@@ -35,7 +35,6 @@ srm27_minco_controller::YawPolicy::Config makeConfig(srm27_minco_controller::Yaw
   config.mode = _mode;
   config.max_angular_speed = 0.3;
   config.max_angular_accel = 0.5;
-  config.narrow_clearance_threshold = 0.6;
   config.allow_reverse = true;
   return config;
 }
@@ -70,10 +69,6 @@ TEST(YawPolicyTest, ConfigureRejectsInvalidValues)
   config = makeConfig(srm27_minco_controller::YawMode::kFollowTangent);
   config.max_angular_speed = 0.0;
   EXPECT_FALSE(policy.configure(config, &reason)) << "非 xy_only 模式必须要求正的角速度上限";
-
-  config = makeConfig(srm27_minco_controller::YawMode::kXyOnly);
-  config.narrow_clearance_threshold = std::nan("");
-  EXPECT_FALSE(policy.configure(config, &reason));
 
   EXPECT_TRUE(policy.configure(makeConfig(srm27_minco_controller::YawMode::kXyOnly), &reason));
 }

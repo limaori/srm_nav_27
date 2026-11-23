@@ -739,7 +739,6 @@ controller_server:
         # xy_only 下 MPC 的角速度权限为 0；se2（导航追切线）在云台系下没有意义。
         mode: xy_only                                   # 导航只出平移：wz 归决策层
         stop_rotation_on_goal: True                     # 到点后停止自转参考
-        narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
 
       # 自转请求进线：xy_only 下**只缓存不进线**（并计入 rejected_spin_request_count），
@@ -753,7 +752,6 @@ controller_server:
       safety:                                           # 几何与安全
         robot_radius: 0.33                              # 车身包络半径（米），来自本车模型
         clearance_margin: 0.06                          # 额外净空裕量（米）
-        narrow_linear_speed: 0.90                       # 进入 yaw_policy 的窄区前将平移降至此上限（m/s）
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
         # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
         # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死

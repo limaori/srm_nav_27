@@ -85,11 +85,6 @@ inline PlanarCommandLimits rotatingFrameLimits(double _speed, double _accel, dou
   return {0.5 * _accel / frame_rate, 0.5 * _accel};
 }
 
-/// Look for a narrow section within the distance traveled while yaw brakes.
-bool shouldInhibitSpin(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
-  const Eigen::Vector2d & _velocity, double _lookahead, double _clearance);
-
 /// Limit only inward velocity so reaction travel plus braking distance fits
 /// the available clearance: v*tau + v^2/(2*a) <= distance - required_clearance.
 /// Tangential and outward motion retain the original speed limit.

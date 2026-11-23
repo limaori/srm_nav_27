@@ -315,16 +315,6 @@ TEST(RotatingFrameLimitsTest, StationaryGimbalPreservesStraightLineLimits)
   EXPECT_DOUBLE_EQ(planar.accel, 7.0);
 }
 
-TEST(SpinInhibitTest, BrakesBeforeEnteringTightSection)
-{
-  using srm27_minco_controller::shouldInhibitSpin;
-  const auto blocked = corridor(true);
-  const auto open = corridor(false);
-  EXPECT_FALSE(shouldInhibitSpin(open, Eigen::Vector2d::Zero(), {2.0, 0.0}, 0.4, 0.40));
-  EXPECT_FALSE(shouldInhibitSpin(blocked, Eigen::Vector2d::Zero(), {0.0, 0.0}, 0.4, 0.40));
-  EXPECT_TRUE(shouldInhibitSpin(blocked, Eigen::Vector2d::Zero(), {2.0, 0.0}, 0.4, 0.40));
-}
-
 TEST(RotatingFrameLimitsTest, BothFullRateDirectionsLeaveBrakingRoom)
 {
   for (double yaw_rate : {8.5, -8.5}) {

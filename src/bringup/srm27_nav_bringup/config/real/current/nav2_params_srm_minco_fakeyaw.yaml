@@ -900,7 +900,6 @@ controller_server:
         # `--yaw-mode spin` 仍被接受（launch 会注入 spin），但自转请求不再需要进 MINCO。
         mode: xy_only
         stop_rotation_on_goal: True                     # 到点后停止自转参考
-        narrow_clearance_threshold: 0.60                # 窄通道净空阈值（米）
         allow_reverse: True                             # 是否允许倒向行驶（全向底盘）
 
       # 自转请求进线（阶段二小陀螺）：SPIN 模式下每一拍喂给航向策略；其余模式
@@ -1042,15 +1041,18 @@ local_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.15           # 2026-11-22 现场档2：0.20→0.15。西线(向前→左→向前)物理缝约 0.75m，0.21 的 inscribed 膨胀仍把起点到西缝的路封死(planner 被迫绕东/直穿)。控制器硬门槛 safety.robot_radius 0.245(只看 254)不变，此处只是规划视野
+      # ★ 2026-11-23 回退到 6108770 的障碍档：0.15 → 0.30。
+      #   0.15 是 11-22「现场档2」为过西线 0.75 m 缝压小的；恢复动态障碍层后必须
+      #   同步回到 0.30 —— 规划外形 < 控制器硬门槛（safety.robot_radius 0.245）时，
+      #   规划器会给出控制器判死（validation_failed）的路径。代价：西线缝重新变窄。
+      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（6108770 档）；车体 CAD 外廓 0.2743
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
-        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
-        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
-        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
-        enabled: false
+        # ★ 2026-11-23 回退：enabled false → true（6108770 档），恢复动态障碍标记。
+        #   11-22 关它是为了压住「低层墙点逐帧抖动 → planner 贴墙」的问题；回退后该
+        #   风险重新存在，若复现请加过滤（高度窗/强度窗）而不是整层关闭。
+        enabled: true
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1060,12 +1062,12 @@ local_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        min_obstacle_height: 0.15      # 2026-11-22: 0.10→0.15。地形分析在南入口输出大量 z≈0.01-0.08 的地面点，0.10 挡不住，整片 y≈1.2-1.7 变 99/100
-        # 2026-11-22: 2.0→0.35。北走廊入口 y≈2.0 上方 0.72 m 处有悬空门楣，
-        # 2.0 会让它投影成 2D 障碍，inscribed 0.25 + inflation 0.27 覆盖到 y≈2.6，
-        # 整条走廊变 99/100 的墙（planner ABORTED）。0.35 只保留车体高度以下的障碍
-        # （云台/雷达顶约 0.33 m，odom z 以地面为 0）。
-        max_obstacle_height: 0.35
+        # ★ 2026-11-23 回退：0.15/0.35 → 0.0/2.0（6108770 档），与源门槛一致。
+        #   ⚠ 11-22 记录的两个副作用会回来：南入口 z≈0.01-0.08 的地面点会成片标记；
+        #   北走廊 y≈2.0 上方 0.72 m 的门楣会投影成 2D 障碍。若复现，只把
+        #   max_obstacle_height 单独压回 0.35 即可（不要整层关）。
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map
@@ -1076,8 +1078,8 @@ local_costmap:
           # terrain_analysis 实际发布在 odom 系（源码硬编码 frame_id=odom）；
           # 这里仍按上游语义填雷达系，本车对应 livox_imu。
           sensor_frame: livox_imu
-          min_obstacle_height: 0.15    # 2026-11-22: 0.10→0.15，滤掉地形分析的地面噪点（z≈0.01-0.08）
-          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
+          min_obstacle_height: 0.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
+          max_obstacle_height: 2.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
@@ -1098,7 +1100,8 @@ local_costmap:
         #   取 0.30 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.30。
         #   （0.45 那一档试过：253 的硬阻挡带仍是 inscribed 0.33，只是把 0.33~0.45
         #     加成高代价，0.69 m 缝里整条缝都变高代价，反而更难走。）
-        inflation_radius: 0.16          # 2026-11-22 现场档2：0.22→0.16 = robot_radius 0.15 + 1 cm，配合打开西线
+        # ★ 2026-11-23 回退：0.16 → 0.30，与 robot_radius 齐平（6108770 档）。
+        inflation_radius: 0.30          # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 global_costmap:
@@ -1113,17 +1116,15 @@ global_costmap:
       #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
       #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
       #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
-      robot_radius: 0.15           # 2026-11-22 现场档2：0.20→0.15。西线(向前→左→向前)物理缝约 0.75m，0.21 的 inscribed 膨胀仍把起点到西缝的路封死(planner 被迫绕东/直穿)。控制器硬门槛 safety.robot_radius 0.245(只看 254)不变，此处只是规划视野
+      # ★ 2026-11-23 回退：0.15 → 0.30（6108770 档），与 local 同步。
+      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（6108770 档）；车体 CAD 外廓 0.2743
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
-        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
-        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
-        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
-        enabled: false
+        # ★ 2026-11-23 回退：enabled false → true（6108770 档），与 local 同步。
+        enabled: true
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1133,10 +1134,9 @@ global_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，滤掉 z≈0.01-0.08 的地面点（否则南入口整片变墙）
-        # 2026-11-22: 2.0→0.35（同 local）。terrain_map_ext 在 y≈2.0 有 z≈0.72 m 的
-        # 悬空门楣点，2.0 会把整条北走廊膨胀封死（实测 planner ABORTED、costmap 全 99/100）。
-        max_obstacle_height: 0.35
+        # ★ 2026-11-23 回退：0.15/0.35 → 0.0/2.0（6108770 档，同 local）。
+        min_obstacle_height: 0.0
+        max_obstacle_height: 2.0
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map_ext
@@ -1144,8 +1144,8 @@ global_costmap:
           data_type: PointCloud2
           topic: <robot_namespace>/terrain_map_ext
           sensor_frame: livox_imu
-          min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，与层门槛一致
-          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
+          min_obstacle_height: 0.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
+          max_obstacle_height: 2.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
           obstacle_max_range: 10.0
           obstacle_min_range: 0.2
       static_layer:
@@ -1160,7 +1160,8 @@ global_costmap:
         # ★ 2026-11-14：0.25 → 0.30，与 robot_radius 齐平（原因见 local_costmap 同项）。
         #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.38，
         #   中间 13 cm 的"规划器认为能走、控制器不敢走"就是 0.8 m 通道卡死的直接来源。
-        inflation_radius: 0.16          # 2026-11-22 现场档2：0.22→0.16 = robot_radius 0.15 + 1 cm，配合打开西线
+        # ★ 2026-11-23 回退：0.16 → 0.30，与 robot_radius 齐平（6108770 档）。
+        inflation_radius: 0.30          # 障碍膨胀半径(m)
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -1433,7 +1434,10 @@ zlio_bridge:
     #   改完再采一次，锁相残差应从 0.26 掉到 <0.04 m（工具会直接判 PASS/FAIL）。
     # ⚠ 建图那份 config/real/mapping_params.yaml 必须同值（回归测试钉住）。
     pose_body_offset_xyz: [0.009, -0.226, -0.130]
-    pose_body_offset_apply_to_cloud: True
+    # 2026-11-24 A/B 诊断：先只补位姿、不补点云，观察“点云绕圈”是否消失。
+    # 诊断完必须改回 True（回归测试 test_mapping_and_nav_share_the_same_pose_body_offset
+    # 与避障都要求 True）。
+    pose_body_offset_apply_to_cloud: False
 
 # 与 zlio 同条件起停：|a| 超阈值的帧，加速度**替换成上一次未饱和的值**后再喂给前端
 # （不是按比例缩小：缩过的值是物理上不存在的持续高加速度，照样会被积分进速度）。

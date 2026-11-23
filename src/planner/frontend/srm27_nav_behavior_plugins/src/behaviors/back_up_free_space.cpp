@@ -106,8 +106,8 @@ void BackUpFreeSpace::onConfigure()
   }
 
   costmap_client_ = node->create_client<nav2_msgs::srv::GetCostmap>(service_name_);
-  spin_inhibit_pub_ = node->create_publisher<std_msgs::msg::Empty>("navigation_spin_inhibit", 1);
-  spin_inhibit_pub_->on_activate();
+  // 2026-11-23：不再发布 navigation_spin_inhibit。底盘 wz 只归决策层（rotation_cmd ->
+  // srm_cmd_mux），恢复行为也不再否决自转；平移仍受上层的净空限幅约束。
 
   if (visualize_) {
     marker_pub_ = node->template create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -120,7 +120,6 @@ void BackUpFreeSpace::onCleanup()
 {
   nav2_behaviors::DriveOnHeading<BackUpAction>::onCleanup();
   costmap_client_.reset();
-  spin_inhibit_pub_.reset();
   marker_pub_.reset();
   early_exit_hold_count_ = 0;
 }
@@ -129,8 +128,6 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
   const std::shared_ptr<const BackUpAction::Goal> command)
 {
   stopRobot();
-  // 备份期间抑制决策层自转（窄区自转冲突），由 mux 统一裁决。
-  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
   if (
     !std::isfinite(command->speed) || command->speed <= 0.0 || !std::isfinite(command->target.x) ||
     command->target.x == 0.0 || command->target.y != 0.0 || command->target.z != 0.0 ||
@@ -232,7 +229,6 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
 
 nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
 {
-  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
   rclcpp::Duration time_remaining = end_time_ - clock_->now();
   if (time_remaining.seconds() < 0.0 && command_time_allowance_.seconds() > 0.0) {
     stopRobot();

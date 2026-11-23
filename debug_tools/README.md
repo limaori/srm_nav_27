@@ -11,10 +11,14 @@
 | `plot_backend_correction.py` | **backend 的 map→odom 纠正监视**：先验配准 / 回环各自改了多少、改到哪；4 个面板 + CSV | 可用（对接 `/tf`、`/localization/odometry`、`~/localization_state`、`/rosout`） |
 | `backend_contribution_report.py` | **先验 / UWB / 回环 / 恢复 / 未归属 / 总计的贡献分解**：累计绝对修正 vs 净效果；读前一个工具的 CSV | 可用 |
 | `system_monitor.py` | 本机占用：CPU/内存/swap/温度/磁盘/网络 + **导航栈分组统计** + 最吃 CPU 的进程 | 可用 |
+| `capture_gimbal_cloud_rotation.py` | **云台自转时点云到底转不转**：同时录多路点云/TF 链/云台角，用二维配准量出「点云世界系转角 vs 云台角」的斜率（0/±1/±2），输出可交接的数据包 | 可用（实车采集链路已验证；`--demo` 四路已知答案自检通过） |
 
 `plot_vxvywz.py`、`plot_backend_correction.py`、`backend_contribution_report.py` 与 `system_monitor.py` 共用 `_common.py`
 （matplotlib 配置目录、中文字体、CSV 落盘、`-h` 输出），改公共行为只改那一处；
 `plot_lio_gt_yaw.py` 是后加的，自带一份同样的样板，没依赖 `_common.py`。
+`capture_gimbal_cloud_rotation.py` 只从 `_common.py` 取 matplotlib 配置/中文字体，
+`-h` 直接打文件头的 docstring；数据落盘、配准和报告都是自带的
+（`--analyze`/`--demo` 不 import rclpy）。
 
 ---
 
@@ -692,3 +696,167 @@ source install/setup.bash
 | Ctrl-C 后 CSV 不完整 | CSV 每秒落盘一次；`kill -9` 仍会丢最后 1 秒，正常 Ctrl-C 不会 |
 | 系统占用里进程表只有几个进程 | 容器/受限环境（hidepid、PID 命名空间）下 `psutil` 只能看到本命名空间的进程；整机 CPU 仍是对的 |
 | 系统占用里磁盘/网络显示 "—" | 速率是"两次采样求差"，第一个采样点没有基准；`--once` 会自动等第二个点，正常不会出现 |
+
+---
+
+## 7. `capture_gimbal_cloud_rotation.py` —— 云台转，点云跟着转吗
+
+![云台点云转动示波（demo 合成数据）](example_gimbal_cloud_rotation.png)
+
+回答一个问题：**底盘停着、只转云台时，点云在 odom 里到底转不转、转多少。**
+这是「我车的定位挺准，但整片点云跟着云台来回摆」这类现象的分层工具：它不猜，
+直接量出「点云世界系转角」对「云台角」的斜率，再把这个数字翻译成故障层。
+
+### 7.1 为什么不能只盯着 RViz
+
+同一个「点云在转」的观感，至少有两种完全不同的原因：
+
+| 层 | 原因 | 点云内容真转了吗 | 该改哪 |
+| --- | --- | --- | --- |
+| A. 上游/坐标 | 点云其实在车体系却标成 odom；去旋转漏了/符号反了/补了两次；前端输出点云的参考时刻和位姿不一致 | **是** | `zlio_bridge` 的 `cloud_pose`、前端 `FrontendFrame.cloud` 的帧契约、`sensor_scan_generation` 的 odom 表达 |
+| B. 显示/TF | RViz Fixed Frame 不是 map；同一 child 有两个 parent；某个静态外参随云台动；看的是另一路点云 | **否** | TF 树、RViz 配置、静态外参 |
+
+RViz 只能告诉你「看起来在转」。本工具把**云台角**和**每路点云的世界系转角**同时录下来，
+用相邻帧二维配准直接量后者，再回归到前者：
+
+| 斜率 s | 含义 | 点云 frame 是 odom/世界系 | 点云 frame 是车体系/云台系 |
+| --- | --- | --- | --- |
+| ≈ 0 | 点云在世界系稳定 | 点云没问题，去查显示层 | TF 在正常补偿云台角 |
+| ≈ +1 | 云台角被同向加了一次 | 变换里**多**了一份云台角 | 不该再被 TF 转一次 |
+| ≈ -1 | 该减的云台角没减/符号反了 | 去旋转漏了、`gimbal_joint_sign` 反了、点云是车体系却标成 odom | 查 TF 符号与 joint 轴向 |
+| ≈ ±2 | 同一个角算了两次 | 既在点云里去旋转、又在 TF 里补了一次 | 双计 |
+| 相关性 <0.5 | 斜率不可信 | 先看内点率、场景几何、云台行程 | 同左 |
+
+回归用**过原点的增量回归**（`s = Σ(Δψ·Δθ)/Σ(Δθ²)`），和 `capture_gimbal_spin.py`
+的判据同口径，所以「转过去再转回来」也能判；逐帧增量只看相邻两帧，不靠首末两点。
+另外再做一路「每帧直接对齐锚点帧」的漂移无关校验，两路斜率应一致。
+
+### 7.2 它录什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 点云 | 自动识别最多 6 路：`registered_scan` / `sensor_scan` / `terrain_map` / `terrain_map_ext` / `cloud_registered` / Livox 原始点云；按 `--rate`（默认 5 Hz）限频、体素降采样到 `--max-points` |
+| 云台角 | `/joint_states` 的 `gimbal_yaw_joint`、`/chassis_to_gimbal_yaw_deg`、以及 **TF 口径** `yaw(odom->gimbal_yaw) − yaw(odom->base_link)`（判据用最后这路） |
+| 位姿 | `/odometry`（导航用，child=`gimbal_yaw`）、`/lidar_odometry`（雷达位姿） |
+| TF | `map->odom`、`odom->base_link`、`base_link->gimbal_yaw`、`gimbal_yaw->livox_*`，按每帧 `header.stamp` 查，不用最新值硬套 |
+| 健康检查 | 同一 child 多 parent、`odom->lidar` 与 `/lidar_odometry` 是否同源、底盘是否真的静止、TF 查询失败计数、相关节点参数（只读） |
+
+产物是一个**自解释数据包**（默认 `user_test_log/gimbal_cloud_<时间戳>/`，不进 Git）：
+
+```text
+manifest.json              环境/话题/帧/git/参数/TF 快照
+samples.csv                20 Hz 标量（云台角三路、TF 各段 yaw、底盘位姿/速度）
+raw/<话题>.npz             每帧点云（发布帧坐标）+ 逐帧 TF 矩阵 + 逐帧云台角
+clouds/*.pcd               关键帧（已变换到分析系，CloudCompare 可直接开）
+clouds/index.csv           每个 PCD 是第几帧、云台多少度
+analysis/pairs.csv         每对相邻帧的 Δψ/Δθ、内点率、平移、锚点结果
+analysis/analysis.json     关键数字的机器可读版本
+analysis/plots.png         六面板总图
+analysis/cloud_overlay.png 云台两端角度的点云叠加
+report.md                  结论 + 证据 + 按斜率给出的排查方向
+bag/                       --bag 时的 rosbag（默认不录，点云很占空间）
+```
+
+### 7.3 用法
+
+```bash
+# 先起导航，等话题稳定；再开本工具（只读，不发任何控制/TF）
+source /opt/ros/humble/setup.bash
+./debug_tools/capture_gimbal_cloud_rotation.py --duration 90 \
+  --note "场地 A，手转云台 ±40°，约 20°/s，两个来回"
+# 终端提示「就绪」后按下面的动作走：
+#   0~10 s  不动（基线）
+#   → 慢慢转到 +30~45°，停 2 s
+#   → 转回中间，再到 -30~45°，停 2 s
+#   → 回中间停 2 s；整套重复 2~3 次（约 60~90 s）
+# 到点自动结束；Ctrl-C 只按一次，后面收尾/分析不要再按
+
+# 一直录到 Ctrl-C（推荐，动作看得到再停）
+./debug_tools/capture_gimbal_cloud_rotation.py
+
+# 只录不分析，回头再算（数据包可以整个拷给别人）
+./debug_tools/capture_gimbal_cloud_rotation.py --duration 60 --no-analyze
+
+# 对已有数据包重算（不需要 ROS，只要 numpy/scipy/matplotlib）
+./debug_tools/capture_gimbal_cloud_rotation.py \
+  --analyze user_test_log/gimbal_cloud_20261124_001234
+
+# 自检：不连 ROS，造 4 路已知答案的点云（正确 / 车体系 / 漏补 / 双计）
+./debug_tools/capture_gimbal_cloud_rotation.py --demo
+
+# 有命名空间 / 要顺带录 bag
+./debug_tools/capture_gimbal_cloud_rotation.py --duration 60 \
+  --ros-args -r __ns:=/red_standard_robot1 --bag
+```
+
+关键参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--duration` | `0` | 录多久；0 = 一直录到 Ctrl-C。**就绪之后才开始计时** |
+| `--wait` | `60` | 等点云/TF 就绪的上限（秒） |
+| `--rate` | `5` | 点云存储频率（话题 10 Hz 时存 5 Hz 足够） |
+| `--max-points` | `4000` | 每帧最多存多少点（体素 `--voxel 0.10` 之后） |
+| `--cloud-topics` | 自动 | 显式指定，逗号分隔或重复给；自动识别按候选表优先级 |
+| `--analysis-frame` | `odom` | 分析系；想看 map 系就传 `map`（用每帧的 `map->odom`） |
+| `--align-points` | `900` | 每帧参与配准的点数 |
+| `--yaw-range` | `60` | 配准搜索的 ±范围（度）；转得猛/行程大时放宽到 90 |
+| `--inlier-dist` | `0.15` | 配准内点距离（米）；稀疏场景可放宽到 0.2 |
+| `--min-travel` | `10` | 云台行程低于这个值直接判「数据不足」 |
+| `--min-dtheta` | `0.15` | 相邻帧云台角增量小于这个值就不进回归（度）；转得特别慢时调小 |
+| `--pcd-max` | `40` | 每路最多落多少个关键帧 PCD |
+| `--bag` | 关 | 顺带录 rosbag；点云全量，注意磁盘 |
+| `--tar` | 关 | 分析完把整个数据包打成 `.tar.gz`，方便发人 |
+| `--note` | 空 | 动作备注（方向/幅度/速度/场地），写进 `report.md` 和 `manifest.json` |
+
+### 7.4 图上/报告里怎么读
+
+- **① 云台角**：蓝线是 TF 口径的物理角，橙虚线是 `-gimbal_yaw_joint`。本车 URDF 的关节轴
+  是 `-z`，所以关节值 +28° 对应物理角 -28°；两条线应重合。判据永远用蓝线，不看符号。
+- **② 点云世界系转角**：横轴时间、纵轴度。平稳 → 点云在世界系里没转；跟着云台走 → 斜率大。
+- **③ Δψ vs Δθ**：每一对相邻帧一个点。斜率就是判据；点云越散，内点率/场景几何越差。
+- **④ 底盘运动**：应该贴 0。若这里有量，斜率会被底盘运动污染，报告会标出来。
+- **⑤ TF 各段 yaw**：云台角落在 `yaw_base_gimbal` 这一段；`yaw_gimbal_lidar` 是固定安装角；
+  `map->odom` 是 backend 的纠正面。
+- **⑥ 每帧点数**：掉到几十说明几何退化，配准不可信。
+
+`report.md` 会把「斜率 → 优先查哪里」直接列成表，并给出本次的云台行程、底盘位移、
+TF 同源性、多 parent 检查结果。
+
+![云台两端角度的点云叠加（demo）](example_gimbal_cloud_overlay.png)
+
+> demo 里「漏补 -θ」那一路在云台 -40° 和 +40° 的点云被转开了 80°，两条墙/两张图；
+> 正确的那路完全重合。这就是「点云跟着云台转」最直观的证据。
+
+### 7.5 实测与自检
+
+- **实车静态 20 s**（云台没转，`/registered_scan` 等 5 路各 ~110 帧）：TF 全命中，
+  相邻帧中位内点率 **0.91~0.97**，判「行程不足」——符合预期。
+- **真实点云注入已知转角**：对实车 `/registered_scan` 的每帧绕雷达反向转 `-θ`
+  （θ=30°·sin(2πt/8)），测得斜率 **-0.941**、锚点斜率 **-1.009**、r=-0.91，
+  判 `follow_neg`；原样不动的那路斜率 -0.089、判 `stable`。
+- **`--demo` 四路自检**：正确 / 车体系 / 漏补 / 双计 四路斜率分别 0.00 / 0.00 / -1.00 / +1.00，
+  `PASS` 全过。自检也验证了「点云在车体系里、但 TF 正确」时世界系是稳定的——所以
+  **frame_id 不同不等于有 bug**，判据是变换后的世界系。
+
+```bash
+cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
+```
+
+### 7.6 交接给别人时发什么
+
+只发**整个数据包目录**（或 `--tar` 的 `.tar.gz`）即可，里面有 `report.md`、
+`manifest.json`、原始点云 `raw/*.npz`、关键帧 `clouds/*.pcd`、逐对结果 `analysis/pairs.csv`。
+对方不需要 ROS，装 `numpy/scipy/matplotlib` 就能：
+`--analyze <包> --yaw-range 90` 重算，或在 CloudCompare 里直接看 `clouds/*.pcd`。
+`manifest.json` 里的 `parameters` 是采集时 `ros2 param dump` 的原样输出，
+排查 `pose_body_offset_*`、`lidar_frame`、`ground_frame` 这类参数时不用再问现场。
+
+### 7.7 限制
+
+- 配准是**二维**的（yaw + xy），roll/pitch 不进斜率；本问题正好是二维。
+- 正对单面墙/空旷场地时几何退化，内点率低，斜率要打折；报告会标。
+- 逐帧增量回归把每对相邻帧当独立样本，同时给锚点斜率做交叉验证，两者应一致。
+- 工具启动前/就绪前的历史补不回来；要覆盖完整动作请先开工具再转云台。
+- 点云按 `header.stamp` 查 TF；超过 `--tf-cache`（默认按 `--duration+30 s`，最少 90 s）的帧会跳过。
+- 一个数据包约 70 MB/分钟（5 路 × 5 Hz × 4000 点）；长时间录请用 `--no-pcd` 或减 `--max-topics`。
