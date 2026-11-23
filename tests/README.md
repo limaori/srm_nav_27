@@ -25,3 +25,13 @@ bash tests/smoke/test_lib_path_guard.sh
 
 一次性问题定位脚本（例如已解决的 TF 树修复脚本）不再放进源码树；结论与命令片段
 记录在 `docs/records/`，原始脚本归档在 `~/srm_nav_27_data/archive/`。
+
+## recovery/
+
+跨包恢复回归、隔离 ROS/Gazebo 场景与地图故障注入：
+
+```bash
+./tests/recovery/validate_recovery.sh
+```
+
+决策及 Nav2/MINCO 联调入口见 `src/decision/srm27_behavior/scripts/validate_decision.sh`；包内测试位于 `src/decision/srm27_behavior/test/`。

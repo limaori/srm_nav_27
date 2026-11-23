@@ -32,6 +32,9 @@ public:
   static BT::PortsList providedPorts();
 
   bool setGoal(Goal & goal) override;
+  BT::NodeStatus tick() override;
+
+  void halt() override;
 
   void onHalt() override;
 

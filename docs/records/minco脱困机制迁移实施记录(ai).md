@@ -1,5 +1,7 @@
 # MINCO 脱困机制迁移实施记录（AI 生成）
 
+> 恢复相关实现、参数解释与验收入口已于 2026-11-16 更新，见 [recovery.md](recovery.md)。本文中的迁移与现场调参记录保留作历史参考。
+
 把北理 `navi_minco_bit` 里 `minco_planner` 自带的脱困能力（`RecoverServer` + `MincoFsm::RECOVERING`）
 迁移到本工作区的 Nav2 链路。**只做代码与参数改动，未做运行期验证**（仿真/实车标定见 §9）。
 

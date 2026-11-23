@@ -14,6 +14,8 @@
 
 #include "srm27_omni_pid_controller/omni_pid_pursuit_controller.hpp"
 
+#include <limits>
+
 #include "nav2_core/exceptions.hpp"
 #include "nav2_util/geometry_utils.hpp"
 #include "nav2_util/node_utils.hpp"
@@ -53,6 +55,12 @@ void OmniPidPursuitController::configure(
 
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".translation_kp", rclcpp::ParameterValue(3.0));
+  // 【2026-11-09】轨迹碰撞检查开关：检查读 local costmap 的 253+ 格，但雷达
+  // 动态层标的墙与 PGM 静态墙位置存在偏差（A* 绕的是 PGM 墙），长路径平滑
+  // 曲线会踩上"雷达偏移的 254"而反复 abort。全局安全已由 A*（挡 253）+
+  // smoother（挡 253）保证，此检查降级为可选。
+  declare_parameter_if_not_declared(
+    node, plugin_name_ + ".enable_collision_check", rclcpp::ParameterValue(true));
   declare_parameter_if_not_declared(
     node, plugin_name_ + ".translation_ki", rclcpp::ParameterValue(0.1));
   declare_parameter_if_not_declared(
@@ -114,6 +122,7 @@ void OmniPidPursuitController::configure(
     node, plugin_name_ + ".max_velocity_scaling_factor_rate", rclcpp::ParameterValue(0.9));
 
   node->get_parameter(plugin_name_ + ".translation_kp", translation_kp_);
+  node->get_parameter(plugin_name_ + ".enable_collision_check", enable_collision_check_);
   node->get_parameter(plugin_name_ + ".translation_ki", translation_ki_);
   node->get_parameter(plugin_name_ + ".translation_kd", translation_kd_);
   node->get_parameter(plugin_name_ + ".enable_rotation", enable_rotation_);
@@ -266,7 +275,7 @@ geometry_msgs::msg::TwistStamped OmniPidPursuitController::computeVelocityComman
 
   geometry_msgs::msg::TwistStamped cmd_vel;
   cmd_vel.header = pose.header;
-  if (!isCollisionDetected(costmap_frame_local_plan)) {
+  if (!enable_collision_check_ || !isCollisionDetected(costmap_frame_local_plan)) {
     cmd_vel.twist.linear.x = lin_vel * cos(theta_dist);
     cmd_vel.twist.linear.y = lin_vel * sin(theta_dist);
     cmd_vel.twist.angular.z = angular_vel;
@@ -277,7 +286,12 @@ geometry_msgs::msg::TwistStamped OmniPidPursuitController::computeVelocityComman
   return cmd_vel;
 }
 
-void OmniPidPursuitController::setPlan(const nav_msgs::msg::Path & path) { global_plan_ = path; }
+void OmniPidPursuitController::setPlan(const nav_msgs::msg::Path & path)
+{
+  global_plan_ = path;
+  // 新路径的起点在机器人当前位姿附近，进度从 0 重新计。
+  progress_index_ = 0;
+}
 
 void OmniPidPursuitController::setSpeedLimit(
   const double & /*speed_limit*/, const bool & /*percentage*/)
@@ -307,11 +321,22 @@ nav_msgs::msg::Path OmniPidPursuitController::transformGlobalPlan(
   // First find the closest pose on the path to the robot
   // bounded by when the path turns around (if it does) so we don't get a pose from a later
   // portion of the path
+  //
+  // 【修复 2026-11-09】搜索起点带进度记忆：从 progress_index_ 开始，不往回搜。
+  // 自相近路径（绕行的平行段）上，无约束的最近点会跳到另一条分支——已走过的
+  // 点被重新纳入局部路径，前视点指向前一轮分支，车沿路径往返振荡
+  // （实测 16 s 周期、2.5 m 往返、净位移≈0）。setPlan（重规划出的新路径）
+  // 会把进度重置为 0，此时新路径起点本就在车附近，行为正确。
+  const std::size_t search_from =
+    std::min(progress_index_, global_plan_.poses.size());
   auto transformation_begin = nav2_util::geometry_utils::min_by(
-    global_plan_.poses.begin(), closest_pose_upper_bound,
+    global_plan_.poses.begin() + static_cast<long>(search_from),
+    closest_pose_upper_bound,
     [&robot_pose](const geometry_msgs::msg::PoseStamped & ps) {
       return euclidean_distance(robot_pose, ps);
     });
+  progress_index_ = static_cast<std::size_t>(
+    std::distance(global_plan_.poses.begin(), transformation_begin));
 
   // Find points up to max_transform_dist so we only transform them.
   auto transformation_end = std::find_if(
@@ -340,6 +365,13 @@ nav_msgs::msg::Path OmniPidPursuitController::transformGlobalPlan(
   // Remove the portion of the global plan that we've already passed so we don't
   // process it on the next iteration (this is called path pruning)
   global_plan_.poses.erase(begin(global_plan_.poses), transformation_begin);
+  // 【修复 2026-11-09】pruning 之后索引基准前移：progress_index_ 是相对
+  // global_plan_ 的绝对下标，erase 掉前缀后若不同步清零，下一轮
+  // search_from 会指向"更靠后"的点——错位逐轮累积，直到最近点距车
+  // 超出 max_costmap_extent，transformed_plan 变成 0 poses（实测长路径
+  // 走到 3.5 m 后卡死的直接原因）。erase 后向量首元即"当前最近点"，
+  // 从 0 重新搜索既正确又保留防回退语义（已走过的点已被物理删除）。
+  progress_index_ = 0;
   local_path_pub_->publish(transformed_plan);
 
   if (transformed_plan.poses.empty()) {
@@ -363,16 +395,36 @@ std::unique_ptr<geometry_msgs::msg::PointStamped> OmniPidPursuitController::crea
 geometry_msgs::msg::PoseStamped OmniPidPursuitController::getLookAheadPoint(
   const double & lookahead_dist, const nav_msgs::msg::Path & transformed_plan)
 {
-  // Find the first pose which is at a distance greater than the lookahead distance
-  auto goal_pose_it = std::find_if(
-    transformed_plan.poses.begin(), transformed_plan.poses.end(), [&](const auto & ps) {
-      return hypot(ps.pose.position.x, ps.pose.position.y) >= lookahead_dist;
-    });
+  // 【修复 2026-11-09】先定位机器人当前在路径上的最近点，再沿路径前进方向找前视点。
+  //
+  // 原实现从 transformed_plan 开头 find_if「第一个到车距离 >= lookahead 的点」。
+  // transformed_plan 是从全局路径开头开始转换的（包含车已走过的段），车沿路径
+  // 走过 lookahead 距离后，路径开头（在车后方）就满足条件被选中——前视点指向
+  // 车后方，车便朝路径反方向冲刺，远离目标后行为树触发恢复（倒退），
+  // 形成「冲刺-倒退」循环、净位移≈0（实测 16 s 周期、2.5 m 往返）。
+  auto nearest_it = transformed_plan.poses.begin();
+  double nearest_dist = std::numeric_limits<double>::max();
+  for (auto it = transformed_plan.poses.begin();
+    it != transformed_plan.poses.end(); ++it)
+  {
+    const double d = std::hypot(it->pose.position.x, it->pose.position.y);
+    if (d < nearest_dist) {
+      nearest_dist = d;
+      nearest_it = it;
+    }
+  }
+
+  // 沿路径前进方向按【弧长】取前视点：从最近点沿路径累计 lookahead 距离。
+  // 之前按「到车的欧氏距离」选取，弯道内侧的点会提前满足条件，
+  // 前视点被拉向弯内，车在弯道上向内切。弧长制保证前视点严格在
+  // 路径前方 lookahead 处，弯道行为由 PID 自然修正。
+  auto goal_pose_it = nav2_util::geometry_utils::first_after_integrated_distance(
+    nearest_it, transformed_plan.poses.end(), lookahead_dist);
 
   // If the no pose is not far enough, take the last pose
   if (goal_pose_it == transformed_plan.poses.end()) {
     goal_pose_it = std::prev(transformed_plan.poses.end());
-  } else if (use_interpolation_ && goal_pose_it != transformed_plan.poses.begin()) {
+  } else if (goal_pose_it != nearest_it && use_interpolation_) {
     // Find the point on the line segment between the two poses
     // that is exactly the lookahead distance away from the robot pose (the origin)
     // This can be found with a closed form for the intersection of a segment and a circle

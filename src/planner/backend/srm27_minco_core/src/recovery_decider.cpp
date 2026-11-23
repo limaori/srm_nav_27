@@ -33,7 +33,7 @@ void logCircularSearch(const double _best_clearance, const double _best_angle_de
 {
   std::fprintf(
     stderr,
-    "\033[33m[MincoRecovery] Flat gradient detected, executing circular search recovery! "
+    "\033[33m[MincoRecovery] Searching collision-checked escape directions. "
     "Max ESDF: %.4f at angle %.1f deg\033[0m\n",
     _best_clearance, _best_angle_deg);
   std::fflush(stderr);
@@ -76,6 +76,10 @@ void RecoveryDecider::configure(const RecoveryConfig & _config)
     (std::isfinite(_config.gradient_epsilon) && _config.gradient_epsilon >= 0.0)
       ? _config.gradient_epsilon
       : 1e-3;
+  config_.minimum_clearance =
+    (std::isfinite(_config.minimum_clearance) && _config.minimum_clearance >= 0.0)
+      ? _config.minimum_clearance
+      : 0.0;
   config_.repeat_guard_radius =
     (std::isfinite(_config.repeat_guard_radius) && _config.repeat_guard_radius >= 0.0)
       ? _config.repeat_guard_radius
@@ -94,6 +98,7 @@ void RecoveryDecider::reset()
   last_recovery_end_sec_ = -1.0;
   recovery_active_ = false;
   escape_velocity_.setZero();
+  preferred_direction_.setZero();
   last_escape_direction_.setZero();
   entry_clearance_ = -1.0;
   last_trigger_ = "none";
@@ -212,7 +217,7 @@ RecoveryDecision RecoveryDecider::decide(
   double best_clearance = -1.0;
   used_circular_search_ = false;
   circular_best_clearance_ = -1.0;
-  if (!planEscapeDirection(_esdf, _position, config_, &direction, &best_clearance)) {
+  if (!planEscapeDirection(_esdf, _position, config_, &direction, &best_clearance, true, preferred_direction_)) {
     // 没有方向的脱困等于停车。这里必须让状态"可自愈"：
     //  * 不开会话（否则 shouldStartRecovery 恒为 false，参考实现在这一分支返回
     //    ENTER_EMER_STOP 且把 recovery_active_ 永久锁死，是同一个坑）；
@@ -236,12 +241,21 @@ RecoveryDecision RecoveryDecider::decide(
     return RecoveryDecision::kRepeatSuppressed;
   }
 
+  used_circular_search_ =
+    !(here.gradient_valid && here.gradient.allFinite() && here.gradient.norm() > 1e-9 &&
+      here.gradient.norm() >= config_.gradient_epsilon &&
+      direction.isApprox(here.gradient.normalized(), 1e-6));
+  circular_best_clearance_ = used_circular_search_ ? best_clearance : -1.0;
+  last_exit_ = "none";
   // 真正进入脱困会话。
   recovery_active_ = true;
   last_recovery_start_sec_ = _now_sec;
   escape_velocity_ = direction * config_.escape_speed;
   last_escape_direction_ = direction;
-  last_trigger_ = used_circular_search_ ? "circular_search" : "gradient";
+  const bool path_aligned =
+    preferred_direction_.squaredNorm() > .5 && direction.dot(preferred_direction_) > 1.0 - 1e-6;
+  last_trigger_ =
+    path_aligned ? "path_aligned" : (used_circular_search_ ? "circular_search" : "gradient");
   if (_escape_velocity != nullptr) {
     *_escape_velocity = escape_velocity_;
   }
@@ -252,9 +266,53 @@ RecoveryDecision RecoveryDecider::decide(
 // 2) 脱困方向规划
 // -----------------------------------------------------------------------------
 
+
+void RecoveryDecider::setPreferredDirection(const Eigen::Vector2d & _direction)
+{
+  preferred_direction_.setZero();
+  if (_direction.allFinite() && _direction.norm() > 1e-6) {
+    preferred_direction_ = _direction.normalized();
+  }
+}
+
+bool RecoveryDecider::isEscapeSegmentSafe(
+  const Esdf2D & _esdf, const Eigen::Vector2d & _start, const Eigen::Vector2d & _end,
+  double _minimum_clearance)
+{
+  if (
+    !_esdf.valid() || !_start.allFinite() || !_end.allFinite() ||
+    !std::isfinite(_minimum_clearance) || _minimum_clearance < 0.0) {
+    return false;
+  }
+  const auto start = _esdf.query(_start.x(), _start.y());
+  if (!start.valid || !std::isfinite(start.distance) || start.cell_state == CellState::kUnknown) {
+    return false;
+  }
+  const double length = (_end - _start).norm();
+  if (!std::isfinite(length)) { return false; }
+  const int steps = std::max(1, static_cast<int>(std::ceil(length / (0.5 * _esdf.resolution()))));
+  double previous = start.distance;
+  bool left_obstacle = !start.insideObstacle();
+  for (int i = 1; i <= steps; ++i) {
+    const Eigen::Vector2d p = _start + (_end - _start) * (static_cast<double>(i) / steps);
+    const auto sample = _esdf.query(p.x(), p.y());
+    if (
+      !sample.valid || !std::isfinite(sample.distance) ||
+      (left_obstacle && sample.insideObstacle()) ||
+      sample.distance + 1e-6 < std::min(previous, _minimum_clearance)) {
+      return false;
+    }
+    left_obstacle = left_obstacle || !sample.insideObstacle();
+    previous = sample.distance;
+  }
+  return true;
+
+}
+
 bool RecoveryDecider::planEscapeDirection(
   const Esdf2D & _esdf, const Eigen::Vector2d & _position, const RecoveryConfig & _config,
-  Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions)
+  Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions,
+  const Eigen::Vector2d & _preferred_direction)
 {
   if (_direction == nullptr) {
     return false;
@@ -266,55 +324,98 @@ bool RecoveryDecider::planEscapeDirection(
   if (!_position.allFinite() || !_esdf.valid()) {
     return false;
   }
-
-  const EsdfQueryResult here = _esdf.query(_position.x(), _position.y());
-  if (!here.valid) {
-    // 机器人在距离场覆盖范围之外：没有任何可靠的方向信息。
+  const auto here = _esdf.query(_position.x(), _position.y());
+  if (!here.valid || !std::isfinite(here.distance)) {
     return false;
   }
 
-  if (here.gradient_valid && here.gradient.allFinite()) {
-    const double norm = here.gradient.norm();
-    if (std::isfinite(norm) && norm >= _config.gradient_epsilon) {
-      *_direction = here.gradient / norm;
-      if (_best_clearance != nullptr) {
-        *_best_clearance = here.distance;
+  const double radius = (std::isfinite(_config.search_radius) && _config.search_radius > 0.0)
+                          ? _config.search_radius
+                          : 0.4;
+  const auto usable = [&](const Eigen::Vector2d & direction, double * clearance) {
+    const Eigen::Vector2d end = _position + radius * direction;
+    const auto sample = _esdf.query(end.x(), end.y());
+    if (
+      !sample.valid || !std::isfinite(sample.distance) || sample.insideObstacle() ||
+      (here.distance < _config.escaped_clearance && sample.distance <= here.distance + 1e-6) ||
+      !isEscapeSegmentSafe(_esdf, _position, end, _config.minimum_clearance)) {
+      return false;
+    }
+    *clearance = sample.distance;
+    return true;
+  };
+  // Prefer the route only if the complete escape corridor continuously improves
+  // the current clearance, with no occupied/unknown cell or map edge in
+  // between.
+  if (
+    !here.insideObstacle() && here.distance > 0 && _preferred_direction.allFinite() &&
+    _preferred_direction.norm() > 1e-6 && std::isfinite(_config.search_radius) &&
+    _config.search_radius > 0) {
+    const Eigen::Vector2d preferred = _preferred_direction.normalized();
+    const double step = std::max(1e-4, std::min(.025, .5 * _esdf.resolution()));
+    const double lookahead = std::min(_config.search_radius, 2.0);
+    const int count = std::max(1, static_cast<int>(std::ceil(lookahead / step)));
+    double previous = here.distance;
+    bool increasing = true;
+    for (int i = 1; i <= count; ++i) {
+      const Eigen::Vector2d point = _position + preferred * (lookahead * i / count);
+      const auto sample = _esdf.query(point.x(), point.y());
+      const double extent = _config.stuck_clearance;
+      const bool covered = _esdf.query(point.x() - extent, point.y()).valid &&
+        _esdf.query(point.x() + extent, point.y()).valid &&
+        _esdf.query(point.x(), point.y() - extent).valid &&
+        _esdf.query(point.x(), point.y() + extent).valid;
+      if (
+        !sample.valid || sample.insideObstacle() || !std::isfinite(sample.distance) ||
+        !covered || sample.distance + 1e-6 < previous) {
+        increasing = false;
+        break;
+      }
+      previous = sample.distance;
+    }
+    if (increasing && previous >= here.distance + .01) {
+      *_direction = preferred;
+      if (_best_clearance) {
+        *_best_clearance = previous;
       }
       return true;
     }
   }
 
-  // 梯度平台（深陷障碍内部时双线性插值会给出零梯度，纯开阔区同理）。
-  // 退化为环形搜索：取邻域内净空最大的方向。
-  const int samples = (_config.search_samples > 0) ? _config.search_samples : 36;
-  const double radius = (_config.search_radius > 0.0) ? _config.search_radius : 0.4;
-  const double step = 2.0 * M_PI / static_cast<double>(samples);
-  double max_clearance = -std::numeric_limits<double>::max();
-  double best_angle = 0.0;
-  bool found = false;
-  for (int i = 0; i < samples; ++i) {
-    const double angle = step * static_cast<double>(i);
-    const EsdfQueryResult sample = _esdf.query(
-      _position.x() + radius * std::cos(angle), _position.y() + radius * std::sin(angle));
-    if (!sample.valid || !std::isfinite(sample.distance)) {
-      continue;
-    }
-    found = true;
-    if (sample.distance > max_clearance) {
-      max_clearance = sample.distance;
-      best_angle = angle;
+
+  if (here.gradient_valid && here.gradient.allFinite()) {
+    const double norm = here.gradient.norm();
+    if (std::isfinite(norm) && norm > 1e-9 && norm >= _config.gradient_epsilon) {
+      const Eigen::Vector2d direction = here.gradient / norm;
+      double clearance;
+      if (usable(direction, &clearance)) {
+        *_direction = direction;
+        if (_best_clearance != nullptr) {
+          *_best_clearance = here.distance;
+        }
+        return true;
+      }
     }
   }
-  if (!found) {
+  const int samples = (_config.search_samples > 0) ? _config.search_samples : 36;
+  double best = -std::numeric_limits<double>::infinity();
+  for (int i = 0; i < samples; ++i) {
+    const double angle = 2.0 * M_PI * i / samples;
+    const Eigen::Vector2d direction(std::cos(angle), std::sin(angle));
+    double clearance;
+    if (usable(direction, &clearance) && clearance > best) {
+      best = clearance;
+      *_direction = direction;
+    }
+  }
+  if (!std::isfinite(best)) {
     return false;
   }
-
-  *_direction = Eigen::Vector2d(std::cos(best_angle), std::sin(best_angle));
   if (_best_clearance != nullptr) {
-    *_best_clearance = max_clearance;
+    *_best_clearance = best;
   }
   if (_log_transitions) {
-    logCircularSearch(max_clearance, best_angle * 180.0 / M_PI);
+    logCircularSearch(best, std::atan2(_direction->y(), _direction->x()) * 180.0 / M_PI);
   }
   return true;
 }
@@ -325,7 +426,8 @@ bool RecoveryDecider::planEscapeDirection(
 
 bool RecoveryDecider::traceEscapePath(
   const Esdf2D & _esdf, const Eigen::Vector2d & _start, const RecoveryConfig & _config,
-  double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path)
+  double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path,
+  const Eigen::Vector2d & _preferred_direction)
 {
   if (_path == nullptr) {
     return false;
@@ -346,15 +448,16 @@ bool RecoveryDecider::traceEscapePath(
     Eigen::Vector2d direction = Eigen::Vector2d::Zero();
     double best_clearance = -1.0;
     if (!planEscapeDirection(
-          _esdf, current, _config, &direction, &best_clearance, /*_log_transitions=*/false)) {
+          _esdf, current, _config, &direction, &best_clearance, false, _preferred_direction)) {
       // 走到方向场给不出方向的区域（地图外 / 全方向采样无效）：路径就到这里。
       return _path->size() > 1;
     }
 
-    current += direction * step;
-    if (!current.allFinite()) {
+    const Eigen::Vector2d next = current + direction * step;
+    if (!isEscapeSegmentSafe(_esdf, current, next, _config.minimum_clearance)) {
       return _path->size() > 1;
     }
+    current = next;
     _path->push_back(current);
 
     // 已经走出卡死区就收尾：再往前是正常导航该走的路，不属于"脱困路径"。
@@ -378,7 +481,8 @@ bool RecoveryDecider::inRecovery(double _now_sec) const
   if (!recovery_active_ || !isTimeValid(_now_sec) || last_recovery_start_sec_ < 0.0) {
     return false;
   }
-  return (_now_sec - last_recovery_start_sec_) <= config_.window_sec;
+  return _now_sec >= last_recovery_start_sec_ &&
+         (_now_sec - last_recovery_start_sec_) <= config_.window_sec;
 }
 
 void RecoveryDecider::finishRecovery(bool _success, double _now_sec)
@@ -397,14 +501,21 @@ RecoveryExit RecoveryDecider::updateRecovery(
   double _now_sec, const Eigen::Vector2d & _position, const Esdf2D & _esdf, double _clearance,
   Eigen::Vector2d * _escape_velocity, bool _log_transitions)
 {
+  if (_escape_velocity != nullptr) {
+    _escape_velocity->setZero();
+  }
   if (!recovery_active_) {
     return RecoveryExit::kNone;
   }
-  if (!isTimeValid(_now_sec)) {
-    return RecoveryExit::kNone;
+  // 期限不依赖位姿、地图或净空；超时后不能再被一帧净空虚高判为成功。
+  if (!isTimeValid(_now_sec) || !inRecovery(_now_sec)) {
+    last_exit_ = "timeout";
+    finishRecovery(false, _now_sec);
+    rememberSessionAnchor(_position);
+    return RecoveryExit::kTimeout;
   }
 
-  // 顺序固定：先判成功，再判超时。
+  // 有效窗口内才允许按净空判成功。
   //
   // 判据是**单帧、单点**的位置判据（与参考实现一致）：只看自身净空，不校验速度、
   // 也不校验"新轨迹是否可解"。超时后回到重规划，由重规划自己证明是否真的脱困。
@@ -418,33 +529,29 @@ RecoveryExit RecoveryDecider::updateRecovery(
     return RecoveryExit::kEscaped;
   }
 
-  if (!inRecovery(_now_sec)) {
-    last_exit_ = "timeout";
-    finishRecovery(false, _now_sec);
-    rememberSessionAnchor(_position);
-    if (_escape_velocity != nullptr) {
-      _escape_velocity->setZero();
-    }
-    return RecoveryExit::kTimeout;
-  }
-
   // 按**当前位置**重算方向（见头文件说明：不能沿用进入脱困时那一个）。
   // 刻意放在成功/超时判定**之后**：已经该退出的周期没必要再花一次
   // ESDF 环形搜索（最多 36 次查询）——这一点在 20~50 Hz 的控制周期里是有意义的。
   Eigen::Vector2d direction = Eigen::Vector2d::Zero();
   double best_clearance = -1.0;
   if (planEscapeDirection(
-        _esdf, _position, config_, &direction, &best_clearance, _log_transitions)) {
+        _esdf, _position, config_, &direction, &best_clearance, _log_transitions,
+        preferred_direction_)) {
     escape_velocity_ = direction * config_.escape_speed;
     last_escape_direction_ = direction;
     const EsdfQueryResult here = _esdf.query(_position.x(), _position.y());
     used_circular_search_ =
-      !(here.gradient_valid && here.gradient.allFinite() &&
-        here.gradient.norm() >= config_.gradient_epsilon);
-    circular_best_clearance_ = best_clearance;
+      !(here.gradient_valid && here.gradient.allFinite() && here.gradient.norm() > 1e-9 &&
+        here.gradient.norm() >= config_.gradient_epsilon &&
+        direction.isApprox(here.gradient.normalized(), 1e-6));
+    circular_best_clearance_ = used_circular_search_ ? best_clearance : -1.0;
+  } else {
+    escape_velocity_.setZero();
+    last_exit_ = "no_direction";
+    finishRecovery(false, _now_sec);
+    rememberSessionAnchor(_position);
+    return RecoveryExit::kNoDirection;
   }
-  // 算不出方向时沿用上一周期的速度：这一步不比"原地停住"更差，
-  // 而且窗口照常计时、必然超时退出，不会卡死在这里。
 
   if (_escape_velocity != nullptr) {
     *_escape_velocity = escape_velocity_;
@@ -483,6 +590,8 @@ const char * toString(RecoveryExit _exit)
       return "none";
     case RecoveryExit::kEscaped:
       return "escaped";
+    case RecoveryExit::kNoDirection:
+      return "no_direction";
     case RecoveryExit::kTimeout:
       return "timeout";
   }

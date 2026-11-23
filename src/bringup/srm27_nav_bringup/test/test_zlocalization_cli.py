@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 
 import tempfile
@@ -66,6 +67,28 @@ class BackendCliTest(unittest.TestCase):
         for platform in ('real', 'sim'):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
                 check_map_path_and_dependencies(platform, Path(directory))
+
+    def test_backend_with_decision_and_no_prior_map(self):
+        trajectory = '/tmp/trajectory output'
+        for platform, entry, tree in (('real', 'real', 'rmul_2027'),
+                                      ('sim', 'simulation', 'rmuc_2027')):
+            with self.subTest(platform=platform):
+                extra = ('--no-chassis', '--gimbal-joint-topic', 'test_angle') if platform == 'real' else ()
+                result = run_cli(platform, '--zloc-backend', '--zloc-loop',
+                                 '--zloc-trajectory', trajectory, '--behavior', tree, *extra)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                commands = [shlex.split(line[line.index('ros2 launch '):].removesuffix('; exec bash'))
+                            for line in result.stdout.splitlines() if 'ros2 launch ' in line]
+                nav = next(cmd for cmd in commands if cmd[3] == f'nav_srm_{entry}_launch.py')
+                behavior = next(cmd for cmd in commands if cmd[2] == 'srm27_behavior')
+                self.assertFalse(any(arg.endswith(':=') for arg in nav), nav)
+                self.assertIn('use_zlocalization_backend:=True', nav)
+                self.assertIn('zlocalization_loop_enabled:=1', nav)
+                self.assertIn(f'zlocalization_trajectory_directory:={trajectory}', nav)
+                self.assertIn('decision_required:=true', nav)
+                self.assertIn(f'target_tree:={tree}', behavior)
+                if platform == 'real':
+                    self.assertIn('gimbal_joint_topic:=test_angle', nav)
 
 
 if __name__ == '__main__':

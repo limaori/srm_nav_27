@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "attempt": 1,
+      "status": 4,
+      "end": [
+        0.24500000476837158,
+        0.5849999785423279
+      ],
+      "path_points": 3,
+      "action_wall_ms": 42.588612999679754
+    },
+    {
+      "attempt": 2,
+      "status": 4,
+      "end": [
+        0.24500000476837158,
+        0.5849999785423279
+      ],
+      "path_points": 3,
+      "action_wall_ms": 21.82051799900364
+    },
+    {
+      "attempt": 3,
+      "status": 4,
+      "end": [
+        0.24500000476837158,
+        0.5849999785423279
+      ],
+      "path_points": 3,
+      "action_wall_ms": 18.25769599963678
+    },
+    {
+      "attempt": 4,
+      "status": 4,
+      "end": [
+        0.24500000476837158,
+        0.5849999785423279
+      ],
+      "path_points": 3,
+      "action_wall_ms": 19.399147997319233
+    },
+    {
+      "attempt": 5,
+      "status": 4,
+      "end": [
+        0.24500000476837158,
+        0.5849999785423279
+      ],
+      "path_points": 3,
+      "action_wall_ms": 19.18626200131257
+    }
+  ],
+  "all_succeeded": true,
+  "max_endpoint_shift_m": 0.0
+}

@@ -31,6 +31,10 @@ namespace srm27_nav_behaviors
 
 void BackUpFreeSpace::onConfigure()
 {
+  nav2_behaviors::DriveOnHeading<BackUpAction>::onConfigure();
+  if (!std::isfinite(simulate_ahead_time_) || simulate_ahead_time_ <= 0.0) {
+    throw std::runtime_error("simulate_ahead_time must be finite and positive");
+  }
   auto node = node_.lock();
   if (!node) {
     throw std::runtime_error{"Failed to lock node"};
@@ -102,6 +106,8 @@ void BackUpFreeSpace::onConfigure()
   }
 
   costmap_client_ = node->create_client<nav2_msgs::srv::GetCostmap>(service_name_);
+  spin_inhibit_pub_ = node->create_publisher<std_msgs::msg::Empty>("navigation_spin_inhibit", 1);
+  spin_inhibit_pub_->on_activate();
 
   if (visualize_) {
     marker_pub_ = node->template create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -112,7 +118,9 @@ void BackUpFreeSpace::onConfigure()
 
 void BackUpFreeSpace::onCleanup()
 {
+  nav2_behaviors::DriveOnHeading<BackUpAction>::onCleanup();
   costmap_client_.reset();
+  spin_inhibit_pub_.reset();
   marker_pub_.reset();
   early_exit_hold_count_ = 0;
 }
@@ -120,6 +128,18 @@ void BackUpFreeSpace::onCleanup()
 nav2_behaviors::Status BackUpFreeSpace::onRun(
   const std::shared_ptr<const BackUpAction::Goal> command)
 {
+  stopRobot();
+  // 备份期间抑制决策层自转（窄区自转冲突），由 mux 统一裁决。
+  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
+  if (
+    !std::isfinite(command->speed) || command->speed <= 0.0 || !std::isfinite(command->target.x) ||
+    command->target.x == 0.0 || command->target.y != 0.0 || command->target.z != 0.0 ||
+    rclcpp::Duration(command->time_allowance).seconds() <= 0.0) {
+    RCLCPP_ERROR(
+      logger_, "Invalid backup goal: finite positive speed and time, nonzero distance required");
+    stopRobot();
+    return nav2_behaviors::Status::FAILED;
+  }
   while (!costmap_client_->wait_for_service(std::chrono::seconds(1))) {
     if (!rclcpp::ok()) {
       RCLCPP_ERROR(logger_, "Interrupted while waiting for the service. Exiting.");
@@ -131,12 +151,21 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
   auto request = std::make_shared<nav2_msgs::srv::GetCostmap::Request>();
   auto result = costmap_client_->async_send_request(request);
   if (result.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
-    RCLCPP_ERROR(logger_, "Interrupted while waiting for the service. Exiting.");
+    costmap_client_->remove_pending_request(result);
+    RCLCPP_ERROR(logger_, "Timed out waiting for costmap");
+    stopRobot();
     return nav2_behaviors::Status::FAILED;
   }
 
   // get costmap
   auto costmap = result.get()->map;
+  srm27_minco_core::GridSnapshot valid_map;
+  if (costmap.header.frame_id != global_frame_ || !buildGridSnapshot(costmap, &valid_map)) {
+    RCLCPP_ERROR(logger_, "Invalid costmap or frame does not match behavior global_frame");
+    stopRobot();
+    return nav2_behaviors::Status::FAILED;
+  }
+  map_resolution_ = costmap.metadata.resolution;
 
   if (!nav2_util::getCurrentPose(
         initial_pose_, *tf_, global_frame_, robot_base_frame_, transform_tolerance_)) {
@@ -166,8 +195,14 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
     }
   }
   if (!direction_ok) {
-    best_angle = findBestDirection(costmap, pose, -M_PI, M_PI, max_radius_, M_PI / 32.0);
+    direction_ok =
+      findBestDirection(costmap, pose, -M_PI, M_PI, max_radius_, M_PI / 32.0, &best_angle);
     last_used_circular_search_ = false;
+  }
+  if (!direction_ok) {
+    RCLCPP_WARN(logger_, "No safe escape direction");
+    stopRobot();
+    return nav2_behaviors::Status::FAILED;
   }
 
   // Calculate move command
@@ -197,6 +232,7 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
 
 nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
 {
+  spin_inhibit_pub_->publish(std_msgs::msg::Empty());
   rclcpp::Duration time_remaining = end_time_ - clock_->now();
   if (time_remaining.seconds() < 0.0 && command_time_allowance_.seconds() > 0.0) {
     stopRobot();
@@ -211,6 +247,7 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   if (!nav2_util::getCurrentPose(
         current_pose, *tf_, global_frame_, robot_base_frame_, transform_tolerance_)) {
     RCLCPP_ERROR(logger_, "Current robot pose is not available.");
+    stopRobot();
     return nav2_behaviors::Status::FAILED;
   }
 
@@ -259,8 +296,10 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   }
 
   auto cmd_vel = std::make_unique<geometry_msgs::msg::Twist>();
-  cmd_vel->linear.y = twist_y_;
-  cmd_vel->linear.x = twist_x_;
+  // robot_base_frame 可能是真实车体系，也可能是 odom 对齐的 fake 系。
+  const double c = std::cos(pose.theta), s = std::sin(pose.theta);
+  cmd_vel->linear.x = c * twist_x_ + s * twist_y_;
+  cmd_vel->linear.y = -s * twist_x_ + c * twist_y_;
 
   if (!isCollisionFree(distance, cmd_vel.get(), pose)) {
     stopRobot();
@@ -271,6 +310,35 @@ nav2_behaviors::Status BackUpFreeSpace::onCycleUpdate()
   vel_pub_->publish(std::move(cmd_vel));
 
   return nav2_behaviors::Status::RUNNING;
+}
+
+bool BackUpFreeSpace::isCollisionFree(
+  const double & distance, geometry_msgs::msg::Twist * cmd_vel, geometry_msgs::msg::Pose2D & pose)
+{
+  if (!collision_checker_ || cmd_vel == nullptr || !std::isfinite(pose.theta)) {
+    return false;
+  }
+  const double speed = std::hypot(cmd_vel->linear.x, cmd_vel->linear.y);
+  if (!std::isfinite(speed) || speed <= 0.0) {
+    return false;
+  }
+  const double travel =
+    std::min(std::max(0.0, std::fabs(command_x_) - distance), speed * simulate_ahead_time_);
+  const int steps = std::max(1, static_cast<int>(std::ceil(travel / (0.5 * map_resolution_))));
+  const double vx =
+    std::cos(pose.theta) * cmd_vel->linear.x - std::sin(pose.theta) * cmd_vel->linear.y;
+  const double vy =
+    std::sin(pose.theta) * cmd_vel->linear.x + std::cos(pose.theta) * cmd_vel->linear.y;
+  for (int i = 0; i <= steps; ++i) {
+    auto predicted = pose;
+    const double dt = (travel / speed) * i / steps;
+    predicted.x += vx * dt;
+    predicted.y += vy * dt;
+    if (!collision_checker_->isCollisionFree(predicted, i == 0)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 double BackUpFreeSpace::queryCurrentClearance(const geometry_msgs::msg::Pose2D & pose)
@@ -285,6 +353,7 @@ double BackUpFreeSpace::queryCurrentClearance(const geometry_msgs::msg::Pose2D &
   // 只等 100 ms：正常情况 1~2 ms 就回。**不能**像 onRun 那样等 1 s ——
   // 那会把 10 Hz 的行为周期直接拖死，而"这一周期没有可信数据"本来就该被跳过。
   if (result.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+    costmap_client_->remove_pending_request(result);
     return nan;
   }
   const auto costmap = result.get()->map;
@@ -422,7 +491,7 @@ bool BackUpFreeSpace::buildGridSnapshot(
   const int size_x = static_cast<int>(costmap.metadata.size_x);
   const int size_y = static_cast<int>(costmap.metadata.size_y);
   const double resolution = costmap.metadata.resolution;
-  if (size_x <= 0 || size_y <= 0 || !(resolution > 0.0)) {
+  if (size_x <= 0 || size_y <= 0 || !std::isfinite(resolution) || !(resolution > 0.0)) {
     return false;
   }
   const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
@@ -460,7 +529,7 @@ bool BackUpFreeSpace::buildGridSnapshotAround(
   const double resolution = costmap.metadata.resolution;
   const double origin_x = costmap.metadata.origin.position.x;
   const double origin_y = costmap.metadata.origin.position.y;
-  if (size_x <= 0 || size_y <= 0 || !(resolution > 0.0)) {
+  if (size_x <= 0 || size_y <= 0 || !std::isfinite(resolution) || !(resolution > 0.0)) {
     return false;
   }
   const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
@@ -576,78 +645,55 @@ void BackUpFreeSpace::visualizeEscape(
   marker_pub_->publish(markers);
 }
 
-float BackUpFreeSpace::findBestDirection(
+bool BackUpFreeSpace::findBestDirection(
   const nav2_msgs::msg::Costmap & costmap, geometry_msgs::msg::Pose2D pose, float start_angle,
-  float end_angle, float radius, float angle_increment)
+  float end_angle, float radius, float angle_increment, float * best_angle)
 {
-  float best_angle = start_angle;
-
-  float first_safe_angle = -1.0f;
-  float last_unsafe_angle = -1.0f;
-
-  float final_safe_angle = 0.0f;
-  float final_unsafe_angle = 0.0f;
-
-  float resolution = costmap.metadata.resolution;
-  float origin_x = costmap.metadata.origin.position.x;
-  float origin_y = costmap.metadata.origin.position.y;
-  int size_x = costmap.metadata.size_x;
-  int size_y = costmap.metadata.size_y;
-
-  float map_min_x = origin_x;
-  float map_max_x = origin_x + (size_x * resolution);
-  float map_min_y = origin_y;
-  float map_max_y = origin_y + (size_y * resolution);
-
-  for (float angle = start_angle; angle <= end_angle; angle += angle_increment) {
-    bool is_safe = true;
-
-    for (float r = 0; r <= radius; r += resolution) {
-      float x = pose.x + r * std::cos(angle);
-      float y = pose.y + r * std::sin(angle);
-
-      if (x >= map_min_x && x <= map_max_x && y >= map_min_y && y <= map_max_y) {
-        int i = static_cast<int>((x - origin_x) / resolution);
-        int j = static_cast<int>((y - origin_y) / resolution);
-
-        if (i >= 0 && i < size_x && j >= 0 && j < size_y) {
-          if (costmap.data[i + j * size_x] >= 253) {
-            is_safe = false;
-            break;
-          }
-        } else {
-          is_safe = false;
-          break;
-        }
-      } else {
-        is_safe = false;
+  srm27_minco_core::GridSnapshot snapshot;
+  if (
+    best_angle == nullptr || !buildGridSnapshot(costmap, &snapshot) || !std::isfinite(pose.x) ||
+    !std::isfinite(pose.y) || !std::isfinite(radius) || radius <= 0.0 ||
+    !std::isfinite(start_angle) || !std::isfinite(end_angle) || end_angle <= start_angle ||
+    !std::isfinite(angle_increment) || angle_increment <= 0.0) {
+    return false;
+  }
+  const int samples =
+    std::max(1, static_cast<int>(std::ceil((end_angle - start_angle) / angle_increment)));
+  const double step = (end_angle - start_angle) / samples;
+  std::vector<bool> safe(samples, true);
+  const int radial_steps =
+    std::max(1, static_cast<int>(std::ceil(radius / (0.5 * snapshot.resolution()))));
+  for (int i = 0; i < samples; ++i) {
+    const double angle = start_angle + step * i;
+    for (int j = 0; j <= radial_steps; ++j) {
+      const double r = radius * j / radial_steps;
+      int mx, my;
+      snapshot.worldToCell(pose.x + r * std::cos(angle), pose.y + r * std::sin(angle), mx, my);
+      if (
+        !snapshot.containsCell(mx, my) ||
+        costmap.data[my * snapshot.sizeX() + mx] >= nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE) {
+        safe[i] = false;
         break;
       }
     }
-    if (is_safe && first_safe_angle == -1.0f) {
-      first_safe_angle = angle;
-    }
-
-    if (!is_safe && first_safe_angle != -1.0f && last_unsafe_angle == -1.0f) {
-      last_unsafe_angle = angle;
-    }
-
-    if (
-      last_unsafe_angle - first_safe_angle > final_unsafe_angle - final_safe_angle &&
-      first_safe_angle != -1.0f && last_unsafe_angle != -1.0f) {
-      final_safe_angle = first_safe_angle;
-      final_unsafe_angle = last_unsafe_angle;
-      first_safe_angle = -1.0f;
-      last_unsafe_angle = -1.0f;
+  }
+  const bool circular = end_angle - start_angle >= 2.0 * M_PI - 1e-5;
+  int run = 0, longest = 0, end = 0;
+  for (int i = 0; i < (circular ? 2 * samples : samples); ++i) {
+    run = safe[i % samples] ? std::min(samples, run + 1) : 0;
+    if (run > longest) {
+      longest = run;
+      end = i;
     }
   }
-  best_angle = (final_safe_angle + final_unsafe_angle) / 2.0f;
-
+  if (longest == 0) {
+    return false;
+  }
+  *best_angle = start_angle + step * (end - 0.5 * (longest - 1));
   if (visualize_) {
-    visualize(pose, radius, final_safe_angle, final_unsafe_angle);
+    visualize(pose, radius, *best_angle - 0.5 * step * longest, *best_angle + 0.5 * step * longest);
   }
-
-  return best_angle;
+  return true;
 }
 
 std::vector<geometry_msgs::msg::Point> BackUpFreeSpace::gatherFreePoints(

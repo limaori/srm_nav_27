@@ -24,7 +24,8 @@
 实车入口（nav_srm_real_launch.py）会传 `spin_topic:=rotation_cmd`。
 
 2026-10-19：独立自转链（rotation_controller / rotation_test_sender /
-rotation_velocity）已删除，自转请求改由**决策层**直接发 `rotation_cmd`。
+rotation_velocity）已删除，自转请求改由决策层直接发 `rotation_cmd`。
+到点后 behavior/hold_spin 续租驻点转速；人工停车与决策许可门控覆盖所有输入。
 
 `nav_topic` / `output_topic` 由导航入口按链路给出：
   * 仿真入口（nav_srm_simulation_launch.py）：cmd_vel_nav_body（fake_vel_transform 的输出），
@@ -70,6 +71,7 @@ def generate_launch_description():
                 "nav_topic": nav_topic,
                 "spin_topic": spin_topic,
                 "output_topic": output_topic,
+                "decision_required": LaunchConfiguration("decision_required"),
             },
             convert_types=True,
         ),
@@ -120,7 +122,7 @@ def generate_launch_description():
                     "（srm27_nav_protocol 订阅它），否则串口节点收不到任何速度。"
                 ),
             ),
+            DeclareLaunchArgument("decision_required", default_value="true"),
             cmd_mux,
         ]
     )
-

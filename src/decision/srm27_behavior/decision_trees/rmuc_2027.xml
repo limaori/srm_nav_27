@@ -1,0 +1,829 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="rmuc_2027">
+  <!-- RMUC 2027（7v7）：回补、回防、反制、阵地攻守与降级巡逻。
+       阅读约定：本文件包含当前赛制的全部策略、比赛门控和自转仲裁，无需加载其他 XML。
+       从上往下读：比赛门控 -> 优先级选择 -> 当前战术的条件、自转、导航。
+       ReactiveSequence 每 tick 从头检查，前置条件失败即停止后续动作；
+       ReactiveFallback 每 tick 从高到低选择第一个 SUCCESS/RUNNING 分支，可抢占低优先级。
+       普通 Sequence/Fallback 依次执行/择一；Inverter 用于反转条件。
+       最外层 ForceSuccess + KeepRunningUntilFailure 使等待/战术失败后继续下一 tick，
+       不会因赛前不满足门控而结束整棵树；取消树/异常的最终停机由服务端处理。
+
+       黑板：{@key} / 脚本 @key 是服务端提供的全局事实或共享状态；
+       {supply_matched_zone} 等无 @ 名称是本树内部输出，各战术独立命名以保留原子树隔离。
+       HP/弹量阈值、转速和超时见 params/sentry_behavior.yaml；点/路线见 params/waypoints.yaml。
+       UC/UL 语义地图由对应的 semantic_map_file 参数提供，区域和航点均须按场地实测标定。
+
+       自转仲裁（见本文件各战术 Spin 子树）：优先坡道，再隧道，命中时采用地图 zone_max_spin；
+       普通战术按 nav_arrived 切换到点快转/赶路慢转；回补按 rfid_supply 或 nav_arrived
+       切换补给驻留/赶路转速；掉血反制采用 evasion_speed。语义区始终优先于这些速度。
+       语义查询 FAILURE 会继续下一个自转候选，并非全局停车；语义区约束需保证地图正确。
+
+       导航均经 NavigationTransitionGate：先取消旧目标，再发新目标；拒绝/中止后退避重试，
+       单次运行受 navigation_timeout 限制。单点成功后保持 RUNNING 驻留，漂离后重新导航；
+       hold_success=false 的连续路线允许整组成功后再循环。RFID 确认在补给区时停止导航。
+       dry_run 跳过自转/姿态发布，导航门返回 RUNNING；可计算策略但不发实际导航目标。
+       motion_allowed 是本轮决策条件放行，最终运动许可还需服务端确认导航就绪/合法驻留，
+       所有速度经 srm_cmd_mux 的独立许可与人工停车门控，决策不会解除人工停车。 -->
+  <!-- UC 阵地字段：control=0/1/2 分别表示己方完全控制/临时控制/未控制；
+       基地/堡垒/前哨 activation=0/1/2/3 表示未激活/己方/对方/双方激活，
+       非己方控制该阵地时发 4；中央高地 0/1/2 表示未激活/己方/对方激活，
+       非己方控制该阵地时发 3。不要将这些“无可用激活信息”值当成敌方激活。
+       字段中的 own/enemy 已由服务端按红蓝身份换算，XML 不自行猜测归属。
+       姿态为本地请求：MOVE/ATTACK/DEFENSE，冷却 5s，累计阈值 175s 后按 fallback_posture 降级；
+       current_posture 不等于裁判确认，当前下行没有姿态执行确认闭环。 -->
+  <!-- 单文件子树：主树仅展示模块入口，Groot 中 Ctrl+单击 SubTree 在独立页签查看。
+       所有入口 _autoremap=true；{@key} / @key 仍访问全局黑板，局部输出沿父黑板映射。
+       保留 Reactive 控制节点，条件每 tick 重检并可抢占低优先级战术。 -->
+  <BehaviorTree ID="rmuc_2027">
+    <KeepRunningUntilFailure>
+      <ForceSuccess>
+        <ReactiveSequence>
+          <SubTree ID="Sub_RmucGameLifecycleGate" _autoremap="true"/>
+          <ReactiveFallback name="RmucPriorityRoot">
+            <SubTree ID="Sub_RmucSupplyAndResupply" _autoremap="true"/>
+            <SubTree ID="Sub_RmucEmergencyDefense" _autoremap="true"/>
+
+            <!-- 可选动态接敌（默认禁用，启用前须完成视觉/路线验收）：
+            <SubTree ID="Sub_RmucDynamicAttackEngagement" _autoremap="true"/> -->
+            <SubTree ID="Sub_RmucTerritoryControl" _autoremap="true"/>
+            <SubTree ID="Sub_RmucFallbackPatrol" _autoremap="true"/>
+          </ReactiveFallback>
+        </ReactiveSequence>
+      </ForceSuccess>
+    </KeepRunningUntilFailure>
+  </BehaviorTree>
+  <!-- 比赛与运动门控：每 tick 先撤销本轮许可、将状态置为 wait，再逐项放行。
+       输入必须新鲜，原始身份/HP 有效、底盘上电、HP > 0、点位已标定；
+       实动模式还要确认 mux 的独立决策门控已就绪，dry_run 只允许策略计算。
+       要求 game_type=1（UC）、game_progress=4（比赛中）、剩余 1~420s；通过后置 motion_allowed=true。
+       任一条件失败时，外层 ReactiveSequence 停止当前战术，由服务端撤销运动许可。 -->
+  <BehaviorTree ID="Sub_RmucGameLifecycleGate">
+    <Sequence name="GameLifecycleGate">
+      <Script code="@motion_allowed := false; @decision_mode := 'wait'; @decision_reason := 'inputs_or_match_gate'"/>
+      <ScriptCondition code="@inputs_ready
+                             &amp;&amp; @status_valid
+                             &amp;&amp; @chassis_enabled
+                             &amp;&amp; @hp &gt; 0
+                             &amp;&amp; @waypoints_calibrated
+                             &amp;&amp; (@dry_run || @guard_ready)"/>
+      <IsGameStatus expected_game_type="1"
+        expected_game_progress="4"
+        min_remain_time="1"
+        max_remain_time="420"/>
+      <Script code="@motion_allowed := true"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- P0 回补：复活需求 > HP 滞回 > 免费弹量滞回；优先于下方全部战术。
+       普通回补只在 remain_time >= 30s 时启用；needs_supply 复活需求不受此限制。
+       赶路/驻留总预算 supply_timeout（默认 25s），失败后冷却 supply_retry（默认 15s）；
+       冷却期仍需复活回补或 HP 未到退出阈值时，前往 rmuc_base_defense 暂避。 -->
+  <BehaviorTree ID="Sub_RmucSupplyAndResupply">
+    <ReactiveFallback name="RmucSupplyAndResupply">
+      <RecoveryWindow timeout_sec="{@supply_timeout}"
+        retry_sec="{@supply_retry}"
+        cooling="{@supply_cooling}">
+        <!-- 回补条件：HP <= uc_hp_trigger（默认 140）进入，HP >= uc_hp_exit（默认 360）
+             且补给区 RFID 有效或已经满血才退出。needs_supply 由服务端根据复活、RFID 与满血状态维护。
+             低弹分支要求免费补弹开关开启、弹量新鲜、开赛满 60s（remain_time <= 360）；
+             基地无危机时才检查弹量滞回：<= uc_ammo_trigger（默认 30）进入，
+             >= uc_ammo_exit（默认 150）且 RFID 在补给区才退出，不发送购买请求。
+             基地危机仅压过普通低弹回补；复活或低血回补仍优先。 -->
+        <ReactiveSequence name="RmucSupplyAttempt">
+          <ScriptCondition code="@game_valid &amp;&amp; ((@remain_time &gt;= 30) || @needs_supply)"/>
+          <ReactiveFallback>
+            <ScriptCondition code="@needs_supply == true"/>
+            <HysteresisCheck metric="hp"
+              match_epoch="{@match_epoch}"
+              trigger_value="{@uc_hp_trigger}"
+              exit_value="{@uc_hp_exit}"
+              trigger_when_below="true"
+              exit_allowed="{@supply_exit_allowed}"
+              ignore_zero_hp="true"
+              key_port="{@referee_robotStatus}"/>
+            <Sequence>
+              <ScriptCondition code="@uc_resupply_enabled &amp;&amp; @ammo_valid &amp;&amp; @remain_time &lt;= 360"/>
+              <Inverter>
+                <!-- 基地危机判定（与低弹回补的避让条件相同）：
+                     新鲜基地 HP 满足 1 <= HP < uc_base_defense_hp（默认 2000），或新鲜阵地反馈
+                     显示己方基地失去完全控制、基地/堡垒激活状态为 2 或 3。 -->
+                <ScriptCondition code="(@ally_hp_valid
+                                         &amp;&amp; @ally_base_hp &gt;= 1
+                                         &amp;&amp; @ally_base_hp &lt; @uc_base_defense_hp)
+                                       || (@arena_valid
+                                         &amp;&amp; (@own_base_control != 0
+                                           || @own_base_activation == 2
+                                           || @own_base_activation == 3
+                                           || @own_fortress_activation == 2
+                                           || @own_fortress_activation == 3))"/>
+              </Inverter>
+              <HysteresisCheck metric="ammo"
+                trigger_value="{@uc_ammo_trigger}"
+                exit_value="{@uc_ammo_exit}"
+                trigger_when_below="true"
+                exit_allowed="{@rfid_supply}"
+                ignore_zero_hp="true"
+                key_port="{@referee_robotStatus}"/>
+            </Sequence>
+          </ReactiveFallback>
+          <SetSentryPosture _successIf="@dry_run"
+            posture="DEFENSE"
+            fallback_posture="MOVE"
+            cooldown_sec="5.0"
+            degrade_limit_sec="175.0"
+            topic_name="sentry/desired_posture"/>
+          <Script code="@decision_mode := 'recover'; @decision_reason := 'hp_revive_or_free_ammo'"/>
+          <SubTree ID="Sub_RmucSupplyAndResupplySpin" _autoremap="true"/>
+          <ReactiveFallback>
+            <IsRfidDetected friendly_supply_zone_exchange="true"
+              friendly_supply_zone_non_exchange="true"
+              key_port="{@referee_rfidStatus}"/>
+            <NavigationTransitionGate>
+              <SendNav2Goal waypoint_name="rmuc_supply" action_name="navigate_to_pose"/>
+            </NavigationTransitionGate>
+          </ReactiveFallback>
+        </ReactiveSequence>
+      </RecoveryWindow>
+      <ReactiveSequence>
+        <ScriptCondition code="@supply_cooling &amp;&amp; (@needs_supply || @hp &lt; @uc_hp_exit)"/>
+        <Script code="@decision_mode := 'shelter'; @decision_reason := 'supply_timeout'"/>
+        <SubTree ID="Sub_RmucSupplyAndResupplyShelterSpin" _autoremap="true"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_base_defense" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveFallback>
+  </BehaviorTree>
+
+  <!-- P1 基地回防：基地低血、基地阵地失守，或基地/堡垒存在敌方激活时，
+       以 DEFENSE 姿态请求前往 rmuc_base_defense；条件解除后重新评估后续优先级。 -->
+  <BehaviorTree ID="Sub_RmucBaseDefense">
+    <ReactiveSequence name="RmucBaseDefense">
+      <!-- 基地危机判定（与低弹回补的避让条件相同）：
+           新鲜基地 HP 满足 1 <= HP < uc_base_defense_hp（默认 2000），或新鲜阵地反馈
+           显示己方基地失去完全控制、基地/堡垒激活状态为 2 或 3。 -->
+      <ScriptCondition code="(@ally_hp_valid
+                               &amp;&amp; @ally_base_hp &gt;= 1
+                               &amp;&amp; @ally_base_hp &lt; @uc_base_defense_hp)
+                             || (@arena_valid
+                               &amp;&amp; (@own_base_control != 0
+                                 || @own_base_activation == 2
+                                 || @own_base_activation == 3
+                                 || @own_fortress_activation == 2
+                                 || @own_fortress_activation == 3))"/>
+      <Script code="@decision_mode := 'defend'; @decision_reason := 'base_hp_or_territory_threat'"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="DEFENSE"
+        fallback_posture="MOVE"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <SubTree ID="Sub_RmucBaseDefenseSpin" _autoremap="true"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="rmuc_base_defense" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P2 掉血反制：连续采样间 HP 下降至少 10，触发后按 spin.evasion_duration_ms 维持；
+       检测间隔过长时重新建立 HP 基线，避免将分支未执行期间的累计掉血当成突发受击。
+       请求 DEFENSE、以正向随机参考平滑变速并前往 rmuc_hp_evasion；语义区限转仍优先。 -->
+  <BehaviorTree ID="Sub_RmucHpDropDefense">
+    <ReactiveSequence name="RmucHpDropDefense">
+      <IsHpDropping hp_drop_threshold="10" hold_duration_ms="{@spin_evasion_duration_ms}" key_port="{@referee_robotStatus}"/>
+      <Script code="@decision_mode := 'evade'; @decision_reason := 'rapid_hp_loss'"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="DEFENSE"
+        fallback_posture="MOVE"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <SubTree ID="Sub_RmucHpDropDefenseSpin" _autoremap="true"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal waypoint_name="rmuc_hp_evasion" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P3 恢复己方前哨阵地：仅在 arena_valid 时读取阵地状态。
+       己方前哨未完全控制、己方高地激活状态为 2，或前哨激活状态为 2/3 时，
+       前往 rmuc_own_outpost_control；到点不能替代裁判的完全控制反馈。 -->
+  <BehaviorTree ID="Sub_RmucRestoreOutpost">
+    <ReactiveSequence name="RmucRestoreOutpost">
+      <ScriptCondition code="@arena_valid
+                             &amp;&amp; (@own_outpost_control != 0
+                               || @own_highland_activation == 2
+                               || @own_outpost_activation == 2
+                               || @own_outpost_activation == 3)"/>
+      <Script code="@decision_mode := 'restore_outpost'; @decision_reason := 'own_outpost_not_secure'"/>
+      <ReactiveSequence name="RmucControlHold">
+        <SetSentryPosture _successIf="@dry_run"
+          posture="DEFENSE"
+          fallback_posture="MOVE"
+          cooldown_sec="5.0"
+          degrade_limit_sec="175.0"
+          topic_name="sentry/desired_posture"/>
+        <SubTree ID="Sub_RmucRestoreOutpostSpin" _autoremap="true"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_own_outpost_control" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P4 可选残局基地施压：uc_enemy_base_enabled 默认 false。
+       需新鲜阵地/控制度反馈、控制度落后、剩余 <= uc_endgame_remain（默认 60s），
+       己方基地与双方前哨均完全控制，HP >= uc_attack_hp 且弹量 >= uc_ammo_exit，
+       才前往 rmuc_enemy_base_control。开启前必须标定并验收合法路线。 -->
+  <BehaviorTree ID="Sub_RmucEndgameBasePressure">
+    <ReactiveSequence name="RmucEndgameBasePressure">
+      <ScriptCondition code="@uc_enemy_base_enabled
+                             &amp;&amp; @arena_valid
+                             &amp;&amp; @score_valid
+                             &amp;&amp; @control_lead &lt; 0
+                             &amp;&amp; @remain_time &lt;= @uc_endgame_remain
+                             &amp;&amp; @own_base_control == 0
+                             &amp;&amp; @own_outpost_control == 0
+                             &amp;&amp; @enemy_outpost_control == 0
+                             &amp;&amp; @hp &gt;= @uc_attack_hp
+                             &amp;&amp; @ammo_valid
+                             &amp;&amp; @ammo &gt;= @uc_ammo_exit"/>
+      <Script code="@decision_mode := 'pressure_base'; @decision_reason := 'endgame_control_deficit'"/>
+      <ReactiveSequence name="RmucControlHold">
+        <SetSentryPosture _successIf="@dry_run"
+          posture="DEFENSE"
+          fallback_posture="MOVE"
+          cooldown_sec="5.0"
+          degrade_limit_sec="175.0"
+          topic_name="sentry/desired_posture"/>
+        <SubTree ID="Sub_RmucEndgameBasePressureSpin" _autoremap="true"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_enemy_base_control" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P5 争夺对方前哨：阵地反馈新鲜、己方基地和前哨完全控制，
+       对方前哨尚未完全控制，HP >= uc_attack_hp（默认 250）且新鲜弹量 > uc_ammo_trigger，
+       前往 rmuc_enemy_outpost_control；临时控制仍需继续争夺。 -->
+  <BehaviorTree ID="Sub_RmucCaptureOutpost">
+    <ReactiveSequence name="RmucCaptureOutpost">
+      <ScriptCondition code="@arena_valid
+                             &amp;&amp; @own_base_control == 0
+                             &amp;&amp; @own_outpost_control == 0
+                             &amp;&amp; @enemy_outpost_control != 0
+                             &amp;&amp; @ammo_valid
+                             &amp;&amp; @ammo &gt; @uc_ammo_trigger
+                             &amp;&amp; @hp &gt;= @uc_attack_hp"/>
+      <Script code="@decision_mode := 'capture_outpost'; @decision_reason := 'seek_two_outposts_score'"/>
+      <ReactiveSequence name="RmucControlHold">
+        <SetSentryPosture _successIf="@dry_run"
+          posture="DEFENSE"
+          fallback_posture="MOVE"
+          cooldown_sec="5.0"
+          degrade_limit_sec="175.0"
+          topic_name="sentry/desired_posture"/>
+        <SubTree ID="Sub_RmucCaptureOutpostSpin" _autoremap="true"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_enemy_outpost_control" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P6 维持双前哨收益：新鲜反馈确认双方前哨均完全控制时，
+       继续驻守 rmuc_enemy_outpost_control。只消费裁判反馈，不用到点/RFID/计时推算控制权。 -->
+  <BehaviorTree ID="Sub_RmucHoldOutposts">
+    <ReactiveSequence name="RmucHoldOutposts">
+      <ScriptCondition code="@arena_valid &amp;&amp; @own_outpost_control == 0 &amp;&amp; @enemy_outpost_control == 0"/>
+      <Script code="@decision_mode := 'hold_outposts'; @decision_reason := 'two_outposts_score_one_per_second'"/>
+      <ReactiveSequence name="RmucControlHold">
+        <SetSentryPosture _successIf="@dry_run"
+          posture="DEFENSE"
+          fallback_posture="MOVE"
+          cooldown_sec="5.0"
+          degrade_limit_sec="175.0"
+          topic_name="sentry/desired_posture"/>
+        <SubTree ID="Sub_RmucHoldOutpostsSpin" _autoremap="true"/>
+        <NavigationTransitionGate>
+          <SendNav2Goal waypoint_name="rmuc_enemy_outpost_control" action_name="navigate_to_pose"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P7 下位机推进预案：上方阵地战术均未接管时，检查新鲜 switch_position=0，
+       剩余 >= 180s、己方前哨 HP 新鲜且 > 0，并且弹量未知或 > uc_ammo_trigger。
+       满足后按 rmuc_outpost_push 路线推进；确认前哨被毁后此分支不能再推进。 -->
+  <BehaviorTree ID="Sub_RmucOutpostPush">
+    <ReactiveSequence name="RmucOutpostPush">
+      <ScriptCondition code="@game_valid == true
+                             &amp;&amp; @remain_time &gt;= 180
+                             &amp;&amp; @switch_valid == true
+                             &amp;&amp; @switch_position == 0
+                             &amp;&amp; ((@ammo_valid == false)
+                               || (@ammo &gt; @uc_ammo_trigger))
+                             &amp;&amp; @ally_hp_valid
+                             &amp;&amp; @ally_outpost_hp &gt; 0"/>
+      <Script code="@decision_mode := 'push'; @decision_reason := 'operator_outpost_request'"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="MOVE"
+        fallback_posture="ATTACK"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <!-- 连续路线：NavigationTransitionGate 的 hold_success=false，整组成功后可开始下一轮；
+           巡逻目标由 NavigateThroughPoses 一次提交，保持取消旧任务后再发新任务的导航契约。 -->
+      <ReactiveSequence name="PatrolWaypoints">
+        <SubTree ID="Sub_RmucOutpostPushSpin" _autoremap="true"/>
+        <NavigationTransitionGate hold_success="false">
+          <NavigateThroughPoses action_name="navigate_through_poses"
+            waypoint_group="rmuc_outpost_push"
+            frame_id="map"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P8 前期巡逻预案：剩余 >= uc_early_remain（默认 240s），
+       弹量未知或 > uc_ammo_trigger，且前哨未知或 HP >= 1 时，循环 rmuc_early_patrol。
+       此处容许弹量/前哨未知以便降级运行；不表示阵地已控制。 -->
+  <BehaviorTree ID="Sub_RmucEarlyPatrol">
+    <ReactiveSequence name="RmucEarlyPatrol">
+      <ScriptCondition code="@game_valid == true
+                             &amp;&amp; @remain_time &gt;= @uc_early_remain
+                             &amp;&amp; ((@ammo_valid == false)
+                               || (@ammo &gt; @uc_ammo_trigger))
+                             &amp;&amp; ((@ally_hp_valid == false)
+                               || (@ally_outpost_hp &gt;= 1))"/>
+      <Script code="@decision_mode := 'patrol'; @decision_reason := 'arena_unknown_early_patrol'"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="MOVE"
+        fallback_posture="DEFENSE"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <!-- 连续路线：NavigationTransitionGate 的 hold_success=false，整组成功后可开始下一轮；
+           巡逻目标由 NavigateThroughPoses 一次提交，保持取消旧任务后再发新任务的导航契约。 -->
+      <ReactiveSequence name="PatrolWaypoints">
+        <SubTree ID="Sub_RmucEarlyPatrolSpin" _autoremap="true"/>
+        <NavigationTransitionGate hold_success="false">
+          <NavigateThroughPoses action_name="navigate_through_poses"
+            waypoint_group="rmuc_early_patrol"
+            frame_id="map"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <!-- P9 最终兜底：上方分支均不适用时请求 DEFENSE，循环 rmuc_fortress_hold。
+       残局、确认失前哨或低弹均可能走到此处；分支本身不额外限定比赛时段。 -->
+  <BehaviorTree ID="Sub_RmucLateFortressHold">
+    <ReactiveSequence name="RmucLateFortressHold">
+      <Script code="@decision_mode := 'fortress'; @decision_reason := 'low_ammo_or_late_fallback'"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="DEFENSE"
+        fallback_posture="MOVE"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <!-- 连续路线：NavigationTransitionGate 的 hold_success=false，整组成功后可开始下一轮；
+           巡逻目标由 NavigateThroughPoses 一次提交，保持取消旧任务后再发新任务的导航契约。 -->
+      <ReactiveSequence name="PatrolWaypoints">
+        <SubTree ID="Sub_RmucLateFortressHoldSpin" _autoremap="true"/>
+        <NavigationTransitionGate hold_success="false">
+          <NavigateThroughPoses action_name="navigate_through_poses"
+            waypoint_group="rmuc_fortress_hold"
+            frame_id="map"/>
+        </NavigationTransitionGate>
+      </ReactiveSequence>
+    </ReactiveSequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucEmergencyDefense">
+    <ReactiveFallback name="RmucEmergencyDefense">
+      <SubTree ID="Sub_RmucBaseDefense" _autoremap="true"/>
+      <SubTree ID="Sub_RmucHpDropDefense" _autoremap="true"/>
+    </ReactiveFallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucTerritoryControl">
+    <ReactiveFallback name="RmucTerritoryControl">
+      <SubTree ID="Sub_RmucRestoreOutpost" _autoremap="true"/>
+      <SubTree ID="Sub_RmucEndgameBasePressure" _autoremap="true"/>
+      <SubTree ID="Sub_RmucCaptureOutpost" _autoremap="true"/>
+      <SubTree ID="Sub_RmucHoldOutposts" _autoremap="true"/>
+    </ReactiveFallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucFallbackPatrol">
+    <ReactiveFallback name="RmucFallbackPatrol">
+      <SubTree ID="Sub_RmucOutpostPush" _autoremap="true"/>
+      <SubTree ID="Sub_RmucEarlyPatrol" _autoremap="true"/>
+      <SubTree ID="Sub_RmucLateFortressHold" _autoremap="true"/>
+    </ReactiveFallback>
+  </BehaviorTree>
+
+  <!-- 可选动态接敌：仅在主树取消对应 SubTree 调用的注释后启用。 -->
+  <BehaviorTree ID="Sub_RmucDynamicAttackEngagement">
+    <ReactiveSequence name="RmucDynamicAttackEngagement">
+      <CalculateAttackPose topic_name="attack_pose_markers"
+        attack_radius="3.0"
+        num_sectors="36"
+        cost_threshold="50"
+        robot_base_frame="base_link"
+        max_target_age_sec="1.5"
+        visualize="true"
+        goal="{engage_attack_pose}"/>
+      <SetSentryPosture _successIf="@dry_run"
+        posture="ATTACK"
+        fallback_posture="MOVE"
+        cooldown_sec="5.0"
+        degrade_limit_sec="175.0"
+        topic_name="sentry/desired_posture"/>
+      <SubTree ID="Sub_RmucDynamicAttackEngagementSpin" _autoremap="true"/>
+      <NavigationTransitionGate>
+        <SendNav2Goal goal="{engage_attack_pose}" action_name="navigate_to_pose"/>
+      </NavigationTransitionGate>
+    </ReactiveSequence>
+  </BehaviorTree>
+  <BehaviorTree ID="Sub_RmucSupplyAndResupplySpin">
+    <Fallback name="SupplySpin">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{supply_matched_zone}"
+            zone_max_spin="{supply_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{supply_matched_zone}"
+            zone_max_spin="{supply_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{supply_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedSupplySpin">
+        <ScriptCondition code="@rfid_supply || @nav_arrived"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_supply_speed}"
+          spin_mode="SUPPLY_HOLD"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="SUPPLY_MOVE"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucSupplyAndResupplyShelterSpin">
+    <Fallback name="SupplySpin">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{shelter_matched_zone}"
+            zone_max_spin="{shelter_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{shelter_matched_zone}"
+            zone_max_spin="{shelter_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{shelter_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedSupplySpin">
+        <ScriptCondition code="@rfid_supply || @nav_arrived"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_supply_speed}"
+          spin_mode="SUPPLY_HOLD"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="SUPPLY_MOVE"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucBaseDefenseSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{base_matched_zone}"
+            zone_max_spin="{base_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{base_matched_zone}"
+            zone_max_spin="{base_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{base_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucHpDropDefenseSpin">
+    <Fallback name="EvasionSpin">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{evasion_matched_zone}"
+            zone_max_spin="{evasion_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{evasion_matched_zone}"
+            zone_max_spin="{evasion_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{evasion_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_evasion_speed}"
+        randomize="true"
+        spin_mode="HP_DROP_EVASION"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucRestoreOutpostSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{restore_matched_zone}"
+            zone_max_spin="{restore_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{restore_matched_zone}"
+            zone_max_spin="{restore_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{restore_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucEndgameBasePressureSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{pressure_matched_zone}"
+            zone_max_spin="{pressure_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{pressure_matched_zone}"
+            zone_max_spin="{pressure_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{pressure_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucCaptureOutpostSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{capture_matched_zone}"
+            zone_max_spin="{capture_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{capture_matched_zone}"
+            zone_max_spin="{capture_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{capture_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucHoldOutpostsSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{hold_matched_zone}"
+            zone_max_spin="{hold_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{hold_matched_zone}"
+            zone_max_spin="{hold_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{hold_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucOutpostPushSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{push_matched_zone}"
+            zone_max_spin="{push_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{push_matched_zone}"
+            zone_max_spin="{push_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{push_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucEarlyPatrolSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{patrol_matched_zone}"
+            zone_max_spin="{patrol_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{patrol_matched_zone}"
+            zone_max_spin="{patrol_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{patrol_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucLateFortressHoldSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{fortress_matched_zone}"
+            zone_max_spin="{fortress_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{fortress_matched_zone}"
+            zone_max_spin="{fortress_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{fortress_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+
+  <BehaviorTree ID="Sub_RmucDynamicAttackEngagementSpin">
+    <Fallback name="SpinArbitration">
+      <Sequence name="SemanticSpinGuard">
+        <Fallback>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="slope"
+            matched_zone="{engage_matched_zone}"
+            zone_max_spin="{engage_zone_max_spin}"/>
+          <IsInSemanticZone map_file="{@uc_semantic_map_file}"
+            zone_type="tunnel"
+            matched_zone="{engage_matched_zone}"
+            zone_max_spin="{engage_zone_max_spin}"/>
+        </Fallback>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{engage_zone_max_spin}"
+          spin_mode="SEMANTIC_ZONE"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <Sequence name="ArrivedFastSpin">
+        <ScriptCondition code="@nav_arrived == true"/>
+        <PublishRotationCmd _successIf="@dry_run"
+          spin_speed="{@spin_arrived_speed}"
+          spin_mode="ARRIVED_FAST"
+          topic_name="rotation_cmd"/>
+      </Sequence>
+      <PublishRotationCmd _successIf="@dry_run"
+        spin_speed="{@spin_moving_speed}"
+        spin_mode="MOVING_SLOW"
+        topic_name="rotation_cmd"/>
+    </Fallback>
+  </BehaviorTree>
+</root>

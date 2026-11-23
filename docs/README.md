@@ -24,6 +24,8 @@
 
 ## operations
 
+- [导航恢复与仿真验证](recovery.md)：两层恢复的职责、安全约束、参数入口与一键验证。
+
 - [MID360 使用指南](operations/mid360使用指南.md) —— 网络配置与驱动启动。
 - [Z-Localization Backend 功能验收](operations/Z-Localization后端功能验收.md) —— 假设输入链路正常，直接验地图定位、跟踪、错误地图拒绝、reset 与导航接管。
 - [Z-Localization 后端继续验收方案](operations/Z-Localization后端继续验收方案.md) —— 在输出位姿稳定的基线上，继续验 reset/状态机、输出尖峰/时间同步、回环 A/B、导航联动与长跑开销。
@@ -63,6 +65,7 @@
 - [仿真 LIO 前端替换 Z-LIO 实施记录](records/仿真LIO前端替换Z-LIO实施记录%28ai%29.md)
 - [调试日志——by maori](records/调试日志——by%20maori.md)
 - [旧版完整 README（2026-11-14 归档）](records/README_full_20261114.md) —— 重构前的完整项目说明，仅供追溯。
+- [TDT 场地算法验证](../maps/227_1116_remap/simulation/field_validation/README.md) —— 227_1116_remap 的分层判据、往返循环入口、A/B 配置生成与 2026-11-16 净空未通过记录。
 
 ## archive
 

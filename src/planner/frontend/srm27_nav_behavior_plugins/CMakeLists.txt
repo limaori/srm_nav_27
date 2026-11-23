@@ -22,6 +22,11 @@ target_compile_definitions(srm27_remove_passed_goals_bt_node PRIVATE BT_PLUGIN_E
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_back_up_free_space test/test_back_up_free_space.cpp)
+  target_link_libraries(test_back_up_free_space srm27_backup_free_space_behavior)
+  set_tests_properties(test_back_up_free_space PROPERTIES ENVIRONMENT
+    "ROS_HOME=${CMAKE_BINARY_DIR}/ros_home;ROS_LOG_DIR=${CMAKE_BINARY_DIR}/ros_home/log")
+
   ament_add_gtest(test_omni_stopped_goal_checker test/test_omni_stopped_goal_checker.cpp)
   target_link_libraries(test_omni_stopped_goal_checker srm27_goal_checkers)
   set_tests_properties(test_omni_stopped_goal_checker PROPERTIES ENVIRONMENT

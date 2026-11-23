@@ -24,6 +24,7 @@
 
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/twist.hpp"
+#include "nav2_core/behavior.hpp"
 #include "nav2_core/goal_checker.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -66,14 +67,15 @@ geometry_msgs::msg::Twist makeTwist(double _vx, double _vy, double _wz)
 
 /// \brief 用一组给定参数构造检查器；参数通过节点 override 提供。
 std::shared_ptr<srm27_nav_plugins::OmniStoppedGoalChecker> makeChecker(
-  double _xy_tolerance, double _yaw_tolerance, double _trans_stopped)
+  double _xy_tolerance, double _yaw_tolerance, double _trans_stopped, bool _stateful = false)
 {
   const std::string name = "test_goal_checker";
   rclcpp::NodeOptions options;
   options.parameter_overrides(
     {{name + ".xy_goal_tolerance", _xy_tolerance},
      {name + ".yaw_goal_tolerance", _yaw_tolerance},
-     {name + ".trans_stopped_velocity", _trans_stopped}});
+     {name + ".trans_stopped_velocity", _trans_stopped},
+     {name + ".stateful", _stateful}});
   auto node =
     std::make_shared<rclcpp_lifecycle::LifecycleNode>("goal_checker_test_node", "", options);
 
@@ -83,6 +85,23 @@ std::shared_ptr<srm27_nav_plugins::OmniStoppedGoalChecker> makeChecker(
 }
 
 }  // namespace
+
+TEST(OmniStoppedGoalCheckerTest, StatefulCaptureCompletesAfterBrakeDrift)
+{
+  auto checker = makeChecker(0.50, 6.28, 0.10, true);
+  const auto goal = makePose(1.0, 0.0);
+  EXPECT_FALSE(checker->isGoalReached(makePose(0.501, 0.0), goal, makeTwist(.2, 0., 2.5)));
+  EXPECT_TRUE(checker->isGoalReached(makePose(0.495, 0.0), goal, makeTwist(0., 0., 2.5)));
+  checker->reset();
+  EXPECT_FALSE(checker->isGoalReached(makePose(0.495, 0.0), goal, makeTwist(0., 0., 2.5)));
+}
+
+TEST(OmniStoppedGoalCheckerTest, StatefulCaptureDoesNotFollowAChangedGoal)
+{
+  auto checker = makeChecker(0.50, 6.28, 0.10, true);
+  EXPECT_TRUE(checker->isGoalReached(makePose(.9, 0.), makePose(1., 0.), makeTwist(0., 0., 2.5)));
+  EXPECT_FALSE(checker->isGoalReached(makePose(.9, 0.), makePose(3., 0.), makeTwist(0., 0., 2.5)));
+}
 
 /// \brief 角速度任意大都不影响到达判定 —— 本插件的存在理由。
 TEST(OmniStoppedGoalCheckerTest, AngularVelocityIsIrrelevant)
@@ -189,7 +208,7 @@ TEST(OmniStoppedGoalCheckerTest, RejectsInvalidParameters)
 namespace
 {
 
-constexpr char kPluginClass[] = "srm27_nav_plugins::OmniStoppedGoalChecker";
+constexpr char kPluginClass[] = "srm27_nav_plugins/OmniStoppedGoalChecker";
 
 }  // namespace
 
@@ -204,12 +223,24 @@ TEST(OmniStoppedGoalCheckerPluginTest, DeclaredAsNav2GoalCheckerPlugin)
 TEST(OmniStoppedGoalCheckerPluginTest, CanBeInstantiatedThroughPluginlib)
 {
   pluginlib::ClassLoader<nav2_core::GoalChecker> loader("nav2_core", "nav2_core::GoalChecker");
+  // 归属包取自声明该类的 plugin XML 所在包：本包（srm27_nav_behavior_plugins）
+  // 声明了 srm27_nav_plugins/... 这个历史别名，类实现也在本包。
+  EXPECT_EQ(loader.getClassPackage(kPluginClass), "srm27_nav_behavior_plugins");
   nav2_core::GoalChecker::Ptr instance;
   ASSERT_NO_THROW(instance = loader.createSharedInstance(kPluginClass));
   ASSERT_NE(instance, nullptr);
   // 默认参数（0.25/0.25/0.25）下：正好在容差边界上应判到达，wz 无所谓。
   EXPECT_TRUE(
     instance->isGoalReached(makePose(0.80, 0.0), makePose(1.0, 0.0), makeTwist(0.0, 0.0, 5.0)));
+}
+
+TEST(NavBehaviorPluginTest, RecoveryLoadsFromThisPackage)
+{
+  pluginlib::ClassLoader<nav2_core::Behavior> loader("nav2_core", "nav2_core::Behavior");
+  const std::string name = "srm27_nav_plugins/BackUpFreeSpace";
+  // 同上：别名由本包的 behavior_plugin.xml 提供，归属包即本包。
+  ASSERT_EQ(loader.getClassPackage(name), "srm27_nav_behavior_plugins");
+  EXPECT_NE(loader.createSharedInstance(name), nullptr);
 }
 
 int main(int argc, char ** argv)

@@ -55,12 +55,13 @@ enum class RecoveryExit {
   kEscaped,
   /// \brief 超过 `window_sec` 仍未恢复净空，判为脱困超时。
   kTimeout,
+  /// 无可信的安全方向，停车并交回重规划。
+  kNoDirection,
 };
 
 /// \brief 脱困决策的可调参数。
 ///
-/// 默认值与 `navi_minco_bit/src/navigation/minco_planner` 的
-/// `MincoPlanner.recovery_server.*` 默认值一致，便于逐项对照迁移前的行为。
+/// 默认值供纯算法调用；ROS 控制器的实际值由各自 YAML 提供。
 struct RecoveryConfig
 {
   /// \brief 连续规划失败多少次才允许进入脱困。
@@ -91,6 +92,8 @@ struct RecoveryConfig
   int search_samples{36};
   /// \brief 梯度范数低于该值时判为"梯度平台"，改用环形搜索。
   double gradient_epsilon{1e-3};
+  /// 机器人包络与安全裕量之和；由调用方的安全配置提供，不另设 ROS 参数。
+  double minimum_clearance{0.0};
 
   /// \brief 重复进入抑制半径（m）：距上一次脱困会话**结束点**小于该值时启用抑制。
   ///
@@ -115,7 +118,8 @@ struct RecoveryConfig
 ///
 /// 三类职责：
 ///  1. **脱困判定**：连续失败计数 + 阈值 + 冷却 + 卡死分诊（`decide()`）。
-///  2. **脱困方向规划**：ESDF 梯度上升；梯度退化时退化为环形搜索取最开阔方向。
+///  2. **脱困方向规划**：有路线偏好时先检查其前推净空；否则沿 ESDF 梯度上升，
+///     梯度退化时用环形搜索取最开阔方向。
 ///  3. **脱困成功判定**：脱困期间净空恢复到 `escaped_clearance` 以上即成功，
 ///     超过 `window_sec` 未恢复即超时（`updateRecovery()`）。
 ///
@@ -133,10 +137,17 @@ public:
   /// \brief 清空全部运行期状态（新目标、取消、失活、定位重置）。
   void reset();
 
+  /// Prefer the forward path direction only when the complete sampled escape
+  /// corridor has valid, nondecreasing clearance and ends with more clearance.
+  /// Zero/nonfinite disables the preference; the existing gradient/search
+  /// remains fallback.
+  void setPreferredDirection(const Eigen::Vector2d & _direction);
+  const Eigen::Vector2d & preferredDirection() const { return preferred_direction_; }
+
   // === 1) 脱困判定 ===
 
   /// \brief 汇报一次规划失败。
-  /// \return 计数已累计并跨过门限时返回 true（此后 `inRecovery()` 为真）。
+  /// \return 计数已累计并跨过门限时返回 true；由 decide() 开启会话。
   bool onPlanningFailure(double _now_sec);
 
   /// \brief 汇报一次规划成功；清零失败计数。
@@ -179,7 +190,8 @@ public:
   /// \return 路径是否至少走出了第一步（即"是否有可执行的脱困路径"）。
   static bool traceEscapePath(
     const Esdf2D & _esdf, const Eigen::Vector2d & _start, const RecoveryConfig & _config,
-    double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path);
+    double _step, int _max_steps, std::vector<Eigen::Vector2d> * _path,
+    const Eigen::Vector2d & _preferred_direction = Eigen::Vector2d::Zero());
 
   // === 3) 脱困成功判定 ===
 
@@ -203,8 +215,8 @@ public:
   ///
   /// \param _now_sec 当前 ROS 时间（s）。
   /// \param _position 机器人当前位置（规划坐标系，m）。
-  /// \param _esdf 距离场；无效时无法给方向，本周期不输出速度（但窗口继续走）。
-  /// \param _clearance 当前自身净空（m）；非有限时视为"未成功"，只按时间推进。
+  /// \param _esdf 距离场；无效时无法给方向，清零速度并以 kNoDirection 结束会话。
+  /// \param _clearance 当前自身净空（m）；非有限时不得判成功，仍检查方向与期限。
   /// \param _escape_velocity 输出：仍在脱困时填入本周期应执行的逃逸速度。
   /// \param _log_transitions 是否打印方向分支日志（进入脱困那一周期打一次即可）。
   /// \return `kNone` 表示"继续脱困"，否则表示已退出且退出原因即为返回值。
@@ -248,10 +260,16 @@ public:
   /// \param _direction 输出：单位方向向量。
   /// \param _best_clearance 输出：方向选取依据（梯度分支填起点净空，环形分支填环形最大值）。
   /// \param _log_transitions 是否打印"梯度退化、转环形搜索"日志。
-  /// \return 无可用方向时返回 false。
+  /// \return 无可安全到达的方向时返回 false。
   static bool planEscapeDirection(
     const Esdf2D & _esdf, const Eigen::Vector2d & _position, const RecoveryConfig & _config,
-    Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions = true);
+    Eigen::Vector2d * _direction, double * _best_clearance, bool _log_transitions = true,
+    const Eigen::Vector2d & _preferred_direction = Eigen::Vector2d::Zero());
+
+  /// 检查完整线段；起点净空不足时只允许逐步增大净空，禁止穿过障碍找出口。
+  static bool isEscapeSegmentSafe(
+    const Esdf2D & _esdf, const Eigen::Vector2d & _start, const Eigen::Vector2d & _end,
+    double _minimum_clearance);
 
 private:
   /// \brief 时间是否可用（有限且非负）。
@@ -281,6 +299,7 @@ private:
 
   // 脱困会话缓存
   Eigen::Vector2d escape_velocity_{Eigen::Vector2d::Zero()};
+  Eigen::Vector2d preferred_direction_{Eigen::Vector2d::Zero()};
   Eigen::Vector2d last_escape_direction_{Eigen::Vector2d::Zero()};
   double entry_clearance_{-1.0};
 

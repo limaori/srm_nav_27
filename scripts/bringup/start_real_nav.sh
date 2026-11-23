@@ -74,7 +74,9 @@
 # 用法:
 #   ./scripts/bringup/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
 #   ./scripts/bringup/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
+#   ./scripts/bringup/start_real_nav.sh --tdt-planner          # YAstar + MINCO/MPC
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
+#   ./scripts/bringup/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
 #   ./scripts/bringup/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
 #   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
@@ -105,6 +107,7 @@
 #   -p, --params <绝对路径>     Nav2 参数文件（实车默认 = 迁移链那份, 见 -c）
 #   -c, --controller <auto|minco>   控制器（实车另有 omni 可选, 见下）
 #       --minco                 等价于 --controller minco
+#       --tdt-planner           全局规划器换成 YAstar（局部仍为 MINCO/MPC）
 #       --gicp / --no-gicp      先验点云重定位（= --reloc）/ 关掉它（= --no-reloc, LIO+静态图）
 #       --lio / --no-lio        LIO 出里程计 + 静态 map->odom / 关掉 LIO（实车=--static）
 #       --lio-frontend <point_lio|zlio>   里程计前端（**默认 zlio**；point_lio = 回退）
@@ -342,6 +345,7 @@ PRIOR_PCD_MANIFEST="${PRIOR_PCD_MANIFEST:-}"
 WORLD_ARG="${WORLD:-}"
 # 自定义 RViz 配置（与 start_sim_nav.sh 同名）。
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
+BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
 
 # 云台关节角回传话题：0x0010 第 4 个字段已改为 chassis_to_gimbal_yaw，
 # srm27_nav_protocol 会据此发出 gimbal_joint_angle（云台相对底盘、弧度）。
@@ -366,6 +370,7 @@ ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 # 局部控制器: auto (按参数文件内容判断) / omni / minco。
 CONTROLLER="${CONTROLLER:-minco}"
 CONTROLLER_CLI_GIVEN=0
+USE_TDT_PLANNER=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
@@ -457,6 +462,7 @@ CHASSIS_PATTERN='[s]rm27_nav_protocol'
 NAV_PATTERN='[n]av_(srm_real|2_stack)_launch\.py'
 RVIZ_PATTERN='[r]viz_launch\.py'
 JOY_PATTERN='[j]oy_teleop_launch\.py'
+BEHAVIOR_PATTERN='[s]rm27_behavior_launch\.py|[s]rm27_behavior_server'
 
 # ---------- 帮助 ----------
 usage() {
@@ -587,6 +593,8 @@ stop_real_nav() {
     "$NAV_PATTERN"
     "$RVIZ_PATTERN"
     "$JOY_PATTERN"
+    "$BEHAVIOR_PATTERN"
+    '[s]rm27_behavior'
     '[n]av2_container'
     '[p]oint_lio'
     '[l]oam_interface'
@@ -689,6 +697,7 @@ while [ $# -gt 0 ]; do
                       CONTROLLER_CLI_GIVEN=1; shift 2 ;;
     --minco)          CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --omni)           CONTROLLER="omni"; CONTROLLER_CLI_GIVEN=1; shift ;;
+    --tdt-planner)    USE_TDT_PLANNER=1; shift ;;
     --map-to-odom)
       MAP_TO_ODOM_X="${2:?--map-to-odom 需要 X Y YAW}"
       MAP_TO_ODOM_Y="${3:?--map-to-odom 需要 X Y YAW}"
@@ -769,6 +778,8 @@ while [ $# -gt 0 ]; do
                         GIMBAL_SPIN_WZ="$GIMBAL_SPIN_DEFAULT"; shift
                       fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_CLI_GIVEN=1; shift ;;
+    --behavior)       BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
+    --no-behavior)    BEHAVIOR_TREE=""; shift ;;
     --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"
                       GIMBAL_JOINT_TOPIC_GIVEN=1; shift 2 ;;
     --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; GIMBAL_JOINT_TOPIC_GIVEN=1; shift ;;
@@ -1209,6 +1220,10 @@ if [ "$CONTROLLER" = "minco" ] && [ "$USE_FAKE_VEL_TRANSFORM" = "1" ] \
    && grep -qE "gimbal_yaw_fake|base_link_fake" "$PARAMS_FILE" 2>/dev/null; then
   MINCO_FAKEYAW_CHAIN=1
 fi
+if [ "$USE_TDT_PLANNER" = "1" ] && [ "$MINCO_FAKEYAW_CHAIN" != "1" ]; then
+  echo "[错误] --tdt-planner 需要 MINCO/MPC 云台系实车配置。" >&2
+  exit 2
+fi
 
 # 速度出口：迁移链的出口话题是 fake_vel_transform 的输入 cmd_vel_nav_fake；
 # Omni 旧链保持原样（fake -> cmd_vel_nav2_result，无 fake -> 直接 cmd_vel_chassis）。
@@ -1402,6 +1417,9 @@ if [ "$DRY_RUN" != "1" ]; then
                  srm27_nav_plugins srm27_costmap_plugins srm27_nav_behavior_plugins)
   if [ "$CONTROLLER" = "minco" ]; then
     WS_CHECK_PKGS+=(srm27_minco_controller srm27_minco_core)
+  fi
+  if [ "$USE_TDT_PLANNER" = "1" ]; then
+    WS_CHECK_PKGS+=(tdt_nav_kit)
   fi
   if [ "$USE_CHASSIS_MUX" = "1" ]; then
     # 迁移链的出口节点；缺了它 cmd_vel_chassis 没有任何发布者（车不动）。
@@ -1677,6 +1695,7 @@ CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"
 Z_MUX_ARG="$(bool_arg "$USE_CHASSIS_MUX")"
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_real_launch.py"
+  NAV_CMD="$NAV_CMD use_tdt_planner:=$(bool_arg "$USE_TDT_PLANNER")"
   [ -n "$NS_ARG" ] && NAV_CMD="$NAV_CMD $NS_ARG"
   NAV_CMD="$NAV_CMD slam:=$SLAM_ARG"
   NAV_CMD="$NAV_CMD use_pcd_localization:=$RELOC_ARG"
@@ -1700,7 +1719,9 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
     if [ -n "$ZLOC_CONFIG" ]; then
       NAV_CMD="$NAV_CMD zlocalization_backend_config:=$(q "$ZLOC_CONFIG")"
     fi
-    NAV_CMD="$NAV_CMD zlocalization_prior_map:=$(q "$ZLOC_MAP")"
+    if [ -n "$ZLOC_MAP" ]; then
+      NAV_CMD="$NAV_CMD zlocalization_prior_map:=$(q "$ZLOC_MAP")"
+    fi
     if [ -n "$ZLOC_TRAJECTORY_DIR" ]; then
       NAV_CMD="$NAV_CMD zlocalization_trajectory_directory:=$(q "$ZLOC_TRAJECTORY_DIR")"
     fi
@@ -1724,6 +1745,11 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD use_chassis_mux:=$Z_MUX_ARG"
   NAV_CMD="$NAV_CMD mux_nav_topic:=cmd_vel_nav_body"
   NAV_CMD="$NAV_CMD mux_output_topic:=cmd_vel_chassis"
+  if [ -n "$BEHAVIOR_TREE" ]; then
+    NAV_CMD="$NAV_CMD decision_required:=true"
+  else
+    NAV_CMD="$NAV_CMD decision_required:=false"
+  fi
   # 空值绝对不能传: ros2 launch 会报 malformed launch argument 'gimbal_joint_topic:='
   # 并直接退出 —— 表现是整个 nav2 栈一个节点都不起、launch.log 是 0 字节。
   # 没接云台角回传时干脆不传这个参数, 让 launch 用自己的默认值 ('')。
@@ -1782,6 +1808,14 @@ JOY_CMD="ros2 launch srm27_nav_bringup joy_teleop_launch.py"
 [ -n "$NS_ARG" ] && JOY_CMD="$JOY_CMD $NS_ARG"
 JOY_CMD="$JOY_CMD use_sim_time:=False"
 JOY_CMD="$JOY_CMD joy_vel:=cmd_vel_chassis joy_config_file:=$(q "$PARAMS_FILE")"
+
+# 7) 决策行为树（可选，加 --behavior <tree> 时拉起）
+BEHAVIOR_CMD=""
+if [ -n "$BEHAVIOR_TREE" ]; then
+  BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py"
+  [ -n "$NS_ARG" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD $NS_ARG"
+  BEHAVIOR_CMD="$BEHAVIOR_CMD use_sim_time:=False target_tree:=${BEHAVIOR_TREE} log_level:=$LOG_LEVEL"
+fi
 
 # ---------- 配置摘要 ----------
 if [ "$SLAM_ON" = "1" ]; then
@@ -1843,6 +1877,9 @@ if [ "$CONTROLLER" = "minco" ]; then
   echo "  局部控制器  : MINCO + MPC (srm27_minco_controller::MincoMpcController)"
 else
   echo "  局部控制器  : Omni (srm27_omni_pid_controller::OmniPidPursuitController)"
+fi
+if [ "$USE_TDT_PLANNER" = "1" ]; then
+  echo "  全局规划器  : TDT YAstar (GridBased)"
 fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then
@@ -1980,6 +2017,9 @@ if [ "$USE_RVIZ" = "1" ]; then
 fi
 if [ "$USE_JOY" = "1" ]; then
   add_step "SRM27 手柄遥控" "$JOY_PATTERN" "$JOY_CMD"
+fi
+if [ -n "$BEHAVIOR_CMD" ]; then
+  add_step "SRM27 决策行为树 (${BEHAVIOR_TREE})" "$BEHAVIOR_PATTERN" "$BEHAVIOR_CMD"
 fi
 
 TOTAL=${#STEP_TITLES[@]}

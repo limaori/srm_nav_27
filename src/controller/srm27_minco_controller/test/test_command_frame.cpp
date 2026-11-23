@@ -16,8 +16,52 @@
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include "srm27_minco_controller/command_frame.hpp"
+#include "srm27_minco_controller/minco_mpc_controller.hpp"
+#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_minco_core/grid_snapshot.hpp"
+
+namespace srm27_minco_controller
+{
+struct CommandContinuityTestPeer
+{
+  static void checkStoppedCommandHistory(bool _was_moving)
+  {
+    if (!rclcpp::ok()) {
+      rclcpp::init(0, nullptr);
+    }
+    auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("command_continuity_test");
+    MincoMpcController controller;
+    srm27_minco_core::MpcModel::Config config;
+    ASSERT_TRUE(controller.mpc_model_.configure(config));
+    controller.previous_applied_input_ = Eigen::Vector3d(2.0, -0.5, 0.0);
+    controller.has_previous_input_ = _was_moving;
+    controller.last_control_stamp_ = 99.0;
+    const auto stop = controller.stopCommand(node, "candidate rejected", 100.0);
+    EXPECT_DOUBLE_EQ(stop.twist.linear.x, 0.0);
+    EXPECT_DOUBLE_EQ(stop.twist.linear.y, 0.0);
+    // Stopping must preserve the actual zero as the next command's slew-rate
+    // baseline, even if no previous normal command was available.
+    ASSERT_TRUE(controller.has_previous_input_);
+    ASSERT_TRUE(controller.has_last_control_stamp_);
+    EXPECT_DOUBLE_EQ(controller.last_control_stamp_, 100.0);
+    EXPECT_EQ(controller.previous_applied_input_.size(), controller.mpc_model_.inputDim());
+    EXPECT_DOUBLE_EQ(controller.previous_applied_input_.norm(), 0.0);
+  }
+};
+}  // namespace srm27_minco_controller
+
+TEST(CommandContinuityTest, StopIsTheResumeAccelerationBaseline)
+{
+  srm27_minco_controller::CommandContinuityTestPeer::checkStoppedCommandHistory(true);
+}
+
+TEST(CommandContinuityTest, PlanningGraceZeroAlsoEstablishesCommandHistory)
+{
+  srm27_minco_controller::CommandContinuityTestPeer::checkStoppedCommandHistory(false);
+}
 
 /// \file
 /// \brief `command_frame` 输出坐标系选择的回归（方案 §3.2、§4.1.3）。
@@ -139,4 +183,154 @@ TEST(CommandFrameTest, DoubleRotationWouldBeDetectable)
   const Eigen::Vector2d wrong =
     srm27_minco_core::odomToBodyVelocity(psi, correct);  // 被重复转换一次
   EXPECT_GT((wrong - correct).norm(), 0.1) << "重复旋转必须能被这条断言发现";
+}
+
+TEST(ClearanceVelocityTest, FullSpeedTangentialMotionIsUnchanged)
+{
+  const Eigen::Vector2d velocity(2.6, 0.0);
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    velocity, Eigen::Vector2d(0, 1), 0.43, 0.38, 7.0, 0.1);
+  EXPECT_LT((limited - velocity).norm(), 1.0e-12);
+}
+
+TEST(ClearanceVelocityTest, InwardComponentFitsReactionAndBrakingDistance)
+{
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    Eigen::Vector2d(2.0, -1.0), Eigen::Vector2d(0, 2), 0.43, 0.38, 7.0, 0.1);
+  const double approach = -limited.y();
+  EXPECT_DOUBLE_EQ(limited.x(), 2.0);
+  EXPECT_GT(approach, 0.0);
+  EXPECT_LT(approach, 1.0);
+  EXPECT_LE(approach * 0.1 + approach * approach / 14.0, 0.05 + 1.0e-12);
+}
+
+TEST(ClearanceVelocityTest, OutwardMotionIsUnchanged)
+{
+  const Eigen::Vector2d velocity(2.2, 0.4);
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    velocity, Eigen::Vector2d(0, 1), 0.39, 0.38, 7.0, 0.1);
+  EXPECT_LT((limited - velocity).norm(), 1.0e-12);
+}
+
+TEST(ClearanceVelocityTest, ExistingClearanceViolationCannotMoveFurtherInward)
+{
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    Eigen::Vector2d(2.0, -0.5), Eigen::Vector2d(0, 1), 0.36, 0.38, 7.0, 0.1);
+  EXPECT_DOUBLE_EQ(limited.x(), 2.0);
+  EXPECT_NEAR(limited.y(), 0.0, 1.0e-12);
+}
+
+TEST(ClearanceVelocityTest, MissingNormalNearObstacleStops)
+{
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    Eigen::Vector2d(2.0, 0), Eigen::Vector2d::Zero(), 0.36, 0.38, 7.0, 0.1);
+  EXPECT_DOUBLE_EQ(limited.norm(), 0.0);
+}
+
+TEST(ClearanceVelocityTest, InvalidBrakingModelFailsClosed)
+{
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    Eigen::Vector2d(2.0, -1), Eigen::Vector2d(0, 1), 0.43, 0.38, 0.0, 0.1);
+  EXPECT_DOUBLE_EQ(limited.norm(), 0.0);
+}
+
+TEST(ClearanceVelocityTest, ConstraintIsInvariantToFrameRotation)
+{
+  const Eigen::Vector2d velocity(1.8, -0.9);
+  const Eigen::Vector2d normal(0.2, 0.8);
+  const auto limited = srm27_minco_controller::clearanceLimitedVelocity(
+    velocity, normal, 0.45, 0.38, 7.0, 0.1);
+  const auto rotated = srm27_minco_controller::clearanceLimitedVelocity(
+    Eigen::Vector2d(-velocity.y(), velocity.x()), Eigen::Vector2d(-normal.y(), normal.x()),
+    0.45, 0.38, 7.0, 0.1);
+  EXPECT_LT((rotated - Eigen::Vector2d(-limited.y(), limited.x())).norm(), 1.0e-12);
+}
+
+namespace
+{
+srm27_minco_core::Esdf2D corridor(bool _blocked_ahead)
+{
+  using srm27_minco_core::CellState;
+  constexpr int size = 90;
+  std::vector<CellState> cells(size * size, CellState::kFree);
+  for (int i = 0; i < size; ++i) {
+    cells[30 * size + i] = CellState::kOccupied;
+    cells[49 * size + i] = CellState::kOccupied;
+    if (_blocked_ahead) {
+      cells[i * size + 58] = CellState::kOccupied;
+    }
+  }
+  srm27_minco_core::GridSnapshot grid;
+  EXPECT_TRUE(grid.reset(-2.0, -2.0, 0.05, size, size, std::move(cells), 1, 0.0));
+  srm27_minco_core::Esdf2D esdf;
+  EXPECT_TRUE(esdf.build(grid));
+  return esdf;
+}
+}  // namespace
+
+TEST(BrakingPathTest, ClearNarrowCorridorRetainsFullSpeed)
+{
+  const auto limited = srm27_minco_controller::brakingPathLimitedVelocity(
+    corridor(false), Eigen::Vector2d::Zero(), Eigen::Vector2d(2.6, 0.0), 0.38, 7.0, 0.1);
+  EXPECT_NEAR(limited.x(), 2.6, 1.0e-9);
+  EXPECT_NEAR(limited.y(), 0.0, 1.0e-9);
+}
+
+TEST(BrakingPathTest, ObstacleBeyondTangentialNearestWallReducesSpeed)
+{
+  const auto esdf = corridor(true);
+  const Eigen::Vector2d command(2.6, 0.0);
+  const auto center = esdf.query(0.0, 0.0);
+  const auto point_only = srm27_minco_controller::clearanceLimitedVelocity(
+    command, center.gradient, center.distance, 0.38, 7.0, 0.1);
+  EXPECT_NEAR(point_only.x(), 2.6, 1.0e-9);
+  const auto limited = srm27_minco_controller::brakingPathLimitedVelocity(
+    esdf, Eigen::Vector2d::Zero(), command, 0.38, 7.0, 0.1);
+  EXPECT_GT(limited.x(), 0.0);
+  EXPECT_LT(limited.x(), 2.6);
+  const double stopped_at = limited.x() * 0.1 + limited.squaredNorm() / 14.0;
+  EXPECT_GE(esdf.query(stopped_at, 0.0).distance, 0.38 - 1.0e-6);
+}
+
+TEST(BrakingPathTest, EscapeCanIncreaseClearanceInsideMargin)
+{
+  const auto limited = srm27_minco_controller::brakingPathLimitedVelocity(
+    corridor(false), Eigen::Vector2d(0.0, 0.20), Eigen::Vector2d(0.0, -0.5), 0.38, 7.0, 0.1);
+  EXPECT_NEAR(limited.y(), -0.5, 1.0e-9);
+}
+
+TEST(BrakingPathTest, CurrentMomentumAllowsAnAlreadySafeSlowerCommand)
+{
+  const auto esdf = corridor(true);
+  const Eigen::Vector2d command(0.5, 0.0);
+  const auto limited = srm27_minco_controller::limitExecutionVelocity(
+    esdf, Eigen::Vector2d::Zero(), command, Eigen::Vector2d(2.6, 0.0), 0.38, 7.0, 0.1);
+  EXPECT_NEAR(limited.x(), 0.5, 1.0e-9);
+}
+
+TEST(RotatingFrameLimitsTest, StationaryGimbalPreservesStraightLineLimits)
+{
+  const auto planar = srm27_minco_controller::rotatingFrameLimits(2.6, 7.0, 0.0);
+  EXPECT_DOUBLE_EQ(planar.speed, 2.6);
+  EXPECT_DOUBLE_EQ(planar.accel, 7.0);
+}
+
+TEST(SpinInhibitTest, BrakesBeforeEnteringTightSection)
+{
+  using srm27_minco_controller::shouldInhibitSpin;
+  const auto blocked = corridor(true);
+  const auto open = corridor(false);
+  EXPECT_FALSE(shouldInhibitSpin(open, Eigen::Vector2d::Zero(), {2.0, 0.0}, 0.4, 0.40));
+  EXPECT_FALSE(shouldInhibitSpin(blocked, Eigen::Vector2d::Zero(), {0.0, 0.0}, 0.4, 0.40));
+  EXPECT_TRUE(shouldInhibitSpin(blocked, Eigen::Vector2d::Zero(), {2.0, 0.0}, 0.4, 0.40));
+}
+
+TEST(RotatingFrameLimitsTest, BothFullRateDirectionsLeaveBrakingRoom)
+{
+  for (double yaw_rate : {8.5, -8.5}) {
+    const auto planar = srm27_minco_controller::rotatingFrameLimits(2.6, 7.0, yaw_rate);
+    EXPECT_NEAR(planar.speed, 3.5 / 8.5, 1.0e-9);
+    EXPECT_DOUBLE_EQ(planar.accel, 3.5);
+    EXPECT_LE(std::abs(yaw_rate) * planar.speed + planar.accel, 7.0 + 1.0e-9);
+  }
 }

@@ -648,6 +648,9 @@ smoother_server:
 behavior_server:
   ros__parameters:
     use_sim_time: False
+    # Humble 的碰撞检查器使用单组话题，必须与 global_frame 同系。
+    costmap_topic: global_costmap/costmap_raw
+    footprint_topic: global_costmap/published_footprint
     local_costmap_topic: local_costmap/costmap_raw
     global_costmap_topic: global_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint

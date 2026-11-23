@@ -25,12 +25,12 @@ namespace srm27_behavior
 SentryBehaviorClient::SentryBehaviorClient(const rclcpp::NodeOptions & options)
 : Node("sentry_behavior_client", options)
 {
-  declare_parameter<std::string>("target_tree", "test_attacked_feedback");
+  declare_parameter<std::string>("target_tree", "rmul_2027");
   get_parameter("target_tree", target_tree_);
 
   action_client_ = rclcpp_action::create_client<BTExecuteTree>(this, "srm27_behavior");
 
-  if (!action_client_->wait_for_action_server()) {
+  if (!action_client_->wait_for_action_server(10s)) {
     RCLCPP_ERROR(get_logger(), "Action server not available!");
     return;
   }
@@ -71,7 +71,7 @@ void SentryBehaviorClient::resultCallback(
     case rclcpp_action::ResultCode::UNKNOWN:
       break;
   }
-  timer_->reset();
+  // A cancel or failure must remain stopped until an explicit restart.
 }
 
 void SentryBehaviorClient::feedbackCallback(

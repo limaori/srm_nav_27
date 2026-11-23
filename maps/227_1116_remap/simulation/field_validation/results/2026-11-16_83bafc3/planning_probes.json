@@ -1,0 +1,93 @@
+[
+  {
+    "name": "south_exit",
+    "requested_goal": [
+      -4.305,
+      -2.615
+    ],
+    "status": 6,
+    "path_points": 0,
+    "path_xy": [],
+    "resolved_goal": null
+  },
+  {
+    "name": "south_entry",
+    "requested_goal": [
+      -3.955,
+      -1.615
+    ],
+    "status": 6,
+    "path_points": 0,
+    "path_xy": [],
+    "resolved_goal": null
+  },
+  {
+    "name": "north_inner",
+    "requested_goal": [
+      -2.405,
+      2.435
+    ],
+    "status": 4,
+    "path_points": 2,
+    "path_xy": [
+      [
+        -1.9049999713897705,
+        1.2350000143051147
+      ],
+      [
+        -2.4049999713897705,
+        2.434999942779541
+      ]
+    ],
+    "resolved_goal": [
+      -2.4049999713897705,
+      2.434999942779541
+    ]
+  },
+  {
+    "name": "north_corridor",
+    "requested_goal": [
+      -2.955,
+      5.985
+    ],
+    "status": 6,
+    "path_points": 0,
+    "path_xy": [],
+    "resolved_goal": null
+  },
+  {
+    "name": "east",
+    "requested_goal": [
+      0.695,
+      0.685
+    ],
+    "status": 4,
+    "path_points": 5,
+    "path_xy": [
+      [
+        -1.9049999713897705,
+        1.2350000143051147
+      ],
+      [
+        -0.654999852180481,
+        1.2350000143051147
+      ],
+      [
+        -0.5049997568130493,
+        1.0850003957748413
+      ],
+      [
+        -0.10499963909387589,
+        0.9349998235702515
+      ],
+      [
+        0.6949999928474426,
+        0.6850000023841858
+      ]
+    ],
+    "resolved_goal": [
+      0.6949999928474426,
+      0.6850000023841858
+    ]
+  }
+]

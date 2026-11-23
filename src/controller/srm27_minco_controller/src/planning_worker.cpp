@@ -38,6 +38,51 @@ double steadyNow()
          1.0e-9;
 }
 
+srm27_minco_core::Trajectory2D repairTiming(
+  srm27_minco_core::MincoOptimizer & optimizer,
+  const srm27_minco_core::TrajectoryValidator & validator,
+  const srm27_minco_core::Limits2D & limits,
+  const srm27_minco_core::Trajectory2D & original, PlanningResult & result)
+{
+  auto trajectory = original;
+  result.time_scale = 1.0;
+  const auto violation = [&limits](double speed, double acceleration) {
+    return std::max(
+      speed / limits.max_linear_speed, std::sqrt(acceleration / limits.max_linear_accel));
+  };
+  double speed = 0.0;
+  double acceleration = 0.0;
+  if (!validator.computeExtrema(original, speed, acceleration)) {
+    return trajectory;
+  }
+
+  // Fixed derivatives can make the extrema increase as segments get longer.
+  constexpr int kMaxRepairAttempts = 8;
+  constexpr double kMaxTimeScale = 4.0;
+  double best_violation = violation(speed, acceleration);
+  double scale = 1.0;
+  for (int attempt = 0;
+    attempt < kMaxRepairAttempts && best_violation > 1.0 + 1.0e-6 && scale < kMaxTimeScale;
+    ++attempt)
+  {
+    scale = std::min(kMaxTimeScale, scale * std::max(violation(speed, acceleration), 1.05));
+    srm27_minco_core::Trajectory2D repaired;
+    if (!optimizer.rescaleDurations(original, scale, repaired) ||
+      !validator.computeExtrema(repaired, speed, acceleration))
+    {
+      break;
+    }
+    ++result.speed_repair_count;
+    const double repaired_violation = violation(speed, acceleration);
+    if (repaired_violation < best_violation) {
+      trajectory = std::move(repaired);
+      result.time_scale = scale;
+      best_violation = repaired_violation;
+    }
+  }
+  return trajectory;
+}
+
 }  // namespace
 
 PlanningWorker::~PlanningWorker() { stop(); }
@@ -76,6 +121,7 @@ void PlanningWorker::stop()
 void PlanningWorker::clear()
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  ++generation_;
   has_request_ = false;
   has_result_ = false;
   result_ = PlanningResult();
@@ -118,12 +164,14 @@ void PlanningWorker::run()
 {
   while (true) {
     PlanningRequest request;
+    std::uint64_t generation;
     {
       std::unique_lock<std::mutex> lock(mutex_);
       condition_.wait(lock, [this] { return shutdown_ || has_request_; });
       if (shutdown_) {
         break;
       }
+      generation = generation_;
       request = request_;
       has_request_ = false;
       busy_.store(true);
@@ -137,6 +185,11 @@ void PlanningWorker::run()
         // 生命周期已停止：不回写任何结果。
         busy_.store(false);
         break;
+      }
+      if (generation != generation_) {
+        discarded_stale_.fetch_add(1);
+        busy_.store(false);
+        continue;
       }
       result_ = result;
       has_result_ = true;
@@ -176,8 +229,17 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   path_config.max_speed = _request.limits.max_linear_speed;
   path_config.braking_deceleration = _request.validator_config.braking_deceleration;
   path_config.reaction_latency = _request.validator_config.reaction_latency;
+  // Global inflation and the local conservative ESDF can disagree by a cell.
+  // Seed away from that boundary before clipping; otherwise a smoothed corner
+  // is truncated at the hard threshold and repeatedly creates invalid curves.
+  const auto reference_path = improvePathClearance(
+    _request.path, *_request.esdf,
+    path_config.required_clearance + _request.minco_config.optimization_clearance_margin,
+    std::max(
+      _request.path_centering_max_displacement,
+      _request.minco_config.optimization_clearance_margin));
   const LocalPathResult clipped = extractLocalPath(
-    _request.path, _request.state.position(), *_request.esdf, path_config,
+    reference_path, _request.state.position(), *_request.esdf, path_config,
     _request.terminal_is_global_goal);
   const auto & local_path = clipped.points;
   const bool terminal_reached = clipped.end == LocalPathEnd::kGlobalGoal;
@@ -220,7 +282,6 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     result.total_time_ms = (steadyNow() - begin) * 1.0e3;
     return result;
   }
-  result.terminal_speed = guess.tail_velocity.norm();
   result.frontend_time_ms = (steadyNow() - frontend_begin) * 1.0e3;
 
   // 3) MINCO 优化（PRE / FINELY 两阶段）。
@@ -238,22 +299,8 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     optimizer.setWarmStart(_request.warm_inner_points, _request.warm_durations);
   }
 
-  MincoOptimizeResult optimize_result;
-  optimizer.optimize(guess, _request.limits, optimize_result);
-  result.pre_time_ms = optimize_result.pre_time_ms;
-  result.finely_time_ms = optimize_result.fine_time_ms;
-  result.iterations = optimize_result.iterations;
-  if (optimize_result.status != SolveStatus::kSuccess) {
-    result.status = std::string("optimize_") + srm27_minco_core::toString(optimize_result.status);
-    result.reason = optimize_result.message;
-    result.total_time_ms = (steadyNow() - begin) * 1.0e3;
-    return result;
-  }
-
-  // 4) 独立轨迹验证（优化成功 != 轨迹安全）。
+  // 4) 独立验证使用本次请求的有效约束。
   TrajectoryValidator validator;
-  // 校验器配置来自请求（由控制器与自身的 validator_ 用同一份配置填入），
-  // 只有速度/加速度上限需要跟随本次请求的有效约束。
   srm27_minco_core::TrajectoryValidatorConfig validator_config = _request.validator_config;
   validator_config.max_linear_speed = _request.limits.max_linear_speed;
   validator_config.max_linear_accel = _request.limits.max_linear_accel;
@@ -264,55 +311,50 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
     return result;
   }
 
-  Trajectory2D trajectory = optimize_result.trajectory;
-
-  // 硬保证：MINCO 的速度/加速度是**软约束**，最优点可能轻微越过硬上限；而验证器按硬上限
-  // 判定，越限即整条丢弃，现场表现为“反复 recovery、机器人完全不动”。这里做确定性的
-  // 时间拉伸修复（同一组路标点与首末边界条件、段时长整体放大 k），把越限压回硬上限以内；
-  // 修复后仍会重新计算极值并做完整碰撞与时效校验，不安全就照样丢弃。
-  double candidate_speed = 0.0;
-  double candidate_accel = 0.0;
-  if (validator.computeExtrema(trajectory, candidate_speed, candidate_accel)) {
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      const double speed_ratio = _request.limits.max_linear_speed > 0.0
-                                   ? candidate_speed / _request.limits.max_linear_speed
-                                   : 1.0;
-      const double accel_ratio = _request.limits.max_linear_accel > 0.0
-                                   ? std::sqrt(candidate_accel / _request.limits.max_linear_accel)
-                                   : 1.0;
-      const double scale = std::max(1.0, std::max(speed_ratio, accel_ratio));
-      if (scale <= 1.0 + 1.0e-6) {
-        break;
-      }
-      Trajectory2D repaired;
-      if (!optimizer.rescaleDurations(trajectory, scale, repaired)) {
-        break;
-      }
-      trajectory = std::move(repaired);
-      ++result.speed_repair_count;
-      result.time_scale *= scale;
-      if (!validator.computeExtrema(trajectory, candidate_speed, candidate_accel)) {
-        break;
-      }
-    }
-  }
-
-  trajectory.versions = _request.versions;
-  trajectory.generated_stamp = _request.request_stamp;
-  trajectory.valid_after = _request.request_stamp;
-  // 必须给出**真正的**有效期：`Trajectory2D::sanityCheck()` 会检查
-  // `valid_until >= valid_after`，只把 valid_until 留 0 会让候选轨迹在自检阶段
-  // 就被判死（表现为 validation_failed 且说不出具体原因）。
-  trajectory.valid_until = _request.request_stamp + _request.validity_window;
-  trajectory.terminal_is_global_goal = terminal_reached;
-  trajectory.terminal_requires_stop = result.terminal_speed <= 1.0e-6;
-  trajectory.terminal_reason = result.terminal_reason;
-
-  const double validation_begin = steadyNow();
+  Trajectory2D trajectory;
   TrajectoryValidationReport report;
-  const bool valid =
-    validator.validate(trajectory, *_request.esdf, _request.state, _request.request_stamp, report);
-  result.validation_time_ms = (steadyNow() - validation_begin) * 1.0e3;
+  bool valid = false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    result.terminal_speed = guess.tail_velocity.norm();
+    MincoOptimizeResult optimized;
+    optimizer.optimize(guess, _request.limits, optimized);
+    result.pre_time_ms += optimized.pre_time_ms;
+    result.finely_time_ms += optimized.fine_time_ms;
+    result.iterations += optimized.iterations;
+    if (optimized.status != SolveStatus::kSuccess) {
+      result.status = std::string("optimize_") + srm27_minco_core::toString(optimized.status);
+      result.reason = optimized.message;
+      result.total_time_ms = (steadyNow() - begin) * 1.0e3;
+      return result;
+    }
+
+    trajectory = repairTiming(optimizer, validator, _request.limits, optimized.trajectory, result);
+    trajectory.versions = _request.versions;
+    trajectory.generated_stamp = _request.request_stamp;
+    trajectory.valid_after = _request.request_stamp;
+    trajectory.valid_until = _request.request_stamp + _request.validity_window;
+    trajectory.terminal_is_global_goal = terminal_reached;
+    trajectory.terminal_requires_stop = result.terminal_speed <= 1.0e-6;
+    trajectory.terminal_reason = result.terminal_reason;
+
+    const double validation_begin = steadyNow();
+    valid = validator.validate(
+      trajectory, *_request.esdf, _request.state, _request.request_stamp, report);
+    result.validation_time_ms += (steadyNow() - validation_begin) * 1.0e3;
+    if (valid || trajectory.terminal_requires_stop) {
+      break;
+    }
+
+    // A moving endpoint is optional at the local horizon. Replan to stop
+    // there when the requested terminal velocity prevents a valid trajectory.
+    initializer_config.terminal_speed = 0.0;
+    if (!TrajectoryInitializer::initialize(
+        local_path, _request.state.velocity, initializer_config, guess, &reason))
+    {
+      break;
+    }
+    optimizer.clearWarmStart();
+  }
   result.validation = report;
   result.min_clearance = report.min_clearance;
   result.max_speed = report.max_speed;

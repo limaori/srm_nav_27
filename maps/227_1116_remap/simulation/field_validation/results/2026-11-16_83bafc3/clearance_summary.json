@@ -1,0 +1,182 @@
+{
+  "source_map_sha256": "2923d7b519a4df9be1cd266228f0b1016e6390cd09ea9bc1738b916b9aab443c",
+  "envelope_radius_m": 0.33,
+  "method": "Distance to occupied-cell axis-aligned square faces; subtract robot envelope radius; interpolate recorded XY segments at <=2mm spacing. This is a geometric replay check, not contact-sensor evidence.",
+  "legs": [
+    {
+      "name": "cycle_01_out",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4325,
+      "max_gt_speed_mps": 2.345026677479314,
+      "wall_s": 4.56,
+      "actual_distance_m": 1.9813555500721567,
+      "center_clearance_m": 0.42669479868632487,
+      "envelope_margin_m": 0.09669479868632486,
+      "minimum_xy": [
+        -0.5488853331504085,
+        1.0686843486869286
+      ],
+      "gt_samples": 152,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_01_home",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.421,
+      "max_gt_speed_mps": 2.4028975127946577,
+      "wall_s": 3.01,
+      "actual_distance_m": 1.4956213527672881,
+      "center_clearance_m": 0.4106173980613357,
+      "envelope_margin_m": 0.08061739806133567,
+      "minimum_xy": [
+        -0.3203045851601414,
+        1.02409681139734
+      ],
+      "gt_samples": 119,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_02_out",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.3042,
+      "max_gt_speed_mps": 2.51975615366197,
+      "wall_s": 5.21,
+      "actual_distance_m": 1.968911428635772,
+      "center_clearance_m": 0.3726969270321359,
+      "envelope_margin_m": 0.0426969270321359,
+      "minimum_xy": [
+        -0.3917685806176781,
+        1.1033127526577449
+      ],
+      "gt_samples": 142,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 1
+    },
+    {
+      "name": "cycle_02_home",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4234,
+      "max_gt_speed_mps": 2.0781123067389307,
+      "wall_s": 5.4,
+      "actual_distance_m": 1.8131618621496968,
+      "center_clearance_m": 0.4175299990828462,
+      "envelope_margin_m": 0.0875299990828462,
+      "minimum_xy": [
+        -0.5068141246455697,
+        1.0399183500593812
+      ],
+      "gt_samples": 146,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 2
+    },
+    {
+      "name": "cycle_03_out",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4229,
+      "max_gt_speed_mps": 2.106373647614884,
+      "wall_s": 4.81,
+      "actual_distance_m": 1.5611394506893363,
+      "center_clearance_m": 0.39363670227302355,
+      "envelope_margin_m": 0.06363670227302354,
+      "minimum_xy": [
+        -0.4204318325926806,
+        1.0983232648199348
+      ],
+      "gt_samples": 151,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_03_home",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4258,
+      "max_gt_speed_mps": 2.2680622944006275,
+      "wall_s": 3.11,
+      "actual_distance_m": 1.5490129017577734,
+      "center_clearance_m": 0.4272852640255181,
+      "envelope_margin_m": 0.09728526402551807,
+      "minimum_xy": [
+        -0.30096805618327577,
+        1.0001958684486032
+      ],
+      "gt_samples": 109,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_04_out",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.2784,
+      "max_gt_speed_mps": 2.289349694392863,
+      "wall_s": 7.03,
+      "actual_distance_m": 1.8079593662797164,
+      "center_clearance_m": 0.39587800092914843,
+      "envelope_margin_m": 0.06587800092914842,
+      "minimum_xy": [
+        -0.3973476373152927,
+        1.0791232915826243
+      ],
+      "gt_samples": 218,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 3
+    },
+    {
+      "name": "cycle_04_home",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4048,
+      "max_gt_speed_mps": 2.407291968487149,
+      "wall_s": 3.16,
+      "actual_distance_m": 1.6643899541310783,
+      "center_clearance_m": 0.4073095045923984,
+      "envelope_margin_m": 0.07730950459239838,
+      "minimum_xy": [
+        -0.5920727583523635,
+        1.0713646141752349
+      ],
+      "gt_samples": 118,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_05_out",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.4309,
+      "max_gt_speed_mps": 2.174917149633801,
+      "wall_s": 4.97,
+      "actual_distance_m": 1.552864096806358,
+      "center_clearance_m": 0.40918872843818804,
+      "envelope_margin_m": 0.07918872843818803,
+      "minimum_xy": [
+        -0.41762210986220966,
+        1.0768766769115508
+      ],
+      "gt_samples": 158,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    },
+    {
+      "name": "cycle_05_home",
+      "status": "SUCCEEDED",
+      "endpoint_error_m": 0.3768,
+      "max_gt_speed_mps": 2.334304326777927,
+      "wall_s": 5.69,
+      "actual_distance_m": 1.567658436705435,
+      "center_clearance_m": 0.42560003440556804,
+      "envelope_margin_m": 0.09560003440556802,
+      "minimum_xy": [
+        -0.3479836509893641,
+        0.9667965850142015
+      ],
+      "gt_samples": 165,
+      "nav2_recoveries": 0,
+      "internal_recovery_max_enter_count": 0
+    }
+  ],
+  "all_succeeded": true,
+  "minimum_envelope_margin_m": 0.0426969270321359,
+  "maximum_observed_speed_mps": 2.51975615366197,
+  "minimum_margin_goal_m": 0.05,
+  "margin_goal_met": false
+}

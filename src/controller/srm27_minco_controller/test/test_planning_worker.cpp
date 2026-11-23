@@ -125,3 +125,58 @@ TEST(PlanningWorkerTest, ShortGoalTrajectoryCanHoldAtRestForMpc)
   EXPECT_LT(result.trajectory.totalDuration(), 0.6);
   EXPECT_GE(result.validation.effective_prefix_duration, 0.6);
 }
+
+TEST(PlanningWorkerTest, LowSpeedHorizonWithFixedNonzeroBoundaryUsesFeasibleTiming)
+{
+  auto input = request(5.0);
+  input.path.insert(input.path.begin() + 1, Eigen::Vector2d(0.7, 0.5));
+  input.state.velocity = Eigen::Vector2d(0.03, 0.0);
+  input.limits.max_linear_speed = 0.4;
+  input.limits.max_linear_accel = 1.0;
+  input.validator_config.braking_deceleration = 1.0;
+  input.minco_config.w_jerk = 0.0;
+  input.minco_config.w_time = 25.0;
+  const auto result = runPlan(input);
+  ASSERT_TRUE(result.success) << result.status << ": " << result.reason;
+  EXPECT_EQ(result.terminal_reason, "planning_horizon");
+  EXPECT_NEAR(result.trajectory.startVelocity().x(), 0.03, 1.0e-6);
+  EXPECT_GT(result.trajectory.endVelocity().norm(), 0.0);
+  EXPECT_LE(result.max_speed, 0.408);
+  EXPECT_LE(result.max_acceleration, 1.02);
+}
+
+TEST(PlanningWorkerTest, VeryLowSpeedCanReachAStopWithinLimits)
+{
+  auto input = request(2.5);
+  input.path.insert(input.path.begin() + 1, Eigen::Vector2d(1.3, 0.45));
+  input.limits.max_linear_speed = 0.2;
+  input.limits.max_linear_accel = 1.0;
+  input.validator_config.braking_deceleration = 1.0;
+  input.minco_config.w_jerk = 0.0;
+  input.minco_config.w_time = 25.0;
+  const auto result = runPlan(input);
+  ASSERT_TRUE(result.success) << result.status << ": " << result.reason;
+  EXPECT_NEAR(result.trajectory.endVelocity().norm(), 0.0, 1.0e-6);
+  EXPECT_LE(result.max_speed, 0.204);
+}
+
+TEST(PlanningWorkerTest, ClearDiscardsTheResultOfAnAlreadyRunningTask)
+{
+  controller::PlanningWorker worker;
+  ASSERT_TRUE(worker.start());
+  ASSERT_TRUE(worker.submit(request(5.0)));
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!worker.busy() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(worker.busy());
+  worker.clear();
+  while (worker.busy() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_FALSE(worker.busy());
+  controller::PlanningResult result;
+  EXPECT_FALSE(worker.takeResult(result));
+  EXPECT_GE(worker.discardedStaleCount(), 1u);
+  worker.stop();
+}

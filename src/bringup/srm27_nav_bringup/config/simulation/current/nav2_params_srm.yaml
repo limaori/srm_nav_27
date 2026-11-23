@@ -576,6 +576,9 @@ smoother_server:
 behavior_server:
   ros__parameters:
     use_sim_time: True                                     # 是否使用仿真时钟
+    # Humble 的碰撞检查器使用单组话题，必须与 global_frame 同系。
+    costmap_topic: global_costmap/costmap_raw
+    footprint_topic: global_costmap/published_footprint
     local_costmap_topic: local_costmap/costmap_raw         # 局部原始代价地图话题
     global_costmap_topic: global_costmap/costmap_raw       # 全局原始代价地图话题
     local_footprint_topic: local_costmap/published_footprint # 局部机器人轮廓话题

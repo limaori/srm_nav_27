@@ -25,29 +25,46 @@ IsRfidDetectedCondition::IsRfidDetectedCondition(
 
 BT::NodeStatus IsRfidDetectedCondition::checkRfidStatus()
 {
-  bool friendly_fortress_gain_point, friendly_supply_zone_non_exchange,
-    friendly_supply_zone_exchange, center_gain_point;
+  bool friendly_fortress_gain_point = false;
+  bool friendly_supply_zone_non_exchange = false;
+  bool friendly_supply_zone_exchange = false;
+  bool center_gain_point = false;
+  bool friendly_base_gain_point = false;
+  bool friendly_outpost_gain = false;
+  bool friendly_central_highland_gain_point = false;
+  bool friendly_trapezoidal_gain_point = false;
+  bool friendly_energy_mechanism_gain = false;
+
   auto msg = getInput<rm_decision_interfaces::msg::RfidStatus>("key_port");
   if (!msg) {
-    return BT::NodeStatus::FAILURE;
     RCLCPP_ERROR(logger_, "RfidStatus message is not available");
+    return BT::NodeStatus::FAILURE;
   }
 
   getInput("friendly_fortress_gain_point", friendly_fortress_gain_point);
   getInput("friendly_supply_zone_non_exchange", friendly_supply_zone_non_exchange);
   getInput("friendly_supply_zone_exchange", friendly_supply_zone_exchange);
   getInput("center_gain_point", center_gain_point);
+  getInput("friendly_base_gain_point", friendly_base_gain_point);
+  getInput("friendly_outpost_gain", friendly_outpost_gain);
+  getInput("friendly_central_highland_gain_point", friendly_central_highland_gain_point);
+  getInput("friendly_trapezoidal_gain_point", friendly_trapezoidal_gain_point);
+  getInput("friendly_energy_mechanism_gain", friendly_energy_mechanism_gain);
 
-  if (
+  const bool detected =
     (friendly_fortress_gain_point && msg->friendly_fortress_gain == msg->DETECTED) ||
     (friendly_supply_zone_non_exchange &&
      msg->friendly_supply_zone_non_overlap == msg->DETECTED) ||
     (friendly_supply_zone_exchange && msg->friendly_supply_zone_overlap == msg->DETECTED) ||
-    (center_gain_point && msg->center_gain_point_rmul == msg->DETECTED)) {
-    return BT::NodeStatus::SUCCESS;
-  } else {
-    return BT::NodeStatus::FAILURE;
-  }
+    (center_gain_point && msg->center_gain_point_rmul == msg->DETECTED) ||
+    (friendly_base_gain_point && msg->friendly_base_gain_point == msg->DETECTED) ||
+    (friendly_outpost_gain && msg->friendly_outpost_gain == msg->DETECTED) ||
+    (friendly_central_highland_gain_point &&
+     msg->friendly_central_highland_gain_point == msg->DETECTED) ||
+    (friendly_trapezoidal_gain_point && msg->friendly_trapezoidal_gain_point == msg->DETECTED) ||
+    (friendly_energy_mechanism_gain && msg->friendly_energy_mechanism_gain == msg->DETECTED);
+
+  return detected ? BT::NodeStatus::SUCCESS : BT::NodeStatus::FAILURE;
 }
 
 BT::PortsList IsRfidDetectedCondition::providedPorts()
@@ -60,6 +77,11 @@ BT::PortsList IsRfidDetectedCondition::providedPorts()
       "friendly_supply_zone_non_exchange", false, "己方与兑换区不重叠的补给区 / RMUL 补给区"),
     BT::InputPort<bool>("friendly_supply_zone_exchange", false, "己方与兑换区重叠的补给区"),
     BT::InputPort<bool>("center_gain_point", false, "中心增益点（仅 RMUL 适用）"),
+    BT::InputPort<bool>("friendly_base_gain_point", false, "己方基地增益点"),
+    BT::InputPort<bool>("friendly_outpost_gain", false, "己方前哨站增益点"),
+    BT::InputPort<bool>("friendly_central_highland_gain_point", false, "己方中央高地增益点"),
+    BT::InputPort<bool>("friendly_trapezoidal_gain_point", false, "己方梯形高地增益点"),
+    BT::InputPort<bool>("friendly_energy_mechanism_gain", false, "己方能量机关/装配增益点"),
   };
 }
 }  // namespace srm27_behavior

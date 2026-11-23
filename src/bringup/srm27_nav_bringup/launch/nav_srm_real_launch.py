@@ -67,6 +67,8 @@
 import os
 import sys
 
+import yaml
+
 from ament_index_python.packages import (
     PackageNotFoundError,
     get_package_prefix,
@@ -277,6 +279,46 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
+class RealNavParams(RewrittenYaml):
+    def perform(self, context):
+        path = super().perform(context)
+        if not _as_bool(LaunchConfiguration("use_tdt_planner").perform(context)):
+            return path
+
+        with open(path, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        planner = config.get("planner_server", {}).get("ros__parameters", {})
+        if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
+            raise RuntimeError("use_tdt_planner requires planner_server with a single GridBased planner")
+        planner["GridBased"] = {
+            "plugin": "tdt_nav_kit::TdtGlobalPlanner",
+            "occupancy_threshold": 252,
+            "treat_unknown_as_obstacle": True,
+            "save_point_max_radius": 0.4,
+            # 0.0 会在目标格被动态障碍/地形点占用后让每次重规划都报 "goal unavailable"
+            # 并触发恢复行为（实车表现为车停住、反复 abort）。放宽到 0.4 让目标吸附到
+            # 最近的可通行格，与 planner 默认值一致。
+            "goal_snap_max_radius": 0.4,
+            "path_resample_step": 0.20,
+            # 2026-11-22 补全（此前注入丢键，与仿真 tdt 参数不一致）：
+            # 缺 cost_inflate_radius 时 planner 对 252 带边缘没有离障代价，实测路径
+            # 贴着 inscribed(253) 走 —— smoother 的 QP(252 约束)在贴边路径上无解、
+            # nav2 footprint 检查(0.15m 圆盘 vs 253)也必撞。补上后按 1.0m 半径
+            # 抬高障碍附近代价，把路径推离墙体，与仿真 nav2_params_srm_tdt.yaml 同源。
+            "cost_inflate_radius": 1.0,
+            "mask_num_layers": 1,
+            # 2026-11-22: 0.1 -> 0.03。ε=0.1 的折线简化会把沿走廊中轴蜿蜒的 S 路径
+            # 用弦代替（每顶点最多偏 0.1m），实车 219_1121 实测路径整体偏东 13.5cm、
+            # 车身边缘距东墙仅 ~0.24m，MINCO 以净空 0.204<0.245 拒轨。0.03 保住
+            # 中轴形状（0.05m 栅格下近似无损），代价是点数略增、平滑输入更密。
+            "simplify_epsilon": 0.03,
+            "orientation_mode": "tangent",
+        }
+        with open(path, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream)
+        return path
+
+
 def _default_backend_config(profile):
     """backend 是可选实验包：没装时返回空串，由 localization_launch 在真正启用时报错。"""
     try:
@@ -342,7 +384,7 @@ def generate_launch_description():
     # 控制），StoppedGoalChecker 的角速度判停永远不会通过，必须换成只看平移的
     # OmniStoppedGoalChecker（方案 §4.2）。
     effective_goal_checker = PythonExpression([
-        "'srm27_nav_plugins::OmniStoppedGoalChecker' if '", yaw_mode_arg,
+        "'srm27_nav_plugins/OmniStoppedGoalChecker' if '", yaw_mode_arg,
         "' in ('spin', 'xy_only', 'auto', 'se2') "
         "else 'nav2_controller::StoppedGoalChecker'",
     ])
@@ -350,7 +392,7 @@ def generate_launch_description():
     # Nav2 栈的参数文件：在通用文件之上注入航向策略与判停器（点分全路径，
     # 见 nav2_common RewrittenYaml 的 substitute_params "total path" 分支）。
     # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装。
-    nav_stack_params = RewrittenYaml(
+    nav_stack_params = RealNavParams(
         source_file=params_file,
         root_key=None,
         param_rewrites={
@@ -427,6 +469,7 @@ def generate_launch_description():
             "spin_topic": mux_spin_topic,
             # 实车出口必须是串口节点订阅的话题。
             "output_topic": mux_output_topic,
+            "decision_required": LaunchConfiguration("decision_required"),
         }.items(),
     )
 
@@ -469,6 +512,7 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
+    ld.add_action(DeclareLaunchArgument("decision_required", default_value="true"))
 
     ld.add_action(
         DeclareLaunchArgument(
@@ -556,6 +600,14 @@ def generate_launch_description():
                 bringup_dir, "config", "real", "nav2_params_srm_minco_fakeyaw.yaml"
             ),
             description="实车迁移链参数文件（MINCO + gimbal_yaw 云台系）",
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_tdt_planner",
+            default_value="False",
+            choices=["True", "False"],
+            description="Use YAstar as the GridBased global planner for real navigation",
         )
     )
     ld.add_action(

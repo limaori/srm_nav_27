@@ -76,6 +76,112 @@ const Eigen::Vector2d kOpenPosition(5.0, 5.0);
 // 1) 脱困判定
 // -----------------------------------------------------------------------------
 
+TEST(RecoveryDecider, PrefersRouteWhenClearanceIncreasesAlongEntireCorridor)
+{
+  const auto esdf = MakeEsdf(true, 100, 106, 100, 106);
+  minco::RecoveryConfig config;
+  Eigen::Vector2d direction;
+  double clearance = 0;
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(5.2, 5.0), config, &direction, &clearance, false, Eigen::Vector2d(1, 0)));
+  EXPECT_NEAR(direction.x(), 1, 1e-9);
+  EXPECT_NEAR(direction.y(), 0, 1e-9);
+  EXPECT_GT(clearance, esdf.distanceAt(5.2, 5.0) + .01);
+}
+
+TEST(RecoveryDecider, RejectsPreferredRouteTowardObstacleEvenWhenEndpointBeyondWallIsFree)
+{
+  const auto esdf = MakeEsdf(true, 104, 90, 104, 110);
+  minco::RecoveryConfig config;
+  Eigen::Vector2d direction;
+  double clearance = 0;
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(5.0, 5.0), config, &direction, &clearance, false, Eigen::Vector2d(1, 0)));
+  EXPECT_LT(direction.x(), -.9);
+}
+
+TEST(RecoveryDecider, PreferredRouteCannotLeaveMap)
+{
+  const auto esdf = MakeEsdf(true, 180, 0, 183, kSizeY - 1);
+  minco::RecoveryConfig config;
+  Eigen::Vector2d direction;
+  double clearance = 0;
+  const Eigen::Vector2d preferred(1, .5);
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(9.4, 5), config, &direction, &clearance, false, preferred));
+  EXPECT_LT(direction.dot(preferred.normalized()), .99);
+}
+
+TEST(RecoveryDecider, RejectsUnknownCellsInPreferredCorridor)
+{
+  std::vector<minco::CellState> cells(kSizeX * kSizeY, minco::CellState::kFree);
+  for (int y = 90; y <= 110; ++y) {
+    cells[y * kSizeX + 104] = minco::CellState::kUnknown;
+  }
+  minco::GridSnapshot snapshot;
+  ASSERT_TRUE(snapshot.reset(0, 0, kResolution, kSizeX, kSizeY, cells, 1, 0));
+  minco::Esdf2D esdf;
+  ASSERT_TRUE(esdf.build(snapshot));
+  Eigen::Vector2d direction;
+  double clearance;
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(5.0, 5.0), minco::RecoveryConfig{}, &direction, &clearance, false,
+    Eigen::Vector2d(1, 0)));
+  EXPECT_LT(direction.x(), -.9);
+}
+
+TEST(RecoveryDecider, TestsIntermediateClearanceRatherThanOnlyEscapeEndpoint)
+{
+  std::vector<minco::CellState> cells(kSizeX * kSizeY, minco::CellState::kFree);
+  for (int y = 0; y < kSizeY; ++y) {
+    cells[y * kSizeX + 99] = minco::CellState::kOccupied;
+  }
+  for (int y = 90; y <= 110; ++y) {
+    cells[y * kSizeX + 105] = minco::CellState::kOccupied;
+  }
+  minco::GridSnapshot snapshot;
+  ASSERT_TRUE(snapshot.reset(0, 0, kResolution, kSizeX, kSizeY, cells, 1, 0));
+  minco::Esdf2D esdf;
+  ASSERT_TRUE(esdf.build(snapshot));
+  const Eigen::Vector2d position(5.075, 5.0);
+  ASSERT_GT(
+    esdf.distanceAt(position.x() + .4, position.y()),
+    esdf.distanceAt(position.x(), position.y()) + .01);
+  Eigen::Vector2d direction;
+  double clearance;
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, position, minco::RecoveryConfig{}, &direction, &clearance, false, Eigen::Vector2d(1, 0)));
+  // The preferred corridor is rejected because its middle crosses the wall even
+  // though the endpoint beyond the wall is free. After the merge, the gradient
+  // direction is rejected as well (its segment crosses the same wall via
+  // isEscapeSegmentSafe), so the ring search must return a wall-avoiding
+  // direction whose reported clearance is the sampled one, not the endpoint.
+  EXPECT_FALSE(direction.isApprox(Eigen::Vector2d::UnitX(), 1e-6));
+  EXPECT_TRUE(minco::RecoveryDecider::isEscapeSegmentSafe(
+    esdf, position, position + .4 * direction, 0.0));
+  EXPECT_GT(clearance, esdf.distanceAt(position.x(), position.y()));
+}
+
+TEST(RecoveryDecider, PathPreferencePersistsDuringRecoveryAndResetsForNewGoal)
+{
+  const auto esdf = MakeEsdf(true, 0, 0, 3, kSizeY - 1);
+  auto decider = MakeDecider(1);
+  const Eigen::Vector2d preferred = Eigen::Vector2d(1, .5).normalized();
+  decider.setPreferredDirection(preferred);
+  decider.onPlanningFailure(1.0);
+  Eigen::Vector2d velocity;
+  ASSERT_EQ(
+    decider.decide(1.0, Eigen::Vector2d(.4, 5), esdf, &velocity), minco::RecoveryDecision::kEscape);
+  EXPECT_GT(velocity.normalized().dot(preferred), .999);
+  EXPECT_EQ(decider.lastTrigger(), "path_aligned");
+  EXPECT_EQ(
+    decider.updateRecovery(1.1, Eigen::Vector2d(.45, 5.025), esdf, .2, &velocity, false),
+    minco::RecoveryExit::kNone);
+  EXPECT_GT(velocity.normalized().dot(preferred), .999);
+  decider.reset();
+  EXPECT_TRUE(decider.preferredDirection().isZero());
+}
+
 TEST(RecoveryDecider, ConfigureClampsIllegalValues)
 {
   minco::RecoveryDecider decider;
@@ -229,9 +335,8 @@ TEST(RecoveryDecider, EscapeDirectionFollowsAnalyticGradient)
   minco::RecoveryConfig config;
   Eigen::Vector2d direction = Eigen::Vector2d::Zero();
   double clearance = 0.0;
-  ASSERT_TRUE(
-    minco::RecoveryDecider::planEscapeDirection(
-      esdf, Eigen::Vector2d(0.5, 5.0), config, &direction, &clearance));
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(2.8, 5.0), config, &direction, &clearance));
   EXPECT_GT(direction.x(), 0.9);
   EXPECT_NEAR(direction.norm(), 1.0, 1e-9);
 }
@@ -319,9 +424,8 @@ TEST(RecoveryDecider, GradientBranchIgnoresSingleSampleOfZeroGradientAtWall)
   minco::RecoveryConfig config;
   Eigen::Vector2d direction = Eigen::Vector2d::Zero();
   double clearance = 0.0;
-  ASSERT_TRUE(
-    minco::RecoveryDecider::planEscapeDirection(
-      esdf, Eigen::Vector2d(0.14, 5.0), config, &direction, &clearance));
+  ASSERT_TRUE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(2.54, 5.0), config, &direction, &clearance));
   EXPECT_GT(direction.x(), 0.5);
 }
 
@@ -411,9 +515,9 @@ TEST(RecoveryDecider, UpdateRecoveryRecomputesDirectionFromCurrentPosition)
   EXPECT_NEAR(out.norm(), decider.config().escape_speed, 1e-9);
 }
 
-TEST(RecoveryDecider, UpdateRecoveryWithoutEsdfKeepsPreviousDirection)
+TEST(RecoveryDecider, UpdateRecoveryWithoutEsdfStopsAndEndsSession)
 {
-  // 距离场暂时不可用时不得输出零速把车停在原地，也不得判成功；窗口照常计时。
+  // 失去可信地图后不能继续执行上一周期速度。
   const minco::Esdf2D esdf = MakeEsdf(true, 95, 0, 104, kSizeY - 1);
   minco::RecoveryDecider decider = MakeDecider(1);
   Eigen::Vector2d escape = Eigen::Vector2d::Zero();
@@ -426,9 +530,9 @@ TEST(RecoveryDecider, UpdateRecoveryWithoutEsdfKeepsPreviousDirection)
   Eigen::Vector2d out = Eigen::Vector2d::Zero();
   EXPECT_EQ(
     decider.updateRecovery(10.01, Eigen::Vector2d(5.6, 5.0), empty, 0.30, &out),
-    minco::RecoveryExit::kNone);
-  EXPECT_GT(out.norm(), 0.0) << "距离场不可用时不应该把逃逸速度清零";
-  EXPECT_TRUE(decider.isRecovering());
+    minco::RecoveryExit::kNoDirection);
+  EXPECT_DOUBLE_EQ(out.norm(), 0.0);
+  EXPECT_FALSE(decider.isRecovering());
 }
 
 // -----------------------------------------------------------------------------
@@ -663,3 +767,44 @@ TEST(RecoveryDecider, SuppressionKeepsFailureCountAndCooldownBehaviour)
 }
 
 }  // namespace
+
+TEST(RecoveryDecider, EnclosingWallCannotBeCrossedForAnOpenEndpoint)
+{
+  std::vector<minco::CellState> cells(kSizeX * kSizeY, minco::CellState::kFree);
+  for (int y = 94; y <= 105; ++y) {
+    for (int x = 94; x <= 105; ++x) {
+      if (x == 94 || x == 105 || y == 94 || y == 105) {
+        cells[y * kSizeX + x] = minco::CellState::kOccupied;
+      }
+    }
+  }
+  minco::GridSnapshot grid;
+  ASSERT_TRUE(grid.reset(0, 0, kResolution, kSizeX, kSizeY, cells, 1, 10));
+  minco::Esdf2D esdf;
+  ASSERT_TRUE(esdf.build(grid));
+  Eigen::Vector2d direction;
+  double clearance;
+  EXPECT_FALSE(minco::RecoveryDecider::planEscapeDirection(
+    esdf, Eigen::Vector2d(5, 5), minco::RecoveryConfig{}, &direction, &clearance, false));
+  EXPECT_DOUBLE_EQ(direction.norm(), 0.0);
+}
+
+TEST(RecoveryDecider, EscapeMayLeaveAnInsufficientClearanceButCannotApproachAnotherWall)
+{
+  const auto esdf = MakeEsdf(true, 95, 0, 104, kSizeY - 1);
+  EXPECT_TRUE(minco::RecoveryDecider::isEscapeSegmentSafe(esdf, {5.35, 5}, {5.75, 5}, 0.4));
+  EXPECT_FALSE(minco::RecoveryDecider::isEscapeSegmentSafe(esdf, {5.75, 5}, {5.35, 5}, 0.4));
+  EXPECT_FALSE(minco::RecoveryDecider::isEscapeSegmentSafe(esdf, {5.75, 5}, {4.25, 5}, 0.4));
+  EXPECT_FALSE(minco::RecoveryDecider::isEscapeSegmentSafe(esdf, {5.75, 5}, {11, 5}, 0.4));
+}
+
+TEST(RecoveryDecider, ExpiredSessionCannotBecomeSuccessfulFromALateClearanceSample)
+{
+  const auto esdf = MakeEsdf(true, 95, 0, 104, kSizeY - 1);
+  auto decider = MakeDecider(1);
+  Eigen::Vector2d velocity;
+  ASSERT_EQ(decider.decide(10, {5.35, 5}, esdf, &velocity), minco::RecoveryDecision::kEscape);
+  EXPECT_EQ(
+    decider.updateRecovery(20, {5.75, 5}, esdf, 1.0, &velocity), minco::RecoveryExit::kTimeout);
+  EXPECT_DOUBLE_EQ(velocity.norm(), 0.0);
+}

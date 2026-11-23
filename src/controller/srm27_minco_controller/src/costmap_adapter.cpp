@@ -14,7 +14,6 @@
 
 #include "srm27_minco_controller/costmap_adapter.hpp"
 
-#include <algorithm>
 #include <mutex>
 #include <nav2_costmap_2d/cost_values.hpp>
 #include <vector>
@@ -82,31 +81,34 @@ bool CostmapAdapter::snapshot(
     return fail("costmap is not available");
   }
 
-  const unsigned int size_x = costmap->getSizeInCellsX();
-  const unsigned int size_y = costmap->getSizeInCellsY();
-  if (size_x == 0 || size_y == 0) {
-    return fail("costmap has zero size");
-  }
-  const std::size_t count = static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
-
-  std::vector<unsigned char> raw(count, 0);
-  const double origin_x = costmap->getOriginX();
-  const double origin_y = costmap->getOriginY();
-  const double resolution = costmap->getResolution();
-
+  unsigned int size_x;
+  unsigned int size_y;
+  double origin_x;
+  double origin_y;
+  double resolution;
+  std::vector<unsigned char> raw;
   {
-    // 互斥锁只覆盖复制过程，随后立即释放；后续 EDT / 优化都在副本上进行。
+    // 滚动窗口可能同时改原点和栅格，必须在同一把锁下读取。
     std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap->getMutex()));
+    size_x = costmap->getSizeInCellsX();
+    size_y = costmap->getSizeInCellsY();
+    origin_x = costmap->getOriginX();
+    origin_y = costmap->getOriginY();
+    resolution = costmap->getResolution();
     const unsigned char * char_map = costmap->getCharMap();
+    if (size_x == 0 || size_y == 0) {
+      return fail("costmap has zero size");
+    }
     if (char_map == nullptr) {
       return fail("costmap character map is null");
     }
-    std::copy(char_map, char_map + count, raw.begin());
+    const std::size_t count = static_cast<std::size_t>(size_x) * size_y;
+    raw.assign(char_map, char_map + count);
   }
 
   // 代价值 1..252 是膨胀层产生的梯度代价，**不写入原始占用**。
-  std::vector<srm27_minco_core::CellState> cells(count, srm27_minco_core::CellState::kFree);
-  for (std::size_t i = 0; i < count; ++i) {
+  std::vector<srm27_minco_core::CellState> cells(raw.size(), srm27_minco_core::CellState::kFree);
+  for (std::size_t i = 0; i < raw.size(); ++i) {
     const unsigned char cost = raw[i];
     if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
       cells[i] = srm27_minco_core::CellState::kOccupied;

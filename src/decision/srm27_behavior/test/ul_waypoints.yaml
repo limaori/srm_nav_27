@@ -1,0 +1,7 @@
+# 仿真场地将中心、回退和补给分开，以覆盖三种目标的切换。
+frame_id: map
+named_waypoints:
+  rmul_supply: {x: 0.0, y: 0.0, yaw: 0.0}
+  rmul_supply_shelter: {x: 1.0, y: 0.0, yaw: 0.0}
+  rmul_center: {x: 4.5, y: -3.2, yaw: 0.0}
+  rmul_center_fallback: {x: 3.0, y: -3.2, yaw: 0.0}

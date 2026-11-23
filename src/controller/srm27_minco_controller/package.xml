@@ -25,6 +25,7 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_lifecycle</depend>
+  <depend>std_msgs</depend>
   <depend>srm27_minco_core</depend>
   <depend>srm27_minco_vendor</depend>
   <depend>srm27_qpoases_vendor</depend>

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<class_libraries>
+  <library path="tdt_nav_kit">
+    <class type="tdt_nav_kit::TdtGlobalPlanner" base_class_type="nav2_core::GlobalPlanner">
+      <description>
+        Nav2 global planner wrapping the vendored T-DT YAstar A* on a snapshot
+        of the Nav2 global costmap. Outputs nav_msgs/msg/Path in the map frame;
+        does not output Twist or cmd_vel.
+      </description>
+    </class>
+    <class type="tdt_nav_kit::TdtSmoother" base_class_type="nav2_core::Smoother">
+      <description>
+        Nav2 smoother wrapping the vendored T-DT MinimumSnap (natural spline QP
+        solved by OSQP) with SfcSquare corridor constraints. Keeps the original
+        path untouched when the QP fails or exceeds max_time.
+      </description>
+    </class>
+  </library>
+</class_libraries>
