@@ -51,7 +51,8 @@ loam_interface:
 zlio_bridge:
   ros__parameters:
     pose_body_offset_xyz: [0.009, -0.226, -0.130]
-    # 2026-11-24 与导航同步做 A/B 诊断；诊断完改回 True。
+    # 2026-11-24 起正式配置：只补位姿（世界点云走原始位姿）；原因和实测见
+    # nav2_params_srm_minco_fakeyaw.yaml 的 zlio_bridge 注释。
     pose_body_offset_apply_to_cloud: False
 
 sensor_scan_generation:

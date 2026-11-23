@@ -53,6 +53,7 @@
 - [2026-11-14 工作区清理记录](records/2026-11-14-workspace-cleanup.md) —— 本轮数据迁移、脚本/launch/docs 重整与 Git 清理。
 - [2026-11-15 ROS 包目录模块化重组](records/2026-11-15-module-reorg.md) —— 七模块 + 支撑层的包目录调整、路径修正与验证。
 - [2026-11-16 Z-Localization backend 迁入](records/2026-11-16-zlocalization-backend-migration.md) —— backend 包迁入、输入适配、reset 所有权、构建/测试/地图包验证证据。
+- [2026-11-24 云台点云平移绕圈定位记录](records/2026-11-24-云台点云平移绕圈%28ai%29.md) —— yaw 稳定但世界点云 R≈9.6 cm 绕圈；`pose_body_offset` 被带到点云，`apply_to_cloud` 改 false。
 - [MINCO 迁移实施记录](records/minco迁移实施记录%28ai%29.md)
 - [MINCO 实车迁移实施记录与上电验收清单](records/minco实车迁移实施记录%28ai%29.md)
 - [MINCO 脱困机制迁移实施记录](records/minco脱困机制迁移实施记录%28ai%29.md)

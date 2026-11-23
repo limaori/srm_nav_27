@@ -804,6 +804,7 @@ source /opt/ros/humble/setup.bash
 | `--inlier-dist` | `0.15` | 配准内点距离（米）；稀疏场景可放宽到 0.2 |
 | `--min-travel` | `10` | 云台行程低于这个值直接判「数据不足」 |
 | `--min-dtheta` | `0.15` | 相邻帧云台角增量小于这个值就不进回归（度）；转得特别慢时调小 |
+| `--orbit-min` | `0.03` | 平移绕圈半径超过这个值（米）就单独判读；默认 3 cm |
 | `--pcd-max` | `40` | 每路最多落多少个关键帧 PCD |
 | `--bag` | 关 | 顺带录 rosbag；点云全量，注意磁盘 |
 | `--tar` | 关 | 分析完把整个数据包打成 `.tar.gz`，方便发人 |
@@ -819,6 +820,8 @@ source /opt/ros/humble/setup.bash
 - **⑤ TF 各段 yaw**：云台角落在 `yaw_base_gimbal` 这一段；`yaw_gimbal_lidar` 是固定安装角；
   `map->odom` 是 backend 的纠正面。
 - **⑥ 每帧点数**：掉到几十说明几何退化，配准不可信。
+- **平移绕圈**：报告表格里这一列是锚点平移对云台角拟合出的圆半径。yaw≈0 但 R>3 cm 时
+  会判 `translation_orbit`——点云不是转，而是整体绕车体平移（障碍物会跟着绕）。
 
 `report.md` 会把「斜率 → 优先查哪里」直接列成表，并给出本次的云台行程、底盘位移、
 TF 同源性、多 parent 检查结果。
@@ -838,6 +841,12 @@ TF 同源性、多 parent 检查结果。
 - **`--demo` 四路自检**：正确 / 车体系 / 漏补 / 双计 四路斜率分别 0.00 / 0.00 / -1.00 / +1.00，
   `PASS` 全过。自检也验证了「点云在车体系里、但 TF 正确」时世界系是稳定的——所以
   **frame_id 不同不等于有 bug**，判据是变换后的世界系。
+- **2026-11-24 实车：yaw 稳定但平移绕圈**。`--lio` 3 个来回、104.5° 行程：5 路 yaw 斜率
+  -0.02~+0.04，但锚点平移对云台角拟合出 **R≈9.6 cm** 的圆（`registered_scan`；
+  `sensor_scan` 9.2、`terrain_map_ext` 7.6），同段 `odom→base` 只 R≈1.8 cm；backend 包
+  同样 9.8/1.8。工具现在把这种情形判 `translation_orbit`（报告有「平移绕圈」列），
+  不再只看 yaw。根因与改动见 `docs/records/2026-11-24-云台点云平移绕圈(ai).md`：
+  `pose_body_offset` 被同时施加到世界点云上，已改成 `apply_to_cloud: false`。
 
 ```bash
 cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v

@@ -94,11 +94,15 @@ ZLIO 在输入中断后会自己换代冷启动（`coordinated_reset: false`）�
 
     pose_pub = pose · T(offset)
 
-作用范围由 `pose_body_offset_apply_to_cloud` 决定（默认 true = 位姿和点云一起改）：
-整条链变成正确的，且点云与车位姿的相对几何仍是外参 A（避障/代价地图不受影响）；
-代价是点云相对**旧地图**的位置变了（旧图按带误差的链条建的）⇒ 要重跑一次建图，或用
-`--reloc` 让 GICP 重新对齐。设成 false 只改位姿，旧图配准不变，但障碍物会相对车位姿
-永久偏 |offset|（≈0.26 m 且随车头转）⇒ 会破坏避障，**只适合做 A/B 诊断**。
+作用范围由 `pose_body_offset_apply_to_cloud` 决定（2026-11-24 起正式配置 = **false**）：
+
+  * **false（正式）**：只改**位姿**；世界点云仍用 ZLIO 原始雷达位姿。2026-11-24 实车实测：
+    true 时 `registered_scan` 相对锚点有 R≈9.6 cm 的平移绕圈（`sensor_scan` 9.2、
+    `terrain_map_ext` 7.6），而 `odom→base` 只有 R≈1.8 cm ⇒ 障碍物绕车体转；false 后
+    RViz 里绕圈消失。旧注释"true 时相对几何仍是外参 A"在实车上不成立。
+  * **true（旧默认，仅 A/B/回退）**：位姿和点云一起改，会把 pose 的圆周补偿带进世界点云。
+    旧图按带误差的链条建时曾用它；现在不要作为正式配置。
+
 取值不用手算：`debug_tools/capture_gimbal_spin.py` 会把建议值直接打印成
 `pose_body_offset_xyz: [x, y, z]`。默认全零时本节点行为与改造前逐位一致。
 
@@ -324,18 +328,16 @@ class ZlioBridge(Node):
         # （2026-11-13 实测 0.15~0.26 m，而外参本身已被"点云 vs 实物"对照证实是对的）。
         # 补偿方式：把该偏置从位姿上右乘减掉
         #     pose_corrected = pose · T(offset)
-        # 两种作用范围（`pose_body_offset_apply_to_cloud`）：
-        #   true（默认）= **位姿和点云一起改**。整条链变成"正确"的：云台自转时车不再画圈，
-        #       且点云与车位姿仍然自洽（相对几何 = 外参 A，完全不变）⇒ 避障/代价地图不受影响。
-        #       代价：点云相对**旧地图**的位置会变（旧图是用带误差的链条建的）⇒ 需要重跑一次
-        #       建图，或者用 `--reloc` 让 GICP 重新对齐。
-        #   false（**只做诊断**）= 只改位姿，点云仍按未补偿的位姿变换。旧图配准不变，但
-        #       障碍物相对车位姿会永久偏 |offset|（≈0.26 m、随车头转）⇒ 会破坏避障，
-        #       只用来做"症结是不是它"的 A/B。
+        # 两种作用范围（`pose_body_offset_apply_to_cloud`，2026-11-24 起正式配置 = false）：
+        #   false（**正式配置**）= 只改位姿，世界点云仍按 ZLIO 原始雷达位姿变换。实测 true 时
+        #       `registered_scan` 有 R≈9.6 cm 的平移绕圈、`odom→base` 只有 R≈1.8 cm，
+        #       障碍物绕车体转；false 后现场绕圈消失。
+        #   true（旧默认，仅 A/B/回退）= 位姿和点云一起改；会把 pose 的圆周补偿带进世界点云。
+        #       旧注释的"相对几何仍是外参 A、避障不受影响"在实车上不成立。
         # 取值：跑一次 `debug_tools/capture_gimbal_spin.py`，它会把建议值直接打印成
         #   `pose_body_offset_xyz: [x, y, z]`，粘过来即可；默认 [0,0,0] = 不补偿。
         self.declare_parameter("pose_body_offset_xyz", [0.0, 0.0, 0.0])
-        self.declare_parameter("pose_body_offset_apply_to_cloud", True)
+        self.declare_parameter("pose_body_offset_apply_to_cloud", False)
         self.declare_parameter("tf_timeout", 0.5)
         self.declare_parameter("anchor_on_epoch_change", True)
         self.declare_parameter("epoch_topic", "zlio_bridge/epoch")
@@ -545,11 +547,11 @@ class ZlioBridge(Node):
             + (
                 f", pose_body_offset_xyz=({self.pose_body_offset.t[0]:+.4f}, "
                 f"{self.pose_body_offset.t[1]:+.4f}, {self.pose_body_offset.t[2]:+.4f})"
-                "（位姿+点云一起改：链条自洽，但旧地图需重建或用 --reloc）"
+                "（旧模式：位姿+点云一起改，会把圆周补偿带进世界点云；2026-11-24 起不推荐）"
                 if self.pose_body_offset is not None
                 and self.pose_body_offset_apply_to_cloud
                 else (
-                    "（⚠ 只改位姿：障碍物会相对车位姿偏 |offset|，仅供 A/B 诊断）"
+                    "（位姿单独补偿；世界点云走原始位姿，2026-11-24 起正式配置）"
                     if self.pose_body_offset is not None
                     else ""
                 )

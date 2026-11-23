@@ -180,8 +180,10 @@ def test_pose_body_offset_cancels_the_residual():
 
     1. 不补偿时 `pose·A⁻¹` 的平移画半径为 |d| 的圆；
     2. 用上面那个 c_corr 后圆消失（< 1 mm）—— **符号反了会加倍**（这是最容易错的）；
-    3. 补偿确实会移动"发布出去的位姿"（所以点云要不要跟着动，由
-       `pose_body_offset_apply_to_cloud` 决定；默认 true = 一起动，链条才自洽）。
+    3. 补偿只应移动"发布出去的位姿"；世界点云走 ZLIO 原始位姿（
+       `pose_body_offset_apply_to_cloud: false`）。2026-11-24 实车实测：true 时
+       `registered_scan` 相对锚点有 R≈9.6 cm 的平移绕圈、车位姿只有 R≈1.8 cm，
+       障碍物绕车体转；false 后现场绕圈消失。
     """
     mount_true = (
         _Rigid(quat_from_rpy(math.radians(-30.0), 0.0, math.radians(63.0)),
@@ -248,6 +250,9 @@ def test_mapping_and_nav_share_the_same_pose_body_offset():
     定位在 map 里整体偏/转一个常量，`--no-reloc` 下尤其明显。
 
     偏移量表达在**雷达/IMU 体坐标系**，与 base_frame 选谁无关，所以两份配置必须逐项一致。
+
+    2026-11-24 起两份都用 pose-only（`apply_to_cloud: false`）：偏置只修位姿，世界点云
+    走 ZLIO 原始位姿；旧的 true 会把 ~9.6 cm 的圆周补偿带进世界点云，障碍物跟着绕圈。
     """
     import yaml
 
@@ -273,7 +278,9 @@ def test_mapping_and_nav_share_the_same_pose_body_offset():
     _assert(nav_cloud == map_cloud,
             f"建图与导航的 pose_body_offset_apply_to_cloud 不一致：nav={nav_cloud} "
             f"mapping={map_cloud}")
-    _assert(nav_cloud, "apply_to_cloud=false 只适合 A/B 诊断，不该作为建图/导航的正式配置")
+    _assert(not nav_cloud,
+            "apply_to_cloud=true 会把 pose 的圆周补偿带进世界点云（2026-11-24 实测 "
+            "registered_scan R≈9.6 cm、车位姿 R≈1.8 cm），正式配置应为 false")
 
 
 def main():
