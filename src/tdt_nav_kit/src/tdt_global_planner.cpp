@@ -196,8 +196,17 @@ nav_msgs::msg::Path TdtGlobalPlanner::createPlan(
   // costmap 已是 253（INSCRIBED）。0.30 m 重罚放行了 0.3~0.55 m 的贴墙段，
   // smoother 的 SFC（threshold 252）判撞 → OSQP 六轮迭代必败 → BT 死循环。
   // 0.60 m 覆盖 inscribed+膨胀带，A* 路径不再进入 253 区。
+  // 【2026-11-22 v3 实车】二值罚价在窄走廊（<1.2 m）里退化成"处处等价"：
+  // 带内每格距两侧墙都 <0.60 m，penalty 全部 = 100，A* 失去居中倾向，
+  // 实车 219_1121 北走廊路径贴墙（车身边缘蹭墙，人工目视确认）。
+  // 改线性衰减（对齐上游 bench_yastar 的梯度思路）：
+  //   0.40 m 内 100·(1−d/0.40)，走廊中轴（d≈缝宽/2）代价最低，向墙单调上升。
+  //   0.56 m 缝：中轴 d=0.28 → 罚 30，贴边 d=0.16 → 罚 60，梯度 30 拉回中轴。
+  //   宽阔区（d>0.40）罚 0，行为与 v2 一致。253/254 仍被 occupancy_threshold
+  //   252 挡住，不受本改动影响。
   planner.setCostField(
-    cost_inflate_radius_, [](float x) { return x < 0.60f ? 100.0f : 0.0f; });
+    cost_inflate_radius_,
+    [](float x) { return x < 0.40f ? 100.0f * (1.0f - x / 0.40f) : 0.0f; });
   planner.initCostMap();
 
   const auto resolved_start = nearestFreePoint(

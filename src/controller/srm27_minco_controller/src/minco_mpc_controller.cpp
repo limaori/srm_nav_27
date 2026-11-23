@@ -258,6 +258,7 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("odom_topic", std::string("odometry"));
   declare("replan_frequency", 10.0);
   declare("planning_horizon", 2.0);
+  declare("path_centering_max_displacement", 0.01);
   declare("planning_deadline_ms", 30.0);
   declare("state_timeout", 0.10);
   declare("map_timeout", 0.30);
@@ -370,6 +371,8 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".odom_topic", odom_topic_);
   node->get_parameter(name + ".replan_frequency", replan_frequency_);
   node->get_parameter(name + ".planning_horizon", planning_horizon_);
+  node->get_parameter(
+    name + ".path_centering_max_displacement", path_centering_max_displacement_);
   node->get_parameter(name + ".planning_deadline_ms", planning_deadline_ms_);
   node->get_parameter(name + ".state_timeout", state_timeout_);
   node->get_parameter(name + ".map_timeout", map_timeout_);
@@ -1485,6 +1488,7 @@ void MincoMpcController::requestReplan(
   planning_request.request_stamp = _now_stamp;
   planning_request.request_steady = _now_steady;
   planning_request.local_path_horizon = planning_horizon_;
+  planning_request.path_centering_max_displacement = path_centering_max_displacement_;
   planning_request.validity_window = trajectory_max_age_;
   planning_request.validator_config = makeValidatorConfig();
   planning_request.validator_config.braking_deceleration = std::min(

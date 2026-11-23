@@ -227,7 +227,9 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   const auto reference_path = improvePathClearance(
     _request.path, *_request.esdf,
     path_config.required_clearance + _request.minco_config.optimization_clearance_margin,
-    _request.minco_config.optimization_clearance_margin);
+    std::max(
+      _request.path_centering_max_displacement,
+      _request.minco_config.optimization_clearance_margin));
   const LocalPathResult clipped = extractLocalPath(
     reference_path, _request.state.position(), *_request.esdf, path_config,
     _request.terminal_is_global_goal);
