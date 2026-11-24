@@ -6,7 +6,7 @@
 
      1) ComputePathThroughPoses 之后插入 SmoothPath：
         TDT YAstar 输出稀疏路径（launch 注入 path_resample_step 0.20 后为 0.2 m 间距），
-        MinimumSnap 平滑后交给控制器的是连续曲线；SmoothPath 失败时 TdtSmoother 的
+        MinimumSnap 平滑后交给控制器的是连续曲线；SmoothPath 失败时 MinimumSnapSmoother 的
         fallback_to_resampled 会返回加密折线，FollowPath 不缺前视点。
 
      2) RateController 3.0 -> 0.2 Hz：SmoothPath 耗时 ~0.6 s，1 Hz 重规划会把

@@ -35,13 +35,13 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "srm27_minco_controller/command_frame.hpp"
-#include "srm27_minco_controller/costmap_adapter.hpp"
+#include "srm27_map_adapter/costmap_adapter.hpp"
 #include "srm27_minco_controller/diagnostics.hpp"
 #include "srm27_minco_controller/planning_worker.hpp"
 #include "srm27_minco_controller/state_adapter.hpp"
 #include "srm27_minco_controller/terminal_stop.hpp"
 #include "srm27_minco_controller/yaw_policy.hpp"
-#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/mpc_solver.hpp"
 #include "srm27_minco_core/recovery_decider.hpp"
@@ -291,7 +291,7 @@ private:
 
   // 子模块
   StateAdapter state_adapter_{};
-  CostmapAdapter costmap_adapter_{};
+  srm27_map_adapter::CostmapAdapter costmap_adapter_{};
   YawPolicy yaw_policy_{};
   /// \brief 终点急停：一进入目标检查器的成功区域就立即输出零速，不再追踪末点。
   TerminalStop terminal_stop_{};
@@ -306,7 +306,7 @@ private:
   srm27_minco_core::RecoveryDecider recovery_decider_{};
   srm27_minco_core::MincoOptimizerConfig minco_config_{};
   srm27_minco_core::TrajectoryInitializer::Config initializer_config_{};
-  srm27_minco_core::Esdf2D::Config esdf_config_{};
+  srm27_map_core::Esdf2D::Config esdf_config_{};
   srm27_minco_core::TrackingReferenceConfig reference_config_{};
 
   // 运行状态
@@ -321,7 +321,7 @@ private:
   std::uint64_t trajectory_id_{0};
 
   std::shared_ptr<const srm27_minco_core::Trajectory2D> trajectory_{};
-  std::shared_ptr<srm27_minco_core::Esdf2D> esdf_{};
+  std::shared_ptr<srm27_map_core::Esdf2D> esdf_{};
   double esdf_received_steady_{0.0};
   std::uint64_t map_version_{0};
   double map_stamp_{0.0};

@@ -45,9 +45,9 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 |---|---|---|
 | 接口 | `src/interfaces` | `localization_interfaces`、`rm_decision_interfaces` |
 | 感知定位 | `src/localization` | frontend: `frontend`(ZLIO)、`point_lio`、`livox_ros_driver2`、`loam_interface`、`pointcloud_to_laserscan`；backend: `small_gicp_relocalization`、`sensor_scan_generation`、`srm27_localization_adapter` |
-| 轨迹规划 | `src/planner` | frontend: `terrain_analysis`、`terrain_analysis_ext`、`srm27_costmap_plugins`、`srm27_nav_behavior_plugins`；backend: `srm27_minco_core`、`srm27_minco_vendor`、`srm27_qpoases_vendor` |
+| 轨迹规划 | `src/planner` | map: `srm27_map_core`（栅格/ESDF/占据几何/SFC，纯 C++）、`srm27_map_adapter`（Nav2 代价图→快照）；common: `srm27_nav_common`（YAstar/MinimumSnap vendored 源码 + Path 转换）；frontend: `terrain_analysis`、`terrain_analysis_ext`、`srm27_costmap_plugins`、`srm27_nav_behavior_plugins`、`srm27_nav_planner`（YAstar 全局规划器）；backend: `srm27_minco_core`、`srm27_minco_vendor`、`srm27_qpoases_vendor`、`srm27_nav_smoother`（MinimumSnap 平滑器） |
 | 控制器 | `src/controller` | `srm27_minco_controller`、`srm27_omni_pid_controller`、`fake_vel_transform`、`srm27_chassis_control`、`srm27_nav_protocol`、`srm27_teleop_twist_joy` |
-| 决策 | `src/decision` | `srm27_behavior` |
+| 决策 | `src/decision` | common: `srm27_behavior_core`（航点/语义区/自转/姿态共享状态）；frontend: `srm27_behavior_plugins`（BehaviorTree 动作/条件/控制/装饰器插件）；backend: `srm27_behavior`（执行服务端、裁判输入、决策树/参数/launch） |
 | 仿真 | `src/simulation` | `srm27_gazebo_simulator`、`srm27_robot_description`、`ign_sim_pointcloud_tool` |
 | 装配 | `src/bringup` | `srm27_nav_bringup`、`srm27_nav_tools`、`srm27_navigation` 元包 |
 | 依赖 | `src/dependencies` | `BehaviorTree.ROS2` |
@@ -55,6 +55,26 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 > 七个业务模块：感知定位前端/后端、轨迹规划前端/后端、控制器、决策、仿真；
 > `interfaces`、`bringup`、`dependencies` 是支撑目录。ROS 包名没有改，只调整了目录归属。
 > 每个包的输入/输出与路径见 [ROS 包清点](docs/architecture/package_inventory.md)。
+>
+> 2026-11-24：原 `src/tdt_nav_kit` 拆包并入轨迹规划——全局规划器进
+> `srm27_nav_planner`（前端），MinimumSnap 平滑器进 `srm27_nav_smoother`（后端），
+> vendored 算法与共用转换层进 `srm27_nav_common`（planner/common）。
+> 插件 ID：`srm27_nav_planner::YAstarGlobalPlanner`、
+> `srm27_nav_smoother::MinimumSnapSmoother`。开关：实车 `--yastar-planner`，
+> 仿真 `--yastar-planner` / `--minisnap-smoother`。
+>
+> 2026-11-24：决策模块按同一框架拆成 `srm27_behavior_core`（common）、
+> `srm27_behavior_plugins`（frontend）、`srm27_behavior`（backend）；服务端运行时
+> 从 `srm27_behavior_plugins/bt_plugins` 加载插件，启动入口 `ros2 launch srm27_behavior ...`
+> 与 `start_*_nav.sh --behavior` 均保持不变。
+>
+> 2026-11-24：地图部分单独成 `src/planner/map`——`srm27_map_core`（GridSnapshot/ESDF/
+> 占据几何/SFC，纯 C++）与 `srm27_map_adapter`（Nav2 costmap→快照）。YAstar、
+> MINCO/controller、MinimumSnap 平滑器共用同一套栅格语义与同一份 costmap 拷贝实现。
+>
+> 2026-11-24：上游算法源码不再集中——YAstar 进 `srm27_nav_planner/vendor/`，
+> MinimumSnap/SfcSquare 进 `srm27_nav_smoother/vendor/`（各自 MIT 许可与补丁登记），
+> `srm27_nav_common` 只保留共享的路径工具。
 
 ## 四个正式入口
 
@@ -82,6 +102,10 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 # 仿真：默认 Gazebo 真值里程计；接 LIO 用 --lio
 ./scripts/bringup/start_sim_nav.sh
 ./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio
+
+# 规划插件（可选）：YAstar 全局规划器 / MinimumSnap 平滑器
+./scripts/bringup/start_real_nav.sh --yastar-planner
+./scripts/bringup/start_sim_nav.sh --yastar-planner --minisnap-smoother
 
 # 建图
 ./scripts/bringup/start_real_slam.sh

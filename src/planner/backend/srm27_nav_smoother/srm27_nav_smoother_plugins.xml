@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<class_libraries>
+  <library path="srm27_nav_smoother">
+    <class type="srm27_nav_smoother::MinimumSnapSmoother" base_class_type="nav2_core::Smoother">
+      <description>
+        Nav2 smoother wrapping the vendored T-DT MinimumSnap (natural spline QP
+        solved by OSQP) with SfcSquare corridor constraints. Keeps the original
+        path untouched when the QP fails or exceeds max_time.
+      </description>
+    </class>
+  </library>
+</class_libraries>

@@ -93,7 +93,7 @@ class Probe(Node):
    g=ComputePathToPose.Goal();g.goal=self.pose(spec['xy']);g.planner_id='GridBased';g.use_start=False;t=time.monotonic();res=self.action(self.plan,g);result['planner_action_wall_ms']=round((time.monotonic()-t)*1000,2)
    if res and res.status==GoalStatus.STATUS_SUCCEEDED:
     result['raw_path']=coords(res.result.path);result['planning_ms']=res.result.planning_time.sec*1000+res.result.planning_time.nanosec/1e6;result['raw_min_obstacle_center_clearance_m']=clearance(result['raw_path'])
-    sm=SmoothPath.Goal();sm.path=res.result.path;sm.smoother_id='tdt_smoother';sm.max_smoothing_duration.sec=1;sm.check_for_collisions=False;sr=self.action(self.smooth,sm)
+    sm=SmoothPath.Goal();sm.path=res.result.path;sm.smoother_id='minimum_snap_smoother';sm.max_smoothing_duration.sec=1;sm.check_for_collisions=False;sr=self.action(self.smooth,sm)
     if sr and sr.status==GoalStatus.STATUS_SUCCEEDED:
      result['smoothed_path']=coords(sr.result.path);result['smoothing_ms']=sr.result.smoothing_duration.sec*1000+sr.result.smoothing_duration.nanosec/1e6;result['smoothed_min_obstacle_center_clearance_m']=clearance(result['smoothed_path'])
     else:result['smoothing_status']=None if sr is None else sr.status

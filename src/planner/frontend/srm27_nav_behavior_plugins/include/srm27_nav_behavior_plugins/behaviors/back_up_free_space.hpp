@@ -92,7 +92,7 @@ protected:
     float end_angle, float radius, float angle_increment, float * best_angle);
 
   /**
-   * @brief 把 `GetCostmap` 返回的代价图转成 `srm27_minco_core::GridSnapshot`。
+   * @brief 把 `GetCostmap` 返回的代价图转成 `srm27_map_core::GridSnapshot`。
    *
    * 语义必须与 MINCO 控制器里的 `CostmapAdapter::snapshot` 保持一致，否则脱困方向
    * 与规划器看到的障碍不是同一份：
@@ -105,7 +105,7 @@ protected:
    * （OccupancyGrid 同样从原点按 x、y 递增；只有图片文件需要翻转行。）
    */
   bool buildGridSnapshot(
-    const nav2_msgs::msg::Costmap & costmap, srm27_minco_core::GridSnapshot * snapshot) const;
+    const nav2_msgs::msg::Costmap & costmap, srm27_map_core::GridSnapshot * snapshot) const;
 
   /**
    * @brief 只把机器人周围 `radius` 米见方的一块抠成快照（用于每周期量净空）。
@@ -124,7 +124,7 @@ protected:
    */
   bool buildGridSnapshotAround(
     const nav2_msgs::msg::Costmap & costmap, const geometry_msgs::msg::Pose2D & pose,
-    double radius, srm27_minco_core::GridSnapshot * snapshot) const;
+    double radius, srm27_map_core::GridSnapshot * snapshot) const;
 
   /**
    * @brief 取一次当前代价地图上的自身净空（米）；数据不可信时返回 NaN。

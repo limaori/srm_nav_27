@@ -33,7 +33,7 @@ for i,name in enumerate(['fixed_run1','fixed_run2']):
     events={key:len(re.findall(pattern,log)) for key,pattern in {
         'smoother_collision':'Smoothed path leads to a collision',
         'smoother_solve_failure':'OSQP solve failed',
-        'smoother_timeout':'TdtSmoother: exceeded max_time',
+        'smoother_timeout':'MinimumSnapSmoother: exceeded max_time',
         'controller_validation_rejection':r'规划失败 \(validation_failed\)',
         'qp_over_budget':r'QP 求解 .*超过预算',
         'backing_up':'backing up'}.items()}

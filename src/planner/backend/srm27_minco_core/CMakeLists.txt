@@ -10,11 +10,10 @@ find_package(ament_cmake REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(srm27_minco_vendor REQUIRED)
 find_package(srm27_qpoases_vendor REQUIRED)
+find_package(srm27_map_core REQUIRED)
 
 add_library(
   ${PROJECT_NAME} SHARED
-  src/esdf_2d.cpp
-  src/grid_snapshot.cpp
   src/minco_optimizer.cpp
   src/mpc_model.cpp
   src/mpc_solver.cpp
@@ -37,11 +36,14 @@ target_include_directories(
 # 必须是 PUBLIC：公开头文件 `minco_optimizer.hpp` 直接 include `<gcopter/minco.hpp>`，
 # 下游（本包测试目标、srm27_minco_controller）同样需要这个 include 路径。
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${srm27_minco_vendor_INCLUDE_DIRS})
+# 地图类型来自 srm27_map_core（纯 C++）：公开头文件直接 include 它的头。
+target_include_directories(${PROJECT_NAME} PUBLIC ${srm27_map_core_INCLUDE_DIRS})
 target_link_libraries(
   ${PROJECT_NAME}
   PUBLIC
     Eigen3::Eigen
     ${srm27_qpoases_vendor_TARGETS}
+    ${srm27_map_core_LIBRARIES}
 )
 
 if(BUILD_TESTING)
@@ -50,7 +52,6 @@ if(BUILD_TESTING)
 
   find_package(ament_cmake_gtest REQUIRED)
   set(SRM27_MINCO_CORE_TEST_SOURCES
-    test/test_esdf_2d.cpp
     test/test_kinematics.cpp
     test/test_minco_optimizer.cpp
     test/test_mpc_solver.cpp
@@ -83,6 +84,6 @@ install(DIRECTORY include/ DESTINATION include)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
-ament_export_dependencies(Eigen3 srm27_minco_vendor srm27_qpoases_vendor)
+ament_export_dependencies(Eigen3 srm27_minco_vendor srm27_qpoases_vendor srm27_map_core)
 
 ament_package()

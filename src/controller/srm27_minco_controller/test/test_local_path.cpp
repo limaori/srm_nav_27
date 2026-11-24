@@ -19,30 +19,30 @@
 #include <vector>
 
 #include "srm27_minco_controller/local_path.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 
 namespace controller = srm27_minco_controller;
-namespace core = srm27_minco_core;
+namespace map = srm27_map_core;
 
 namespace
 {
 using Point = Eigen::Vector2d;
 
-core::Esdf2D makeMap(double _half_width = 6.0, double _wall_x = 100.0, bool _unknown = false)
+map::Esdf2D makeMap(double _half_width = 6.0, double _wall_x = 100.0, bool _unknown = false)
 {
   const double resolution = 0.05;
   const int size = static_cast<int>(2.0 * _half_width / resolution);
-  std::vector<core::CellState> cells(size * size, core::CellState::kFree);
+  std::vector<map::CellState> cells(size * size, map::CellState::kFree);
   for (int y = 0; y < size; ++y) {
     for (int x = 0; x < size; ++x) {
       if (-_half_width + (x + 0.5) * resolution >= _wall_x) {
-        cells[y * size + x] = _unknown ? core::CellState::kUnknown : core::CellState::kOccupied;
+        cells[y * size + x] = _unknown ? map::CellState::kUnknown : map::CellState::kOccupied;
       }
     }
   }
-  core::GridSnapshot grid;
+  map::GridSnapshot grid;
   EXPECT_TRUE(grid.reset(-_half_width, -_half_width, resolution, size, size, cells, 1, 100.0));
-  core::Esdf2D esdf;
+  map::Esdf2D esdf;
   EXPECT_TRUE(esdf.build(grid));
   return esdf;
 }
@@ -211,7 +211,7 @@ TEST(LocalPathClearanceTest, ClearReferenceIsUnchanged)
 TEST(LocalPathClearanceTest, InvalidMapAndInvalidReserveDoNotMoveSeed)
 {
   const std::vector<Point> path{Point(0, -1), Point(0.65, 0), Point(0, 1)};
-  const auto no_map = controller::improvePathClearance(path, core::Esdf2D(), 0.53, 0.15);
+  const auto no_map = controller::improvePathClearance(path, map::Esdf2D(), 0.53, 0.15);
   const auto invalid = controller::improvePathClearance(path, makeMap(), 0.53, -1.0);
   EXPECT_TRUE(no_map[1].isApprox(path[1]));
   EXPECT_TRUE(invalid[1].isApprox(path[1]));

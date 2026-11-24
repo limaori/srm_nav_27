@@ -164,6 +164,11 @@
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
 #                                 --no-run 则保持暂停等你点播放)
 #       --smoother / --no-smoother velocity_smoother 是否串联 (默认串联)
+#       --yastar-planner          全局规划器换成 srm27_nav_planner::YAstarGlobalPlanner
+#                                 (默认 nav2_theta_star_planner/ThetaStarPlanner)
+#       --minisnap-smoother       平滑器换成 srm27_nav_smoother::MinimumSnapSmoother
+#                                 (默认 SimpleSmoother; 需要行为树里有 SmoothPath)
+#       两个都加 = 原来的 TDT 仿真链路 (YAstar + MinimumSnap)。
 #   -h, --help                显示本帮助
 #
 # 环境变量:
@@ -213,6 +218,10 @@ USE_GUI="${USE_GUI:-true}"
 # 想保持旧的"暂停等点播放"行为: --no-run 或 RUN_IMMEDIATELY=false。
 RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-true}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
+# 可选规划插件（原 tdt_nav_kit，2026-11-24 拆包并入 src/planner）。
+# 默认关闭 = 与改动前完全一致的 ThetaStar + SimpleSmoother 链路。
+USE_YASTAR_PLANNER="${USE_YASTAR_PLANNER:-False}"
+USE_MINISNAP_SMOOTHER="${USE_MINISNAP_SMOOTHER:-False}"
 DRY_RUN="${DRY_RUN:-0}"                      # 1 = 只打印将执行的命令, 不真的启动
 # 一步验证小陀螺导航 (--verify-spin): 无头起栈 -> 发自转请求 -> 发导航目标 ->
 # 断言 wz 链路与"边转边走" -> 清理。参数用环境变量覆盖。
@@ -342,6 +351,10 @@ while [ $# -gt 0 ]; do
     --no-run)     RUN_IMMEDIATELY="false"; shift ;;
     --smoother)   USE_VELOCITY_SMOOTHER="True"; shift ;;
     --no-smoother) USE_VELOCITY_SMOOTHER="False"; shift ;;
+    --yastar-planner)    USE_YASTAR_PLANNER="True"; shift ;;
+    --no-yastar-planner) USE_YASTAR_PLANNER="False"; shift ;;
+    --minisnap-smoother)    USE_MINISNAP_SMOOTHER="True"; shift ;;
+    --no-minisnap-smoother) USE_MINISNAP_SMOOTHER="False"; shift ;;
     --yaw-mode)   YAW_MODE="${2:?--yaw-mode 需要 auto|xy_only|spin|se2}"; YAW_MODE_CLI_GIVEN=1; shift 2 ;;
     --chassis-spin)
                   CHASSIS_SPIN_GIVEN=1
@@ -1167,6 +1180,7 @@ else
 fi
 printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
 printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
+printf '规划插件  : YAstar=%s  MinimumSnap=%s\n' "$USE_YASTAR_PLANNER" "$USE_MINISNAP_SMOOTHER"
 printf 'wz 归属   : 决策层 rotation_cmd -> srm_cmd_mux（导航只出平移, 完全解耦）\n'
 printf '速度链    : Nav2[cmd_vel_nav_fake] -> fake_vel_transform[cmd_vel_nav_body] -> srm_cmd_mux -> cmd_vel_sim -> Gazebo\n'
 printf '            srm_cmd_mux 第二路: rotation_cmd (只取 angular.z, 停发 0.25 s 停转)\n'
@@ -1274,7 +1288,7 @@ fi
 
 # 定位方式由 NAV_EXTRA_ARGS 统一给出 (use_pcd_localization / use_lio_odometry /
 # prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
-NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}${RVIZ_CONFIG_ARG} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE} gimbal_spin_rate:=${GIMBAL_SPIN_WZ}"
+NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}${RVIZ_CONFIG_ARG} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE} gimbal_spin_rate:=${GIMBAL_SPIN_WZ} use_yastar_planner:=${USE_YASTAR_PLANNER} use_minisnap_smoother:=${USE_MINISNAP_SMOOTHER}"
 # 自动决策模式从 mux 启动即要求许可；普通手动导航显式关闭。
 if [ -n "$BEHAVIOR_TREE" ]; then
   NAV_CMD="$NAV_CMD decision_required:=true"

@@ -45,7 +45,7 @@ def clearance(path, grid):
 
 class Probe(Node):
     def __init__(self):
-        super().__init__('tdt_smoother_sim_probe')
+        super().__init__('minisnap_smoother_sim_probe')
         self.set_parameters([Parameter('use_sim_time',value=True)])
         self.grid = None
         self.gt = None
@@ -131,9 +131,9 @@ class Probe(Node):
 
     def parameters(self):
         checks={
-            'planner_server':{'GridBased.plugin':'tdt_nav_kit::TdtGlobalPlanner','GridBased.occupancy_threshold':THRESHOLD},
-            'smoother_server':{'tdt_smoother.plugin':'tdt_nav_kit::TdtSmoother','tdt_smoother.occupancy_threshold':253,
-                               **({'tdt_smoother.fallback_to_resampled':False,'robot_base_frame':'gimbal_yaw_fake'} if STRICT_SOLVE else {})},
+            'planner_server':{'GridBased.plugin':'srm27_nav_planner::YAstarGlobalPlanner','GridBased.occupancy_threshold':THRESHOLD},
+            'smoother_server':{'minimum_snap_smoother.plugin':'srm27_nav_smoother::MinimumSnapSmoother','minimum_snap_smoother.occupancy_threshold':253,
+                               **({'minimum_snap_smoother.fallback_to_resampled':False,'robot_base_frame':'gimbal_yaw_fake'} if STRICT_SOLVE else {})},
             'controller_server':{'FollowPath.limits.max_linear_speed':1.0,
                                  'FollowPath.safety.robot_radius':0.28,'FollowPath.safety.clearance_margin':EXECUTION_MARGIN},
             'global_costmap/global_costmap':{'robot_radius':0.30,'intensity_voxel_layer.enabled':True,
@@ -191,7 +191,7 @@ class Probe(Node):
         path=points(raw.result.path)
         self.result['raw_path']=path
         self.result['raw_clearance']=clearance(path,self.grid)
-        goal=SmoothPath.Goal();goal.path=raw.result.path;goal.smoother_id='tdt_smoother'
+        goal=SmoothPath.Goal();goal.path=raw.result.path;goal.smoother_id='minimum_snap_smoother'
         goal.max_smoothing_duration.sec=1;goal.check_for_collisions=True
         smooth=self.action(self.smooth,goal,20)
         self.result['smoothing_status']=None if smooth is None else smooth.status

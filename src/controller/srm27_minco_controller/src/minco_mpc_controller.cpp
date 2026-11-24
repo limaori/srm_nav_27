@@ -126,8 +126,7 @@ void MincoMpcController::configure(
     throw MincoMpcControllerError("MincoMpcController: state adapter: " + reason);
   }
 
-  CostmapAdapter::Config costmap_config;
-  costmap_config.unknown_is_obstacle = esdf_config_.unknown_is_seed;
+  srm27_map_adapter::CostmapConfig costmap_config;
   if (!costmap_adapter_.configure(costmap_ros_, costmap_config, &reason)) {
     throw MincoMpcControllerError("MincoMpcController: costmap adapter: " + reason);
   }
@@ -891,7 +890,7 @@ void MincoMpcController::refreshMap(double _stamp, const ControllerDiagnostics &
 {
   (void)_diagnostics;
   std::string reason;
-  srm27_minco_core::GridSnapshot snapshot;
+  srm27_map_core::GridSnapshot snapshot;
   std::uint64_t version = 0;
   if (!costmap_adapter_.snapshot(_stamp, snapshot, version, &reason)) {
     RCLCPP_WARN_THROTTLE(
@@ -901,7 +900,7 @@ void MincoMpcController::refreshMap(double _stamp, const ControllerDiagnostics &
   }
 
   const bool version_changed = version != map_version_;
-  auto esdf = std::make_shared<srm27_minco_core::Esdf2D>();
+  auto esdf = std::make_shared<srm27_map_core::Esdf2D>();
   if (!esdf->build(snapshot, esdf_config_)) {
     RCLCPP_WARN_THROTTLE(
       (parent_.lock())->get_logger(), *(parent_.lock())->get_clock(), 2000,
@@ -1003,7 +1002,7 @@ bool MincoMpcController::handlePlanningFailure(const State2D & _state, double _n
     return true;
   }
 
-  const srm27_minco_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
+  const srm27_map_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
   const double clearance = here.distance;
   diagnostics_.recovery_clearance = clearance;
 
@@ -1161,7 +1160,7 @@ bool MincoMpcController::updateRecovery(
   // 查询失败（NaN / 地图外）不得判成功 —— 那是"不知道"，不是"脱困了"。
   double clearance = std::numeric_limits<double>::quiet_NaN();
   if (esdf_) {
-    const srm27_minco_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
+    const srm27_map_core::EsdfQueryResult here = esdf_->query(_state.x, _state.y);
     if (here.valid && std::isfinite(here.distance)) {
       clearance = here.distance;
     }
@@ -1172,7 +1171,7 @@ bool MincoMpcController::updateRecovery(
   // 逃逸方向由 decider 按**当前位置**每周期重算（对应参考实现 FSM 在 RECOVERING 里
   // 每次 tick 都调用 calculateEscapeVelocity），所以必须把当前位置与距离场传进去。
   // 无可信方向时 decider 结束会话并清零，不能继续执行旧速度。
-  const srm27_minco_core::Esdf2D empty_esdf;
+  const srm27_map_core::Esdf2D empty_esdf;
   recovery_decider_.setPreferredDirection(forwardPathDirection(planning_path_, _state.position()));
   const srm27_minco_core::RecoveryExit exit = recovery_decider_.updateRecovery(
     _now_stamp, _state.position(), esdf_ ? *esdf_ : empty_esdf, clearance, &escape_velocity,
@@ -1482,7 +1481,7 @@ void MincoMpcController::requestReplan(
     planning_request.validator_config.braking_deceleration, _planar.accel);
   planning_request.terminal_reached_radius = terminal_reached_radius_;
   // 距离场以只读快照交给工作线程；工作线程不持有 costmap 锁。
-  planning_request.esdf = std::const_pointer_cast<const srm27_minco_core::Esdf2D>(esdf_);
+  planning_request.esdf = std::const_pointer_cast<const srm27_map_core::Esdf2D>(esdf_);
   planning_request.use_warm_start = decision.use_warm_start && has_warm_start_;
   planning_request.warm_inner_points = warm_inner_points_;
   planning_request.warm_durations = warm_durations_;

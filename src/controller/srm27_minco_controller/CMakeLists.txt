@@ -11,7 +11,6 @@ ament_auto_find_build_dependencies()
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/command_frame.cpp
-  src/costmap_adapter.cpp
   src/diagnostics.cpp
   src/local_path.cpp
   src/minco_mpc_controller.cpp

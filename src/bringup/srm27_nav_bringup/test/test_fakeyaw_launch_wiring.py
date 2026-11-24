@@ -282,6 +282,81 @@ def test_inconsistent_command_frame_is_rejected():
         raise AssertionError("关掉 fakeyaw 后没有被拦下来")
 
 
+def test_optional_yastar_and_minisnap_injection():
+    """可选规划插件的参数注入：默认不改链路，打开后只替换两段。"""
+    import yaml
+
+    module = _load_launch_module()
+    base = yaml.safe_load(FAKEYAW_PARAMS.read_text())
+    base_grid = base["planner_server"]["ros__parameters"]["GridBased"]
+    base_smoother = base["smoother_server"]["ros__parameters"]
+
+    # 默认（两个开关都关）：参数文件逐字保持不变。
+    _, context, includes, _ = _make_context(module, {"params_file": str(FAKEYAW_PARAMS)})
+    nav2 = _nav2_include_arguments(includes, context)
+    with open(nav2["params_file"], encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    _assert(
+        config["planner_server"]["ros__parameters"]["GridBased"] == base_grid,
+        "默认仿真链路不应改动 GridBased",
+    )
+    _assert(
+        config["smoother_server"]["ros__parameters"] == base_smoother,
+        "默认仿真链路不应改动 smoother_server",
+    )
+
+    # 打开两个开关：只替换 planner/smoother 两段，其余段逐字不变。
+    _, context, includes, _ = _make_context(
+        module,
+        {
+            "params_file": str(FAKEYAW_PARAMS),
+            "use_yastar_planner": "True",
+            "use_minisnap_smoother": "True",
+        },
+    )
+    nav2 = _nav2_include_arguments(includes, context)
+    with open(nav2["params_file"], encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+
+    grid = config["planner_server"]["ros__parameters"]["GridBased"]
+    _assert(
+        grid["plugin"] == "srm27_nav_planner::YAstarGlobalPlanner",
+        f"YAstar 开关没有替换全局规划器: {grid}",
+    )
+    _assert(grid["path_resample_step"] == 0.20, "YAstar 输出需要加密给控制器跟踪")
+
+    smoother = config["smoother_server"]["ros__parameters"]
+    _assert(
+        smoother["smoother_plugins"] == ["minimum_snap_smoother"],
+        f"平滑器实例名不对: {smoother.get('smoother_plugins')}",
+    )
+    _assert(
+        smoother["minimum_snap_smoother"]["plugin"]
+        == "srm27_nav_smoother::MinimumSnapSmoother",
+        f"平滑器插件 ID 不对: {smoother['minimum_snap_smoother']}",
+    )
+    bt = config["bt_navigator"]["ros__parameters"]
+    _assert(
+        "navigate_to_pose_w_smoothing.xml" in bt["default_nav_to_pose_bt_xml"],
+        f"打开平滑器后行为树必须带 SmoothPath: {bt['default_nav_to_pose_bt_xml']}",
+    )
+    _assert(
+        "navigate_through_poses_w_smoothing.xml"
+        in bt["default_nav_through_poses_bt_xml"],
+        f"多目标行为树也必须带 SmoothPath: {bt['default_nav_through_poses_bt_xml']}",
+    )
+    # controller_server 的两个 yaw/判停键由 nav_stack_params 统一改写，
+    # bt_navigator 在打开平滑器时按设计改两份 BT —— 两者都单独断言。
+    for name in ("local_costmap", "global_costmap", "fake_vel_transform",
+                 "behavior_server"):
+        _assert(config[name] == base[name], f"规划插件注入改动了 {name}")
+    _assert(
+        config["controller_server"]["ros__parameters"]["FollowPath"]["plugin"]
+        == base["controller_server"]["ros__parameters"]["FollowPath"]["plugin"],
+        "规划插件注入不应改动控制器",
+    )
+
+
 def _run_all():
     failures = 0
     for name, function in sorted(globals().items()):

@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<class_libraries>
+  <library path="srm27_nav_planner">
+    <class type="srm27_nav_planner::YAstarGlobalPlanner" base_class_type="nav2_core::GlobalPlanner">
+      <description>
+        Nav2 global planner wrapping the vendored T-DT YAstar A* on a snapshot
+        of the Nav2 global costmap. Outputs nav_msgs/msg/Path in the map frame;
+        does not output Twist or cmd_vel.
+      </description>
+    </class>
+  </library>
+</class_libraries>

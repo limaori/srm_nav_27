@@ -23,14 +23,21 @@
   <exec_depend>sensor_scan_generation</exec_depend>
   <exec_depend>small_gicp_relocalization</exec_depend>
   <exec_depend>srm27_behavior</exec_depend>
+  <exec_depend>srm27_behavior_core</exec_depend>
+  <exec_depend>srm27_behavior_plugins</exec_depend>
   <exec_depend>srm27_chassis_control</exec_depend>
   <exec_depend>srm27_costmap_plugins</exec_depend>
   <exec_depend>srm27_gazebo_simulator</exec_depend>
   <exec_depend>srm27_localization_adapter</exec_depend>
   <exec_depend>srm27_minco_controller</exec_depend>
   <exec_depend>srm27_minco_core</exec_depend>
+  <exec_depend>srm27_map_adapter</exec_depend>
+  <exec_depend>srm27_map_core</exec_depend>
   <exec_depend>srm27_minco_vendor</exec_depend>
   <exec_depend>srm27_nav_behavior_plugins</exec_depend>
+  <exec_depend>srm27_nav_common</exec_depend>
+  <exec_depend>srm27_nav_planner</exec_depend>
+  <exec_depend>srm27_nav_smoother</exec_depend>
   <exec_depend>srm27_nav_bringup</exec_depend>
   <exec_depend>srm27_nav_protocol</exec_depend>
   <exec_depend>srm27_nav_tools</exec_depend>

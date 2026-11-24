@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_nav_common</name>
+  <version>0.1.0</version>
+  <description>
+    SRM27 轨迹规划前端/后端共用的路径工具：按段长加密、折角圆弧化、
+    nav_msgs/Path 与 Eigen 点列互转（含 identity/tangent 朝向语义）。
+    只含本工作区代码，不含第三方源码；不注册任何 Nav2 插件。
+  </description>
+  <maintainer email="srm27@example.com">SRM27 Navigation Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <build_depend>eigen3_cmake_module</build_depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+  <exec_depend>eigen</exec_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

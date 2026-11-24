@@ -54,6 +54,8 @@ REAL_ACCEPTS_ONLY = {
     "--gimbal-spin": "云台由下位机驱动，上位机无指令通道：只告警",
     "--no-gimbal-spin": "同上",
     "--prior-pcd-manifest": "用建图出生点推导初值，实车由 --map-to-odom/--init-pose 承担",
+    "--minisnap-smoother": "实车默认参数已固定使用 MinimumSnap，只提示不切换",
+    "--no-minisnap-smoother": "没有 SimpleSmoother 的正式实车参数文件，只告警不切换",
 }
 
 _FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")

@@ -502,7 +502,7 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 100
     wait_for_service_timeout: 1000
-    # 2026-11-22 TDT 完整链路档：YAstar(稀疏输出) + TdtSmoother(MinimumSnap)。
+    # 2026-11-22 TDT 完整链路档：YAstar(稀疏输出) + MinimumSnapSmoother。
     # 两个 BT 都换成带 SmoothPath 的版本 —— 不换的话 smoother_server 完全不会被调用
     # （行为树里没有 SmoothPath 节点，2026-11-16 教训）。
     default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_to_pose_w_smoothing.xml
@@ -1193,16 +1193,16 @@ planner_server:
 smoother_server:
   ros__parameters:
     use_sim_time: False
-    # 2026-11-22: SimpleSmoother -> tdt_nav_kit::TdtSmoother（T-DT MinimumSnap, OSQP + SfcSquare 走廊）。
-    # 参数以仿真调优版（tdt_nav_kit/config/nav2_params_srm_tdt_smooth.yaml smoother_server 段）
-    # 为基线，仅两处实车适配：
+    # 2026-11-22: SimpleSmoother -> srm27_nav_smoother::MinimumSnapSmoother
+    # （T-DT MinimumSnap, OSQP + SfcSquare 走廊；2026-11-24 由 tdt_nav_kit 拆包并入 planner/backend）。
+    # 参数以原 tdt_nav_kit 的调优版 smoother_server 段为基线，仅两处实车适配：
     #   * corner_round_cut 0.40 -> 0.30：西缝物理缝约 0.75 m、MINCO 硬净空（ESDF）0.245 m，
     #     切角过大会把曲线顶向内角，参考线贴墙触发 MINCO validation_failed（11-21 实测教训）。
     #   * use_sim_time: False。
     # 平滑失败时 fallback_to_resampled 返回加密折线（不阻塞导航）；QP 失败不会动车。
-    smoother_plugins: ["tdt_smoother"]
-    tdt_smoother:
-      plugin: "tdt_nav_kit::TdtSmoother"
+    smoother_plugins: ["minimum_snap_smoother"]
+    minimum_snap_smoother:
+      plugin: "srm27_nav_smoother::MinimumSnapSmoother"
       occupancy_threshold: 252                     # 253 放行会让曲线贴障碍 ~0.1 m（仿真 11-09 实测），252 严格
       treat_unknown_as_obstacle: False             # True 时动态层留下的未观测格会让平滑恒失败
       order: 5                                     # 多项式阶数
@@ -1218,7 +1218,6 @@ smoother_server:
       path_resample_step: 0.30                     # 平滑前按步长线性加密（稀疏路径会让样条切进膨胀层）
       path_resample_max_points: 2000               # 加密后点数上限
       fallback_to_resampled: True                  # 求解失败时回退加密折线，保证路径仍可跟踪
-      corner_round_input_step: 0.80                # 切角前按弧长抽稀步长（米）
       corner_round_cut: 0.20                       # 切角长度（米），实车窄道档 0.40 -> 0.30 -> 0.20（2026-11-22：mouth 67° 弯内切顶墙，再降）
       corner_round_min_turn_deg: 25.0              # 小于该转角不切
       corner_round_sample_step: 0.20               # 贝塞尔采样步长（米）

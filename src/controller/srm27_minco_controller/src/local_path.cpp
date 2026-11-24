@@ -25,7 +25,7 @@ namespace
 constexpr double kEpsilon = 1.0e-6;
 
 LocalPathEnd pointFailure(
-  const Eigen::Vector2d & _point, const srm27_minco_core::Esdf2D & _esdf, double _clearance)
+  const Eigen::Vector2d & _point, const srm27_map_core::Esdf2D & _esdf, double _clearance)
 {
   const auto query = _esdf.query(_point.x(), _point.y());
   // The entire circular footprint must remain in the observed map rectangle.
@@ -51,7 +51,7 @@ void appendPoint(std::vector<Eigen::Vector2d> & _points, const Eigen::Vector2d &
 
 bool clearSegment(
   const Eigen::Vector2d & _from, const Eigen::Vector2d & _to,
-  const srm27_minco_core::Esdf2D & _esdf, double _clearance, double _step)
+  const srm27_map_core::Esdf2D & _esdf, double _clearance, double _step)
 {
   const int count = std::max(1, static_cast<int>(std::ceil((_to - _from).norm() / _step)));
   for (int i = 0; i <= count; ++i) {
@@ -65,7 +65,7 @@ bool clearSegment(
 }  // namespace
 
 std::vector<Eigen::Vector2d> improvePathClearance(
-  const std::vector<Eigen::Vector2d> & _path, const srm27_minco_core::Esdf2D & _esdf,
+  const std::vector<Eigen::Vector2d> & _path, const srm27_map_core::Esdf2D & _esdf,
   double _target_clearance, double _max_displacement)
 {
   auto result = _path;
@@ -159,7 +159,7 @@ Eigen::Vector2d forwardPathDirection(
 
 LocalPathResult extractLocalPath(
   const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position,
-  const srm27_minco_core::Esdf2D & _esdf, const LocalPathConfig & _config, bool _path_ends_at_goal)
+  const srm27_map_core::Esdf2D & _esdf, const LocalPathConfig & _config, bool _path_ends_at_goal)
 {
   LocalPathResult result;
   if (

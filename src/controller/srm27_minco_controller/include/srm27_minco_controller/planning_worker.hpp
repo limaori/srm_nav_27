@@ -25,7 +25,7 @@
 #include <thread>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/trajectory_2d.hpp"
 #include "srm27_minco_core/trajectory_initializer.hpp"
@@ -76,7 +76,7 @@ struct PlanningRequest
   /// 局部路径为空是正常情况（已经到点），不应被当成规划失败反复告警。
   double terminal_reached_radius{0.20};
   /// \brief 地图/距离场快照（由控制线程在锁内复制后建立，工作线程只读）。
-  std::shared_ptr<const srm27_minco_core::Esdf2D> esdf{};
+  std::shared_ptr<const srm27_map_core::Esdf2D> esdf{};
   /// \brief 是否使用热启动初值。
   bool use_warm_start{false};
   /// \brief 热启动内部路标点（不含首末点）。

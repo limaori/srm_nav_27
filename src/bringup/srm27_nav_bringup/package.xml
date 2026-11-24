@@ -50,6 +50,11 @@
   <!-- MINCO + MPC 迁移新增：核心算法库与 FollowPath 控制器插件。 -->
   <exec_depend>srm27_minco_core</exec_depend>
   <exec_depend>srm27_minco_controller</exec_depend>
+  <!-- 规划前端/后端插件（2026-11-24 由 tdt_nav_kit 拆包并入 src/planner）：
+       实车默认参数已使用 srm27_nav_smoother；YAstar 全局规划器由
+       use_yastar_planner 开关启用，仿真入口同样支持。 -->
+  <exec_depend>srm27_nav_planner</exec_depend>
+  <exec_depend>srm27_nav_smoother</exec_depend>
   <exec_depend>srm27_minco_vendor</exec_depend>
   <exec_depend>srm27_qpoases_vendor</exec_depend>
   <exec_depend>small_gicp_relocalization</exec_depend>

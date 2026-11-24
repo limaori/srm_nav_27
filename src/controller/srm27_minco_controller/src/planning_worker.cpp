@@ -398,7 +398,7 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   const double sample_dt = 0.05;
   for (double t = 0.0; t <= trajectory.totalDuration(); t += sample_dt) {
     const Eigen::Vector2d position = trajectory.positionAt(t);
-    const srm27_minco_core::EsdfQueryResult query =
+    const srm27_map_core::EsdfQueryResult query =
       _request.esdf->query(position.x(), position.y());
     srm27_minco_core::ClearanceSample sample;
     sample.time = t;

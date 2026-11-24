@@ -1,5 +1,11 @@
 # TDT 移植包验证测试报告
 
+> 2026-11-24 备注：被测包 `src/tdt_nav_kit` 已拆成 `srm27_nav_planner`、
+> `srm27_nav_smoother` 与 `srm27_nav_common`，插件 ID 改为
+> `srm27_nav_planner::YAstarGlobalPlanner` / `srm27_nav_smoother::MinimumSnapSmoother`。
+> 本报告的算法结论仍可引用，路径与插件名以当时为准；
+> 拆分记录见 [2026-11-24-tdt-merge-into-planner.md](2026-11-24-tdt-merge-into-planner.md)。
+
 - 日期：2026-11-20（C2 修复复测：2026-11-21；A9/BackUp 二次修复：2026-11-21）
 - 仓库/分支：`srm_nav_27` / `feat/实车迁移东大规划`
 - 被测对象：`src/tdt_nav_kit`（TdtGlobalPlanner、TdtSmoother）及 Nav2 → MINCO/MPC → fakeyaw 接入链路

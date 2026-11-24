@@ -24,8 +24,8 @@
 #include <string>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/smooth_cost.hpp"
 #include "srm27_minco_core/trajectory_2d.hpp"
@@ -33,9 +33,6 @@
 #include "srm27_minco_core/trajectory_validator.hpp"
 #include "srm27_minco_core/types.hpp"
 
-using srm27_minco_core::CellState;
-using srm27_minco_core::Esdf2D;
-using srm27_minco_core::GridSnapshot;
 using srm27_minco_core::Limits2D;
 using srm27_minco_core::MincoOptimizer;
 using srm27_minco_core::MincoOptimizerConfig;
@@ -47,6 +44,10 @@ using srm27_minco_core::TrajectoryInitializer;
 
 namespace
 {
+using srm27_map_core::CellState;
+using srm27_map_core::Esdf2D;
+using srm27_map_core::EsdfQueryResult;
+using srm27_map_core::GridSnapshot;
 
 /// \brief 把实测指标格式化成科学计数法字符串（gtest XML 里可读）。
 std::string formatMetric(double _value)

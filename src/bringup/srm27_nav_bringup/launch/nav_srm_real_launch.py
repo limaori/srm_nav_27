@@ -279,19 +279,19 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
-class RealNavParams(RewrittenYaml):
+class RealPlannerParams(RewrittenYaml):
     def perform(self, context):
         path = super().perform(context)
-        if not _as_bool(LaunchConfiguration("use_tdt_planner").perform(context)):
+        if not _as_bool(LaunchConfiguration("use_yastar_planner").perform(context)):
             return path
 
         with open(path, encoding="utf-8") as stream:
             config = yaml.safe_load(stream)
         planner = config.get("planner_server", {}).get("ros__parameters", {})
         if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
-            raise RuntimeError("use_tdt_planner requires planner_server with a single GridBased planner")
+            raise RuntimeError("use_yastar_planner requires planner_server with a single GridBased planner")
         planner["GridBased"] = {
-            "plugin": "tdt_nav_kit::TdtGlobalPlanner",
+            "plugin": "srm27_nav_planner::YAstarGlobalPlanner",
             "occupancy_threshold": 252,
             "treat_unknown_as_obstacle": True,
             "save_point_max_radius": 0.4,
@@ -300,11 +300,11 @@ class RealNavParams(RewrittenYaml):
             # 最近的可通行格，与 planner 默认值一致。
             "goal_snap_max_radius": 0.4,
             "path_resample_step": 0.20,
-            # 2026-11-22 补全（此前注入丢键，与仿真 tdt 参数不一致）：
+            # 2026-11-22 补全（此前注入丢键，与仿真参数不一致）：
             # 缺 cost_inflate_radius 时 planner 对 252 带边缘没有离障代价，实测路径
             # 贴着 inscribed(253) 走 —— smoother 的 QP(252 约束)在贴边路径上无解、
             # nav2 footprint 检查(0.15m 圆盘 vs 253)也必撞。补上后按 1.0m 半径
-            # 抬高障碍附近代价，把路径推离墙体，与仿真 nav2_params_srm_tdt.yaml 同源。
+            # 抬高障碍附近代价，把路径推离墙体，与仿真 YAstar 注入参数同源。
             "cost_inflate_radius": 1.0,
             "mask_num_layers": 1,
             # 2026-11-22: 0.1 -> 0.03。ε=0.1 的折线简化会把沿走廊中轴蜿蜒的 S 路径
@@ -392,7 +392,7 @@ def generate_launch_description():
     # Nav2 栈的参数文件：在通用文件之上注入航向策略与判停器（点分全路径，
     # 见 nav2_common RewrittenYaml 的 substitute_params "total path" 分支）。
     # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装。
-    nav_stack_params = RealNavParams(
+    nav_stack_params = RealPlannerParams(
         source_file=params_file,
         root_key=None,
         param_rewrites={
@@ -604,10 +604,10 @@ def generate_launch_description():
     )
     ld.add_action(
         DeclareLaunchArgument(
-            "use_tdt_planner",
+            "use_yastar_planner",
             default_value="False",
             choices=["True", "False"],
-            description="Use YAstar as the GridBased global planner for real navigation",
+            description="Use srm27_nav_planner::YAstarGlobalPlanner as the GridBased global planner",
         )
     )
     ld.add_action(

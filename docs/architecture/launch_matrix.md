@@ -33,6 +33,10 @@
 - `--reloc` 需要 `maps/pcd/<site>_mapframe.pcd`；`point_lio` + `--reloc` 是实车 GICP 组合。
 - 速度链由 `fake_vel_transform` 把 `gimbal_yaw_fake` 下的平移一次性转到 `base_link`；
   `srm_cmd_mux` 只透传平移并叠加决策层 `rotation_cmd` 的 `wz`。`yaw_mode` 默认 `xy_only`。
+- 规划插件（2026-11-24 起）：平滑器默认就是
+  `srm27_nav_smoother::MinimumSnapSmoother`（参数在 `config/real/current/` 里）；
+  加 `--yastar-planner` 把全局规划器从 ThetaStar 换成
+  `srm27_nav_planner::YAstarGlobalPlanner`（`--tdt-planner` 仍作为过渡别名）。
 
 **2）仿真导航**
 
@@ -40,6 +44,11 @@
 - 默认不使用 LIO（Gazebo 真值里程计）；`--lio` 才接 ZLIO/Point-LIO。仿真里控制器只出平移，
   底盘 `wz` 由 `rotation_cmd` 在 `srm_cmd_mux` 合成。
 - 默认命名空间 `red_standard_robot1`；Gazebo 与导航分两个标签页启动。
+- 规划插件可选：`--yastar-planner`（`srm27_nav_planner::YAstarGlobalPlanner`）、
+  `--minisnap-smoother`（`srm27_nav_smoother::MinimumSnapSmoother`）。两个都加即原 TDT 仿真链路；
+  默认保持参数文件里的 ThetaStar + SimpleSmoother。打开平滑器时 launch 会把两份行为树
+  自动切到带 `SmoothPath` 的 `nav2_bt/navigate_to_pose_w_smoothing.xml` /
+  `navigate_through_poses_w_smoothing.xml`，不需要另传 `--behavior`。
 
 **3）实车建图**
 

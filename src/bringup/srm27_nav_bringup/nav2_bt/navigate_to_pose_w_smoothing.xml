@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  带平滑的单目标导航行为树（tdt_nav_kit 专用）。
+  带平滑的单目标导航行为树（srm27_nav_smoother 专用）。
 
   与 srm27_nav_bringup 自带的 navigate_to_pose_w_replanning_and_recovery.xml
   的唯一差别：在 ComputePathToPose 与 FollowPath 之间插入了 SmoothPath。
@@ -27,7 +27,7 @@
          把车顶到了右侧桌子上。对比测试期间规定：
            - 规划/平滑失败只清代价地图重试，绝不主动给速度；
            - 重试 3 次仍失败就让目标 ABORT，由人检查现场后再决定。
-         需要恢复原来的"脱困推车"时，从 tdt_nav_kit 的原版 BT 拷回即可。 -->
+         需要恢复原来的"脱困推车"时，从本文件的 git 历史里把 <BackUp> 加回即可。 -->
     <RecoveryNode name="NavigateRecovery"
                   number_of_retries="3">
       <PipelineSequence name="NavigateWithReplanning">

@@ -20,10 +20,16 @@
 #include <string>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
 
 namespace srm27_minco_core
 {
+
+// 地图类型由 srm27_map_core 提供（2026-11-24 从本包抽出）。
+using srm27_map_core::CellState;
+using srm27_map_core::Esdf2D;
+using srm27_map_core::EsdfQueryResult;
+using srm27_map_core::GridSnapshot;
 
 /// \brief 一次脱困决策的结果。
 enum class RecoveryDecision {

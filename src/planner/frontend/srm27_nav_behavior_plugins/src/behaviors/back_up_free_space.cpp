@@ -156,7 +156,7 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
 
   // get costmap
   auto costmap = result.get()->map;
-  srm27_minco_core::GridSnapshot valid_map;
+  srm27_map_core::GridSnapshot valid_map;
   if (costmap.header.frame_id != global_frame_ || !buildGridSnapshot(costmap, &valid_map)) {
     RCLCPP_ERROR(logger_, "Invalid costmap or frame does not match behavior global_frame");
     stopRobot();
@@ -377,17 +377,17 @@ double BackUpFreeSpace::queryCurrentClearance(const geometry_msgs::msg::Pose2D &
   // 唯一区别是**只抠机器人周围一小块**：整张全局图建一次 ESDF 实测 15~24 ms，
   // 而这里是 10 Hz 的周期函数，付不起（详见 buildGridSnapshotAround 的说明）。
   const double crop_radius = std::max(1.0, 2.0 * early_exit_clearance_);
-  srm27_minco_core::GridSnapshot snapshot;
+  srm27_map_core::GridSnapshot snapshot;
   if (!buildGridSnapshotAround(costmap, pose, crop_radius, &snapshot)) {
     return nan;
   }
-  srm27_minco_core::Esdf2D esdf;
-  srm27_minco_core::Esdf2D::Config esdf_config;
+  srm27_map_core::Esdf2D esdf;
+  srm27_map_core::Esdf2D::Config esdf_config;
   esdf_config.unknown_is_seed = esdf_unknown_is_seed_;
   if (!esdf.build(snapshot, esdf_config)) {
     return nan;
   }
-  const srm27_minco_core::EsdfQueryResult here = esdf.query(pose.x, pose.y);
+  const srm27_map_core::EsdfQueryResult here = esdf.query(pose.x, pose.y);
   if (!here.valid || !std::isfinite(here.distance)) {
     return nan;
   }
@@ -436,13 +436,13 @@ bool BackUpFreeSpace::planEscapeDirectionByEsdf(
     return false;
   }
 
-  srm27_minco_core::GridSnapshot snapshot;
+  srm27_map_core::GridSnapshot snapshot;
   if (!buildGridSnapshot(costmap, &snapshot)) {
     return false;
   }
 
-  srm27_minco_core::Esdf2D esdf;
-  srm27_minco_core::Esdf2D::Config esdf_config;
+  srm27_map_core::Esdf2D esdf;
+  srm27_map_core::Esdf2D::Config esdf_config;
   esdf_config.unknown_is_seed = esdf_unknown_is_seed_;
   if (!esdf.build(snapshot, esdf_config)) {
     return false;
@@ -466,7 +466,7 @@ bool BackUpFreeSpace::planEscapeDirectionByEsdf(
   // 诊断标注：`planEscapeDirection` 有三个分支（梯度上升 / 环形搜索 / 失败）。
   // 这里复现它的分支条件，好让日志能说清"这次方向是梯度给的还是环形搜索给的"——
   // 两者在现场对应完全不同的处境：梯度 = 还贴着障碍、环形 = 已经陷在梯度平台的死角里。
-  const srm27_minco_core::EsdfQueryResult here = esdf.query(position.x(), position.y());
+  const srm27_map_core::EsdfQueryResult here = esdf.query(position.x(), position.y());
   last_used_circular_search_ = !(
     here.gradient_valid && here.gradient.allFinite() &&
     here.gradient.norm() >= recovery_config.gradient_epsilon);
@@ -479,7 +479,7 @@ bool BackUpFreeSpace::planEscapeDirectionByEsdf(
 }
 
 bool BackUpFreeSpace::buildGridSnapshot(
-  const nav2_msgs::msg::Costmap & costmap, srm27_minco_core::GridSnapshot * snapshot) const
+  const nav2_msgs::msg::Costmap & costmap, srm27_map_core::GridSnapshot * snapshot) const
 {
   if (snapshot == nullptr) {
     return false;
@@ -498,13 +498,13 @@ bool BackUpFreeSpace::buildGridSnapshot(
   // 与 `CostmapAdapter::snapshot` 同一套语义：只有原始占用与未知进距离场，
   // 膨胀代价 1..252 一律视为自由 —— 机器人半径已经在净空阈值里单独计入，
   // 重复计入会让有效通道凭空变窄（会把本来能过的窄通道判成"无处可逃"）。
-  std::vector<srm27_minco_core::CellState> cells(count, srm27_minco_core::CellState::kFree);
+  std::vector<srm27_map_core::CellState> cells(count, srm27_map_core::CellState::kFree);
   for (std::size_t i = 0; i < count; ++i) {
     const std::uint8_t cost = costmap.data[i];
     if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
-      cells[i] = srm27_minco_core::CellState::kOccupied;
+      cells[i] = srm27_map_core::CellState::kOccupied;
     } else if (cost == nav2_costmap_2d::NO_INFORMATION) {
-      cells[i] = srm27_minco_core::CellState::kUnknown;
+      cells[i] = srm27_map_core::CellState::kUnknown;
     }
   }
 
@@ -515,7 +515,7 @@ bool BackUpFreeSpace::buildGridSnapshot(
 
 bool BackUpFreeSpace::buildGridSnapshotAround(
   const nav2_msgs::msg::Costmap & costmap, const geometry_msgs::msg::Pose2D & pose,
-  double radius, srm27_minco_core::GridSnapshot * snapshot) const
+  double radius, srm27_map_core::GridSnapshot * snapshot) const
 {
   if (snapshot == nullptr) {
     return false;
@@ -558,19 +558,19 @@ bool BackUpFreeSpace::buildGridSnapshotAround(
   // 逐行抠图。索引布局与 `buildGridSnapshot` 完全一致：行优先、自左下角起，
   // 即 `my * size_x + mx`（`GetCostmap` 返回的是 `Costmap2D::getCharMap()`，不是
   // nav_msgs/OccupancyGrid 那种自上而下的布局，不需要翻转 y）。
-  std::vector<srm27_minco_core::CellState> cells(
+  std::vector<srm27_map_core::CellState> cells(
     static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny),
-    srm27_minco_core::CellState::kFree);
+    srm27_map_core::CellState::kFree);
   for (int my = y0; my < y1; ++my) {
     const std::size_t src_row = static_cast<std::size_t>(my) * static_cast<std::size_t>(size_x);
     const std::size_t dst_row = static_cast<std::size_t>(my - y0) * static_cast<std::size_t>(nx);
     for (int mx = x0; mx < x1; ++mx) {
       const std::uint8_t cost = costmap.data[src_row + static_cast<std::size_t>(mx)];
-      srm27_minco_core::CellState & cell = cells[dst_row + static_cast<std::size_t>(mx - x0)];
+      srm27_map_core::CellState & cell = cells[dst_row + static_cast<std::size_t>(mx - x0)];
       if (cost == nav2_costmap_2d::LETHAL_OBSTACLE) {
-        cell = srm27_minco_core::CellState::kOccupied;
+        cell = srm27_map_core::CellState::kOccupied;
       } else if (cost == nav2_costmap_2d::NO_INFORMATION) {
-        cell = srm27_minco_core::CellState::kUnknown;
+        cell = srm27_map_core::CellState::kUnknown;
       }
     }
   }
@@ -645,7 +645,7 @@ bool BackUpFreeSpace::findBestDirection(
   const nav2_msgs::msg::Costmap & costmap, geometry_msgs::msg::Pose2D pose, float start_angle,
   float end_angle, float radius, float angle_increment, float * best_angle)
 {
-  srm27_minco_core::GridSnapshot snapshot;
+  srm27_map_core::GridSnapshot snapshot;
   if (
     best_angle == nullptr || !buildGridSnapshot(costmap, &snapshot) || !std::isfinite(pose.x) ||
     !std::isfinite(pose.y) || !std::isfinite(radius) || radius <= 0.0 ||

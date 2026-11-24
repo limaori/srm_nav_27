@@ -40,7 +40,7 @@
     }
   ],
   "planner": "YAstar",
-  "smoother": "TdtSmoother",
+  "smoother": "MinimumSnapSmoother",
   "controller": "MincoMpcController",
   "odometry": "Gazebo ground truth",
   "goal_tolerance_m": 0.5

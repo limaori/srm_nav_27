@@ -20,8 +20,8 @@
 
 #include "srm27_minco_controller/command_frame.hpp"
 #include "srm27_minco_controller/minco_mpc_controller.hpp"
-#include "srm27_minco_core/esdf_2d.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 
 namespace srm27_minco_controller
 {
@@ -248,9 +248,9 @@ TEST(ClearanceVelocityTest, ConstraintIsInvariantToFrameRotation)
 
 namespace
 {
-srm27_minco_core::Esdf2D corridor(bool _blocked_ahead)
+srm27_map_core::Esdf2D corridor(bool _blocked_ahead)
 {
-  using srm27_minco_core::CellState;
+  using srm27_map_core::CellState;
   constexpr int size = 90;
   std::vector<CellState> cells(size * size, CellState::kFree);
   for (int i = 0; i < size; ++i) {
@@ -260,9 +260,9 @@ srm27_minco_core::Esdf2D corridor(bool _blocked_ahead)
       cells[i * size + 58] = CellState::kOccupied;
     }
   }
-  srm27_minco_core::GridSnapshot grid;
+  srm27_map_core::GridSnapshot grid;
   EXPECT_TRUE(grid.reset(-2.0, -2.0, 0.05, size, size, std::move(cells), 1, 0.0));
-  srm27_minco_core::Esdf2D esdf;
+  srm27_map_core::Esdf2D esdf;
   EXPECT_TRUE(esdf.build(grid));
   return esdf;
 }

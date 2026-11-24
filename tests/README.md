@@ -34,4 +34,4 @@ bash tests/smoke/test_lib_path_guard.sh
 ./tests/recovery/validate_recovery.sh
 ```
 
-决策及 Nav2/MINCO 联调入口见 `src/decision/srm27_behavior/scripts/validate_decision.sh`；包内测试位于 `src/decision/srm27_behavior/test/`。
+决策及 Nav2/MINCO 联调入口见 `src/decision/backend/srm27_behavior/scripts/validate_decision.sh`；包内测试位于 `src/decision/backend/srm27_behavior/test/`，核心/插件 gtest 分别在 `src/decision/common/srm27_behavior_core/test/` 与 `src/decision/frontend/srm27_behavior_plugins/test/`。

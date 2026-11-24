@@ -293,7 +293,7 @@ bt_navigator:
     bt_loop_duration: 10
     default_server_timeout: 100
     wait_for_service_timeout: 1000
-    default_nav_to_pose_bt_xml: /home/srm/nav_ws/srm_nav_27_tdt/src/tdt_nav_kit/behavior_trees/navigate_to_pose_w_smoothing.xml
+    default_nav_to_pose_bt_xml: $(find-pkg-share srm27_nav_bringup)/nav2_bt/navigate_to_pose_w_smoothing.xml
     default_nav_through_poses_bt_xml: $(find-pkg-share srm27_nav_bringup)/behavior_trees/navigate_through_poses_route_aware.xml
     plugin_lib_names:
     - nav2_compute_path_to_pose_action_bt_node
@@ -583,7 +583,7 @@ planner_server:
     planner_plugins:
     - GridBased
     GridBased:
-      plugin: tdt_nav_kit::TdtGlobalPlanner
+      plugin: srm27_nav_planner::YAstarGlobalPlanner
       occupancy_threshold: 252
       treat_unknown_as_obstacle: false
       mask_num_layers: 1
@@ -595,9 +595,9 @@ smoother_server:
   ros__parameters:
     use_sim_time: true
     smoother_plugins:
-    - tdt_smoother
-    tdt_smoother:
-      plugin: tdt_nav_kit::TdtSmoother
+    - minimum_snap_smoother
+    minimum_snap_smoother:
+      plugin: srm27_nav_smoother::MinimumSnapSmoother
       occupancy_threshold: 252
       treat_unknown_as_obstacle: false
       order: 5

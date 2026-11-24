@@ -22,8 +22,8 @@
 #include <utility>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 #include "srm27_minco_core/trajectory_2d.hpp"
 #include "srm27_minco_core/trajectory_validator.hpp"
 #include "srm27_minco_core/types.hpp"
@@ -32,6 +32,10 @@ namespace minco = srm27_minco_core;
 
 namespace
 {
+using srm27_map_core::CellState;
+using srm27_map_core::Esdf2D;
+using srm27_map_core::EsdfQueryResult;
+using srm27_map_core::GridSnapshot;
 
 /// \brief 测试地图：200x200，分辨率 0.05 m，原点 (-5,-5)，覆盖 [-5,5]^2。
 constexpr int kSizeX = 200;

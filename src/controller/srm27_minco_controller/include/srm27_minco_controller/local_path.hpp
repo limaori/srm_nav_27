@@ -18,7 +18,7 @@
 #include <Eigen/Core>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
 
 namespace srm27_minco_controller
 {
@@ -31,7 +31,7 @@ const char * toString(LocalPathEnd _end);
 /// a bounded distance. Keep endpoints fixed; this is only an optimizer seed,
 /// and clipping plus independent trajectory validation remain mandatory.
 std::vector<Eigen::Vector2d> improvePathClearance(
-  const std::vector<Eigen::Vector2d> & _path, const srm27_minco_core::Esdf2D & _esdf,
+  const std::vector<Eigen::Vector2d> & _path, const srm27_map_core::Esdf2D & _esdf,
   double _target_clearance, double _max_displacement);
 
 /// Direction toward the forward endpoint of the nearest path segment; keeps
@@ -61,7 +61,7 @@ struct LocalPathResult
 /// This produces a planning reference, never an executable trajectory.
 LocalPathResult extractLocalPath(
   const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position,
-  const srm27_minco_core::Esdf2D & _esdf, const LocalPathConfig & _config, bool _path_ends_at_goal);
+  const srm27_map_core::Esdf2D & _esdf, const LocalPathConfig & _config, bool _path_ends_at_goal);
 
 }  // namespace srm27_minco_controller
 

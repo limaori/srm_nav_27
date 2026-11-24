@@ -79,7 +79,7 @@ for name in ['global_costmap', 'local_costmap']:
     for source in voxel['observation_sources'].split():
         voxel[source]['sensor_frame'] = 'front_mid360'
 nav['planner_server']['ros__parameters']['GridBased'] = {
-    'plugin': 'tdt_nav_kit::TdtGlobalPlanner', 'occupancy_threshold': 240,
+    'plugin': 'srm27_nav_planner::YAstarGlobalPlanner', 'occupancy_threshold': 240,
     'treat_unknown_as_obstacle': True, 'save_point_max_radius': 0.4,
     'path_resample_step': 0.20,
 }

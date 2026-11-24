@@ -78,7 +78,7 @@ def analyze(directory):
         'speed_limit_1_mps_respected':float(speed.max())<=1.0+1e-6 and float(cmd_speed.max())<=1.0+1e-6,
         'full_speed_test_exercised':float(speed.max())>=.90,
         'stopped_for_two_seconds':stop_range<=.002 and stopped_cmd_max<=1e-6 and len(stop)>=10,
-        'fallback_disabled':r['verified_parameters']['smoother_server']['tdt_smoother.fallback_to_resampled'] is False,
+        'fallback_disabled':r['verified_parameters']['smoother_server']['minimum_snap_smoother.fallback_to_resampled'] is False,
         'execution_clearance_not_lowered':sum(r['verified_parameters']['controller_server'][k] for k in ['FollowPath.safety.robot_radius','FollowPath.safety.clearance_margin'])>=.30,
         'bt_collision_check_enabled':r.get('bt_collision_check_enabled',False),
     }

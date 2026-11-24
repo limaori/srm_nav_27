@@ -20,21 +20,21 @@
 #include <vector>
 
 #include "srm27_minco_controller/planning_worker.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 
 namespace controller = srm27_minco_controller;
-namespace core = srm27_minco_core;
+namespace map = srm27_map_core;
 
 namespace
 {
 controller::PlanningRequest request(double _end_x)
 {
   controller::PlanningRequest result;
-  core::GridSnapshot grid;
+  map::GridSnapshot grid;
   EXPECT_TRUE(grid.reset(
-    -6, -6, 0.05, 240, 240, std::vector<core::CellState>(240 * 240, core::CellState::kFree), 1,
+    -6, -6, 0.05, 240, 240, std::vector<map::CellState>(240 * 240, map::CellState::kFree), 1,
     100.0));
-  auto esdf = std::make_shared<core::Esdf2D>();
+  auto esdf = std::make_shared<map::Esdf2D>();
   EXPECT_TRUE(esdf->build(grid));
   result.esdf = esdf;
   result.path = {Eigen::Vector2d(0, 0), Eigen::Vector2d(_end_x, 0)};

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_map_adapter</name>
+  <version>0.1.0</version>
+  <description>
+    SRM27 规划地图适配层：把 Nav2 Costmap2D/ROS 复制成 srm27_map_core::GridSnapshot，
+    并维护「内容版本号」。规划前端、平滑器与 controller 共用。
+  </description>
+  <maintainer email="srm27@example.com">SRM27 Navigation Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>srm27_map_core</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

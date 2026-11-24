@@ -54,6 +54,8 @@
 import os
 import sys
 
+import yaml
+
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -219,6 +221,103 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
+# ---------------------------------------------------------------------------
+# 可选规划插件（2026-11-24：原 tdt_nav_kit 拆包并入 src/planner）
+#   前端 srm27_nav_planner::YAstarGlobalPlanner      —— 稀疏但更快的 A* 路径
+#   后端 srm27_nav_smoother::MinimumSnapSmoother     —— MinimumSnap + SFC 平滑
+# 参数只注入这两段，不维护整份参数副本：单一来源仍是 params_file。
+# ---------------------------------------------------------------------------
+YASTAR_PLANNER_OVERRIDE = {
+    "plugin": "srm27_nav_planner::YAstarGlobalPlanner",
+    "occupancy_threshold": 252,
+    "treat_unknown_as_obstacle": False,
+    "mask_num_layers": 1,
+    "cost_inflate_radius": 1.0,
+    "simplify_epsilon": 0.1,
+    "save_point_max_radius": 0.4,
+    "goal_snap_max_radius": 0.4,
+    "path_resample_step": 0.20,
+    "orientation_mode": "tangent",
+}
+
+MINISNAP_SMOOTHER_INSTANCE = "minimum_snap_smoother"
+MINISNAP_SMOOTHER_OVERRIDE = {
+    "plugin": "srm27_nav_smoother::MinimumSnapSmoother",
+    "occupancy_threshold": 252,
+    "treat_unknown_as_obstacle": False,
+    "order": 5,
+    "max_dx": 3,
+    "strict_collision": False,
+    "backend": "path",
+    "collision_iter": 6,
+    "norm_time": True,
+    "max_corridor_range": 2.5,
+    "corridor_shrink": 0.0,
+    "max_speed": 3.0,
+    "max_acc": 1.0,
+    "path_resample_step": 0.30,
+    "path_resample_max_points": 2000,
+    "fallback_to_resampled": True,
+    "corner_round_cut": 0.40,
+    "corner_round_min_turn_deg": 25.0,
+    "corner_round_sample_step": 0.20,
+    "init_vel_from_odom": False,
+    "odom_topic": "odom",
+    "init_vel_max_age": 0.30,
+    "min_points": 2,
+    "orientation_mode": "tangent",
+    "publish_sfc": True,
+    "sfc_topic": "~/sfc_corridor",
+    "sfc_line_width": 0.02,
+}
+
+
+class SimPlannerSmootherParams(RewrittenYaml):
+    """按开关注入 YAstar / MinimumSnap 两段配置。
+
+    `use_yastar_planner` 与 `use_minisnap_smoother` 都为 False 时原样返回
+    RewrittenYaml 的结果，链路与默认仿真完全一致。
+    """
+
+    def perform(self, context):
+        path = super().perform(context)
+        use_yastar = _as_bool(
+            LaunchConfiguration("use_yastar_planner").perform(context))
+        use_minisnap = _as_bool(
+            LaunchConfiguration("use_minisnap_smoother").perform(context))
+        if not (use_yastar or use_minisnap):
+            return path
+
+        with open(path, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+
+        if use_yastar:
+            planner = config.get("planner_server", {}).get("ros__parameters", {})
+            if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
+                raise RuntimeError(
+                    "use_yastar_planner requires planner_server with a single "
+                    "GridBased planner")
+            planner["GridBased"] = dict(YASTAR_PLANNER_OVERRIDE)
+
+        if use_minisnap:
+            smoother = config.get("smoother_server", {}).get("ros__parameters", {})
+            smoother["smoother_plugins"] = [MINISNAP_SMOOTHER_INSTANCE]
+            smoother[MINISNAP_SMOOTHER_INSTANCE] = dict(MINISNAP_SMOOTHER_OVERRIDE)
+            # 行为树没有 SmoothPath 节点时 smoother_server 根本不会被调用
+            # （2026-11-16 教训），所以打开平滑器时把两份 BT 一起切到平滑版。
+            bt = config.get("bt_navigator", {}).get("ros__parameters", {})
+            bt["default_nav_to_pose_bt_xml"] = (
+                "$(find-pkg-share srm27_nav_bringup)/nav2_bt/"
+                "navigate_to_pose_w_smoothing.xml")
+            bt["default_nav_through_poses_bt_xml"] = (
+                "$(find-pkg-share srm27_nav_bringup)/nav2_bt/"
+                "navigate_through_poses_w_smoothing.xml")
+
+        with open(path, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream)
+        return path
+
+
 def generate_launch_description():
     bringup_dir = get_package_share_directory("srm27_nav_bringup")
     launch_dir = os.path.join(bringup_dir, "launch")
@@ -319,7 +418,7 @@ def generate_launch_description():
     # root_key 留空：nav2_stack 内部的 RewrittenYaml 会再做命名空间包装，这里先包
     # 会双重嵌套导致参数加载不到。实车链（start_real_nav.sh）直接走
     # nav2_stack_launch、不经过本包装，其 yaw_policy/判停器不受影响。
-    nav_stack_params = RewrittenYaml(
+    nav_stack_params = SimPlannerSmootherParams(
         source_file=params_file,
         root_key=None,
         param_rewrites={
@@ -639,6 +738,31 @@ def generate_launch_description():
             "use_velocity_smoother",
             default_value="True",
             description="True: controller→velocity_smoother→cmd_vel_nav；False: controller 直接输出",
+        )
+    )
+    # 可选规划插件（原 tdt_nav_kit 的两段参数，2026-11-24 收进本入口）：
+    #   --yastar-planner + --minisnap-smoother 复现原来的 TDT 仿真链路，
+    #   单独打开任何一个也可以（参数各自注入，不互相依赖）。
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_yastar_planner",
+            default_value="False",
+            choices=["True", "False"],
+            description=(
+                "True: planner_server.GridBased 换成 srm27_nav_planner::YAstarGlobalPlanner；"
+                "False: 保持参数文件里的 ThetaStar"
+            ),
+        )
+    )
+    ld.add_action(
+        DeclareLaunchArgument(
+            "use_minisnap_smoother",
+            default_value="False",
+            choices=["True", "False"],
+            description=(
+                "True: smoother_server 换成 srm27_nav_smoother::MinimumSnapSmoother，"
+                "并把行为树切到带 SmoothPath 的版本；False: 保持 SimpleSmoother"
+            ),
         )
     )
     # --- wz 控制迁移 / fakeyaw（方案 §4.4）-------------------------------------

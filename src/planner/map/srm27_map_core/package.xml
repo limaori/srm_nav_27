@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_map_core</name>
+  <version>0.1.0</version>
+  <description>
+    SRM27 规划地图底座（纯 C++，不依赖 ROS/Nav2）：GridSnapshot 栅格语义与几何、
+    ESDF 距离场、占据几何查询、SFC 栅格视图。规划前端（YAstar）、后端
+    （MINCO/ESDF、MinimumSnap/SFC）与 controller 共用。
+  </description>
+  <maintainer email="srm27@example.com">SRM27 Navigation Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <build_depend>eigen3_cmake_module</build_depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+  <exec_depend>eigen</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

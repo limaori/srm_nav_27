@@ -14,7 +14,7 @@
 
 #include "srm27_minco_controller/command_frame.hpp"
 
-#include "srm27_minco_core/esdf_2d.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
 
 namespace srm27_minco_controller
 {
@@ -49,7 +49,7 @@ bool resolveCommandFrame(
 }
 
 Eigen::Vector2d brakingPathLimitedVelocity(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const srm27_map_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
   const Eigen::Vector2d & _velocity, double _required_clearance,
   double _braking_deceleration, double _reaction_latency)
 {
@@ -101,7 +101,7 @@ Eigen::Vector2d brakingPathLimitedVelocity(
 }
 
 Eigen::Vector2d limitExecutionVelocity(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const srm27_map_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
   const Eigen::Vector2d & _requested, const Eigen::Vector2d & _measured,
   double _required_clearance, double _braking_deceleration, double _reaction_latency)
 {

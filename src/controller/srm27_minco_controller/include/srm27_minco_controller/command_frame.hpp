@@ -22,7 +22,7 @@
 
 #include "srm27_minco_core/kinematics.hpp"
 
-namespace srm27_minco_core
+namespace srm27_map_core
 {
 class Esdf2D;
 }
@@ -120,13 +120,13 @@ inline Eigen::Vector2d clearanceLimitedVelocity(
 
 /// Limit a command against obstacles along its reaction and braking path.
 Eigen::Vector2d brakingPathLimitedVelocity(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const srm27_map_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
   const Eigen::Vector2d & _velocity, double _required_clearance,
   double _braking_deceleration, double _reaction_latency);
 
 /// Account for existing motion when limiting an approach to an obstacle.
 Eigen::Vector2d limitExecutionVelocity(
-  const srm27_minco_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
+  const srm27_map_core::Esdf2D & _esdf, const Eigen::Vector2d & _position,
   const Eigen::Vector2d & _requested, const Eigen::Vector2d & _measured,
   double _required_clearance, double _braking_deceleration, double _reaction_latency);
 

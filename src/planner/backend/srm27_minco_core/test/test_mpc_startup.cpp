@@ -19,8 +19,8 @@
 #include <string>
 #include <vector>
 
-#include "srm27_minco_core/esdf_2d.hpp"
-#include "srm27_minco_core/grid_snapshot.hpp"
+#include "srm27_map_core/esdf_2d.hpp"
+#include "srm27_map_core/grid_snapshot.hpp"
 #include "srm27_minco_core/minco_optimizer.hpp"
 #include "srm27_minco_core/mpc_solver.hpp"
 #include "srm27_minco_core/tracking_reference.hpp"
@@ -45,6 +45,10 @@
 
 namespace
 {
+using srm27_map_core::CellState;
+using srm27_map_core::Esdf2D;
+using srm27_map_core::EsdfQueryResult;
+using srm27_map_core::GridSnapshot;
 
 using namespace srm27_minco_core;
 

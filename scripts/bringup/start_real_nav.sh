@@ -74,7 +74,7 @@
 # 用法:
 #   ./scripts/bringup/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
 #   ./scripts/bringup/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
-#   ./scripts/bringup/start_real_nav.sh --tdt-planner          # YAstar + MINCO/MPC
+#   ./scripts/bringup/start_real_nav.sh --yastar-planner        # YAstar + MINCO/MPC
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./scripts/bringup/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
@@ -107,7 +107,10 @@
 #   -p, --params <绝对路径>     Nav2 参数文件（实车默认 = 迁移链那份, 见 -c）
 #   -c, --controller <auto|minco>   控制器（实车另有 omni 可选, 见下）
 #       --minco                 等价于 --controller minco
-#       --tdt-planner           全局规划器换成 YAstar（局部仍为 MINCO/MPC）
+#       --yastar-planner         全局规划器换成 YAstar（局部仍为 MINCO/MPC）
+#       --no-yastar-planner      回到 ThetaStar（默认）
+#       --minisnap-smoother      仅提示：实车默认已是 MinimumSnap 平滑器
+#       --no-minisnap-smoother   仅提示：没有 SimpleSmoother 的正式实车参数
 #       --gicp / --no-gicp      先验点云重定位（= --reloc）/ 关掉它（= --no-reloc, LIO+静态图）
 #       --lio / --no-lio        LIO 出里程计 + 静态 map->odom / 关掉 LIO（实车=--static）
 #       --lio-frontend <point_lio|zlio>   里程计前端（**默认 zlio**；point_lio = 回退）
@@ -370,7 +373,7 @@ ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 # 局部控制器: auto (按参数文件内容判断) / omni / minco。
 CONTROLLER="${CONTROLLER:-minco}"
 CONTROLLER_CLI_GIVEN=0
-USE_TDT_PLANNER=0
+USE_YASTAR_PLANNER=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
@@ -697,7 +700,19 @@ while [ $# -gt 0 ]; do
                       CONTROLLER_CLI_GIVEN=1; shift 2 ;;
     --minco)          CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --omni)           CONTROLLER="omni"; CONTROLLER_CLI_GIVEN=1; shift ;;
-    --tdt-planner)    USE_TDT_PLANNER=1; shift ;;
+    --yastar-planner) USE_YASTAR_PLANNER=1; shift ;;
+    --no-yastar-planner) USE_YASTAR_PLANNER=0; shift ;;
+    # 兼容旧命令：等价于 --yastar-planner（2026-11-24 插件改名后的过渡入口）。
+    --tdt-planner)    USE_YASTAR_PLANNER=1; shift ;;
+    # 参数面与仿真脚本对齐：实车默认参数已固定使用 MinimumSnap 平滑器，
+    # 这两个开关只用于提示，不改变链路（仿真/实车共用同一套 start_* 习惯）。
+    --minisnap-smoother)
+      echo "[提示] 实车默认参数已使用 srm27_nav_smoother::MinimumSnapSmoother（无需开关）。" >&2
+      shift ;;
+    --no-minisnap-smoother)
+      echo "[警告] 实车没有 SimpleSmoother 的正式参数文件：忽略 --no-minisnap-smoother，" >&2
+      echo "[警告] 平滑器仍为 srm27_nav_smoother::MinimumSnapSmoother。" >&2
+      shift ;;
     --map-to-odom)
       MAP_TO_ODOM_X="${2:?--map-to-odom 需要 X Y YAW}"
       MAP_TO_ODOM_Y="${3:?--map-to-odom 需要 X Y YAW}"
@@ -1220,8 +1235,8 @@ if [ "$CONTROLLER" = "minco" ] && [ "$USE_FAKE_VEL_TRANSFORM" = "1" ] \
    && grep -qE "gimbal_yaw_fake|base_link_fake" "$PARAMS_FILE" 2>/dev/null; then
   MINCO_FAKEYAW_CHAIN=1
 fi
-if [ "$USE_TDT_PLANNER" = "1" ] && [ "$MINCO_FAKEYAW_CHAIN" != "1" ]; then
-  echo "[错误] --tdt-planner 需要 MINCO/MPC 云台系实车配置。" >&2
+if [ "$USE_YASTAR_PLANNER" = "1" ] && [ "$MINCO_FAKEYAW_CHAIN" != "1" ]; then
+  echo "[错误] --yastar-planner 需要 MINCO/MPC 云台系实车配置。" >&2
   exit 2
 fi
 
@@ -1414,12 +1429,13 @@ require_pkg_from_ws() {
 
 if [ "$DRY_RUN" != "1" ]; then
   WS_CHECK_PKGS=(srm27_nav_bringup srm27_nav_tools srm27_nav_protocol
-                 srm27_nav_plugins srm27_costmap_plugins srm27_nav_behavior_plugins)
+                 srm27_nav_plugins srm27_costmap_plugins srm27_nav_behavior_plugins
+                 srm27_nav_common srm27_nav_smoother)
   if [ "$CONTROLLER" = "minco" ]; then
     WS_CHECK_PKGS+=(srm27_minco_controller srm27_minco_core)
   fi
-  if [ "$USE_TDT_PLANNER" = "1" ]; then
-    WS_CHECK_PKGS+=(tdt_nav_kit)
+  if [ "$USE_YASTAR_PLANNER" = "1" ]; then
+    WS_CHECK_PKGS+=(srm27_nav_planner)
   fi
   if [ "$USE_CHASSIS_MUX" = "1" ]; then
     # 迁移链的出口节点；缺了它 cmd_vel_chassis 没有任何发布者（车不动）。
@@ -1695,7 +1711,7 @@ CHASSIS_CMD="ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py"
 Z_MUX_ARG="$(bool_arg "$USE_CHASSIS_MUX")"
 if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_real_launch.py"
-  NAV_CMD="$NAV_CMD use_tdt_planner:=$(bool_arg "$USE_TDT_PLANNER")"
+  NAV_CMD="$NAV_CMD use_yastar_planner:=$(bool_arg "$USE_YASTAR_PLANNER")"
   [ -n "$NS_ARG" ] && NAV_CMD="$NAV_CMD $NS_ARG"
   NAV_CMD="$NAV_CMD slam:=$SLAM_ARG"
   NAV_CMD="$NAV_CMD use_pcd_localization:=$RELOC_ARG"
@@ -1878,8 +1894,8 @@ if [ "$CONTROLLER" = "minco" ]; then
 else
   echo "  局部控制器  : Omni (srm27_omni_pid_controller::OmniPidPursuitController)"
 fi
-if [ "$USE_TDT_PLANNER" = "1" ]; then
-  echo "  全局规划器  : TDT YAstar (GridBased)"
+if [ "$USE_YASTAR_PLANNER" = "1" ]; then
+  echo "  全局规划器  : srm27_nav_planner::YAstarGlobalPlanner (GridBased)"
 fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then

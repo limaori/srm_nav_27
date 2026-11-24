@@ -73,7 +73,7 @@
 
 ## 复跑
 
-在 Ubuntu 22.04 / ROS 2 Humble 工作区根目录执行。需要先构建 `srm27_minco_core`、`srm27_minco_controller`、`srm27_nav_plugins`、`tdt_nav_kit` 以及仿真依赖，并 source 工作区。Python 依赖沿用同目录的 `build_scene.py`、`verify_navigation.py` 与 `analyze_clearance.py`；无显示服务时需要 Xvfb。默认使用 CycloneDDS（`ros-humble-rmw-cyclonedds-cpp`），可通过 RMW_IMPLEMENTATION 指定已安装的 DDS 实现，所有终端保持一致。
+在 Ubuntu 22.04 / ROS 2 Humble 工作区根目录执行。需要先构建 `srm27_minco_core`、`srm27_minco_controller`、`srm27_nav_plugins`、`srm27_nav_common`、`srm27_nav_planner`、`srm27_nav_smoother` 以及仿真依赖，并 source 工作区。Python 依赖沿用同目录的 `build_scene.py`、`verify_navigation.py` 与 `analyze_clearance.py`；无显示服务时需要 Xvfb。默认使用 CycloneDDS（`ros-humble-rmw-cyclonedds-cpp`），可通过 RMW_IMPLEMENTATION 指定已安装的 DDS 实现，所有终端保持一致。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -126,7 +126,7 @@ ros2 service call /waypoint_mission/stop std_srvs/srv/Trigger '{}'
 | --- | --- | --- | --- |
 | A_thetastar_simple.yaml | ThetaStar | SimpleSmoother | 原规划器基线 |
 | B_yastar_simple.yaml | YAstar | SimpleSmoother | 看全局规划替换的影响 |
-| C_yastar_tdt.yaml | YAstar | TdtSmoother | 完整移植链路 |
+| C_yastar_tdt.yaml | YAstar | MinimumSnapSmoother | 完整移植链路（文件名沿用 2026-11 实验记录） |
 
 在工作区根目录生成当前 checkout 对应的配置：
 
