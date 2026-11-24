@@ -323,7 +323,9 @@ def test_optional_yastar_and_minisnap_injection():
         grid["plugin"] == "srm27_nav_planner::YAstarGlobalPlanner",
         f"YAstar 开关没有替换全局规划器: {grid}",
     )
-    _assert(grid["path_resample_step"] == 0.20, "YAstar 输出需要加密给控制器跟踪")
+    _assert(grid["mask_num_layers"] == 4, "上游 main.cpp 固定 4 层 Mask")
+    _assert(grid["simplify_epsilon"] == 0.1, "上游 DP 化简阈值 0.1 m")
+    _assert("path_resample_step" not in grid, "上游不做输出加密")
 
     smoother = config["smoother_server"]["ros__parameters"]
     _assert(
@@ -335,6 +337,12 @@ def test_optional_yastar_and_minisnap_injection():
         == "srm27_nav_smoother::MinimumSnapSmoother",
         f"平滑器插件 ID 不对: {smoother['minimum_snap_smoother']}",
     )
+    smoother_params = smoother["minimum_snap_smoother"]
+    _assert(smoother_params["order"] == 6, "上游 setOrder(6) = 五次多项式")
+    _assert(smoother_params["backend"] == "corridor", "上游 main.cpp 用 OSQPCorridor")
+    for removed in ("path_resample_step", "corner_round_cut",
+                    "fallback_to_resampled", "init_vel_from_odom", "min_points"):
+        _assert(removed not in smoother_params, f"上游没有 {removed} 参数")
     bt = config["bt_navigator"]["ros__parameters"]
     _assert(
         "navigate_to_pose_w_smoothing.xml" in bt["default_nav_to_pose_bt_xml"],

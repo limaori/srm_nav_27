@@ -6,14 +6,13 @@
 
 #include "srm27_nav_smoother/minimum_snap_smoother.hpp"
 
-#include <tf2/time.h>
-#include <tf2/utils.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -31,8 +30,6 @@ using srm27_map_core::GridSnapshot;
 using srm27_map_core::makeSfcGrid;
 using srm27_map_core::SfcGrid;
 using srm27_nav_common::pointsFromPath;
-using srm27_nav_common::resamplePath;
-using srm27_nav_common::roundCorners;
 using srm27_nav_common::writePath;
 
 namespace srm27_nav_smoother
@@ -72,42 +69,84 @@ std::string frameIdOf(const nav_msgs::msg::Path & path)
   return path.header.frame_id.empty() ? "map" : path.header.frame_id;
 }
 
-/// 是否至少有一个方块是真的有面积（不是退化成点）。
-bool hasArea(const std::vector<SfcSquare::PointPair> & boxes)
+/// 只统计 RViz 真的会画的方块（有限值且有面积），与 makeSfcMarkerArray 的过滤一致。
+struct BoxSummary
 {
-  return std::any_of(
-    boxes.begin(), boxes.end(), [](const SfcSquare::PointPair & box) {
-      return std::all_of(box.begin(), box.end(), [](float value) {return std::isfinite(value);}) &&
-             box[2] > box[0] && box[3] > box[1];
-    });
+  std::size_t count{0};
+  float mean_w{0.0f};
+  float mean_h{0.0f};
+};
+
+BoxSummary summarizeBoxes(const std::vector<SfcBox> & boxes)
+{
+  BoxSummary summary;
+  double sum_w = 0.0;
+  double sum_h = 0.0;
+  for (const auto & box : boxes) {
+    if (!std::all_of(
+        box.begin(), box.end(), [](float value) {return std::isfinite(value);}) ||
+      box[2] <= box[0] || box[3] <= box[1])
+    {
+      continue;
+    }
+    ++summary.count;
+    sum_w += static_cast<double>(box[2] - box[0]);
+    sum_h += static_cast<double>(box[3] - box[1]);
+  }
+  if (summary.count > 0) {
+    summary.mean_w = static_cast<float>(sum_w / static_cast<double>(summary.count));
+    summary.mean_h = static_cast<float>(sum_h / static_cast<double>(summary.count));
+  }
+  return summary;
 }
 
-/// 选出发给 RViz 的方形走廊。
-///
-/// 优先用求解迭代里**真正**当约束用的那组方块（backend=corridor：可能插入过控制点、
-/// 收缩过）；上游在 backend=path / close 时把 result.corridor 填成起止相等的退化点，
-/// 那组方块画出来只有点没有面，所以此时按当前 costmap 现场生成一次 SFC。
-/// 这样无论用哪个后端，RViz 里都能看到「这条路径周围的方形走廊」。
-std::vector<SfcBox> selectSfcBoxes(
-  MinimumSnap & smoother,
-  const std::vector<Eigen::Vector2f> & points,
-  const std::vector<SfcSquare::PointPair> & solve_corridor,
-  float max_range,
-  float shrink)
+std::string formatBoxSummary(const BoxSummary & summary)
 {
-  if (hasArea(solve_corridor)) {
-    return std::vector<SfcBox>(solve_corridor.begin(), solve_corridor.end());
+  if (summary.count == 0) {
+    return "none";
+  }
+  std::ostringstream text;
+  text << std::fixed << std::setprecision(2);
+  text << summary.count << (summary.count == 1 ? " box " : " boxes ") <<
+    summary.mean_w << "x" << summary.mean_h << " m";
+  return text.str();
+}
+
+/// 白字标签：放在路径中点上方，避免路径靠近画面边缘时被裁掉。
+/// 路径为空时返回 DELETE，避免上一次的文字残留在 RViz 里。
+visualization_msgs::msg::Marker makeLegendMarker(
+  const nav_msgs::msg::Path & path,
+  const std::string & frame_id,
+  const rclcpp::Time & stamp,
+  const std::string & text,
+  int id,
+  float z)
+{
+  visualization_msgs::msg::Marker marker;
+  marker.header.frame_id = frame_id;
+  marker.header.stamp = stamp;
+  marker.ns = "sfc_legend";
+  marker.id = id;
+  marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+
+  if (path.poses.empty()) {
+    marker.action = visualization_msgs::msg::Marker::DELETE;
+    return marker;
   }
 
-  SfcSquare & sfc = smoother.getSfc();
-  if (!sfc.isUseable() || points.size() < 2 || !(max_range > 0.0f)) {
-    return {};
-  }
-  // 与求解分支使用同一个夹紧值：上游 _getBound 把 maxRange/mapping 转 int，
-  // 过大的 maxRange 会溢出并越界读（见 configure 附近说明）。
-  const auto corridor = sfc.getCorridor(
-    points, std::min(max_range, kMaxCorridorRangeLimit), shrink);
-  return std::vector<SfcBox>(corridor.corridor.begin(), corridor.corridor.end());
+  const auto & mid = path.poses[path.poses.size() / 2].pose.position;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  marker.pose.position.x = mid.x;
+  marker.pose.position.y = mid.y;
+  marker.pose.position.z = z;
+  marker.pose.orientation.w = 1.0;
+  marker.scale.z = 0.09f;
+  marker.color.r = 1.0f;
+  marker.color.g = 1.0f;
+  marker.color.b = 1.0f;
+  marker.color.a = 1.0f;
+  marker.text = text;
+  return marker;
 }
 
 }  // namespace
@@ -154,26 +193,6 @@ void MinimumSnapSmoother::configure(
     node, p + "corridor_shrink", rclcpp::ParameterValue(corridor_shrink_));
   declare_parameter_if_not_declared(node, p + "max_speed", rclcpp::ParameterValue(max_speed_));
   declare_parameter_if_not_declared(node, p + "max_acc", rclcpp::ParameterValue(max_acc_));
-  declare_parameter_if_not_declared(node, p + "min_points", rclcpp::ParameterValue(min_points_));
-  declare_parameter_if_not_declared(
-    node, p + "path_resample_step", rclcpp::ParameterValue(path_resample_step_));
-  declare_parameter_if_not_declared(
-    node, p + "path_resample_max_points", rclcpp::ParameterValue(path_resample_max_points_));
-  declare_parameter_if_not_declared(
-    node, p + "fallback_to_resampled", rclcpp::ParameterValue(fallback_to_resampled_));
-  declare_parameter_if_not_declared(
-    node, p + "corner_round_cut", rclcpp::ParameterValue(corner_round_cut_));
-  declare_parameter_if_not_declared(
-    node, p + "corner_round_min_turn_deg",
-    rclcpp::ParameterValue(corner_round_min_turn_deg_));
-  declare_parameter_if_not_declared(
-    node, p + "corner_round_sample_step", rclcpp::ParameterValue(corner_round_sample_step_));
-  declare_parameter_if_not_declared(
-    node, p + "init_vel_from_odom", rclcpp::ParameterValue(init_vel_from_odom_));
-  declare_parameter_if_not_declared(
-    node, p + "odom_topic", rclcpp::ParameterValue(odom_topic_));
-  declare_parameter_if_not_declared(
-    node, p + "init_vel_max_age", rclcpp::ParameterValue(init_vel_max_age_));
   declare_parameter_if_not_declared(
     node, p + "orientation_mode",
     rclcpp::ParameterValue(
@@ -198,32 +217,7 @@ void MinimumSnapSmoother::configure(
   corridor_shrink_ = static_cast<float>(node->get_parameter(p + "corridor_shrink").as_double());
   max_speed_ = static_cast<float>(node->get_parameter(p + "max_speed").as_double());
   max_acc_ = static_cast<float>(node->get_parameter(p + "max_acc").as_double());
-  min_points_ = static_cast<int>(node->get_parameter(p + "min_points").as_int());
-  path_resample_step_ =
-    static_cast<float>(node->get_parameter(p + "path_resample_step").as_double());
-  path_resample_max_points_ =
-    static_cast<int>(node->get_parameter(p + "path_resample_max_points").as_int());
-  fallback_to_resampled_ = node->get_parameter(p + "fallback_to_resampled").as_bool();
-  corner_round_cut_ =
-    static_cast<float>(node->get_parameter(p + "corner_round_cut").as_double());
-  corner_round_min_turn_deg_ =
-    static_cast<float>(node->get_parameter(p + "corner_round_min_turn_deg").as_double());
-  corner_round_sample_step_ =
-    static_cast<float>(node->get_parameter(p + "corner_round_sample_step").as_double());
-  init_vel_from_odom_ = node->get_parameter(p + "init_vel_from_odom").as_bool();
-  odom_topic_ = node->get_parameter(p + "odom_topic").as_string();
-  init_vel_max_age_ = node->get_parameter(p + "init_vel_max_age").as_double();
 
-  if (init_vel_from_odom_) {
-    odom_sub_ = node->create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, rclcpp::QoS(10),
-      [this](const nav_msgs::msg::Odometry::SharedPtr msg) {onOdom(*msg);});
-    RCLCPP_INFO(
-      node->get_logger(), "MinimumSnapSmoother: 起点速度取自 %s（有效窗口 %.2f s）",
-      odom_topic_.c_str(), init_vel_max_age_);
-  } else {
-    odom_sub_.reset();
-  }
   orientation_mode_ = srm27_nav_common::parseOrientationMode(
     node->get_parameter(p + "orientation_mode").as_string());
   publish_sfc_ = node->get_parameter(p + "publish_sfc").as_bool();
@@ -244,42 +238,13 @@ void MinimumSnapSmoother::configure(
     sfc_pub_.reset();
   }
 
-  // 配置自检：backend 与路径加密是强耦合的，只改一处会让平滑静默失效
-  // （solve 失败 → 原样返回路径 → 行为树看不出来，只表现为"车不动"）。
-  // 这里在 configure 阶段就把话说清楚，避免以后再踩。
-  if (path_resample_step_ <= 1e-3f && backend_ != "close") {
-    RCLCPP_WARN(
-      node->get_logger(),
-      "MinimumSnapSmoother: backend=%s 但 path_resample_step=%.2f（未加密）。稀疏路径"
-      "（YAstar 段长可达数米）下该后端会 OSQP 不收敛并原样返回路径，"
-      "表现为平滑静默失效。请把 path_resample_step 设为 0.30，或改用 backend=close。",
-      backend_.c_str(), static_cast<double>(path_resample_step_));
-  }
-  if (backend_ == "corridor") {
-    RCLCPP_WARN(
-      node->get_logger(),
-      "MinimumSnapSmoother: backend=corridor 以方形走廊为硬约束。2026-11-05 在 RMUC 2026 仿真"
-      "地图（1191 点）上曾实测不收敛（408 ms）——当时 SfcSquare 的「索引 -> 世界坐标」"
-      "少补了原点（P10），方块整体偏移 2*|origin|，约束落在真实路径之外。P10 修正后"
-      "实车地图短路径已能收敛（4 ms），但上游方块扩张会跳过未检查的环，方块内可能含"
-      "障碍（见 PATCHES.md「已知上游问题」），因此 corridor 后端仍建议只用于验证；"
-      "默认 path 不使用走廊约束，不受这两点影响。");
-  }
-  if (path_resample_max_points_ < 100) {
-    RCLCPP_WARN(
-      node->get_logger(),
-      "MinimumSnapSmoother: path_resample_max_points=%d 过小，长路径会被截断，建议 >= 500。",
-      path_resample_max_points_);
-  }
-}
-
-void MinimumSnapSmoother::onOdom(const nav_msgs::msg::Odometry & msg)
-{
-  init_vel_ = Eigen::Vector2f(
-    static_cast<float>(msg.twist.twist.linear.x),
-    static_cast<float>(msg.twist.twist.linear.y));
-  init_vel_stamp_ = rclcpp::Time(msg.header.stamp);
-  init_vel_valid_ = true;
+  RCLCPP_INFO(
+    node->get_logger(),
+    "MinimumSnapSmoother: 上游 main.cpp 参数 order=%d max_dx=%d backend=%s "
+    "collision_iter=%d norm_time=%s corridor=[%.2f m, shrink %.2f m]",
+    order_, max_dx_, backend_.c_str(), collision_iter_,
+    norm_time_ ? "true" : "false",
+    static_cast<double>(max_corridor_range_), static_cast<double>(corridor_shrink_));
 }
 
 void MinimumSnapSmoother::cleanup()
@@ -302,27 +267,62 @@ void MinimumSnapSmoother::deactivate()
 }
 
 void MinimumSnapSmoother::publishSfcMarkers(
-  const nav_msgs::msg::Path & path, const std::vector<SfcBox> & boxes)
+  const nav_msgs::msg::Path & path,
+  const std::vector<SfcBox> & free_space_boxes,
+  const std::vector<SfcBox> & final_boxes,
+  bool solve_ok)
 {
   if (!sfc_pub_) {
     return;
   }
-  // 空 boxes 会生成 DELETE 动作，把 RViz 里上一目标的方块清掉。
-  sfc_pub_->publish(
-    makeSfcMarkerArray(boxes, frameIdOf(path), clock_->now(), sfc_style_));
+
+  const std::string frame_id = frameIdOf(path);
+  const auto stamp = clock_->now();
+
+  // 黄色细线：getCorridor() 的初始自由方块（未碰撞收缩），代表"实际还剩多少空间"。
+  SfcMarkerStyle free_style = sfc_style_;
+  free_style.marker_namespace = "sfc_corridor";
+  free_style.red = 1.0f;
+  free_style.green = 0.90f;
+  free_style.blue = 0.10f;
+  free_style.alpha = 0.95f;
+
+  // 橙色粗线：求解迭代后的最终约束，可能被 upstream shrink 成小方块/点。
+  SfcMarkerStyle final_style = sfc_style_;
+  final_style.marker_namespace = "sfc_corridor_final";
+  final_style.red = 1.0f;
+  final_style.green = 0.35f;
+  final_style.blue = 0.0f;
+  final_style.alpha = 0.95f;
+  final_style.line_width = std::max(0.03f, sfc_line_width_ * 1.5f);
+
+  auto array = makeSfcMarkerArray(free_space_boxes, frame_id, stamp, free_style);
+  auto final_array = makeSfcMarkerArray(final_boxes, frame_id, stamp, final_style);
+  array.markers.insert(
+    array.markers.end(), final_array.markers.begin(), final_array.markers.end());
+  const auto free_summary = summarizeBoxes(free_space_boxes);
+  const auto final_summary = summarizeBoxes(final_boxes);
+  const std::string free_text = "SFC free (yellow): " + formatBoxSummary(free_summary);
+  const std::string final_text = std::string("SFC final (orange): ") +
+    (solve_ok ? formatBoxSummary(final_summary) : "no result");
+  array.markers.push_back(makeLegendMarker(path, frame_id, stamp, free_text, 0, 0.90f));
+  array.markers.push_back(makeLegendMarker(path, frame_id, stamp, final_text, 1, 1.02f));
+
+  sfc_pub_->publish(array);
 }
 
 bool MinimumSnapSmoother::smooth(
   nav_msgs::msg::Path & path,
   const rclcpp::Duration & max_time)
 {
+  // 上游 main.cpp:149 固定 setTL(10)；Nav2 的 max_smoothing_duration 不再截断求解。
+  (void)max_time;
   if (!active_) {
     return false;
   }
-  if (path.poses.size() < static_cast<std::size_t>(std::max(min_points_, 2))) {
-    // 点数太少无需平滑：返回 true 表示「已完成」，保持原路径。
-    // 这类路径没有走廊，顺手清掉上一次的方块，避免 RViz 里留着与当前目标是两条路。
-    publishSfcMarkers(path, {});
+  if (path.poses.size() < 2) {
+    // 单点/空路径：无走廊可解，保持原路径并清掉上一次的方块。
+    publishSfcMarkers(path, {}, {}, false);
     return true;
   }
 
@@ -338,7 +338,7 @@ bool MinimumSnapSmoother::smooth(
     RCLCPP_WARN_THROTTLE(
       node->get_logger(), *clock_, 2000,
       "MinimumSnapSmoother: costmap unavailable, keep original path");
-    publishSfcMarkers(path, {});
+    publishSfcMarkers(path, {}, {}, false);
     return false;
   }
 
@@ -356,7 +356,7 @@ bool MinimumSnapSmoother::smooth(
     RCLCPP_WARN_THROTTLE(
       node->get_logger(), *clock_, 2000,
       "MinimumSnapSmoother: costmap conversion failed (%s), keep original path", e.what());
-    publishSfcMarkers(path, {});
+    publishSfcMarkers(path, {}, {}, false);
     return false;
   }
 
@@ -367,64 +367,30 @@ bool MinimumSnapSmoother::smooth(
     toEigenMap(grid), grid.resolution, grid.origin_x, grid.origin_y);
   smoother.setOrder(order_);
   smoother.setMaxDx(max_dx_);
+  smoother.setDt(0.1f);
   smoother.setStrictCollision(strict_collision_);
+  // 上游 main.cpp:147/149：采样间隔 0.1 s、迭代时间上限 10 s。
+  smoother.setTL(10.0);
 
-  const double limit_s = max_time.seconds();
-  smoother.setTL(limit_s > 0.0 ? limit_s : 1.0);
+  // 3) 输入：直接使用规划器给出的稀疏路径，不切角、不加密（上游 main.cpp:152）。
+  const std::vector<Eigen::Vector2f> points = pointsFromPath(path);
 
-  // 3) 填输入。上游默认 backend=Close、normTime=false、collisionIter=2，
-  //    与 README 示例不同，因此这里全部显式设置，不依赖库默认。
-  const std::vector<Eigen::Vector2f> raw_points = pointsFromPath(path);
-  // 先圆弧化折角，再加密：顺序反了会把贝塞尔重新拉成折线。
-  const std::vector<Eigen::Vector2f> rounded = roundCorners(
-    raw_points, corner_round_cut_, corner_round_min_turn_deg_,
-    corner_round_sample_step_);
-  const std::vector<Eigen::Vector2f> points =
-    resamplePath(rounded, path_resample_step_, path_resample_max_points_);
-  if (points.size() != raw_points.size()) {
-    RCLCPP_DEBUG(
-      node->get_logger(), "MinimumSnapSmoother: 路径加密 %zu -> %zu 点（步长 %.2f m）",
-      raw_points.size(), points.size(), static_cast<double>(path_resample_step_));
+  // 诊断用：同一批路径点的**初始** getCorridor 方块（未经过碰撞迭代 shrink），
+  // 这才是"实际还剩多少自由空间"。求解仍然只用 result.corridor。
+  std::vector<SfcBox> free_space_boxes;
+  if (smoother.getSfc().isUseable() && max_corridor_range_ > 0.0f) {
+    const auto free_corridor = smoother.getSfc().getCorridor(
+      points, std::min(max_corridor_range_, kMaxCorridorRangeLimit), corridor_shrink_);
+    free_space_boxes.assign(free_corridor.corridor.begin(), free_corridor.corridor.end());
   }
 
   MinimumSnap::SolveInput input;
   input.setPath(points);
-
-  // 起点速度约束：上游默认"自由"，实车换目标瞬间会给出与当前速度无关的首段加速度。
-  // 这里把底盘速度（车体系）旋转到路径坐标系后交给 setInitVel。
-  if (init_vel_from_odom_ && init_vel_valid_) {
-    const double age = (clock_->now() - init_vel_stamp_).seconds();
-    if (std::abs(age) <= init_vel_max_age_) {
-      Eigen::Vector2f v = init_vel_;
-      try {
-        const auto tr = tf_->lookupTransform(
-          path.header.frame_id, "base_link", tf2::TimePointZero);
-        const double yaw = tf2::getYaw(tr.transform.rotation);
-        const float c = static_cast<float>(std::cos(yaw));
-        const float s = static_cast<float>(std::sin(yaw));
-        v = Eigen::Vector2f(
-          c * init_vel_.x() - s * init_vel_.y(),
-          s * init_vel_.x() + c * init_vel_.y());
-      } catch (const tf2::TransformException & e) {
-        RCLCPP_WARN_THROTTLE(
-          node->get_logger(), *clock_, 2000,
-          "MinimumSnapSmoother: 起点速度无法转换到 %s（%s），按车体系使用",
-          path.header.frame_id.c_str(), e.what());
-      }
-      input.setInitVel(v);
-    } else {
-      RCLCPP_DEBUG(
-        node->get_logger(), "MinimumSnapSmoother: 里程计过期 %.2f s，起点速度按自由处理", age);
-    }
-  }
-
+  // 上游 main.cpp:164：起点速度显式约束为 0；setPath 已把终点速度设为 0。
+  input.setInitVel(Eigen::Vector2f::Zero());
   input.setBackend(toBackend(backend_));
   input.setMaxSpeed(max_speed_);
   input.setMaxAcc(max_acc_);
-  // 上游 setTimeAllocated 取的是非 const 引用，必须传具名左值。
-  std::vector<double> time_allocated =
-    MinimumSnap::trapezoidalTimeAllocation(points, max_speed_, max_acc_);
-  input.setTimeAllocated(time_allocated);
   input.setNormTime(norm_time_);
   input.setCollisionCheckIter(collision_iter_);
 
@@ -435,51 +401,27 @@ bool MinimumSnapSmoother::smooth(
   input.setMaxCorridorRange(std::min(max_corridor_range_, kMaxCorridorRangeLimit));
   input.setCorridorShrink(corridor_shrink_);
 
-  // 4) 求解。上游不收敛时返回空路径且 success=false（无闭式兜底），
+  // 4) 求解。上游不收敛时返回空路径且 success=false（无闭式兜底、不回退），
   //    此时保留原路径并返回 false，由 smoother_server 决定后续行为。
   const auto t0 = std::chrono::steady_clock::now();
   MinimumSnap::SolveOutput result = smoother.solve(input);
   const double elapsed =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-  // 方形走廊可视化放在失败/超时分支**之前**：平滑失败时"此刻这张地图上的走廊
-  // 长什么样"正是排查依据，不能只在成功时画。
-  //   * backend=corridor：画求解迭代里真正当约束用的那组方块；
-  //   * backend=path/close：结果里只有退化成点的方块，改为现场生成一次 SFC。
-  publishSfcMarkers(
-    path, selectSfcBoxes(
-      smoother, points, result.corridor, max_corridor_range_, corridor_shrink_));
-
-  if (!result.success || result.path.size() < 2) {
-    RCLCPP_WARN_THROTTLE(
-      node->get_logger(), *clock_, 2000,
-      "MinimumSnapSmoother: OSQP solve failed (backend=%s, iter=%d, %.1f ms), %s",
-      backend_.c_str(), result.iter, result.time * 1000.0,
-      (fallback_to_resampled_ && points.size() >= 2) ?
-      "回退到加密折线（保证可跟踪）" : "keep original path");
-    if (fallback_to_resampled_ && points.size() >= 2) {
-      // 返回已加密的折线而不是原始稀疏点：上游规划器的段长可达 10 m，
-      // Nav2 控制器按 2.5 m 裁剪后只剩 1 个点，会退化成 0.2 m/s 爬行并判无进展。
-      writePath(path, points, orientation_mode_);
-      path.header.stamp = node->now();
-      return true;
-    }
-    return false;
+  // 上游 main.cpp:184-190：橙色方块是求解迭代里真正当约束用的那组（可能被 shrink）；
+  // 黄色方块是初始自由空间，即使 OSQP 失败也会发出来，便于判断是"空间小"还是"解失败"。
+  const bool solved = result.success && result.path.size() >= 2;
+  std::vector<SfcBox> final_boxes;
+  if (solved) {
+    final_boxes.assign(result.corridor.begin(), result.corridor.end());
   }
+  publishSfcMarkers(path, free_space_boxes, final_boxes, solved);
 
-  // 超过时限也放弃结果：Nav2 的 max_time 是平滑预算，超时结果不应再改变路径。
-  if (limit_s > 0.0 && elapsed > limit_s) {
+  if (!solved) {
     RCLCPP_WARN_THROTTLE(
       node->get_logger(), *clock_, 2000,
-      "MinimumSnapSmoother: exceeded max_time (%.1f ms > %.1f ms), %s",
-      elapsed * 1000.0, limit_s * 1000.0,
-      (fallback_to_resampled_ && points.size() >= 2) ?
-      "回退到加密折线（保证可跟踪）" : "keep original path");
-    if (fallback_to_resampled_ && points.size() >= 2) {
-      writePath(path, points, orientation_mode_);
-      path.header.stamp = node->now();
-      return true;
-    }
+      "MinimumSnapSmoother: OSQP solve failed (backend=%s, iter=%d, %.1f ms), keep original path",
+      backend_.c_str(), result.iter, result.time * 1000.0);
     return false;
   }
 

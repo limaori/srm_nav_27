@@ -66,12 +66,12 @@ private:
   srm27_map_adapter::CostmapAdapter costmap_adapter_;
   int occupancy_threshold_{252};
   bool treat_unknown_as_obstacle_{true};
-  int mask_num_layers_{1};
+  /// 上游 main.cpp: `setMaskNumLayers(4)`；本仓库不接动态 Mask，多层只是空层。
+  int mask_num_layers_{4};
   float cost_inflate_radius_{1.0f};
   float simplify_epsilon_{0.1f};
   float save_point_max_radius_{0.4f};
   float goal_snap_max_radius_{0.4f};
-  float path_resample_step_{0.0f};
   /// "identity"（默认 w=1）或 "tangent"（由相邻路径点求 yaw）。
   srm27_nav_common::OrientationMode orientation_mode_{
     srm27_nav_common::OrientationMode::kIdentity};

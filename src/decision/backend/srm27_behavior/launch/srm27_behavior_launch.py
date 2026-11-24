@@ -33,12 +33,14 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time")
     params_file = LaunchConfiguration("params_file")
     target_tree = LaunchConfiguration("target_tree")
+    enforce_mux_guard = LaunchConfiguration("enforce_mux_guard")
     log_level = LaunchConfiguration("log_level")
 
     # Create our own temporary YAML files that include substitutions
     param_substitutions = {
         "use_sim_time": use_sim_time,
         "target_tree": target_tree,
+        "enforce_mux_guard": enforce_mux_guard,
     }
 
     configured_params = ParameterFile(
@@ -82,6 +84,12 @@ def generate_launch_description():
         description="Behavior tree ID to execute (e.g. rmul_2027, rmuc_2027, rmul_2025)",
     )
 
+    declare_enforce_mux_guard_cmd = DeclareLaunchArgument(
+        "enforce_mux_guard",
+        default_value="true",
+        description="Force srm_cmd_mux decision_required=true; false only for bench tests",
+    )
+
     declare_log_level_cmd = DeclareLaunchArgument(
         "log_level", default_value="info", description="log level"
     )
@@ -122,6 +130,7 @@ def generate_launch_description():
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_target_tree_cmd)
+    ld.add_action(declare_enforce_mux_guard_cmd)
     ld.add_action(declare_log_level_cmd)
 
     # Add the actions to launch the nodes

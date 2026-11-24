@@ -221,6 +221,9 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
 {
   node()->declare_parameter("use_cout_logger", false);
   node()->get_parameter("use_cout_logger", use_cout_logger_);
+  // 决策许可默认强制。关掉只用于空场/台架测试：不把 mux 的 decision_required 改回 true。
+  node()->declare_parameter("enforce_mux_guard", true);
+  node()->get_parameter("enforce_mux_guard", enforce_mux_guard_);
   node()->declare_parameter("map_frame", std::string("map"));
   node()->get_parameter("map_frame", map_frame_);
   node()->declare_parameter("robot_base_frame", std::string("base_link"));
@@ -240,6 +243,13 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   status_pub_ = node()->create_publisher<std_msgs::msg::String>("decision/status", 10);
   guard_client_ = node()->create_client<rcl_interfaces::srv::SetParameters>("srm_cmd_mux/set_parameters");
   initBlackboardDefaults();
+  if (!enforce_mux_guard_) {
+    // 测试模式：不再向 mux 写 decision_required=true；mux 由启动脚本固定为 false。
+    globalBlackboard()->set("guard_ready", true);
+    RCLCPP_WARN(
+      node()->get_logger(),
+      "enforce_mux_guard=false：不强制 srm_cmd_mux 要求决策许可，仅用于空场/台架测试");
+  }
   initDynamicParameters();
   input_timeout_sec_ = node()->declare_parameter("input_timeout_sec", 3.0);
   if (!std::isfinite(input_timeout_sec_) || input_timeout_sec_ <= 0.0) {
@@ -345,7 +355,9 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
   ++tick_count_;
   auto bb = globalBlackboard();
   const bool dry_run = bb->get<bool>("dry_run");
-  if (!dry_run && !bb->get<bool>("guard_ready")) {
+  // 测试模式（enforce_mux_guard=false）跳过这里，避免把启动脚本设好的
+  // decision_required=false 又改回 true（无裁判输入时会把自转/导航全部清零）。
+  if (enforce_mux_guard_ && !dry_run && !bb->get<bool>("guard_ready")) {
     if (guard_future_.valid()) {
       if (guard_future_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         const auto response = guard_future_.get();

@@ -77,6 +77,7 @@
 #   ./scripts/bringup/start_real_nav.sh --yastar-planner        # YAstar + MINCO/MPC
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./scripts/bringup/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
+#   ./scripts/bringup/start_real_nav.sh --test-behavior       # 测试树: 导航中 2 rad/s, 到点/无目标原地 5 rad/s
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
 #   ./scripts/bringup/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
 #   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
@@ -117,6 +118,10 @@
 #       --init-pose "<x,y,z,roll,pitch,yaw>"   map->odom 初值（实车只取 x/y/yaw）
 #       --prior-pcd-manifest <路径>   仿真专用, 实车只提示忽略
 #       --yaw-mode <auto|xy_only>    MINCO 航向策略（实车默认 xy_only；se2/spin 会被告警/拒绝）
+#       --behavior <树名>        同时起决策行为树（如 rmul_2027）；mux 要求决策许可
+#       --test-behavior [树名]   测试行为树模式：默认 test_spin_speed；mux 不要求
+#                                决策许可，无裁判输入也能动（空场/架起车辆使用）
+#       --no-behavior            不起决策行为树
 #       --chassis-spin [rad/s] / --no-chassis-spin   底盘小陀螺（默认 2.0 rad/s）
 #       --chassis-spin-sine [max] [--spin-min <min>] [--spin-period <s>]
 #                               正弦小陀螺: wz(t)=mid+amp*sin(2*pi*t/T)，默认 max 0.3 / min -0.3 / T 4
@@ -349,6 +354,9 @@ WORLD_ARG="${WORLD:-}"
 # 自定义 RViz 配置（与 start_sim_nav.sh 同名）。
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
+# 1 = --test-behavior：起测试行为树，并让 mux 不要求决策许可（无裁判输入也能动）。
+BEHAVIOR_TEST="${BEHAVIOR_TEST:-0}"
+TEST_BEHAVIOR_TREE="${TEST_BEHAVIOR_TREE:-test_spin_speed}"
 
 # 云台关节角回传话题：0x0010 第 4 个字段已改为 chassis_to_gimbal_yaw，
 # srm27_nav_protocol 会据此发出 gimbal_joint_angle（云台相对底盘、弧度）。
@@ -793,8 +801,15 @@ while [ $# -gt 0 ]; do
                         GIMBAL_SPIN_WZ="$GIMBAL_SPIN_DEFAULT"; shift
                       fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_CLI_GIVEN=1; shift ;;
-    --behavior)       BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
-    --no-behavior)    BEHAVIOR_TREE=""; shift ;;
+    --behavior)       BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"
+                      BEHAVIOR_TEST=0; shift 2 ;;
+    --test-behavior)  BEHAVIOR_TEST=1
+                      if [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ]; then
+                        BEHAVIOR_TREE="$2"; shift 2
+                      else
+                        BEHAVIOR_TREE="$TEST_BEHAVIOR_TREE"; shift
+                      fi ;;
+    --no-behavior)    BEHAVIOR_TREE=""; BEHAVIOR_TEST=0; shift ;;
     --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"
                       GIMBAL_JOINT_TOPIC_GIVEN=1; shift 2 ;;
     --no-gimbal-joint-topic) GIMBAL_JOINT_TOPIC=""; GIMBAL_JOINT_TOPIC_GIVEN=1; shift ;;
@@ -823,6 +838,13 @@ while [ $# -gt 0 ]; do
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+# --test-behavior：测试树直接进 mux，不依赖裁判/决策许可。安全提示必须在启动任何节点前打印。
+if [ "$BEHAVIOR_TEST" = "1" ] && [ -n "$BEHAVIOR_TREE" ]; then
+  echo "[警告] --test-behavior：测试行为树模式（${BEHAVIOR_TREE}）" >&2
+  echo "[警告]   mux 不要求决策许可 (decision_required=false)，树会直接驱动底盘。" >&2
+  echo "[警告]   只在空场/架起车辆并守物理急停时使用；正式比赛请改用 --behavior。" >&2
+fi
 
 # --no-chassis 时没人发 gimbal_joint_angle（只有 srm27_nav_protocol 发），云台中继按
 # float32 模式等 0.3 s 就停发 /joint_states；而 gimbal_yaw->base_link 这条 TF **只**来自
@@ -904,8 +926,16 @@ fi
 # 请求走 rotation_cmd -> srm_cmd_mux（方案 §4.3），与 MINCO 的 spin_request 无关。
 if awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ a=(v<0)?-v:v; exit !(a > 0) }'; then
   echo "[提示] 底盘自转 ${CHASSIS_SPIN_WZ} rad/s 已请求：首跑请架起车辆或守物理急停，先确认方向与增益。"
-  echo "[提示] 实际 wz 受 srm_cmd_mux.wz_max（config/real/speed_limits.yaml，当前 1.0 rad/s）"
-  echo "[提示] 与 mux 的 wz_ramp（4.5 rad/s²，起停斜率）两层限制。"
+  echo "[提示] 实际 wz 受 srm_cmd_mux.wz_max / wz_ramp 限幅（见 config/real/speed_limits.yaml 的 mux 段）。"
+fi
+
+# 行为树和手动小陀螺是同一路 wz 的两个发布者：都发 rotation_cmd，mux 只认最后一条。
+if [ -n "$BEHAVIOR_TREE" ] && \
+   { [ "$CHASSIS_SPIN_SINE" = "1" ] || \
+     awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 1 : 0 }'; }; then
+  echo "[警告] 同时给了决策/测试行为树（${BEHAVIOR_TREE}）和底盘自转：两者都发 rotation_cmd。" >&2
+  echo "[警告]   mux 只按最后一条消息更新 wz，实际转速会在两者之间抖动，不是稳定曲线。" >&2
+  echo "[警告]   只保留一个来源：行为树用 --test-behavior/--behavior；手动恒速只用 --chassis-spin。" >&2
 fi
 
 # ---------- --no-lio（与 sim 同名）----------
@@ -1262,6 +1292,11 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "0" ] && [ "$USE_CHASSIS_MUX" = "1" ] \
     echo "[警告] Omni 旧链不支持 mux（旧链出口 cmd_vel_nav2_result），已忽略 --mux。" >&2
   fi
   USE_CHASSIS_MUX=0
+fi
+# 测试树靠 rotation_cmd -> mux 驱动底盘；旧链/no-mux 下请求没人消费，提前说清楚。
+if [ "$BEHAVIOR_TEST" = "1" ] && [ -n "$BEHAVIOR_TREE" ] &&
+   { [ "$MINCO_FAKEYAW_CHAIN" != "1" ] || [ "$USE_CHASSIS_MUX" != "1" ]; }; then
+  echo "[警告] --test-behavior 依赖 srm_cmd_mux 消费 rotation_cmd；当前链路没有 mux，底盘不会转。" >&2
 fi
 
 # 航向策略只在迁移链上有意义；旧链强制 xy_only（导航不控自转）。
@@ -1761,7 +1796,8 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
   NAV_CMD="$NAV_CMD use_chassis_mux:=$Z_MUX_ARG"
   NAV_CMD="$NAV_CMD mux_nav_topic:=cmd_vel_nav_body"
   NAV_CMD="$NAV_CMD mux_output_topic:=cmd_vel_chassis"
-  if [ -n "$BEHAVIOR_TREE" ]; then
+  # 自动决策要求许可；--test-behavior 的测试树跳过许可门控（空场/台架没有裁判输入）。
+  if [ -n "$BEHAVIOR_TREE" ] && [ "$BEHAVIOR_TEST" != "1" ]; then
     NAV_CMD="$NAV_CMD decision_required:=true"
   else
     NAV_CMD="$NAV_CMD decision_required:=false"
@@ -1831,6 +1867,8 @@ if [ -n "$BEHAVIOR_TREE" ]; then
   BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py"
   [ -n "$NS_ARG" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD $NS_ARG"
   BEHAVIOR_CMD="$BEHAVIOR_CMD use_sim_time:=False target_tree:=${BEHAVIOR_TREE} log_level:=$LOG_LEVEL"
+  # 测试模式：服务端不要再把 mux 的 decision_required 改回 true。
+  [ "$BEHAVIOR_TEST" = "1" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD enforce_mux_guard:=false"
 fi
 
 # ---------- 配置摘要 ----------
@@ -1933,7 +1971,7 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
     echo "  底盘自转    : 关 (要转加 --chassis-spin [rad/s] 或 --chassis-spin-sine, 首跑建议 0.3)"
   else
     echo "  底盘自转    : $CHASSIS_SPIN_WZ rad/s (Nav2 就绪后自动下发 rotation_cmd)"
-    echo "                mux wz_max 会在这一层钳住 (当前 1.0 rad/s, 见 speed_limits.yaml)"
+    echo "                mux wz_max 会在这一层钳住 (见 speed_limits.yaml 的 mux 段)"
   fi
   echo "  云台关节    : revolute, gimbal_yaw->base_link 来自 /joint_states（TF 树已反转）"
   if [ -n "$GIMBAL_JOINT_TOPIC" ]; then

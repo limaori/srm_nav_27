@@ -42,20 +42,21 @@ ros2 param get /planner_server GridBased.plugin   # srm27_nav_planner::YAstarGlo
 |---|---|---|
 | `occupancy_threshold` | `252` | 代价 > 该值视为障碍；253/254 仍是硬障碍 |
 | `treat_unknown_as_obstacle` | `true` | `NO_INFORMATION(255)` 是否按障碍 |
-| `mask_num_layers` | `1` | 上游 Mask 层数（静态图只用 1） |
-| `cost_inflate_radius` | `1.0` | 离障代价的搜索半径（米） |
-| `simplify_epsilon` | `0.1` | 路径简化容差（米）；实车建议 `0.03` 保走廊中轴 |
+| `mask_num_layers` | `4` | 上游 `main.cpp:96` 的 Mask 层数（静态图只用基础层） |
+| `cost_inflate_radius` | `1.0` | 离障代价的搜索半径（米），配合上游 `0.5/(0.1+d)` 势场 |
+| `simplify_epsilon` | `0.1` | 上游 `main.cpp:133` 的 DP 化简阈值（米） |
 | `save_point_max_radius` | `0.4` | 起点不在自由格时的吸附半径（米） |
 | `goal_snap_max_radius` | `0.4` | 目标吸附半径（米）；同一目标重规划期间吸附点固定 |
-| `path_resample_step` | `0.0` | 输出前加密步长（米），`0` 表示不加密 |
 | `orientation_mode` | `identity` | `identity`（w=1）或 `tangent`（相邻点求 yaw） |
 | `debug_timing` | `false` | 打印每次规划的分段耗时 |
 
-实车默认注入值（`nav_srm_real_launch.py`）为
+2026-11-24 起，规划流程直接对齐上游 `main.cpp`：
+`setMap -> setMaskNumLayers(4) -> setCostField(1.0, 0.5/(0.1+d)) -> initCostMap()`,
+搜索后只做 `simplifyPath(0.1) + simplifyPathHypot()`，不再输出前加密、不再做
+简化回退。实车默认注入值（`nav_srm_real_launch.py`）为
 `occupancy_threshold=252`、`treat_unknown_as_obstacle=true`、
-`save_point_max_radius=goal_snap_max_radius=0.4`、`path_resample_step=0.20`、
-`cost_inflate_radius=1.0`、`mask_num_layers=1`、`simplify_epsilon=0.03`、
-`orientation_mode=tangent`。
+`save_point_max_radius=goal_snap_max_radius=0.4`、`cost_inflate_radius=1.0`、
+`mask_num_layers=4`、`simplify_epsilon=0.1`、`orientation_mode=tangent`。
 
 ## 包内结构
 

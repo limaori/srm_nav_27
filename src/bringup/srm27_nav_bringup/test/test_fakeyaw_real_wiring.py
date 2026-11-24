@@ -409,7 +409,9 @@ def test_yastar_planner_opt_in_preserves_the_real_navigation_chain():
         _assert(planner["planner_plugins"] == ["GridBased"], "BT planner ID must stay GridBased")
         _assert(grid["plugin"] == expected, f"Unexpected global planner: {grid['plugin']}")
         if enabled == "True":
-            _assert(grid["path_resample_step"] == 0.20, "MINCO needs a dense reference path")
+            _assert(grid["mask_num_layers"] == 4, "Upstream YAstar uses 4 mask layers")
+            _assert(grid["simplify_epsilon"] == 0.1, "Upstream DP simplify threshold is 0.1 m")
+            _assert("path_resample_step" not in grid, "Upstream YAstar does not resample")
             _assert(grid["treat_unknown_as_obstacle"] is True, "Unknown space must be blocked")
         for name in ("local_costmap", "global_costmap", "fake_vel_transform",
                      "smoother_server", "bt_navigator"):

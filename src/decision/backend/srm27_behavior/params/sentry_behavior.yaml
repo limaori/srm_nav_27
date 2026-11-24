@@ -11,6 +11,7 @@ srm27_behavior_server:
     models_output_path: ""
 
     dry_run: false             # true 时仅计算策略，不发导航/自转/许可/姿态请求
+    enforce_mux_guard: true    # false = 不强制 mux 要求决策许可（仅 --test-behavior 空场测试）
     waypoints_calibrated: true # 按当前场地和己方颜色标定后设 true
     status_topic: /srm/sefdefined
     supply_timeout: 25.0

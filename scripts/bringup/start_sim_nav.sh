@@ -67,6 +67,7 @@
 #   ./scripts/bringup/start_sim_nav.sh --chassis-spin --gimbal-spin     # 两个一起: 底盘 2.0 + 云台 -1.0
 #   ./scripts/bringup/start_sim_nav.sh --chassis-spin 3.0 --gimbal-spin 1.5   # 自己给转速
 #   ./scripts/bringup/start_sim_nav.sh --behavior rmul_2027               # 同时起决策行为树
+#   ./scripts/bringup/start_sim_nav.sh --test-behavior                    # 测试树: 导航中 2 rad/s, 到点/无目标 5 rad/s
 #   ./scripts/bringup/start_sim_nav.sh --yaw-mode xy_only                # 导航只出平移（默认）
 #   ./scripts/bringup/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
 #   ./scripts/bringup/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
@@ -170,6 +171,10 @@
 #                                 (默认 SimpleSmoother; 需要行为树里有 SmoothPath)
 #       两个都加 = 原来的 TDT 仿真链路 (YAstar + MinimumSnap)。
 #   -h, --help                显示本帮助
+#       --behavior <树名>          同时起决策行为树（srm27_behavior）；mux 要求决策许可
+#       --test-behavior [树名]     测试行为树模式：默认 test_spin_speed；mux 不要求
+#                                  决策许可，无裁判输入也能动
+#       --no-behavior              不起决策行为树
 #
 # 环境变量:
 #   WORLD MAP MAP_NAME PARAMS_FILE CONTROLLER USE_RVIZ USE_GUI RUN_IMMEDIATELY
@@ -256,6 +261,9 @@ GIMBAL_SPIN_DEFAULT="-1.0"                     # --gimbal-spin 不带数值时�
 # 自定义 RViz 配置（留空 = 用包内 rviz/nav2_default_view.rviz；--rviz-config 覆盖）
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
+# 1 = --test-behavior：起测试行为树，并让 mux 不要求决策许可（无裁判输入也能动）。
+BEHAVIOR_TEST="${BEHAVIOR_TEST:-0}"
+TEST_BEHAVIOR_TREE="${TEST_BEHAVIOR_TREE:-test_spin_speed}"
 BEHAVIOR_PATTERN='[s]rm27_behavior_launch\.py|[s]rm27_behavior_server'
 MAP_NAME="${MAP_NAME:-}"
 MAP_FILE="${MAP:-}"
@@ -372,15 +380,35 @@ while [ $# -gt 0 ]; do
                     GIMBAL_SPIN_WZ="$GIMBAL_SPIN_DEFAULT"; shift
                   fi ;;
     --no-gimbal-spin) GIMBAL_SPIN_WZ="0"; GIMBAL_SPIN_GIVEN=1; shift ;;
-    --behavior)   BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"; shift 2 ;;
-    --no-behavior) BEHAVIOR_TREE=""; shift ;;
+    --behavior)   BEHAVIOR_TREE="${2:?--behavior 需要行为树名 (如 rmul_2027 / rmuc_2027)}"
+                  BEHAVIOR_TEST=0; shift 2 ;;
+    --test-behavior)
+                  BEHAVIOR_TEST=1
+                  if [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ]; then
+                    BEHAVIOR_TREE="$2"; shift 2
+                  else
+                    BEHAVIOR_TREE="$TEST_BEHAVIOR_TREE"; shift
+                  fi ;;
+    --no-behavior) BEHAVIOR_TREE=""; BEHAVIOR_TEST=0; shift ;;
     --verify-spin) VERIFY_SPIN=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
 
+# --test-behavior：测试树直接进 mux，不依赖裁判/决策许可。安全提示必须在启动任何节点前打印。
+if [ "$BEHAVIOR_TEST" = "1" ] && [ -n "$BEHAVIOR_TREE" ]; then
+  echo "[警告] --test-behavior：测试行为树模式（${BEHAVIOR_TREE}）" >&2
+  echo "[警告]   mux 不要求决策许可 (decision_required=false)，树会直接驱动底盘。" >&2
+  echo "[警告]   确认仿真/空场无障碍；正式比赛请改用 --behavior。" >&2
+fi
+
 # --verify-spin 必须无头 + 无终端 (direct)：验证过程不需要 GUI，也不能依赖终端窗口。
+# 它自己会下发自转请求和导航目标，与 --test-behavior 的树会抢同一条链路。
+if [ "$VERIFY_SPIN" = "1" ] && [ "$BEHAVIOR_TEST" = "1" ]; then
+  echo "[错误] --verify-spin 与 --test-behavior 不能同时使用（两者都会自主下发目标/转速）。" >&2
+  exit 2
+fi
 if [ "$VERIFY_SPIN" = "1" ]; then
   OPEN_MODE="direct"
   USE_RVIZ="False"
@@ -445,6 +473,14 @@ check_spin_rate "云台自转速度" "$GIMBAL_SPIN_WZ" || exit 2
 if [ "$CHASSIS_SPIN_GIVEN" = "1" ] && \
    ! awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 0 : 1 }'; then
   echo "[提示] 底盘自转 ${CHASSIS_SPIN_WZ} rad/s：rotation_cmd -> srm_cmd_mux（不进 MINCO）。"
+fi
+
+# 行为树和手动小陀螺是同一路 wz 的两个发布者：都发 rotation_cmd，mux 只认最后一条。
+if [ -n "$BEHAVIOR_TREE" ] && \
+   awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ exit (v == 0) ? 1 : 0 }'; then
+  echo "[警告] 同时给了决策/测试行为树（${BEHAVIOR_TREE}）和底盘自转：两者都发 rotation_cmd。" >&2
+  echo "[警告]   mux 只按最后一条消息更新 wz，实际转速会在两者之间抖动，不是稳定曲线。" >&2
+  echo "[警告]   只保留一个来源：行为树用 --test-behavior/--behavior；手动恒速只用 --chassis-spin。" >&2
 fi
 
 # --verify-spin 自己发 VERIFY_SPIN_WZ 的请求；若同时给了 --chassis-spin，用它的转速，
@@ -1289,8 +1325,8 @@ fi
 # 定位方式由 NAV_EXTRA_ARGS 统一给出 (use_pcd_localization / use_lio_odometry /
 # prior_pcd_file); fakeyaw 链路的两个开关跟在它后面, 与定位方式正交。
 NAV_CMD="ros2 launch srm27_nav_bringup nav_srm_simulation_launch.py namespace:=${ROBOT_NS} world:=${WORLD} map:=${MAP_FILE_Q} params_file:=${PARAMS_FILE_Q} slam:=False${NAV_EXTRA_ARGS} use_fakeyaw_transform:=${USE_FAKEYAW_ARG} command_frame:=${COMMAND_FRAME_ARG} use_composition:=${USE_COMPOSITION} use_sim_time:=True use_rviz:=${USE_RVIZ}${RVIZ_CONFIG_ARG} use_velocity_smoother:=${USE_VELOCITY_SMOOTHER} yaw_mode:=${YAW_MODE} gimbal_spin_rate:=${GIMBAL_SPIN_WZ} use_yastar_planner:=${USE_YASTAR_PLANNER} use_minisnap_smoother:=${USE_MINISNAP_SMOOTHER}"
-# 自动决策模式从 mux 启动即要求许可；普通手动导航显式关闭。
-if [ -n "$BEHAVIOR_TREE" ]; then
+# 自动决策模式从 mux 启动即要求许可；普通手动导航和 --test-behavior 显式关闭。
+if [ -n "$BEHAVIOR_TREE" ] && [ "$BEHAVIOR_TEST" != "1" ]; then
   NAV_CMD="$NAV_CMD decision_required:=true"
 else
   NAV_CMD="$NAV_CMD decision_required:=false"
@@ -1299,6 +1335,8 @@ start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ -n "$BEHAVIOR_TREE" ]; then
   BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py namespace:=${ROBOT_NS} use_sim_time:=True target_tree:=${BEHAVIOR_TREE}"
+  # 测试模式：服务端不要再把 mux 的 decision_required 改回 true。
+  [ "$BEHAVIOR_TEST" = "1" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD enforce_mux_guard:=false"
   start_once "SRM27 决策行为树 (${BEHAVIOR_TREE})" "$BEHAVIOR_PATTERN" "$BEHAVIOR_CMD"
 fi
 

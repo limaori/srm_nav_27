@@ -70,9 +70,17 @@ private:
     }
     const auto now = std::chrono::steady_clock::now();
     if (now < retry_after_) { return BT::NodeStatus::RUNNING; }
+    // A failed/timed-out attempt has no active goal any more. resetChild() only halts a
+    // RUNNING child, so a child that already returned FAILURE would leave the tracker's
+    // has_active_goal=true behind and keep the spin arbitration on the "navigating" branch.
+    std::shared_ptr<NavigationSpinTracker> tracker;
+    auto clear_tracker_goal = [&]() {
+      if (bb->get("nav_spin_tracker", tracker) && tracker) { tracker->clearGoal(); }
+    };
     if (attempt_started_ != std::chrono::steady_clock::time_point{} &&
         std::chrono::duration<double>(now - attempt_started_).count() >= getInput<double>("timeout_sec").value()) {
       resetChild();
+      clear_tracker_goal();
       attempt_started_ = {};
       retry_after_ = now + std::chrono::seconds(1);
       bb->set("nav_fault", std::string("navigation_timeout"));
@@ -86,6 +94,7 @@ private:
     if (result != BT::NodeStatus::RUNNING) { attempt_started_ = {}; }
     if (result == BT::NodeStatus::FAILURE) {
       resetChild();
+      clear_tracker_goal();
       retry_after_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
       return BT::NodeStatus::RUNNING;
     }

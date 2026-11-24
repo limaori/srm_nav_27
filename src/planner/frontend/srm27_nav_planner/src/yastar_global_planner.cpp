@@ -20,8 +20,6 @@
 
 using nav2_util::declare_parameter_if_not_declared;
 using srm27_map_core::nearestFreePoint;
-using srm27_map_core::pathIsFree;
-using srm27_nav_common::resamplePath;
 using srm27_nav_common::toPath;
 
 namespace srm27_nav_planner
@@ -66,9 +64,6 @@ void YAstarGlobalPlanner::configure(
     node, plugin_name_ + ".save_point_max_radius",
     rclcpp::ParameterValue(static_cast<double>(save_point_max_radius_)));
   declare_parameter_if_not_declared(
-    node, plugin_name_ + ".path_resample_step",
-    rclcpp::ParameterValue(static_cast<double>(path_resample_step_)));
-  declare_parameter_if_not_declared(
     node, plugin_name_ + ".orientation_mode",
     rclcpp::ParameterValue(
       std::string(srm27_nav_common::orientationModeName(orientation_mode_))));
@@ -92,8 +87,6 @@ void YAstarGlobalPlanner::configure(
     rclcpp::ParameterValue(static_cast<double>(save_point_max_radius_)));
   goal_snap_max_radius_ = static_cast<float>(
     node->get_parameter(plugin_name_ + ".goal_snap_max_radius").as_double());
-  path_resample_step_ = static_cast<float>(
-    node->get_parameter(plugin_name_ + ".path_resample_step").as_double());
   orientation_mode_ = srm27_nav_common::parseOrientationMode(
     node->get_parameter(plugin_name_ + ".orientation_mode").as_string());
   debug_timing_ = node->get_parameter(plugin_name_ + ".debug_timing").as_bool();
@@ -114,11 +107,10 @@ void YAstarGlobalPlanner::configure(
       "YAstarGlobalPlanner: cost_inflate_radius / simplify_epsilon must be positive");
   }
   if (!std::isfinite(save_point_max_radius_) || save_point_max_radius_ < 0.0f ||
-    !std::isfinite(goal_snap_max_radius_) || goal_snap_max_radius_ < 0.0f ||
-    !std::isfinite(path_resample_step_) || path_resample_step_ < 0.0f)
+    !std::isfinite(goal_snap_max_radius_) || goal_snap_max_radius_ < 0.0f)
   {
     throw nav2_core::PlannerException(
-      "YAstarGlobalPlanner: save_point_max_radius, goal_snap_max_radius and path_resample_step "
+      "YAstarGlobalPlanner: save_point_max_radius and goal_snap_max_radius "
       "must be finite and nonnegative");
   }
 }
@@ -178,23 +170,12 @@ nav_msgs::msg::Path YAstarGlobalPlanner::createPlan(
     snap.sizeX(), snap.sizeY(), static_cast<float>(snap.resolution()),
     static_cast<float>(snap.originX()), static_cast<float>(snap.originY()), mask);
   // setMaskNumLayers 会按 occMap 尺寸重建掩码，必须在 setMap 之后。
+  // 上游 main.cpp:96 固定 4 层；本仓库不接动态 Mask，空层不影响静态图搜索。
   planner.setMaskNumLayers(mask_num_layers_);
-  // 【2026-11-09 v2】代价场改「0.60 m 内重罚 + 远处零代价」。
-  // v1（0.30 m）实测不足：inscribed 半径 0.33 m、膨胀 0.55 m，距墙 0.5 m 处
-  // costmap 已是 253（INSCRIBED）。0.30 m 重罚放行了 0.3~0.55 m 的贴墙段，
-  // smoother 的 SFC（threshold 252）判撞 → OSQP 六轮迭代必败 → BT 死循环。
-  // 0.60 m 覆盖 inscribed+膨胀带，A* 路径不再进入 253 区。
-  // 【2026-11-22 v3 实车】二值罚价在窄走廊（<1.2 m）里退化成"处处等价"：
-  // 带内每格距两侧墙都 <0.60 m，penalty 全部 = 100，A* 失去居中倾向，
-  // 实车 219_1121 北走廊路径贴墙（车身边缘蹭墙，人工目视确认）。
-  // 改线性衰减（对齐上游 bench_yastar 的梯度思路）：
-  //   0.40 m 内 100·(1−d/0.40)，走廊中轴（d≈缝宽/2）代价最低，向墙单调上升。
-  //   0.56 m 缝：中轴 d=0.28 → 罚 30，贴边 d=0.16 → 罚 60，梯度 30 拉回中轴。
-  //   宽阔区（d>0.40）罚 0，行为与 v2 一致。253/254 仍被 occupancy_threshold
-  //   252 挡住，不受本改动影响。
+  // 上游 main.cpp:109 的人工势场：cost = 1 + 0.5/(0.1+d)。
   planner.setCostField(
     cost_inflate_radius_,
-    [](float x) { return x < 0.40f ? 100.0f * (1.0f - x / 0.40f) : 0.0f; });
+    [](float x) { return 0.5f / (0.1f + x); });
   planner.initCostMap();
 
   const auto resolved_start = nearestFreePoint(
@@ -230,29 +211,22 @@ nav_msgs::msg::Path YAstarGlobalPlanner::createPlan(
 
   // Humble 的 createPlan 没有 cancel_checker 参数，取消由 planner_server 在
   // 动作层处理；这里不做主动取消检查。
-  // 上游搜索失败与起终点同格都返回单点；先区分两者，再转换到 Nav2 栅格中心。
+  // 上游 main.cpp:133-134：搜索后只做 DP 化简 + 直线化简，不加密、不回退。
   path = nav2PathFromYastar(snap, path, s, g, treat_unknown_as_obstacle_);
-  if (!pathIsFree(snap, path, treat_unknown_as_obstacle_)) {
+  // 上游 main.cpp 在 search() 之后先判 empty 再 simplify；这里必须保留同样的
+  // 前置条件：vendored simplifyPath() 为空时会读 path[0]（越界）。
+  if (path.size() < 2) {
     throw nav2_core::PlannerException(
-      "YAstarGlobalPlanner: YAstar returned no collision-free route");
+      "YAstarGlobalPlanner: no path (start/goal blocked or search failed)");
   }
-
-  const auto unsimplified = path;
   path = planner.simplifyPath(path, simplify_epsilon_);
   path = planner.simplifyPathHypot(path);
-  // Vendor simplifiers use rasterized line checks, which can miss a cell touched
-  // at a corner. Keep the validated search route if a shortcut crosses a cell.
-  if (!pathIsFree(snap, path, treat_unknown_as_obstacle_)) {
-    path = unsimplified;
-  }
-
-  const auto dense = resamplePath(path, path_resample_step_, 10000);
-  if (!pathIsFree(snap, dense, treat_unknown_as_obstacle_)) {
+  if (path.size() < 2) {
     throw nav2_core::PlannerException(
-      "YAstarGlobalPlanner: resampled path crosses an occupied cell");
+      "YAstarGlobalPlanner: simplification returned a degenerate path");
   }
   return toPath(
-    dense, costmap_ros_->getGlobalFrameID(), node->now(), orientation_mode_);
+    path, costmap_ros_->getGlobalFrameID(), node->now(), orientation_mode_);
 }
 
 }  // namespace srm27_nav_planner

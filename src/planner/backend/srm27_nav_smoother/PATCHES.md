@@ -128,6 +128,10 @@ if(freeBottom){bottom++;}else if(freeTop){top--;}   // 再 +1，共 +2
 `backend: corridor` 仍不建议上车的另一半原因。本包不修它：修了会改变 corridor 后端的
 求解语义，需要单独评估；可视化里如实画出原始方块，不做美化。
 
+> 2026-11-24：按“参数和逻辑直接抄开源 main.cpp”的要求，默认后端已切到
+> `OSQPCorridor`、`order=6`、起点速度 0，并移除了路径加密/切角/fallback。
+> 上述方块含障风险仍然存在；实车使用前必须在现场地图上验证。
+
 ## P11 · OSQP 求解诊断日志（2026-11-22，原表漏登记，迁包时补记）
 
 现场排查 `backend: path/corridor` 不收敛时，上游只在失败时打印一句「OSQP未收敛」，

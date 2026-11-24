@@ -299,19 +299,12 @@ class RealPlannerParams(RewrittenYaml):
             # 并触发恢复行为（实车表现为车停住、反复 abort）。放宽到 0.4 让目标吸附到
             # 最近的可通行格，与 planner 默认值一致。
             "goal_snap_max_radius": 0.4,
-            "path_resample_step": 0.20,
-            # 2026-11-22 补全（此前注入丢键，与仿真参数不一致）：
-            # 缺 cost_inflate_radius 时 planner 对 252 带边缘没有离障代价，实测路径
-            # 贴着 inscribed(253) 走 —— smoother 的 QP(252 约束)在贴边路径上无解、
-            # nav2 footprint 检查(0.15m 圆盘 vs 253)也必撞。补上后按 1.0m 半径
-            # 抬高障碍附近代价，把路径推离墙体，与仿真 YAstar 注入参数同源。
+            # 2026-11-24: 参数与调用逻辑直接对齐 tdt-nav-kit 开源 main.cpp:
+            #   setMaskNumLayers(4), setCostField(1.0, 0.5/(0.1+d)),
+            #   search -> simplifyPath(0.1) -> simplifyPathHypot，不加密。
             "cost_inflate_radius": 1.0,
-            "mask_num_layers": 1,
-            # 2026-11-22: 0.1 -> 0.03。ε=0.1 的折线简化会把沿走廊中轴蜿蜒的 S 路径
-            # 用弦代替（每顶点最多偏 0.1m），实车 219_1121 实测路径整体偏东 13.5cm、
-            # 车身边缘距东墙仅 ~0.24m，MINCO 以净空 0.204<0.245 拒轨。0.03 保住
-            # 中轴形状（0.05m 栅格下近似无损），代价是点数略增、平滑输入更密。
-            "simplify_epsilon": 0.03,
+            "mask_num_layers": 4,
+            "simplify_epsilon": 0.1,
             "orientation_mode": "tangent",
         }
         with open(path, "w", encoding="utf-8") as stream:

@@ -130,6 +130,40 @@ ros2 service call /srm_cmd_mux/stop_all std_srvs/srv/Trigger
 
 **姿态边界**：`sentry/desired_posture` 是本地请求，`current_posture` 也是请求侧估计；当前串口没有姿态、买弹、确认复活的下行/确认闭环。5 秒冷却和各姿态累计时间仅约束请求，不证明裁判系统已执行。不编造 2027 下行帧或强化姿态编号。
 
+## 自转转速测试（dev）
+
+`decision_trees/dev_rm.xml` 里的 `test_spin_speed` 只用于空场/仿真标定，不参与比赛策略：
+
+| 树 | 行为 |
+| --- | --- |
+| `test_spin_speed` | 启动后先原地以 `5 rad/s` 转 5 s（无目标点），再发目标、导航中 `2 rad/s`；到点（`nav_arrived`）后原地 `5 rad/s` 并驻留 |
+
+启动段的“无目标点”由 `PublishSpinSpeed` 的 `duration=RUNNING` 做非阻塞延时（发到
+`test/spin_nav_delay` 占位，不影响 `rotation_cmd`），外面套普通 `Sequence` 保证只跑一次。
+导航失败/超时清掉目标的空窗同样回落到 `5 rad/s`。`goal="2;0;0"` 只是示例
+（map 原点沿 +x 2 m），实车前必须改成场地内安全点。
+
+转速 `5.0 / 2.0` 写死在 XML 里，不受 `spin.*` 热调参数影响；实际出口仍受 `srm_cmd_mux`
+的 `wz_max` / `wz_ramp` 限幅（生产配置 `8.5 rad/s`、`25 rad/s²`）。树里会置
+`@motion_allowed=true`，但不含比赛门控，禁止在正式比赛选择。
+
+```bash
+# --test-behavior：脚本自动把 mux 设为 decision_required=false，并打印安全警告
+./scripts/bringup/start_real_nav.sh --test-behavior
+./scripts/bringup/start_sim_nav.sh --test-behavior
+
+# 观测请求与实际出口
+ros2 topic echo /behavior/spin_state                 # TEST_MOVING_SLOW / TEST_HOLD_FAST
+ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_standard_robot1/cmd_vel_sim
+```
+
+`--test-behavior` 与 `--behavior` 的区别：后者走正常决策许可门控（正式比赛/带裁判输入）；
+前者让 mux 不要求 `decision/motion_permit`，方便空场或架起车辆时验证。它同时给服务端传
+`enforce_mux_guard:=false`，否则服务端启动树后会把 mux 的 `decision_required` 改回 `true`
+（无裁判输入时所有输出都会被清零）。`--test-behavior` 也可以带树名覆盖默认的
+`test_spin_speed`。XML 在服务端启动时从 install 目录加载：symlink-install 改完即生效，
+复制式安装需重新构建；`enforce_mux_guard` 是服务端启动参数，改动后需重启服务端。
+
 ## 裁判协议兼容
 
 `EventData` 包含 2027 R/B 阵地控制/激活数组和 `battlefield_valid`，并分别提供 UL 中心激活 `center_gain_point_status`、控制权 `center_control` 及有效位 `center_control_valid`；`AllyRobotHP` 包含 R/B 前哨 HP、双方控制度和 `control_score_valid`，对应通信协议 V1.0.0（2026-10-29）表 1-8/1-9。旧转发包保留原字段，新有效位为 false；速度下行仍为 19 字节。ROS 消息定义更新后，生产者和消费者须一起重新构建，避免混用旧消息类型。

@@ -88,4 +88,54 @@
     </Repeat>
   </BehaviorTree>
 
+  <!-- ==================================================================
+       自转转速测试（dev）：验证“导航中慢转、到点/无目标快转”的切换。
+       只用于空场或仿真标定，禁止在正式比赛选择。
+
+         test_spin_speed : 先在原地以 5 rad/s 转 5 s（还没有导航目标）；
+                           随后发目标，导航中 2 rad/s；
+                           到点（nav_arrived）后原地 5 rad/s 并驻留。
+
+       “无目标点”用 PublishSpinSpeed 的 duration=RUNNING 做非阻塞延时，
+       发到 test 话题占位，不影响 rotation_cmd；导航失败/超时清目标的空窗
+       同样回落到 5 rad/s。转速 5.0 / 2.0 写死在树里，不受 spin.* 热调参数
+       影响；实际出口仍受 srm_cmd_mux 的 wz_max / wz_ramp 限幅。
+       goal="2;0;0" 只是示例（map 原点沿 +x 2 m），实车测试前必须改成
+       场地内安全点。
+       入口：start_real_nav.sh / start_sim_nav.sh 的 test-behavior 参数；
+       启动方式与观测见包 README 的“自转转速测试（dev）”一节。
+       ================================================================== -->
+  <BehaviorTree ID="test_spin_speed">
+    <KeepRunningUntilFailure>
+      <ReactiveSequence>
+        <Script code="@motion_allowed := true; @decision_mode := 'test'; @decision_reason := 'spin_speed_profile'"/>
+        <Fallback name="TestSpinProfile">
+          <Sequence name="AtGoalOrNoGoalFastSpin">
+            <ScriptCondition code="@nav_arrived || !@has_active_goal"/>
+            <PublishRotationCmd _successIf="@dry_run"
+                                spin_speed="5.0"
+                                spin_mode="TEST_HOLD_FAST"
+                                topic_name="rotation_cmd"/>
+          </Sequence>
+          <PublishRotationCmd _successIf="@dry_run"
+                              spin_speed="2.0"
+                              spin_mode="TEST_MOVING_SLOW"
+                              topic_name="rotation_cmd"/>
+        </Fallback>
+        <!-- 普通 Sequence 只走一次：先 5 s 无目标（自转仲裁停在 5 rad/s），
+             再发目标进导航。非响应式 Sequence 不会回头重跑延时节点。
+             延时借 PublishSpinSpeed 的 duration=RUNNING 语义，发到 test 话题占位。 -->
+        <Sequence name="NavigateAfterNoTargetPhase">
+          <PublishSpinSpeed _successIf="@dry_run"
+                            duration="5000"
+                            spin_speed="0.0"
+                            topic_name="test/spin_nav_delay"/>
+          <NavigationTransitionGate>
+            <SendNav2Goal goal="2;0;0" action_name="navigate_to_pose"/>
+          </NavigationTransitionGate>
+        </Sequence>
+      </ReactiveSequence>
+    </KeepRunningUntilFailure>
+  </BehaviorTree>
+
 </root>

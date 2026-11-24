@@ -109,6 +109,8 @@ private:
   std::shared_ptr<BT::StdCoutLogger> logger_cout_;
   uint32_t tick_count_ = 0;
   bool use_cout_logger_;
+  // false = 不强制 srm_cmd_mux 要求决策许可（仅 --test-behavior 空场/台架测试用）。
+  bool enforce_mux_guard_ = true;
   double input_timeout_sec_ = 3.0;
   int match_epoch_ = 0;
   int previous_progress_ = -1;

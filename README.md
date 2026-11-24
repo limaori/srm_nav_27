@@ -107,6 +107,10 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 ./scripts/bringup/start_real_nav.sh --yastar-planner
 ./scripts/bringup/start_sim_nav.sh --yastar-planner --minisnap-smoother
 
+# 自转转速测试树：启动后原地 5 rad/s 5 s，导航中 2 rad/s，到点原地 5 rad/s
+./scripts/bringup/start_real_nav.sh --test-behavior
+./scripts/bringup/start_sim_nav.sh --test-behavior
+
 # 建图
 ./scripts/bringup/start_real_slam.sh
 ./scripts/bringup/start_real_slam.sh --save 227_1114

@@ -1193,39 +1193,25 @@ planner_server:
 smoother_server:
   ros__parameters:
     use_sim_time: False
-    # 2026-11-22: SimpleSmoother -> srm27_nav_smoother::MinimumSnapSmoother
-    # （T-DT MinimumSnap, OSQP + SfcSquare 走廊；2026-11-24 由 tdt_nav_kit 拆包并入 planner/backend）。
-    # 参数以原 tdt_nav_kit 的调优版 smoother_server 段为基线，仅两处实车适配：
-    #   * corner_round_cut 0.40 -> 0.30：西缝物理缝约 0.75 m、MINCO 硬净空（ESDF）0.245 m，
-    #     切角过大会把曲线顶向内角，参考线贴墙触发 MINCO validation_failed（11-21 实测教训）。
-    #   * use_sim_time: False。
-    # 平滑失败时 fallback_to_resampled 返回加密折线（不阻塞导航）；QP 失败不会动车。
+    # 2026-11-24: 参数与调用逻辑直接对齐 tdt-nav-kit 开源 main.cpp:145-164。
+    # 不再使用本仓库此前的 path 后端 / 路径加密 / 切角 / fallback / odom 起点速度。
+    # QP 失败时保持原路径并返回 false（上游无闭式兜底）。
     smoother_plugins: ["minimum_snap_smoother"]
     minimum_snap_smoother:
       plugin: "srm27_nav_smoother::MinimumSnapSmoother"
-      occupancy_threshold: 252                     # 253 放行会让曲线贴障碍 ~0.1 m（仿真 11-09 实测），252 严格
-      treat_unknown_as_obstacle: False             # True 时动态层留下的未观测格会让平滑恒失败
-      order: 5                                     # 多项式阶数
-      max_dx: 3                                    # 最大导数阶数
-      strict_collision: False                      # 更严格但更慢、更易失败
-      backend: "path"                              # path | close；corridor 后端在 configure 阶段已被硬拒绝
+      occupancy_threshold: 252                     # 成本图判障阈值（ROS 适配参数）
+      treat_unknown_as_obstacle: False             # 未知格不按障碍（ROS 适配参数）
+      order: 6                                     # 多项式参数数量：6 = 五次多项式（0~5 阶）
+      max_dx: 3                                    # 最大导数阶数，3 = minimum jerk
+      strict_collision: False                      # 上游默认 false
+      backend: "corridor"                          # 上游 main.cpp:163 OSQPCorridor
       collision_iter: 6                            # 碰撞检测迭代次数
       norm_time: True                              # 段内归一化时间
-      max_corridor_range: 2.5                      # 走廊最大扩张范围（米）
-      corridor_shrink: 0.0                         # 走廊收缩（米）
-      max_speed: 3.0                               # 时间分配用最大速度（只影响平顺性，不是硬约束）
-      max_acc: 1.0                                 # 时间分配用最大加速度（同上）
-      path_resample_step: 0.30                     # 平滑前按步长线性加密（稀疏路径会让样条切进膨胀层）
-      path_resample_max_points: 2000               # 加密后点数上限
-      fallback_to_resampled: True                  # 求解失败时回退加密折线，保证路径仍可跟踪
-      corner_round_cut: 0.20                       # 切角长度（米），实车窄道档 0.40 -> 0.30 -> 0.20（2026-11-22：mouth 67° 弯内切顶墙，再降）
-      corner_round_min_turn_deg: 25.0              # 小于该转角不切
-      corner_round_sample_step: 0.20               # 贝塞尔采样步长（米）
-      init_vel_from_odom: False                    # 实测开启后非零起点速度让 OSQP 频繁失败
-      odom_topic: odom                             # 速度来源（相对机器人命名空间）
-      init_vel_max_age: 0.30                       # 超过该时长视为无有效里程计（秒）
-      min_points: 2                                # 两点直线路径也加密供控制器跟踪
-      orientation_mode: "tangent"                  # 由相邻点求 yaw
+      max_corridor_range: 2.5                      # SFC 最大膨胀范围（米）
+      corridor_shrink: 0.0                         # SFC 初始收缩（米），迭代中自动减半
+      max_speed: 3.0                               # 时间分配用最大速度（上游 3.0）
+      max_acc: 1.0                                 # 时间分配用最大加速度（上游 1.0）
+      orientation_mode: "tangent"                  # 由相邻点求 yaw（ROS 输出适配）
       # SFC（方形安全飞行走廊）可视化：每次平滑后把走廊方块发成 MarkerArray。
       # 话题默认私有名 -> /<smoother_server>/sfc_corridor；RViz 的 MarkerArray
       # 显示已在 srm27_nav_bringup/rviz/nav2_default_view.rviz 里预置。
