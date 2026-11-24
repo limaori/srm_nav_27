@@ -259,25 +259,33 @@ def test_mapping_and_nav_share_the_same_pose_body_offset():
     workspace_root = PACKAGE_ROOT.parents[3]
     real_dir = workspace_root / "src" / "bringup" / "srm27_nav_bringup" / "config" / "real" / "current"
 
-    def offset(name, required):
+    def settings(name, required):
         with open(real_dir / name, encoding="utf-8") as stream:
             document = yaml.safe_load(stream)
         section = (document.get("zlio_bridge") or {}).get("ros__parameters")
         if section is None:
             _assert(not required, f"{name} 缺少 zlio_bridge 段")
-            return ([0.0, 0.0, 0.0], True)
+            return ([0.0, 0.0, 0.0], True, "base_link", "")
         return (
             [float(v) for v in section.get("pose_body_offset_xyz", [0.0, 0.0, 0.0])],
             bool(section.get("pose_body_offset_apply_to_cloud", True)),
+            str(section.get("base_frame", "base_link")),
+            str(section.get("ground_frame", "")),
         )
 
-    nav_offset, nav_cloud = offset("nav2_params_srm_minco_fakeyaw.yaml", required=True)
-    map_offset, map_cloud = offset("mapping_params.yaml", required=True)
+    nav_offset, nav_cloud, nav_base, nav_ground = settings(
+        "nav2_params_srm_minco_fakeyaw.yaml", required=True)
+    map_offset, map_cloud, map_base, map_ground = settings("mapping_params.yaml", required=True)
     _assert(nav_offset == map_offset,
             f"建图与导航的 pose_body_offset_xyz 不一致：nav={nav_offset} mapping={map_offset}")
     _assert(nav_cloud == map_cloud,
             f"建图与导航的 pose_body_offset_apply_to_cloud 不一致：nav={nav_cloud} "
             f"mapping={map_cloud}")
+    _assert(nav_base == map_base,
+            f"建图与导航的 zlio_bridge.base_frame 不一致：nav={nav_base} mapping={map_base}")
+    _assert(nav_ground == map_ground,
+            f"建图与导航的 zlio_bridge.ground_frame 不一致：nav={nav_ground} "
+            f"mapping={map_ground}")
     _assert(not nav_cloud,
             "apply_to_cloud=true 会把 pose 的圆周补偿带进世界点云（2026-11-24 实测 "
             "registered_scan R≈9.6 cm、车位姿 R≈1.8 cm），正式配置应为 false")

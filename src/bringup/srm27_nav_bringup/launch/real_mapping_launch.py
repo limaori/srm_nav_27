@@ -211,7 +211,12 @@ def launch_setup(context):
                 params_file,
                 clock_params,
                 # bridge 的默认 lidar_frame 是仿真的 front_mid360，实车必须覆盖。
-                {"odom_frame": "odom", "base_frame": "base_link", "lidar_frame": "livox_imu"},
+                {
+                    "odom_frame": "odom",
+                    "base_frame": "gimbal_yaw",
+                    "ground_frame": "base_link",
+                    "lidar_frame": "livox_imu",
+                },
                 # 累积点云落盘（等价 Point-LIO 的 pcd_save）：退出时按体素降采样写 PCD。
                 {
                     "pcd_save_en": ParameterValue(

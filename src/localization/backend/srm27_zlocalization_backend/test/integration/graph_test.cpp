@@ -38,6 +38,31 @@ TEST(PoseGraph, OdometryChainRecoversGeometryAndUncertaintyGrows) {
     EXPECT_FALSE(graph.hasEstimate(4));
 }
 
+/// 重力因子校正 map 位姿的横滚、俯仰，同时保留其偏航和平移。
+TEST(PoseGraph, GravityAlignmentCorrectsTiltWithoutConstrainingYawOrPosition) {
+    const auto verify_tilt = [](const double roll_deg, const double pitch_deg) {
+        PoseGraph graph;
+        Eigen::Matrix4d initial = testing::translation(2.0, -1.0, 0.4);
+        initial.block<3, 3>(0, 0) = rpyDegreesToRotation(roll_deg, pitch_deg, 40.0);
+        graph.addPrior(0, initial, PoseCovariance6d::Identity() * 0.01, 1.0);
+        graph.addGravityAlignment(0, Eigen::Matrix4d::Identity(), 0.2 * kPi / 180.0);
+        graph.update(false);
+
+        const auto estimate = graph.estimate(0);
+        ASSERT_TRUE(estimate);
+        const Eigen::Matrix3d rotation = estimate->block<3, 3>(0, 0);
+        const double tilt = std::acos(std::clamp(rotation.col(2).dot(Eigen::Vector3d::UnitZ()),
+                                                 -1.0, 1.0));
+        const double initial_yaw = std::atan2(initial(1, 0), initial(0, 0));
+        const double estimated_yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+        EXPECT_LT(tilt, 0.2 * kPi / 180.0);
+        EXPECT_NEAR(std::remainder(estimated_yaw - initial_yaw, 2.0 * kPi), 0.0, 1e-5);
+        EXPECT_LT((estimate->block<3, 1>(0, 3) - initial.block<3, 1>(0, 3)).norm(), 1e-5);
+    };
+    verify_tilt(6.0, 0.0);
+    verify_tilt(0.0, -4.0);
+}
+
 /// 固定滞后窗口移除过期节点后，当前位姿及其边缘协方差仍可查询。
 TEST(PoseGraph, FixedLagRetiresOldStatesWithoutLosingCurrentMotion) {
     PoseGraphConfig config;
