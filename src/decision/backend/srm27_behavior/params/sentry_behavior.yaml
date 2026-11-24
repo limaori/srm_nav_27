@@ -18,6 +18,7 @@ srm27_behavior_server:
     supply_retry: 15.0
     navigation_timeout: 45.0 # 单次 Action 最长运行时间；超时取消，退避后重试
     navigation_completion_tolerance: 0.8 # 独立于自转滞回；需覆盖 Nav2 XY 容差及栅格端点误差
+    nav_action_name: navigate_to_pose # 外部 Nav2 目标状态话题（test_spin_speed 用）
 
     input_timeout_sec: 3.0    # 裁判、身份状态和定位的新鲜度期限（秒）；过期撤销运动许可
     waypoints_file: params/waypoints.yaml

@@ -136,23 +136,27 @@ ros2 service call /srm_cmd_mux/stop_all std_srvs/srv/Trigger
 
 | 树 | 行为 |
 | --- | --- |
-| `test_spin_speed` | 启动后先原地以 `5 rad/s` 转 5 s（无目标点），再发目标、导航中 `2 rad/s`；到点（`nav_arrived`）后原地 `5 rad/s` 并驻留 |
+| `test_spin_speed` | 没有活动 Nav2 目标、已到点或目标被取消/中止 → 原地 `5 rad/s`；Nav2 目标 `ACCEPTED/EXECUTING` → 导航中 `2 rad/s` |
 
-启动段的“无目标点”由 `PublishSpinSpeed` 的 `duration=RUNNING` 做非阻塞延时（发到
-`test/spin_nav_delay` 占位，不影响 `rotation_cmd`），外面套普通 `Sequence` 保证只跑一次。
-导航失败/超时清掉目标的空窗同样回落到 `5 rad/s`。`goal="2;0;0"` 只是示例
-（map 原点沿 +x 2 m），实车前必须改成场地内安全点。
+它**不自己下发目标**：目标用 RViz 的 “Nav2 Goal”（或任何节点）直接发给 `navigate_to_pose`。
+服务端订阅 `<nav_action_name>/_action/status`（默认 `navigate_to_pose`），把最新目标状态
+映射成黑板 `nav_action_state`（0=无目标/取消/中止，1=导航中，2=到点）、
+`nav_action_active`、`nav_action_arrived`，测试树只读这三个键。因此可以直接在 RViz
+里点目标观察 2/5 切换；目标失败/取消后自动回到 5，不需要改 XML 里的坐标。
 
 转速 `5.0 / 2.0` 写死在 XML 里，不受 `spin.*` 热调参数影响；实际出口仍受 `srm_cmd_mux`
 的 `wz_max` / `wz_ramp` 限幅（生产配置 `8.5 rad/s`、`25 rad/s²`）。树里会置
-`@motion_allowed=true`，但不含比赛门控，禁止在正式比赛选择。
+`@motion_allowed=true`，但不含比赛门控，禁止在正式比赛选择；外部目标不会经过
+`SendNav2Goal`，所以必须用 `--test-behavior`（mux 不要求决策许可），`--behavior` 下
+`navigation_ready` 不会被外部目标置位，mux 会把运动清零。
 
 ```bash
 # --test-behavior：脚本自动把 mux 设为 decision_required=false，并打印安全警告
 ./scripts/bringup/start_real_nav.sh --test-behavior
 ./scripts/bringup/start_sim_nav.sh --test-behavior
 
-# 观测请求与实际出口
+# 然后在 RViz 里用 “Nav2 Goal” 点一个空闲目标：
+#   无目标/到点 → 5 rad/s；导航中 → 2 rad/s；取消/失败 → 回到 5 rad/s
 ros2 topic echo /behavior/spin_state                 # TEST_MOVING_SLOW / TEST_HOLD_FAST
 ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_standard_robot1/cmd_vel_sim
 ```
@@ -162,7 +166,7 @@ ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_s
 `enforce_mux_guard:=false`，否则服务端启动树后会把 mux 的 `decision_required` 改回 `true`
 （无裁判输入时所有输出都会被清零）。`--test-behavior` 也可以带树名覆盖默认的
 `test_spin_speed`。XML 在服务端启动时从 install 目录加载：symlink-install 改完即生效，
-复制式安装需重新构建；`enforce_mux_guard` 是服务端启动参数，改动后需重启服务端。
+复制式安装需重新构建；`enforce_mux_guard` / `nav_action_name` 是服务端启动参数，改动后需重启服务端。
 
 ## 裁判协议兼容
 
@@ -183,6 +187,7 @@ ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_s
 | `arena_valid` / `score_valid` | 2027 8 字节场地事件 / 24 字节血量控制度，独立超时；R/B 场地标识按原始身份映射 |
 | `match_epoch` / `needs_supply` | 新局清除历史滞回/姿态预算；复活回补锁存 |
 | `nav_arrived` / `nav_goal_finished` | 距离滞回 / Action 成功，二者分别记录 |
+| `nav_action_state` / `nav_action_active` / `nav_action_arrived` | 外部 Nav2 `<nav_action_name>/_action/status`（默认 `navigate_to_pose`）：0=无目标/取消/中止，1=导航中，2=到点；`test_spin_speed` 用 |
 
 ## 验证
 

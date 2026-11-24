@@ -15,6 +15,7 @@
 #include "srm27_behavior/srm27_behavior_server.hpp"
 #include "srm27_behavior_core/sentry_posture_state.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,8 @@
 
 #include "behaviortree_cpp/xml_parsing.h"
 
+#include "action_msgs/msg/goal_status.hpp"
+#include "action_msgs/msg/goal_status_array.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_util/robot_utils.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -311,6 +314,49 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
     bb->set(setting.first, value);
   }
   initRefereeInputs();
+  initNavActionStatus();
+}
+
+void SentryBehaviorServer::initNavActionStatus()
+{
+  const auto action_name =
+    node()->declare_parameter<std::string>("nav_action_name", "navigate_to_pose");
+  auto bb = globalBlackboard();
+  bb->set("nav_action_state", 0);
+  bb->set("nav_action_active", false);
+  bb->set("nav_action_arrived", false);
+
+  // 外部（RViz / CLI / 其他节点）下发的 Nav2 目标不会经过本树的 SendNav2Goal，
+  // 因此直接跟踪 action 状态，供 test_spin_speed 这类“只看导航状态”的测试树使用。
+  subscriptions_.push_back(node()->create_subscription<action_msgs::msg::GoalStatusArray>(
+    action_name + "/_action/status", rclcpp::QoS(10),
+    [this](const action_msgs::msg::GoalStatusArray::SharedPtr status) {
+      int state = 0;
+      if (!status->status_list.empty()) {
+        const auto latest = std::max_element(
+          status->status_list.begin(), status->status_list.end(),
+          [](const auto & a, const auto & b) {
+            return rclcpp::Time(a.goal_info.stamp) < rclcpp::Time(b.goal_info.stamp);
+          });
+        switch (latest->status) {
+          case action_msgs::msg::GoalStatus::STATUS_ACCEPTED:
+          case action_msgs::msg::GoalStatus::STATUS_EXECUTING:
+          case action_msgs::msg::GoalStatus::STATUS_CANCELING:
+            state = 1;
+            break;
+          case action_msgs::msg::GoalStatus::STATUS_SUCCEEDED:
+            state = 2;
+            break;
+          default:
+            state = 0;
+            break;
+        }
+      }
+      auto blackboard = globalBlackboard();
+      blackboard->set("nav_action_state", state);
+      blackboard->set("nav_action_active", state == 1);
+      blackboard->set("nav_action_arrived", state == 2);
+    }));
 }
 
 void SentryBehaviorServer::stopOutputs()

@@ -84,6 +84,7 @@ private:
 
   void initBlackboardDefaults();
   void initRefereeInputs();
+  void initNavActionStatus();
   void refreshInputState();
   void stopOutputs();
   void initDynamicParameters();

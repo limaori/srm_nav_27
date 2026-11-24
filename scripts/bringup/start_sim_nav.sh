@@ -483,6 +483,13 @@ if [ -n "$BEHAVIOR_TREE" ] && \
   echo "[警告]   只保留一个来源：行为树用 --test-behavior/--behavior；手动恒速只用 --chassis-spin。" >&2
 fi
 
+# 行为树独占 wz 时，清掉上一次 --chassis-spin* 留下的 nohup 发布器（真车/旧仿真都可能是它）。
+if [ -n "$BEHAVIOR_TREE" ] && [ "$CHASSIS_SPIN_WZ" = "0" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+  if pkill -f "[s]pin_sine\.py" 2>/dev/null; then
+    echo "[提示] 已清掉遗留的 spin_sine 发布器（上一次 --chassis-spin* 的 nohup 进程）"
+  fi
+fi
+
 # --verify-spin 自己发 VERIFY_SPIN_WZ 的请求；若同时给了 --chassis-spin，用它的转速，
 # 让"脚本说转多少"与"验证请求多少"是同一个数。
 if [ "$VERIFY_SPIN" = "1" ] && [ "$CHASSIS_SPIN_GIVEN" = "1" ]; then

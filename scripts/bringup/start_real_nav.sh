@@ -627,6 +627,7 @@ stop_real_nav() {
     '[w]aypoint_follower'
     '[m]ap_server'
     '[r]obot_state_publisher'
+    '[s]pin_sine\.py'
   )
   local p
   for p in "${patterns[@]}"; do
@@ -936,6 +937,15 @@ if [ -n "$BEHAVIOR_TREE" ] && \
   echo "[警告] 同时给了决策/测试行为树（${BEHAVIOR_TREE}）和底盘自转：两者都发 rotation_cmd。" >&2
   echo "[警告]   mux 只按最后一条消息更新 wz，实际转速会在两者之间抖动，不是稳定曲线。" >&2
   echo "[警告]   只保留一个来源：行为树用 --test-behavior/--behavior；手动恒速只用 --chassis-spin。" >&2
+fi
+
+# 行为树独占 wz 时，清掉上一次 --chassis-spin* 留下的 nohup 发布器；它不随 launch 退出，
+# 会以 50 Hz 往 rotation_cmd 发旧值，和测试树的 5/2 抢 mux（表现为 wz 抽动）。
+if [ -n "$BEHAVIOR_TREE" ] && [ "$CHASSIS_SPIN_SINE" != "1" ] \
+   && [ "$CHASSIS_SPIN_WZ" = "0" ] && [ "${DRY_RUN:-0}" != "1" ]; then
+  if pkill -f "[s]pin_sine\.py" 2>/dev/null; then
+    echo "[提示] 已清掉遗留的 spin_sine 发布器（上一次 --chassis-spin* 的 nohup 进程）"
+  fi
 fi
 
 # ---------- --no-lio（与 sim 同名）----------
