@@ -86,6 +86,13 @@ if(BUILD_TESTING)
       python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/test_feedback_protocol.py
     OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/test_feedback_protocol.txt
   )
+  # 串口功率档限幅契约：YAML 默认 100w 与 C++ 100w/180w 两档硬上限一致。
+  ament_add_test(test_speed_profile
+    GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+    COMMAND ${CMAKE_COMMAND} -E env
+      python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/test_speed_profile.py
+    OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/test_speed_profile.txt
+  )
 endif()
 
 ament_package()

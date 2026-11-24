@@ -1,0 +1,47 @@
+{
+  "map_yaml": "/home/srm/nav_ws/srm_nav_27_tdt/maps/219_1121/219_1121.yaml",
+  "obstacle_cells": 10526,
+  "mesh_triangles": 43732,
+  "obstacle_height_m": 0.8,
+  "unknown_cells_extruded": false,
+  "spawn_xy": [
+    0.9850000000000001,
+    0.8850000000000002
+  ],
+  "spawn_clearance_m": 0.6020797289396148,
+  "goals": [
+    {
+      "name": "short_diagonal",
+      "xy": [
+        0.685,
+        0.035
+      ]
+    },
+    {
+      "name": "cross_room",
+      "xy": [
+        0.235,
+        1.435
+      ]
+    },
+    {
+      "name": "around_obstacles",
+      "xy": [
+        0.585,
+        1.335
+      ]
+    },
+    {
+      "name": "return_spawn",
+      "xy": [
+        0.985,
+        0.885
+      ]
+    }
+  ],
+  "planner": "YAstar",
+  "smoother": "TdtSmoother",
+  "controller": "MincoMpcController",
+  "odometry": "Gazebo ground truth",
+  "goal_tolerance_m": 0.5
+}

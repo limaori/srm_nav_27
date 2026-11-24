@@ -179,6 +179,7 @@ protected:
   void visualizeEscape(geometry_msgs::msg::Pose2D pose, float clearance, float best_angle);
 
   rclcpp::Client<nav2_msgs::srv::GetCostmap>::SharedPtr costmap_client_;
+  rclcpp_lifecycle::LifecyclePublisher<std_msgs::msg::Empty>::SharedPtr spin_inhibit_pub_;
   std::shared_ptr<rclcpp_lifecycle::LifecyclePublisher<visualization_msgs::msg::MarkerArray>>
     marker_pub_;
   // 方向固定在 global_frame，发布前转换到 robot_base_frame。
@@ -226,6 +227,16 @@ protected:
   double early_exit_min_time_{1.0};
   /// @brief 空图保护：整张代价图里没有任何致命障碍时不认净空结论。
   bool early_exit_require_obstacles_{true};
+
+  // === 包络净空地板（安全限位）===
+  /// @brief 后退过程中自身中心净空的硬下限（m）；<=0 关闭。
+  ///
+  /// 与 `early_exit_clearance_`（"已经安全了，可以提前结束"）方向相反：这里防的是
+  /// "越推越贴障碍"。2026-11-20 复测中 cross_room 的恢复段把车带到中心净空
+  /// 0.274 m，0.33 m 包络已侵入占据格 5.6 cm；该地板保证不再出现这种深度侵入。
+  /// 默认 0.36 = 车体包络 0.33 + 3 cm 余量，低于控制器硬门槛 0.38，正常脱困不会被
+  /// 一上来就拒绝。
+  double min_clearance_{0.36};
   /// @brief 连续满足阈值的计数（低于阈值或数据不可信时清零）。
   int early_exit_hold_count_{0};
   /// @brief 本次 backup 的起始时刻，用于 `early_exit_min_time_`。
