@@ -5,6 +5,8 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 
@@ -14,6 +16,22 @@
 
 namespace backend {
 class PoseGraph;
+
+/// 将 map→odom 投影为 4-DoF：保留 x/y/yaw，z/roll/pitch 置零。
+/// 仅供 2D Nav2 栈消费；内部估计仍保留完整 6-DoF。
+inline Eigen::Matrix4d planarMapFromOdom(const Eigen::Matrix4d& map_from_odom) {
+    Eigen::Matrix4d planar = Eigen::Matrix4d::Identity();
+    planar(0, 3) = map_from_odom(0, 3);
+    planar(1, 3) = map_from_odom(1, 3);
+    const double yaw = std::atan2(map_from_odom(1, 0), map_from_odom(0, 0));
+    const double c = std::cos(yaw);
+    const double s = std::sin(yaw);
+    planar(0, 0) = c;
+    planar(0, 1) = -s;
+    planar(1, 0) = s;
+    planar(1, 1) = c;
+    return planar;
+}
 
 struct TrustedPoseProjection {
     Eigen::Matrix4d T_map_odom = Eigen::Matrix4d::Identity();

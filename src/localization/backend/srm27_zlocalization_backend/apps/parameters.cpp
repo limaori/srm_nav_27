@@ -233,6 +233,7 @@ void ParameterReader::loadOutputs() {
     getParam("services/save_map", parameters_.services.save_map);
     getParam("services/relocalize", parameters_.services.relocalize);
     getParam("services/reset", parameters_.services.reset);
+    getParam("output/planar_map_to_odom", parameters_.planar_map_to_odom);
     getParam("output/legacy/enabled", parameters_.legacy.enabled);
     getParam("output/legacy/publish_pose", parameters_.legacy.publish_pose);
     getParam("output/legacy/publish_twist", parameters_.legacy.publish_twist);

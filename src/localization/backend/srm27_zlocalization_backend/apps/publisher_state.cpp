@@ -9,6 +9,7 @@
 #include "apps/ros.hpp"
 #include "backend/covariance.hpp"
 #include "backend/localization.hpp"
+#include "backend/pose_output.hpp"
 
 namespace backend::ros {
 namespace {
@@ -148,8 +149,14 @@ void Publisher::publishProjection(const LocalizationProjection& projection,
     if (!projection.should_publish_tf || !tf_broadcaster_) {
         return;
     }
+    // 2D Nav2 栈只消费 x/y/yaw；odom 是"出生时 gimbal_yaw"系，可能带出生姿态的
+    // roll/pitch，直接把 6-DoF 发出去会让 global(map) 与 local(odom) costmap 变成
+    // 两个有夹角的平面。可选的 4-DoF 投影只作用于对外 TF，内部估计仍是 6-DoF。
+    const Eigen::Matrix4d T_map_odom = parameters_.planar_map_to_odom
+                                           ? planarMapFromOdom(projection.T_map_odom)
+                                           : projection.T_map_odom;
     tf_broadcaster_->sendTransform(toRosTransform(
-        projection.T_map_odom, parameters_.input.map_frame, parameters_.input.odom_frame, stamp));
+        T_map_odom, parameters_.input.map_frame, parameters_.input.odom_frame, stamp));
     publishLocalizationState(projection.status, projection.reason, projection.estimator_failures,
                              rclcpp::Time(stamp),
                              /*tf_published=*/true, projection.epoch, projection.state_generation,

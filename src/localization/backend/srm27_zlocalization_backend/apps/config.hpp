@@ -109,6 +109,8 @@ struct NodeConfig {
     ServiceParameters services;
     LegacyOutputParameters legacy;
     WorldCloudOutputParameters world_cloud;
+    /// 是否把对外 map→odom 投影为 4-DoF（保留 x/y/yaw，z/roll/pitch 置零）。
+    bool planar_map_to_odom = false;
 };
 
 /// 校验 UWB 输入坐标系名称与固定变换、在线空间标定开关是否一致。

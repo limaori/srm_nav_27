@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================
-# 从地图系点云 maps/pcd/<名字>_mapframe.pcd 生成本仓库 zloc backend 的**先验地图包**
+# 从地图系点云 maps/pcd/<名字>_mapframe[_leveled].pcd 生成本仓库 zloc backend 的**先验地图包**
 #
 #   maps/pcd/map_bundles/<名字>/
 #     keyframes.txt        逐帧位姿 (index timestamp tx ty tz qx qy qz qw)
@@ -12,15 +12,20 @@
 #   start_real_nav.sh --zloc-backend --zloc-prior 的 backend **不吃单个 pcd**: 它要的是
 #   "关键帧地图包"(逐帧位姿 + 逐帧点云 + 描述子), 由离线工具
 #   srm27_zlocalization_backend_build_pcd_map_bundle 从**地图系**点云生成。
-#   输入必须是 <名字>_mapframe.pcd —— camera_init 系的 <名字>.pcd 不能用: 两者差一个
+#   输入必须是 <名字>_mapframe.pcd（或先经 level_map_pcd.py 摆正的
+#   <名字>_mapframe_leveled.pcd）—— camera_init 系的 <名字>.pcd 不能用: 两者差一个
 #   固定的雷达安装位姿, 用它建包会让车被定位到错姿态, 而且 GICP/backend 都不会报错。
+#
+#   2026-11-24 起推荐: 先 level_map_pcd.py 把地面摆到 map z=0，再用
+#   --sensor-z 0.2966（实测雷达离地）建包；keyframe z 与描述子 lidar_height 会一致。
 #
 # 用法:
 #   ./scripts/mapping/build_zloc_map_bundle.sh --name 227_1113pro
 #   ./scripts/mapping/build_zloc_map_bundle.sh --name 227_1113pro --crop-inset 0.15
 #   ./scripts/mapping/build_zloc_map_bundle.sh --name 227_1113pro \
 #       --x-min -8 --x-max 4.5 --y-min -7.6 --y-max 10.1
-#   ./scripts/mapping/build_zloc_map_bundle.sh --name 227_1113pro --force
+#   ./scripts/mapping/build_zloc_map_bundle.sh --name 219_1121 \
+#       --pcd maps/pcd/219_1121_mapframe_leveled.pcd --sensor-z 0.2966 --force
 #   ./scripts/mapping/build_zloc_map_bundle.sh --name 227_1113pro -n
 #
 # 参数:
@@ -33,7 +38,8 @@
 #       --crop-inset <米>        裁掉点云边缘的宽度 (默认 0.1, 给 0 用原始包围盒)
 #       --x-min/--x-max/--y-min/--y-max <米>
 #                                显式指定裁剪范围 (覆盖自动推导; 给了就完全按你给的)
-#       --sensor-z <米>          传感器离地高度 (默认 = config 的 scan_context.lidar_height)
+#       --sensor-z <米>          实测传感器离地高度 (默认 = config 的 scan_context.lidar_height;
+#                                本车 2026-11-24 起为 0.2966，同时决定描述子 lidar_height)
 #       --query-step <米>        位姿网格步长 (默认 2.0)
 #       --bundle-step <米>       关键帧抽稀步长 (默认 1.5, 不能大于 query-step)
 #       --map-voxel <米>         全局显示云体素 (默认 0.15)
@@ -173,10 +179,11 @@ esac
   exit 1
 }
 # camera_init 系的原始件混进来是最常见的错: 建出来的包看着正常, 车却定位到错姿态。
+# *_mapframe_leveled.pcd 是 level_map_pcd.py 的产物，仍是 map 系，允许。
 case "$(basename "$ZLOC_PCD_IN")" in
-  *_mapframe.pcd) ;;
+  *_mapframe.pcd|*_mapframe_leveled.pcd) ;;
   *)
-    echo "[警告] 输入不是 *_mapframe.pcd: $ZLOC_PCD_IN" >&2
+    echo "[警告] 输入不是 *_mapframe.pcd / *_mapframe_leveled.pcd: $ZLOC_PCD_IN" >&2
     echo "[警告] camera_init 系的点云建包会让车被定位到错姿态, 而且不会报错。" >&2
     echo "[警告] 确认它已经在地图系下再继续 (--no-mapframe 生成的原始件不能直接用)。" >&2
     ;;
@@ -248,6 +255,15 @@ fi
 
 if [ -z "$ZLOC_SENSOR_Z" ]; then
   ZLOC_SENSOR_Z="$SC_LIDAR_HEIGHT"
+fi
+
+# 关键帧位姿 z 与 Scan Context lidar_height 必须是同一个“雷达离地高度”：
+# 前者决定每帧点云在关键帧系里的裁切原点，后者决定描述子把地面归一到 z=0 的偏移。
+# 两者不一致时 map 侧描述子与运行期查询差一个常量高度，检索分数会无谓变差。
+if [ "$ZLOC_SENSOR_Z" != "$SC_LIDAR_HEIGHT" ]; then
+  echo "[提示] --sensor-z $ZLOC_SENSOR_Z 与配置 scan_context.lidar_height $SC_LIDAR_HEIGHT 不一致；"
+  echo "       描述子按 --sensor-z 建，运行期 scan_context.lidar_height 也必须改成 $ZLOC_SENSOR_Z。"
+  SC_LIDAR_HEIGHT="$ZLOC_SENSOR_Z"
 fi
 
 # ---------- 裁剪范围: 没给就按点云包围盒推导 ----------

@@ -9,3 +9,18 @@ common:
   # zlio_bridge.lidar_frame）。后端逐帧校验
   # `odometry.child_frame_id == common.sensor_frame`，写错会静默丢帧。
   sensor_frame: livox_imu
+  scan_context:
+    # 2026-11-24：先验地图 219_1121 按地面平面摆正（scripts/mapping/level_map_pcd.py），
+    # 地面在 map z=0，雷达离地 = gimbal_yaw 0.2681 + livox 0.0285 = 0.2966 m。
+    # 必须与地图包建包时的 --sensor-z/--sc-lidar-height 逐位一致：
+    # storage.cpp 按 1e-6 比较，改这里必须重建 bundle，否则启动 FATAL
+    # “failed to load Scan Context descriptors”。（backend.yaml 保持上游基线 0.3464，
+    # 仿真 profile 不受影响；219_1121 与 227_1113pro 两个实车 bundle 都已按 0.2966 重建。）
+    lidar_height: 0.2966
+
+output:
+  # 实车 Nav2 是 2D：local_costmap 在 odom、global_costmap 在 map。odom 是"出生时
+  # gimbal_yaw"系，出生姿态的 roll/pitch 会原样带进 map→odom，导致两张 costmap
+  # 不共面（2026-11-24 实测 z 已由先验地图摆正降到 ~0，但 roll/pitch 仍有 ~1.4°/2.4°）。
+  # 打开 4-DoF 投影后 TF 只保留 x/y/yaw，两张 costmap 共面；内部估计仍是 6-DoF。
+  planar_map_to_odom: true

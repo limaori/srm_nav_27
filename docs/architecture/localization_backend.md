@@ -247,21 +247,26 @@ backend 需要**关键帧地图包**（`keyframes.txt` + `clouds/` + `sc_descrip
 不是 GICP 用的单张 PCD。生成方式（必须用地图系的那张，不能用 `camera_init` 系原始点云）：
 
 ```bash
-# 入口（已在本仓库验证过 227_1113pro）
-ros2 run srm27_zlocalization_backend srm27_zlocalization_backend_build_pcd_map_bundle \
-  --input maps/pcd/<site>_mapframe.pcd \
-  --out-bundle maps/pcd/map_bundles/<site> \
-  --x-min -8 --x-max 4.5 --y-min -7.6 --y-max 10.1 \
-  --sensor-z 0.3464 --query-step 2.0 --bundle-step 1.5 \
-  --map-voxel 0.15 --scan-voxel 0.15 --sc-lidar-height 0.3464
+# 1) 先按实测地面把 mapframe 点云摆正（只改 3D PCD，不动 PGM；地面落到 map z=0）
+python3 scripts/mapping/level_map_pcd.py \
+  --pcd maps/pcd/<site>_mapframe.pcd          # 产出 <site>_mapframe_leveled.pcd
+
+# 2) 用摆正后的点云建包；--sensor-z 是**实测**雷达离地高度，不是 CAD 值
+./scripts/mapping/build_zloc_map_bundle.sh \
+  --name <site> --pcd maps/pcd/<site>_mapframe_leveled.pcd \
+  --sensor-z 0.2966 --force
 ```
 
 要点：
 
-- `--sensor-z` / `--sc-lidar-height` 取 URDF 的雷达离地高度（本车 0.346388 m → 0.3464），
-  且必须与 `scan_context.lidar_height` 逐位一致（`storage.cpp` 按 1e-6 比较）；环数/扇区/
-  最大半径/降采样/augment 同理。不一致时 backend 启动直接
+- `--sensor-z` / `--sc-lidar-height` 取**实测**雷达离地高度（本车 `gimbal_yaw` 0.2681 +
+  `livox_imu` 0.0285 = 0.2966 m；不要再用 CAD 的 0.346388 → 0.3464），且必须与
+  `scan_context.lidar_height` 逐位一致（`storage.cpp` 按 1e-6 比较）；环数/扇区/最大半径/
+  降采样/augment 同理。不一致时 backend 启动直接
   `FATAL: failed to load Scan Context descriptors` —— 不会静默降级成低精度匹配。
+- 2026-11-24 起，`219_1121` 与 `227_1113pro` 两个实车 bundle 都已按上述口径重建；
+  实车 profile 的 `common.scan_context.lidar_height` 为 `0.2966`。裸 PCD 仍保留原始件，
+  摆正后的是 `*_mapframe_leveled.pcd`。
 - 检索参数（`exclude_recent` / `candidates` / `distance_threshold`）同样沿用
   `common.scan_context.*`，改了一个就要同步另一个。
 - `clean_map_bundle` 只对**建图阶段落盘的 runtime bundle** 有意义；对
@@ -282,7 +287,11 @@ ros2 run srm27_zlocalization_backend srm27_zlocalization_backend_build_pcd_map_b
 
 - 未做仿真导航链（验收 E）与实车（验收 F）；精度/CPU/内存指标尚未测。
 - 先验+回环+UWB 共存已实现并有合成场景回归；现场三融合精度、UWB 标定和长时资源占用仍待验收。
-- backend 输出的 3D `map→odom` 未做平面化；Nav2/terrain 侧按平面消费，实车验收前
-  需要确认 z/roll/pitch 的残差可接受。
+- backend 输出的 `map→odom` 默认仍是 3D；2D Nav2 栈可开
+  `output.planar_map_to_odom: true`，对外 TF 只保留 x/y/yaw（内部估计仍是 6-DoF）。
+  2026-11-24 实车 profile 已打开：先验地图按地面摆正后，`z` 从 0.063 m 降到 -0.006 m，
+  但 odom（出生时 `gimbal_yaw`）自身的 `roll/pitch≈1.4°/2.4°` 仍在；4-DoF 投影把这部分
+  清掉，global/local costmap 才共面。3D 消费者（需要完整 z/roll/pitch）应保持 false。
+  换新地图仍建议先跑 `level_map_pcd.py`，否则 3D 地图的 z/tilt 会进入配准。
 - 云台这类"传感器相对车体运动会变"的自由度上游模型里不存在：本实现只借用
   `map→odom`（与 body 外参无关），车体位姿仍由 `sensor_scan_generation` 产生。

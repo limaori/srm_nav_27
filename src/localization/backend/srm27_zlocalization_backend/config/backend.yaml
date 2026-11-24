@@ -406,6 +406,11 @@ services:
   # 统一协调前端 reset 的公开服务名。相对名随 namespace 解析。
   reset: localization_reset
 output:
+  # 是否把对外发布的 map→odom 投影为 4-DoF（保留 x/y/yaw，z/roll/pitch 置零）。
+  # 2D Nav2 栈建议 true：local_costmap 在 odom、global_costmap 在 map，odom 若带
+  # 出生姿态的 roll/pitch（gimbal_yaw 出生系不一定水平），两张 costmap 会变成有夹角
+  # 的平面。只影响 TF；内部估计、先验配准和回环仍是完整 6-DoF。
+  planar_map_to_odom: false
   legacy:
     # 是否启用旧 robot_navigation 兼容接口。
     # 本工作区没有任何消费者，且 publish_tf 会额外发布一条 map→body，

@@ -1062,11 +1062,12 @@ local_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        # ★ 2026-11-23 回退：0.15/0.35 → 0.0/2.0（6108770 档），与源门槛一致。
-        #   ⚠ 11-22 记录的两个副作用会回来：南入口 z≈0.01-0.08 的地面点会成片标记；
-        #   北走廊 y≈2.0 上方 0.72 m 的门楣会投影成 2D 障碍。若复现，只把
-        #   max_obstacle_height 单独压回 0.35 即可（不要整层关）。
-        min_obstacle_height: 0.0
+        # ★ 2026-11-24：0.0 → 0.10。terrain_analysis 除障碍点外还会发一批
+        #   “2D free-space 网格点”（z=vehicleZ≈0、intensity=vehicleHeight），
+        #   0.0 会把它们全部当成障碍，局部/全局代价地图在机器人周围铺出一大片
+        #   青/蓝 inscribed/inflated。抬高到 0.10 只保留真正高于地面的障碍点。
+        #   （2026-11-23 的 0.0/2.0 回退副作用：南入口 z≈0.01-0.08 地面点成片标记。）
+        min_obstacle_height: 0.10
         max_obstacle_height: 2.0
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
@@ -1078,7 +1079,7 @@ local_costmap:
           # terrain_analysis 实际发布在 odom 系（源码硬编码 frame_id=odom）；
           # 这里仍按上游语义填雷达系，本车对应 livox_imu。
           sensor_frame: livox_imu
-          min_obstacle_height: 0.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
+          min_obstacle_height: 0.10    # 2026-11-24：与层门槛一致；排除 free-space 网格点
           max_obstacle_height: 2.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
@@ -1134,8 +1135,8 @@ global_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
-        # ★ 2026-11-23 回退：0.15/0.35 → 0.0/2.0（6108770 档，同 local）。
-        min_obstacle_height: 0.0
+        # ★ 2026-11-24：0.0 → 0.10（同 local；排除 terrain 的 free-space 网格点）。
+        min_obstacle_height: 0.10
         max_obstacle_height: 2.0
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
@@ -1144,7 +1145,7 @@ global_costmap:
           data_type: PointCloud2
           topic: <robot_namespace>/terrain_map_ext
           sensor_frame: livox_imu
-          min_obstacle_height: 0.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
+          min_obstacle_height: 0.10    # 2026-11-24：与层门槛一致；排除 free-space 网格点
           max_obstacle_height: 2.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
           obstacle_max_range: 10.0
           obstacle_min_range: 0.2

@@ -1,6 +1,8 @@
 // 验证输出投影与协方差锚在里程计换代后的物理一致性。
 #include <gtest/gtest.h>
 
+#include <cmath>
+
 #include "backend/covariance.hpp"
 #include "backend/math.hpp"
 #include "backend/pose_graph.hpp"
@@ -9,6 +11,29 @@
 
 namespace backend {
 namespace {
+/// 4-DoF 投影只保留 x/y/yaw，z/roll/pitch 清零，且旋转仍是正交阵。
+TEST(PoseOutput, PlanarProjectionKeepsPlanarComponents) {
+    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+    T.block<3, 3>(0, 0) =
+        (Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()) *
+         Eigen::AngleAxisd(0.03, Eigen::Vector3d::UnitY()) *
+         Eigen::AngleAxisd(-0.02, Eigen::Vector3d::UnitX()))
+            .toRotationMatrix();
+    T.block<3, 1>(0, 3) = Eigen::Vector3d(1.2, -0.4, 0.06);
+
+    const Eigen::Matrix4d planar = planarMapFromOdom(T);
+    EXPECT_NEAR(planar(2, 3), 0.0, 1e-12);
+    EXPECT_NEAR(planar(2, 0), 0.0, 1e-12);
+    EXPECT_NEAR(planar(2, 1), 0.0, 1e-12);
+    EXPECT_NEAR(planar(0, 3), 1.2, 1e-12);
+    EXPECT_NEAR(planar(1, 3), -0.4, 1e-12);
+    EXPECT_NEAR(std::atan2(planar(1, 0), planar(0, 0)), 0.4, 1e-12);
+    const Eigen::Matrix2d xy_rotation = planar.block<2, 2>(0, 0);
+    EXPECT_LT((xy_rotation.transpose() * xy_rotation - Eigen::Matrix2d::Identity()).norm(),
+              1e-12);
+    EXPECT_NEAR(planar(2, 2), 1.0, 1e-12);
+}
+
 /// 图被清空后保留的物理协方差锚，在更换里程计坐标系前后给出相同传播结果。
 TEST(PoseOutput, ReframingPreservesPhysicalProjectionAndRetainedGraphUncertainty) {
     PoseGraphConfig config;
