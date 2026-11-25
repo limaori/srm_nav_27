@@ -73,9 +73,13 @@ except ImportError:  # pragma: no cover
     print("[错误] 需要 scipy (sudo apt install python3-scipy)", file=sys.stderr)
     raise SystemExit(2)
 
-# 判定门限 (米): 参照已对正的 srm_site_01 是 0.026 m。
-GOOD_MEDIAN = 0.05      # 低于它算"对上了"
-ACCEPT_MEDIAN = 0.10    # 高于它直接拒绝输出
+# 判定门限 (米)。参照: 已对正的 srm_site_01 是 0.026 m —— 那是**密集云**的水平。
+# 实车 zlio 落盘的云是 0.10 m 体素（zlio_bridge 的 pcd_voxel_leaf），配合 raw 2D 栅格，
+# 实测能做到的残差下限就是 0.10~0.13 m；拿 0.10 去卡只会误杀同源的正常产物。
+# 门限只负责抓**换错源/装错外参**这类量级错误（那类会到 0.3~2 m）。
+GOOD_MEDIAN = 0.05      # 低于它算"对得很漂亮"（密集云应达到）
+WARN_MEDIAN = 0.10      # 高于它提示"偏大，但 zlio 0.1 m 体素下常见"
+ACCEPT_MEDIAN = 0.15    # 高于它直接拒绝输出
 
 # base_link -> 雷达 (livox_frame) 的安装外参, 来自唯一模型 CAD; 与 real_mapping_launch.py
 # 里 pointcloud_to_laserscan 的切片高度同源。roll 是 -30°(2026-11-13 用静止比力反推确认)。
@@ -83,7 +87,48 @@ MOUNT_XYZ = (0.12081, -0.056721, 0.346388)
 MOUNT_RPY = (-0.523598776, 0.0, 1.099557429)
 
 # 安装角超过它就认为"点云不是水平系", 需要先摆正 (auto 模式的判据)。
-LEVEL_TILT_DEG = 2.0
+LEVEL_TILT_DEG = 8.0
+
+# 验收门限随点云点距放宽: 0.1 m 体素的云 (zlio_bridge 默认) 天生做不到 0.05 m 级残差,
+# 拿密集云的门限去卡它只会误杀。有效门限 = max(ACCEPT_MEDIAN, SPACING_GATE_RATIO × 点距)。
+SPACING_GATE_RATIO = 1.2
+
+
+def estimate_floor_tilt(arr) -> float:
+    """用最低 20% 的点拟合地面, 返回倾角(度)。
+
+    auto 模式据此判断: point_lio 的 camera_init 是建图起点 IMU 姿态系 (雷达装歪时地面
+    是 30° 斜面), 而 zlio_bridge 落盘的是重力对齐的 odom 系 (地面基本水平)。只看最低
+    那层点就够 —— 倾斜地面在低端取到的点仍落在同一平面上。
+    """
+    z = arr[:, 2].astype(np.float64)
+    if z.size < 100:
+        return 0.0
+    low = z <= np.quantile(z, 0.20)
+    pts = arr[low][:, :3].astype(np.float64)
+    if pts.shape[0] < 100:
+        return 0.0
+    a = np.stack([pts[:, 0], pts[:, 1], np.ones(len(pts))], 1)
+    try:
+        coef, *_ = np.linalg.lstsq(a, pts[:, 2], rcond=None)
+    except np.linalg.LinAlgError:
+        return 0.0
+    return float(math.degrees(math.atan(math.hypot(coef[0], coef[1]))))
+
+
+def estimate_spacing(arr, sample: int = 2000) -> float:
+    """估算点云自身点距(米): 抽样做最近邻取中位, 用来给验收门限定量。"""
+    pts = arr[:, :3].astype(np.float64)
+    if pts.shape[0] < 10:
+        return 0.0
+    step = max(1, pts.shape[0] // sample)
+    sub = pts[::step][:sample]
+    if sub.shape[0] < 10:
+        return 0.0
+    tree = cKDTree(pts)
+    dist, _ = tree.query(sub, k=2, workers=-1)
+    return float(np.median(dist[:, 1]))
+
 
 
 def mount_matrix() -> np.ndarray:
@@ -335,8 +380,10 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="把 camera_init 系点云就地转到栅格地图系 (每张图只留一份 maps/pcd/<名字>.pcd)",
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--pcd", required=True, help="输入点云 (camera_init 系), 默认就地覆盖它")
-    parser.add_argument("--map", required=True, help="目标栅格图 yaml (maps/<名字>/<名字>.yaml)")
+    parser.add_argument("--name", help="地图名: 自动推 --pcd maps/pcd/<名字>.pcd 与 "
+                                       "--map maps/<名字>/<名字>.yaml (少写两遍名字)")
+    parser.add_argument("--pcd", help="输入点云 (camera_init 系); 给了 --name 可省")
+    parser.add_argument("--map", help="目标栅格图 yaml; 给了 --name 可省")
     parser.add_argument("--out", help="输出 pcd 路径; 省略 = 与输入同目录的 <名字>_mapframe.pcd")
     parser.add_argument("--z-band", nargs=2, type=float, default=[0.3, 2.0],
                         metavar=("LO", "HI"),
@@ -354,10 +401,23 @@ def main(argv=None) -> int:
     parser.add_argument("--yaw", type=float, help="显式 yaw (度)")
     parser.add_argument("--dx", type=float, help="显式 dx (米)")
     parser.add_argument("--dy", type=float, help="显式 dy (米)")
+    parser.add_argument("--max-residual", type=float, default=None,
+                        help="验收门限(米); 默认按点距自动定量 max(0.10, 1.2×点距)")
     parser.add_argument("--dry-run", action="store_true", help="只评估, 不写文件")
     parser.add_argument("--force", action="store_true",
                         help="残差超门限 / 输入已标注坐标系时仍然继续 (会把图转坏)")
     args = parser.parse_args(argv)
+
+    # --name: 按仓库约定推路径 (地图名只写一次)
+    ws = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if args.name:
+        if not args.pcd:
+            args.pcd = os.path.join(ws, "maps", "pcd", args.name + ".pcd")
+        if not args.map:
+            args.map = os.path.join(ws, "maps", args.name, args.name + ".yaml")
+    if not args.pcd or not args.map:
+        print("[错误] 需要 --pcd/--map，或给一个 --name（按名字自动推路径）", file=sys.stderr)
+        return 2
 
     for path, what in ((args.pcd, "输入点云"), (args.map, "地图 yaml")):
         if not os.path.isfile(path):
@@ -403,9 +463,18 @@ def main(argv=None) -> int:
     # 整份点云是斜的, 平面 (yaw+平移) 拟合天生差 0.1 m 以上 —— 先按安装外参摆正,
     # 再做平面搜索。最终的 z 也在这里一次算好 (之后只动 x/y)。
     level = None
+    cloud_tilt = estimate_floor_tilt(arr)
+    spacing = estimate_spacing(arr)
     if args.level_mount != "off":
-        tilt = math.degrees(max(abs(MOUNT_RPY[0]), abs(MOUNT_RPY[1])))
-        if args.level_mount == "on" or tilt > LEVEL_TILT_DEG:
+        mount_tilt = math.degrees(max(abs(MOUNT_RPY[0]), abs(MOUNT_RPY[1])))
+        if args.level_mount == "on":
+            need_level = True
+        else:  # auto: 看**点云自己**的地面斜不斜, 而不是只看安装外参
+            need_level = cloud_tilt > LEVEL_TILT_DEG
+            print("  点云地面倾斜 %.1f° (安装外参 %.1f°, auto 门限 %.1f°) -> %s"
+                  % (cloud_tilt, mount_tilt, LEVEL_TILT_DEG,
+                     "按安装外参摆正" if need_level else "已是水平系, 跳过安装摆正"))
+        if need_level:
             level = mount_matrix()
             src = arr[:, :3].astype(np.float64)
             arr[:, :3] = (src @ level[:3, :3].T + level[:3, 3]).astype(np.float32)
@@ -453,13 +522,26 @@ def main(argv=None) -> int:
         math.degrees(math.atan2(tf[1, 0], tf[0, 0])), tf[0, 2], tf[1, 2]))
     print("            中位最近邻 %.4f m, 0.1 m 内占比 %.1f%%" % (median, inlier * 100))
 
-    if median > ACCEPT_MEDIAN:
-        print("[错误] 中位最近邻 %.4f m 超过 %.2f m 门限 —— 两者多半不同源, 不是差个平面变换。"
-              % (median, ACCEPT_MEDIAN), file=sys.stderr)
+    gate = ACCEPT_MEDIAN
+    if args.max_residual is not None:
+        gate = args.max_residual
+        gate_src = "--max-residual 指定"
+    else:
+        gate = max(ACCEPT_MEDIAN, SPACING_GATE_RATIO * spacing)
+        gate_src = "按点距 %.3f m 定量" % spacing
+    print("            点距中位 %.3f m -> 验收门限 %.3f m (%s)" % (spacing, gate, gate_src))
+
+    if median > gate:
+        print("[错误] 中位最近邻 %.4f m 超过 %.3f m 门限 —— 两者多半不同源, 不是差个平面变换。"
+              % (median, gate), file=sys.stderr)
         print("[错误] 检查: 点云与 yaml 是否同一次建图产物 / 高度带里是不是混进了家具和地面。", file=sys.stderr)
         if not args.force:
             return 1
         print("[警告] --force: 继续, 但这份 pcd 拿去重定位会是错的。", file=sys.stderr)
+    elif median > WARN_MEDIAN:
+        print("[警告] 中位最近邻 %.4f m 偏大 (密集云参照 0.026 m)。zlio 的 0.1 m 体素点云 +"
+              " raw 2D 栅格在此量级是正常的；若换过地图/外参，先核对是否同一次建图产物。"
+              % median, file=sys.stderr)
     elif median > GOOD_MEDIAN:
         print("[警告] 中位最近邻 %.4f m 偏大 (参照 0.026 m), 建议先核对 --z-band 与地图是否同源。"
               % median, file=sys.stderr)

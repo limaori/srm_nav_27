@@ -627,8 +627,6 @@ ros2 launch srm27_nav_protocol srm27_nav_protocol.launch.py
 # 2026-11-21
 ### 新建图流程
 
-2026-11-13 那套 5 步不用改，末尾多一步建 backend 的先验地图包。
-
 ```bash
 # ---------- 1. 建图 (两个前端任选; 开了 --record-bag 就会录原始话题) ----------
 ./scripts/bringup/start_real_slam.sh --record-bag --bag-name 地图名 --lio-frontend point_lio   # point-lio建图
@@ -684,3 +682,49 @@ ros2 launch srm27_zlocalization_backend backend.launch.py mode:=localization \
 - **裁剪范围**（`--x-min/--x-max/--y-min/--y-max`）是场地相关的。227_1113pro 用的是
   `-8 4.5 -7.6 10.1`；换场地要么重新挑，要么不给——脚本会按点云包围盒内缩 0.1 m 自动算。
 - 地图包 23 MB 左右，`.gitignore` 里有 `/maps/pcd/map_bundles/`，默认不进版本库。
+
+# 2026-11-25
+### 新建图流程
+```bash
+# ---------- 1. 建图：zlio 一条龙（图 + 云 同一次运行、同前端） ----------
+./scripts/bringup/start_real_slam.sh \
+  --record-bag --bag-name 地图名 \
+  --save-pcd --save-pcd-path "$PWD/maps/pcd/地图名.pcd"
+#   默认就是 --lio-frontend zlio、--scan-cloud raw（~20k 点/帧）
+#   转角/尽头用弧线掉头，转速 <30 °/s
+
+# 另起终端：存 2D 栅格图 + 位姿图（maps/地图名/地图名.{pgm,yaml,posegraph,data}）
+./scripts/bringup/start_real_slam.sh --save 地图名
+
+# 停链路：zlio_bridge 收到 SIGINT 才把累积点云写盘（kill -9 不会有文件）
+./scripts/bringup/start_real_slam.sh --stop
+
+
+# ---------- 2. 转地图系（替代 build_pcd_from_bag.sh 的第二半） ----------
+python3 scripts/mapping/pcd_to_mapframe.py \
+  --pcd maps/pcd/地图名.pcd --map maps/地图名/地图名.yaml
+
+#   -> maps/pcd/地图名_mapframe.pcd
+#   zlio 的云已重力对齐，--level-mount auto 会跳过 -30° 安装摆正；残差 0.03 m 量级
+
+# ---------- 3. 地面摆到 z=0（bundle 的 --sensor-z 0.2966 就是按这个口径） ----------
+python3 scripts/mapping/level_map_pcd.py --pcd maps/pcd/地图名_mapframe.pcd
+#   -> maps/pcd/地图名_mapframe_leveled.pcd
+
+# ---------- 4. 建先验包（实车 profile + 实测雷达高度，两个都不能省） ----------
+./scripts/mapping/build_zloc_map_bundle.sh --name 地图名 \
+  --pcd maps/pcd/地图名_mapframe_leveled.pcd \
+  --config "$PWD/src/localization/backend/srm27_zlocalization_backend/config/srm27_localization_real.yaml" \
+  --sensor-z 0.2966
+  ```
+### 简单长地图的仿真
+```bash
+# 带定位前后端版本(非真值定位)
+
+
+./maps/227to219_1125/simulation/run.sh            # 不带 GUI 的 Gazebo、RViz 和全栈导航
+USE_RVIZ=False ./maps/227to219_1125/simulation/run.sh   # 不开 RViz
+./maps/227to219_1125/simulation/run.sh --rebuild        # 改了图重新生成场景
+```
+
+

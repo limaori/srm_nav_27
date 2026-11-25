@@ -1,0 +1,75 @@
+{
+  "map_yaml": "/home/srm/srm_nav_27/maps/227to219_1125/227to219_1125.yaml",
+  "resolution": 0.05,
+  "origin": [
+    -20.1,
+    -9.09,
+    0
+  ],
+  "dimensions": [
+    459,
+    917
+  ],
+  "free_fraction": 0.0875,
+  "occupied_cells_total": 384070,
+  "shell_cells": 8979,
+  "mesh_triangles": 45692,
+  "obstacle_height_m": 0.8,
+  "spawn_xy": [
+    0.175,
+    1.035
+  ],
+  "spawn_clearance_m": 1.736,
+  "map_to_odom": {
+    "x": 0.175,
+    "y": 1.035,
+    "yaw": 0.0
+  },
+  "geodesic_max_m": 32.03,
+  "goals": [
+    {
+      "name": "far_end_a",
+      "xy": [
+        -13.025,
+        12.035
+      ],
+      "geodesic_m": 17.76,
+      "clearance_m": 1.31
+    },
+    {
+      "name": "far_end_b",
+      "xy": [
+        -9.075,
+        19.085
+      ],
+      "geodesic_m": 25.4,
+      "clearance_m": 1.03
+    },
+    {
+      "name": "far_end_c",
+      "xy": [
+        -8.175,
+        24.185
+      ],
+      "geodesic_m": 31.83,
+      "clearance_m": 0.6
+    },
+    {
+      "name": "return_spawn",
+      "xy": [
+        0.175,
+        1.035
+      ],
+      "geodesic_m": 0.0,
+      "clearance_m": 1.74
+    }
+  ],
+  "planner": "YAstar",
+  "smoother": "nav2 SimpleSmoother (sim 默认)",
+  "controller": "MincoMpcController",
+  "odometry": "Gazebo ground truth",
+  "limitations": [
+    "只挤出贴自由区 6 格内的占用格（外壳），障碍内部为空 —— 机器人进不去内部，行为等价。",
+    "没有历史障碍回放、没有真实定位漂移。"
+  ]
+}

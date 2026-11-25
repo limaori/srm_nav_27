@@ -207,11 +207,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--pcd", required=True, help="输入地图系 PCD")
+    parser.add_argument("--name", help="地图名: 自动推 maps/pcd/<名字>_mapframe.pcd")
+    parser.add_argument("--pcd", help="输入地图系 PCD; 给了 --name 可省")
     parser.add_argument("--out", default="", help="输出 PCD（默认 <stem>_leveled.pcd）")
     parser.add_argument("--dry-run", action="store_true", help="只拟合打印，不写文件")
     parser.add_argument("--force", action="store_true", help="覆盖已存在的输出")
     args = parser.parse_args(argv)
+
+    if args.name and not args.pcd:
+        ws = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        args.pcd = os.path.join(ws, "maps", "pcd", args.name + "_mapframe.pcd")
+    if not args.pcd:
+        parser.error("需要 --pcd 或 --name")
 
     pcd = os.path.abspath(args.pcd)
     if not os.path.isfile(pcd):

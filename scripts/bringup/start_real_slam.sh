@@ -50,7 +50,10 @@
 #   ./scripts/bringup/start_real_slam.sh --stop                # 先发零速, 再结束建图链路节点
 #
 # 参数:
-#       --save <名字>           保存当前地图到 maps/<名字>/ (要求建图链路正在跑)
+#       --name <名字>           本次建图的**会话名**（写一次就够）:
+#                               录包目录名、PCD 落盘路径、--save 的地图名都从它推
+#       --save [名字]           保存当前地图到 maps/<名字>/ (要求建图链路正在跑);
+#                               省略名字 = 用 --name 的那个
 #       --out-dir <绝对路径>    存图输出目录, 默认 <工作空间>/maps/<名字>
 #       --wait <秒>             存图前最多等 slam_toolbox 服务出现的秒数 (默认 8; 0 = 不等)
 #       --force                 存图时允许覆盖已存在的同名地图文件
@@ -653,7 +656,15 @@ ACTION_START=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --save)          SAVE_MAP_NAME="${2:?--save 需要地图名字}"; ACTION_START=0; shift 2 ;;
+    --name)          MAP_NAME_CLI="${2:?--name 需要名字}"; shift 2 ;;
+    --save)
+      # 允许省掉名字: "--name X --save" 等价于 "--save X"
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        SAVE_MAP_NAME="$2"; shift 2
+      else
+        SAVE_USES_NAME=1; shift
+      fi
+      ACTION_START=0 ;;
     --out-dir)       MAP_OUT_DIR="${2:?--out-dir 需要绝对路径}"; shift 2 ;;
     --wait)          WAIT_FOR_SLAM="${2:?--wait 需要秒数}"; shift 2 ;;
     --force)         FORCE_SAVE=1; shift ;;
@@ -688,6 +699,33 @@ while [ $# -gt 0 ]; do
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+# ---------- --name: 会话名一次写，三处复用 ----------
+MAP_NAME_CLI="${MAP_NAME_CLI:-}"
+SAVE_USES_NAME="${SAVE_USES_NAME:-0}"
+if [ -n "$MAP_NAME_CLI" ]; then
+  case "$MAP_NAME_CLI" in
+    *[!A-Za-z0-9_.-]*)
+      echo "[错误] --name 只允许字母/数字/下划线/点/短横线, 收到: $MAP_NAME_CLI" >&2
+      exit 2 ;;
+  esac
+  # 录包目录名（只在真的录包时用，否则会触发"给了 bag 参数却没 --record-bag"的校验）
+  if is_true "$RECORD_BAG" && [ -z "$BAG_NAME" ]; then
+    BAG_NAME="$MAP_NAME_CLI"
+  fi
+  # PCD 落盘路径（只在 --save-pcd 时生效）: maps/pcd/<名字>.pcd，和 prepare_prior_map 对得上
+  if is_true "$SAVE_PCD" && [ -z "$PCD_SAVE_PATH_CLI" ]; then
+    PCD_SAVE_PATH_CLI="$WS_DIR/maps/pcd/$MAP_NAME_CLI.pcd"
+  fi
+  # --save 没带名字时用它
+  if [ "$SAVE_USES_NAME" = "1" ]; then
+    SAVE_MAP_NAME="$MAP_NAME_CLI"
+  fi
+fi
+if [ "$SAVE_USES_NAME" = "1" ] && [ -z "$SAVE_MAP_NAME" ]; then
+  echo "[错误] --save 没给名字, 也没给 --name；补一个: --name <地图名> 或 --save <地图名>" >&2
+  exit 2
+fi
 
 case "$WAIT_FOR_SLAM" in
   ''|*[!0-9]*)
