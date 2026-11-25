@@ -6,8 +6,12 @@
 #ifndef TDT_NAV_KIT__TDT_GLOBAL_PLANNER_HPP_
 #define TDT_NAV_KIT__TDT_GLOBAL_PLANNER_HPP_
 
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav2_core/global_planner.hpp"
@@ -15,9 +19,13 @@
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
 #include "tdt_nav_kit/costmap_converter.hpp"
 #include "tdt_nav_kit/planner_geometry.hpp"
 #include "tf2_ros/buffer.h"
+
+// vendor 前向声明：applyDynamicMask 只以引用传递，完整定义由 cpp 包含 yastar.hpp。
+class YAstar;
 
 namespace tdt_nav_kit
 {
@@ -72,6 +80,44 @@ private:
 
   /// 打开后在每次 createPlan 末尾打印分段耗时，用于定位瓶颈（默认关闭）。
   bool debug_timing_{false};
+
+  // ===================== 限时动态掩码（2026-11-23） =====================
+  // 复现上游 setMaskMapTimed 语义：实时障碍点云（对手车 / 场地新增障碍 /
+  // 未建图桌子）栅格化后作为命名掩码层推给 YAstar，duration 窗口内的点持续
+  // 生效、超窗自动失效。单帧噪声（墙点抖动）在窗口内自愈，真实障碍只要
+  // 仍被观测就每帧刷新、持续存在。
+  //
+  // wrapper 侧实现说明：createPlan 每次 new 局部 YAstar 实例，vendor 的
+  // 限时层随实例销毁，因此"duration 记忆"由本类承担——订阅回调把点云
+  // 栅格化成 (row,col) 格子集合并按时间戳缓存，createPlan 时合并 duration
+  // 窗口内的格子推送（非限时 setMaskMap，实例生命周期即有效期）。
+
+  /// 点云回调入口（整体异常兜底，见 cpp 内注释）。
+  void dynamicCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+  /// 回调实现：TF 变换到全局系 → z 带过滤 → 栅格化（含 dilation 膨胀）→ 缓存。
+  void dynamicCloudCallbackImpl(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
+  /// createPlan 内调用：合并 duration 窗口内的缓存格子，推送 "dynamic" 掩码层。
+  void applyDynamicMask(
+    YAstar & planner, int size_x, int size_y, float resolution,
+    float origin_x, float origin_y);
+
+  /// 动态障碍点云话题；空串（默认）= 关闭。
+  std::string dynamic_mask_topic_;
+  /// 掩码有效期（秒）：窗口内的观测合并生效。
+  double dynamic_mask_duration_{0.8};
+  /// 每个障碍点的膨胀半径（米）：让规划路径与实时障碍保持车体级间距。
+  double dynamic_mask_dilation_{0.15};
+  /// 点云 z 过滤带（米）：与代价地图高度窗一致，滤地面噪点与高处结构。
+  double dynamic_mask_min_z_{0.10};
+  double dynamic_mask_max_z_{0.35};
+
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr dynamic_cloud_sub_;
+  std::mutex dynamic_mask_mutex_;
+  /// (接收时刻, 格子集合)；格子为 (row, col) 对（map 系、跟随全局代价地图栅格）。
+  std::deque<std::pair<rclcpp::Time, std::vector<std::pair<int, int>>>> dynamic_cells_;
+  /// TF 超时告警节流（用 double 秒存储，避免 rclcpp::Time 跨时间源相减抛异常：
+  /// node->now() 是 ROS_TIME，默认构造的 Time 是 SYSTEM_TIME）。
+  double last_tf_warn_sec_{-1.0e9};
 };
 
 }  // namespace tdt_nav_kit

@@ -19,6 +19,9 @@
 #include <vector>
 
 #include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "tf2/time.h"
+#include "tf2/utils.h"
+#include "tf2/exceptions.h"
 
 #define VOXEL_BITS 16
 
@@ -53,11 +56,36 @@ void IntensityVoxelLayer::onInitialize()
   mark_threshold_ = node->declare_parameter(name_ + ".mark_threshold", 0);
   publish_voxel_ = node->declare_parameter(name_ + ".publish_voxel_map", false);
 
+  // —— 静态差集过滤参数（2026-11-24 评审 §5/§8.3）——
+  static_diff_only_ = node->declare_parameter(name_ + ".static_diff_only", false);
+  static_map_topic_ = node->declare_parameter(name_ + ".static_map_topic", "map");
+  static_occupied_threshold_ = static_cast<int8_t>(
+    node->declare_parameter(name_ + ".static_occupied_threshold", 65));
+  if (static_diff_only_) {
+    // 与 StaticLayer 同款 transient local 订阅，拿一次全图常驻缓存。
+    static_map_sub_ = node->create_subscription<nav_msgs::msg::OccupancyGrid>(
+      static_map_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+      std::bind(&IntensityVoxelLayer::staticMapCallback, this, std::placeholders::_1));
+  }
+
   if (publish_voxel_) {
     voxel_pub_ = node->create_publisher<nav2_msgs::msg::VoxelGrid>("voxel_grid", 1);
   }
 
   matchSize();
+}
+
+void IntensityVoxelLayer::staticMapCallback(
+  const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
+{
+  // 回调跑在代价地图节点的 executor 上，任何未捕获异常都会终止容器
+  // （2026-11-23 动态掩码 SIGABRT 教训），这里整体兜底。
+  try {
+    std::lock_guard<std::mutex> lock(static_map_mutex_);
+    static_map_ = msg;
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(rclcpp::get_logger("IntensityVoxelLayer"), "静态图缓存异常: %s", e.what());
+  }
 }
 
 IntensityVoxelLayer::~IntensityVoxelLayer() {}
@@ -145,6 +173,47 @@ void IntensityVoxelLayer::updateBounds(
   // update the global current status
   current_ = current;
 
+  // —— 静态差集过滤上下文（每周期一次，2026-11-24 评审 §5/§8.3）——
+  // global_frame_ 可能是 odom（局部代价地图），先换到静态图所在系（map）再查格。
+  // TF 不可用时退化为不过滤（旧行为），保证真实障碍不因过滤器失效而漏标。
+  bool diff_active = false;
+  double diff_tx = 0.0, diff_ty = 0.0, diff_cos = 1.0, diff_sin = 0.0;
+  nav_msgs::msg::OccupancyGrid::SharedPtr diff_map;
+  int diff_w = 0, diff_h = 0;
+  double diff_ox = 0.0, diff_oy = 0.0, diff_res = 0.05;
+  if (static_diff_only_) {
+    {
+      std::lock_guard<std::mutex> lock(static_map_mutex_);
+      diff_map = static_map_;
+    }
+    if (diff_map && tf_ != nullptr) {
+      try {
+        const auto tf_msg = tf_->lookupTransform(
+          diff_map->header.frame_id, global_frame_, tf2::TimePointZero);
+        diff_tx = tf_msg.transform.translation.x;
+        diff_ty = tf_msg.transform.translation.y;
+        const double yaw = tf2::getYaw(tf_msg.transform.rotation);
+        diff_cos = std::cos(yaw);
+        diff_sin = std::sin(yaw);
+        diff_w = static_cast<int>(diff_map->info.width);
+        diff_h = static_cast<int>(diff_map->info.height);
+        diff_ox = diff_map->info.origin.position.x;
+        diff_oy = diff_map->info.origin.position.y;
+        diff_res = diff_map->info.resolution;
+        diff_active = diff_w > 0 && diff_h > 0;
+      } catch (const tf2::TransformException & e) {
+        const double now_sec = clock_->now().seconds();
+        if (now_sec - last_tf_warn_sec_ > 5.0) {
+          last_tf_warn_sec_ = now_sec;
+          RCLCPP_WARN(
+            rclcpp::get_logger("IntensityVoxelLayer"),
+            "静态差集过滤 TF 失败 (%s → %s)，本周期不过滤: %s",
+            global_frame_.c_str(), diff_map->header.frame_id.c_str(), e.what());
+        }
+      }
+    }
+  }
+
   // place the new obstacles into a priority queue... each with a priority of zero to begin with
   for (const auto & obs : observations) {
     double sq_obstacle_max_range = obs.obstacle_max_range_ * obs.obstacle_max_range_;
@@ -185,6 +254,22 @@ void IntensityVoxelLayer::updateBounds(
         }
       } else if (!worldToMap3D(px, py, pz, mx, my, mz)) {
         continue;
+      }
+
+      // 静态差集过滤：该点落在静态占据/未知格 → 已有障碍，跳过（只标"新增"）。
+      // 墙点(80% 抖动)几乎全部落在静态墙上，在此处被丢弃；未建图桌子/对手车
+      // 落在自由格，正常标记。TF 未就绪时 diff_active=false，不过滤（旧行为）。
+      if (diff_active) {
+        const double mwx = diff_tx + diff_cos * px - diff_sin * py;
+        const double mwy = diff_ty + diff_sin * px + diff_cos * py;
+        const int si = static_cast<int>((mwx - diff_ox) / diff_res);
+        const int sj = static_cast<int>((mwy - diff_oy) / diff_res);
+        if (si >= 0 && si < diff_w && sj >= 0 && sj < diff_h) {
+          const int8_t v = diff_map->data[sj * diff_w + si];
+          if (v == -1 || v >= static_occupied_threshold_) {
+            continue;
+          }
+        }
       }
 
       // mark the cell in the voxel grid and check if we should also mark it in the costmap

@@ -313,6 +313,18 @@ class RealNavParams(RewrittenYaml):
             # 中轴形状（0.05m 栅格下近似无损），代价是点数略增、平滑输入更密。
             "simplify_epsilon": 0.03,
             "orientation_mode": "tangent",
+            # 2026-11-23: 限时动态掩码——代码已实现但【默认关闭】。首跑实测把
+            # 11999/12720 格(94%)涂成障碍导致一发车撞墙：terrain 点云 z 0.15-0.35
+            # 带内全是墙点，每点膨胀 0.15m 且无 obstacle_min_range 自反射过滤，
+            # 窄走廊自由带被两侧墙点膨胀吃光。重新启用前必须：
+            #   1) 加 obstacle_min_range(≈0.5m) 滤车身自反射；
+            #   2) 已是静态障碍的格不再膨胀(膨胀只用于"新增"障碍)；
+            #   3) 视情况降 z 带上沿或按点密度过滤。
+            "dynamic_mask_topic": "",
+            "dynamic_mask_duration": 0.8,
+            "dynamic_mask_dilation": 0.15,
+            "dynamic_mask_min_z": 0.15,
+            "dynamic_mask_max_z": 0.35,
         }
         with open(path, "w", encoding="utf-8") as stream:
             yaml.safe_dump(config, stream)

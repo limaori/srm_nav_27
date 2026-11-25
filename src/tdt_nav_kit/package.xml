@@ -27,6 +27,8 @@
   <depend>nav2_util</depend>
   <depend>pluginlib</depend>
   <depend>tf2_ros</depend>
+  <depend>tf2</depend>
+  <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
   <!-- OSQP 由 ROS 包 osqp_vendor 提供（osqp.h + libosqp）。

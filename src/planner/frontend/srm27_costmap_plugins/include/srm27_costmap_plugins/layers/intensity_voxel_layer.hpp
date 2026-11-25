@@ -15,6 +15,10 @@
 #ifndef SRM27_COSTMAP_PLUGINS__LAYERS__INTENSITY_VOXEL_LAYER_HPP_
 #define SRM27_COSTMAP_PLUGINS__LAYERS__INTENSITY_VOXEL_LAYER_HPP_
 
+#include <cstdint>
+#include <mutex>
+#include <string>
+
 #include "laser_geometry/laser_geometry.hpp"
 #include "message_filters/subscriber.h"
 #include "nav2_costmap_2d/layer.hpp"
@@ -71,6 +75,24 @@ private:
   bool has_previous_bounds_{false};
   double previous_min_x_{0.0}, previous_min_y_{0.0};
   double previous_max_x_{0.0}, previous_max_y_{0.0};
+
+  // ============ 静态差集过滤（2026-11-24 评审 §5/§8.3） ============
+  // 动态层只标记静态地图里"不是占据"的格（即新增障碍）：
+  //   * 墙点落在静态占据格上 → 直接丢弃（墙点 80% 抖动的根治手段，2026-11-22
+  //     贴墙事故即抖动标记把自由带逐帧吃掉）；
+  //   * 未建图障碍（桌子、对手车）落在自由格 → 正常标记，全局规划与 MINCO
+  //     局部 ESDF（CostmapAdapter 读局部代价地图）同时可见。
+  // 已知取舍：占据判定按全局系坐标查静态栅格；global_frame 非 map 时（局部
+  // 代价地图 = odom）每周期用一次 TF 把本层全局系变换到 map 系，TF 不可用时
+  // 退化为旧行为（不过滤）并节流告警。
+  void staticMapCallback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg);
+  bool static_diff_only_{false};
+  std::string static_map_topic_{"map"};
+  int8_t static_occupied_threshold_{65};
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr static_map_sub_;
+  std::mutex static_map_mutex_;
+  nav_msgs::msg::OccupancyGrid::SharedPtr static_map_;
+  double last_tf_warn_sec_{-1.0e9};
   inline bool worldToMap3DFloat(
     double wx, double wy, double wz, double & mx, double & my, double & mz)
   {

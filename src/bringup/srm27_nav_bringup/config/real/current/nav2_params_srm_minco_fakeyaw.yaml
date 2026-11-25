@@ -1046,11 +1046,22 @@ local_costmap:
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
-        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
-        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
-        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
+        # 2026-11-24 重新启用（评审 §8.3 差集方案）：动态层只标记静态地图里
+        # "不是占据"的格（static_diff_only=true）——墙点落在静态占据/未知格上
+        # 直接丢弃，11-22 墙点 80% 抖动把自由带逐帧吃掉的问题在源头根治；
+        # 未建图障碍（桌子/对手车）落在自由格正常标记，全局规划（makeSnapshot）
+        # 与 MINCO 局部 ESDF（CostmapAdapter 读局部代价地图）同时可见，
+        # 满足评审 §6.2 的一致性要求。TF 不可用时自动退化为不过滤并节流告警。
+        # 2026-11-24 回退关闭：高度窗 0.60 后墙中段强反射点大量进入，抖动偏移
+        # 1~2 格落在 PGM 自由贴墙带上即穿透 static_diff_only（它只查 PGM 原始占据，
+        # 不含膨胀带），自由带被动态 253 填满、车被"活埋"。重新启用前置条件：
+        # ① 差集改查"静态+inscribed 膨胀带"（cost≥253 的格一律丢弃）
+        # ② 或对动态标记加帧内点数阈值（mark_threshold 需 >0 并验证）
+        # ③ 重定位漂移（走廊内 map→odom 漂 0.2~0.3m）需先解决，否则 TF 对齐不可信
         enabled: false
+        static_diff_only: true
+        static_map_topic: map
+        static_occupied_threshold: 65  # occupancy 0..100，≥65 与 map_server occupied_thresh 0.65 一致
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1065,7 +1076,7 @@ local_costmap:
         # 2.0 会让它投影成 2D 障碍，inscribed 0.25 + inflation 0.27 覆盖到 y≈2.6，
         # 整条走廊变 99/100 的墙（planner ABORTED）。0.35 只保留车体高度以下的障碍
         # （云台/雷达顶约 0.33 m，odom z 以地面为 0）。
-        max_obstacle_height: 0.35
+        max_obstacle_height: 0.60
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map
@@ -1077,7 +1088,7 @@ local_costmap:
           # 这里仍按上游语义填雷达系，本车对应 livox_imu。
           sensor_frame: livox_imu
           min_obstacle_height: 0.15    # 2026-11-22: 0.10→0.15，滤掉地形分析的地面噪点（z≈0.01-0.08）
-          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
+          max_obstacle_height: 0.60    # 2026-11-24: 0.35→0.60。挪入走廊口的桌子顶面 z≈0.35-0.71，0.35 把它整个滤成盲区导致刮蹭；0.60 覆盖桌子主体、仍排除 0.72 门楣
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
@@ -1119,11 +1130,16 @@ global_costmap:
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
-        # 2026-11-22 北走廊实验档：动态层关闭。走廊低层墙点强度≤0.3、逐帧抖动率 80%
-        # （见项目记忆），抖动的动态标记让自由带逐帧摆动——planner 贴一侧走、
-        # MINCO 往真墙蹭，11-22 撞墙即此机制。测试场地静态，墙体由 static_layer
-        # 的 PGM 承担；动态障碍风险由现场人员监控兜底。
+        # 2026-11-24 重新启用（评审 §8.3 差集方案）：与 local 同一套
+        # static_diff_only 配置——墙点落在静态占据/未知格直接丢弃，未建图障碍
+        # （桌子/对手车）落在自由格正常标记。全局代价地图经 makeSnapshot 喂
+        # YAstar，规划器自动绕行新障碍。历史教训（11-22 关动态层的根因）：
+        # 墙点 80% 抖动把自由带逐帧吃掉，差集过滤在源头丢弃落在静态墙上的点。
+        # 2026-11-24 回退关闭（同 local 的三点前置条件，见 local 块注释）。
         enabled: false
+        static_diff_only: true
+        static_map_topic: map
+        static_occupied_threshold: 65
         track_unknown_space: true
         footprint_clearing_enabled: true
         publish_voxel_map: false
@@ -1136,7 +1152,7 @@ global_costmap:
         min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，滤掉 z≈0.01-0.08 的地面点（否则南入口整片变墙）
         # 2026-11-22: 2.0→0.35（同 local）。terrain_map_ext 在 y≈2.0 有 z≈0.72 m 的
         # 悬空门楣点，2.0 会把整条北走廊膨胀封死（实测 planner ABORTED、costmap 全 99/100）。
-        max_obstacle_height: 0.35
+        max_obstacle_height: 0.60
         min_obstacle_intensity: 0.1
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map_ext
@@ -1145,7 +1161,7 @@ global_costmap:
           topic: <robot_namespace>/terrain_map_ext
           sensor_frame: livox_imu
           min_obstacle_height: 0.15    # 2026-11-22: 0.0→0.15，与层门槛一致
-          max_obstacle_height: 0.35    # 2026-11-22: 同层门槛，滤掉门楣等车体以上的悬空结构
+          max_obstacle_height: 0.60    # 2026-11-24: 0.35→0.60，同 local——纳入桌子主体，排除 0.72 门楣
           obstacle_max_range: 10.0
           obstacle_min_range: 0.4      # 2026-11-21：0.2→0.4，滤掉车身自反射点环（实测最近 0.22 m）
       static_layer:
