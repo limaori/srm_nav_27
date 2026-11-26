@@ -37,7 +37,7 @@
 #include "srm27_minco_controller/command_frame.hpp"
 #include "srm27_map_adapter/costmap_adapter.hpp"
 #include "srm27_minco_controller/diagnostics.hpp"
-#include "srm27_minco_controller/planning_worker.hpp"
+#include "srm27_minco_pipeline/planning_worker.hpp"
 #include "srm27_minco_controller/state_adapter.hpp"
 #include "srm27_minco_controller/terminal_stop.hpp"
 #include "srm27_minco_controller/yaw_policy.hpp"
@@ -52,6 +52,11 @@
 
 namespace srm27_minco_controller
 {
+
+// MINCO 前端流水线（2026-11-26 抽到 srm27_minco_pipeline，规划器与控制器共用）。
+using srm27_minco_pipeline::PlanningRequest;
+using srm27_minco_pipeline::PlanningResult;
+using srm27_minco_pipeline::PlanningWorker;
 
 /// \brief MINCO + MPC 的 Nav2 `FollowPath` 控制器插件。
 ///

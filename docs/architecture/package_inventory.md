@@ -90,7 +90,7 @@
 
 - 实车导航：`srm27_nav_bringup` + `srm27_minco_*` + `srm27_costmap_plugins` +
   `srm27_nav_behavior_plugins` + `srm27_nav_smoother`（默认平滑器）+
-  `srm27_nav_planner`（`--yastar-planner` 时）+
+  `srm27_nav_planner`（默认全局规划器；`--no-yastar-planner` 时不用）+
   `srm27_chassis_control` + `srm27_nav_protocol` + `fake_vel_transform` + 定位前端；
 - 仿真导航：上述 + `srm27_gazebo_simulator`；
 - 实车建图：`srm27_nav_bringup` + `srm27_robot_description` + `point_lio`/`frontend` +

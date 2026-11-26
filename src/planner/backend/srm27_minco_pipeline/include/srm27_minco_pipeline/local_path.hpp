@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRM27_MINCO_CONTROLLER__LOCAL_PATH_HPP_
-#define SRM27_MINCO_CONTROLLER__LOCAL_PATH_HPP_
+#ifndef SRM27_MINCO_PIPELINE__LOCAL_PATH_HPP_
+#define SRM27_MINCO_PIPELINE__LOCAL_PATH_HPP_
 
 #include <Eigen/Core>
 #include <vector>
 
 #include "srm27_map_core/esdf_2d.hpp"
 
-namespace srm27_minco_controller
+namespace srm27_minco_pipeline
 {
 
 enum class LocalPathEnd { kInvalid, kGlobalGoal, kHorizon, kMapBoundary, kBlocked, kPathEnd };
@@ -63,6 +63,6 @@ LocalPathResult extractLocalPath(
   const std::vector<Eigen::Vector2d> & _path, const Eigen::Vector2d & _position,
   const srm27_map_core::Esdf2D & _esdf, const LocalPathConfig & _config, bool _path_ends_at_goal);
 
-}  // namespace srm27_minco_controller
+}  // namespace srm27_minco_pipeline
 
-#endif  // SRM27_MINCO_CONTROLLER__LOCAL_PATH_HPP_
+#endif  // SRM27_MINCO_PIPELINE__LOCAL_PATH_HPP_

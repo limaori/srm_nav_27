@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef SRM27_MINCO_CONTROLLER__PLANNING_WORKER_HPP_
-#define SRM27_MINCO_CONTROLLER__PLANNING_WORKER_HPP_
+#ifndef SRM27_MINCO_PIPELINE__PLANNING_WORKER_HPP_
+#define SRM27_MINCO_PIPELINE__PLANNING_WORKER_HPP_
 
 #include <Eigen/Core>
 #include <atomic>
@@ -32,7 +32,7 @@
 #include "srm27_minco_core/trajectory_validator.hpp"
 #include "srm27_minco_core/types.hpp"
 
-namespace srm27_minco_controller
+namespace srm27_minco_pipeline
 {
 
 /// \brief 一次规划任务的输入（不可变快照）。
@@ -176,12 +176,15 @@ public:
   /// \brief 是否正在执行任务。
   bool busy() const { return busy_.load(); }
 
+  /// \brief 同步执行一次完整规划（纯计算，不触碰 ROS、不加锁）。
+  ///
+  /// 规划器插件（MincoPlanner）在自己的线程里直接调用它：那边没有"控制线程/工作线程"
+  /// 的分工，不需要排队语义；控制器仍然用 submit/takeResult 的异步模式。
+  static PlanningResult runOnce(const PlanningRequest & _request);
+
 private:
   /// \brief 线程主循环。
   void run();
-
-  /// \brief 执行一次规划（纯计算，不触碰 ROS 与锁）。
-  static PlanningResult plan(const PlanningRequest & _request);
 
   std::thread thread_{};
   mutable std::mutex mutex_{};
@@ -197,6 +200,6 @@ private:
   std::atomic<std::uint64_t> discarded_stale_{0};
 };
 
-}  // namespace srm27_minco_controller
+}  // namespace srm27_minco_pipeline
 
-#endif  // SRM27_MINCO_CONTROLLER__PLANNING_WORKER_HPP_
+#endif  // SRM27_MINCO_PIPELINE__PLANNING_WORKER_HPP_

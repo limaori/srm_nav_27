@@ -165,11 +165,12 @@
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
 #                                 --no-run 则保持暂停等你点播放)
 #       --smoother / --no-smoother velocity_smoother 是否串联 (默认串联)
-#       --yastar-planner          全局规划器换成 srm27_nav_planner::YAstarGlobalPlanner
-#                                 (默认 nav2_theta_star_planner/ThetaStarPlanner)
+#       --yastar-planner          全局规划器 = srm27_nav_planner::YAstarGlobalPlanner
+#                                 (**默认**; 保留这个开关只为兼容旧命令/显式声明)
+#       --no-yastar-planner       回到 nav2_theta_star_planner/ThetaStarPlanner
 #       --minisnap-smoother       平滑器换成 srm27_nav_smoother::MinimumSnapSmoother
 #                                 (默认 SimpleSmoother; 需要行为树里有 SmoothPath)
-#       两个都加 = 原来的 TDT 仿真链路 (YAstar + MinimumSnap)。
+#       两个都开 = 原来的 TDT 仿真链路 (YAstar + MinimumSnap); YAstar 这一半已是默认。
 #   -h, --help                显示本帮助
 #       --behavior <树名>          同时起决策行为树（srm27_behavior）；mux 要求决策许可
 #       --test-behavior [树名]     测试行为树模式：默认 test_spin_speed；mux 不要求
@@ -223,9 +224,10 @@ USE_GUI="${USE_GUI:-true}"
 # 想保持旧的"暂停等点播放"行为: --no-run 或 RUN_IMMEDIATELY=false。
 RUN_IMMEDIATELY="${RUN_IMMEDIATELY:-true}"
 USE_VELOCITY_SMOOTHER="${USE_VELOCITY_SMOOTHER:-True}"
-# 可选规划插件（原 tdt_nav_kit，2026-11-24 拆包并入 src/planner）。
-# 默认关闭 = 与改动前完全一致的 ThetaStar + SimpleSmoother 链路。
-USE_YASTAR_PLANNER="${USE_YASTAR_PLANNER:-False}"
+# 规划插件（原 tdt_nav_kit，2026-11-24 拆包并入 src/planner）。
+# 2026-11-26 起 **YAstar 是默认全局规划器**（ThetaStar 退回需显式 --no-yastar-planner）；
+# MinimumSnap 平滑器仍默认关闭 = 默认链路是 YAstar + SimpleSmoother。
+USE_YASTAR_PLANNER="${USE_YASTAR_PLANNER:-True}"
 USE_MINISNAP_SMOOTHER="${USE_MINISNAP_SMOOTHER:-False}"
 DRY_RUN="${DRY_RUN:-0}"                      # 1 = 只打印将执行的命令, 不真的启动
 # 一步验证小陀螺导航 (--verify-spin): 无头起栈 -> 发自转请求 -> 发导航目标 ->
@@ -1224,6 +1226,13 @@ fi
 printf 'RViz      : %s    Gazebo GUI: %s    直接运行: %s\n' "$USE_RVIZ" "$USE_GUI" "$RUN_IMMEDIATELY"
 printf '平滑器    : %s\n' "$USE_VELOCITY_SMOOTHER"
 printf '规划插件  : YAstar=%s  MinimumSnap=%s\n' "$USE_YASTAR_PLANNER" "$USE_MINISNAP_SMOOTHER"
+# -p 指向一份"GridBased 本身就是 YAstar"的参数文件时，关开关只能停掉 launch 注入，
+# 文件里的插件不会被改回 ThetaStar —— 说清楚，别让人以为已经换了规划器。
+if [ "$USE_YASTAR_PLANNER" = "False" ] \
+   && grep -q "srm27_nav_planner::YAstarGlobalPlanner" "$PARAMS_FILE" 2>/dev/null; then
+  echo "            (注意: $PARAMS_FILE 里的 GridBased 本身就是 YAstar；"
+  echo "             --no-yastar-planner 只关闭注入，要真回 ThetaStar 请换一份参数文件)"
+fi
 printf 'wz 归属   : 决策层 rotation_cmd -> srm_cmd_mux（导航只出平移, 完全解耦）\n'
 printf '速度链    : Nav2[cmd_vel_nav_fake] -> fake_vel_transform[cmd_vel_nav_body] -> srm_cmd_mux -> cmd_vel_sim -> Gazebo\n'
 printf '            srm_cmd_mux 第二路: rotation_cmd (只取 angular.z, 停发 0.25 s 停转)\n'

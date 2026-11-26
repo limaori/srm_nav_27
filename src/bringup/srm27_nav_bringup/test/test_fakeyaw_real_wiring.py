@@ -390,36 +390,63 @@ def test_gimbal_relay_is_always_started_and_follows_the_topic_arg():
 
 
 def test_yastar_planner_opt_in_preserves_the_real_navigation_chain():
+    """`use_yastar_planner` 的注入行为：ThetaStar -> YAstar 只换 GridBased 一段。
+
+    基线不再直接拿仓库里那份实车参数：2026-11-26（commit 2d7c108）起它**本身就是
+    YAstar**，拿它当"未开启"基线会让本用例恒假。这里先确认它是 YAstar（脚本默认值
+    与之一致），再在临时目录里把它还原成 ThetaStar 来验注入逻辑。
+    """
+    import tempfile
+
     import yaml
 
     module = _load_launch_module()
-    base_params = yaml.safe_load(FAKEYAW_PARAMS.read_text())
-    for enabled in ("False", "True"):
-        _, context, includes, _, _ = _make_context(
-            module, {"params_file": str(FAKEYAW_PARAMS), "use_yastar_planner": enabled}
-        )
-        args = _include_arguments(includes, context, "nav2_stack_launch.py")
-        with open(args["params_file"]) as stream:
-            config = yaml.safe_load(stream)
+    shipped = yaml.safe_load(FAKEYAW_PARAMS.read_text())
+    _assert(
+        shipped["planner_server"]["ros__parameters"]["GridBased"]["plugin"]
+        == "srm27_nav_planner::YAstarGlobalPlanner",
+        "实车默认参数文件应该已经是 YAstar（脚本 --yastar-planner 也是默认值）",
+    )
 
-        planner = config["planner_server"]["ros__parameters"]
-        grid = planner["GridBased"]
-        expected = ("srm27_nav_planner::YAstarGlobalPlanner" if enabled == "True"
-                    else "nav2_theta_star_planner/ThetaStarPlanner")
-        _assert(planner["planner_plugins"] == ["GridBased"], "BT planner ID must stay GridBased")
-        _assert(grid["plugin"] == expected, f"Unexpected global planner: {grid['plugin']}")
-        if enabled == "True":
-            _assert(grid["mask_num_layers"] == 4, "Upstream YAstar uses 4 mask layers")
-            _assert(grid["simplify_epsilon"] == 0.1, "Upstream DP simplify threshold is 0.1 m")
-            _assert("path_resample_step" not in grid, "Upstream YAstar does not resample")
-            _assert(grid["treat_unknown_as_obstacle"] is True, "Unknown space must be blocked")
-        for name in ("local_costmap", "global_costmap", "fake_vel_transform",
-                     "smoother_server", "bt_navigator"):
-            _assert(config[name] == base_params[name], f"YAstar override changed {name} parameters")
-        follow_path = config["controller_server"]["ros__parameters"]["FollowPath"]
-        _assert(follow_path["plugin"] == "srm27_minco_controller::MincoMpcController",
-                "YAstar override must keep the real-robot controller")
-        _assert(follow_path["command_frame"] == "gimbal_yaw_fake", "Unexpected command frame")
+    theta = yaml.safe_load(FAKEYAW_PARAMS.read_text())
+    theta["planner_server"]["ros__parameters"]["GridBased"] = {
+        "plugin": "nav2_theta_star_planner/ThetaStarPlanner",
+        "how_many_corners": 8,
+        "w_euc_cost": 1.0,
+        "w_traversal_cost": 10.0,
+        "w_heuristic_cost": 1.0,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        theta_path = Path(tmp) / "nav2_params_real_theta.yaml"
+        theta_path.write_text(yaml.safe_dump(theta), encoding="utf-8")
+        for enabled in ("False", "True"):
+            _, context, includes, _, _ = _make_context(
+                module, {"params_file": str(theta_path), "use_yastar_planner": enabled}
+            )
+            args = _include_arguments(includes, context, "nav2_stack_launch.py")
+            with open(args["params_file"]) as stream:
+                config = yaml.safe_load(stream)
+
+            planner = config["planner_server"]["ros__parameters"]
+            grid = planner["GridBased"]
+            expected = ("srm27_nav_planner::YAstarGlobalPlanner" if enabled == "True"
+                        else "nav2_theta_star_planner/ThetaStarPlanner")
+            _assert(planner["planner_plugins"] == ["GridBased"],
+                    "BT planner ID must stay GridBased")
+            _assert(grid["plugin"] == expected, f"Unexpected global planner: {grid['plugin']}")
+            if enabled == "True":
+                _assert(grid["mask_num_layers"] == 4, "Upstream YAstar uses 4 mask layers")
+                _assert(grid["simplify_epsilon"] == 0.1, "Upstream DP simplify threshold is 0.1 m")
+                _assert("path_resample_step" not in grid, "Upstream YAstar does not resample")
+                _assert(grid["treat_unknown_as_obstacle"] is True, "Unknown space must be blocked")
+            for name in ("local_costmap", "global_costmap", "fake_vel_transform",
+                         "smoother_server", "bt_navigator"):
+                _assert(config[name] == theta[name],
+                        f"YAstar override changed {name} parameters")
+            follow_path = config["controller_server"]["ros__parameters"]["FollowPath"]
+            _assert(follow_path["plugin"] == "srm27_minco_controller::MincoMpcController",
+                    "YAstar override must keep the real-robot controller")
+            _assert(follow_path["command_frame"] == "gimbal_yaw_fake", "Unexpected command frame")
 
 
 def _run_all():

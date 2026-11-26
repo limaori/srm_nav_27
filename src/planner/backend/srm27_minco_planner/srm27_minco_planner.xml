@@ -1,0 +1,11 @@
+<library path="srm27_minco_planner">
+  <class
+    name="srm27_minco_planner::MincoPlanner"
+    type="srm27_minco_planner::MincoPlanner"
+    base_class_type="nav2_core::GlobalPlanner">
+    <description>
+      MINCO 轨迹规划器：YAstar 出全局路径后，用 MINCO 生成时间参数化轨迹并按
+      opt_freq 连续发布（MincoTrajectory）。控制器只做 MPC 跟踪。
+    </description>
+  </class>
+</library>

@@ -286,7 +286,16 @@ class SimPlannerSmootherParams(RewrittenYaml):
                 raise RuntimeError(
                     "use_yastar_planner requires planner_server with a single "
                     "GridBased planner")
-            planner["GridBased"] = dict(YASTAR_PLANNER_OVERRIDE)
+            existing = planner.get("GridBased") or {}
+            if existing.get("plugin") == YASTAR_PLANNER_OVERRIDE["plugin"]:
+                # 参数文件本身就是 YAstar（例如 maps/<图>/simulation/nav2_params_yastar.yaml）：
+                # 那份文件是调参现场，只补它没写的键，不用硬编码整段覆盖。
+                merged = dict(YASTAR_PLANNER_OVERRIDE)
+                merged.update(existing)
+                planner["GridBased"] = merged
+            else:
+                # 从 ThetaStar 等其它插件切过来：整段替换，避免把别的插件的键带进来。
+                planner["GridBased"] = dict(YASTAR_PLANNER_OVERRIDE)
 
         if use_minisnap:
             smoother = config.get("smoother_server", {}).get("ros__parameters", {})

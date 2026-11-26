@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>srm27_minco_planner</name>
+  <version>0.1.0</version>
+  <description>MINCO 规划器插件（Nav2 GlobalPlanner）：全局搜索 + 连续 MINCO 重规划 + 轨迹发布</description>
+  <maintainer email="srm@example.com">SRM Navigation</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>nav2_core</depend>
+  <depend>nav2_costmap_2d</depend>
+  <depend>nav2_util</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>eigen</depend>
+  <depend>srm27_minco_core</depend>
+  <depend>srm27_minco_pipeline</depend>
+  <depend>srm27_minco_interfaces</depend>
+  <depend>srm27_map_core</depend>
+  <depend>srm27_map_adapter</depend>
+  <depend>srm27_nav_planner</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -87,7 +87,7 @@ void TrackingReferenceBuilder::reset()
 }
 
 double TrackingReferenceBuilder::projectProgress(
-  const Trajectory2D & _trajectory, const Eigen::Vector2d & _position, double _previous_progress,
+  const TimedTrajectory & _trajectory, const Eigen::Vector2d & _position, double _previous_progress,
   bool _has_previous) const
 {
   if (_trajectory.empty() || !_position.allFinite()) {
@@ -141,7 +141,7 @@ double TrackingReferenceBuilder::projectProgress(
 }
 
 bool TrackingReferenceBuilder::build(
-  const Trajectory2D & _trajectory, const State2D & _state, const MpcModel & _model,
+  const TimedTrajectory & _trajectory, const State2D & _state, const MpcModel & _model,
   YawReferenceProvider & _yaw_provider, TrackingReferenceResult & _result)
 {
   _result = TrackingReferenceResult();
@@ -179,7 +179,7 @@ bool TrackingReferenceBuilder::build(
 }
 
 bool TrackingReferenceBuilder::buildSecondPass(
-  const Trajectory2D & _trajectory, const Eigen::MatrixXd & _predicted_velocity,
+  const TimedTrajectory & _trajectory, const Eigen::MatrixXd & _predicted_velocity,
   const MpcModel & _model, YawReferenceProvider & _yaw_provider, TrackingReferenceResult & _result)
 {
   if (!configured_ || !_model.configured() || _trajectory.empty() || !_result.valid) {
@@ -238,7 +238,7 @@ bool TrackingReferenceBuilder::buildSecondPass(
 }
 
 bool TrackingReferenceBuilder::assemble(
-  const Trajectory2D & _trajectory, const State2D & _state, const MpcModel & _model,
+  const TimedTrajectory & _trajectory, const State2D & _state, const MpcModel & _model,
   YawReferenceProvider & _yaw_provider, const std::vector<double> & _sample_times,
   TrackingReferenceResult & _result)
 {
@@ -253,7 +253,7 @@ bool TrackingReferenceBuilder::assemble(
 
   const double total = _trajectory.totalDuration();
   const bool terminal_stop =
-    _trajectory.terminal_is_global_goal || _trajectory.terminal_requires_stop;
+    _trajectory.isTerminalGlobalGoal() || _trajectory.terminalRequiresStop();
   const double slowdown = config_.goal_slowdown_time;
 
   _result.z_ref = Eigen::MatrixXd::Zero(nz, steps);

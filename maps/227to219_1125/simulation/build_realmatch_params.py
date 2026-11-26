@@ -101,6 +101,45 @@ planner = sim['planner_server']['ros__parameters']['GridBased']
 planner['treat_unknown_as_obstacle'] = True
 note('planner_server.GridBased.treat_unknown_as_obstacle False→True（对齐实车）')
 
+# 5b) 规划器侧 MINCO（2026-11-26 新增，默认不启用）：参数块随生成物一起产出，
+#     否则每次重跑脚本都会把它删掉，切回来还得手抄一遍。
+#     启用 = 把 GridBased.plugin 改成 srm27_minco_planner::MincoPlanner，
+#     并把 MincoPlanner 段的键名改成 GridBased（BT 里 planner_id 就是 GridBased）。
+_fp = real['controller_server']['ros__parameters']['FollowPath']
+sim['planner_server']['ros__parameters']['yastar'] = copy.deepcopy(planner)
+sim['planner_server']['ros__parameters']['MincoPlanner'] = {
+    'plugin': 'srm27_minco_planner::MincoPlanner',
+    'yastar_plugin_name': 'yastar',
+    'base_frame': _fp['base_frame'],
+    'output_frame': 'odom',
+    'smooth_path_topic': 'plan_smoothed',
+    'odom_topic': _fp['odom_topic'],
+    'trajectory_topic': 'planning/minco_trajectory',
+    'path_topic': 'planning/minco_path',
+    'diagnostics_topic': 'planning/diagnostics',
+    'opt_frequency': 20.0,
+    'planning_horizon': _fp['planning_horizon'],
+    'path_centering_max_displacement': _fp['path_centering_max_displacement'],
+    'validity_window': 1.0,
+    'terminal_reached_radius': _fp['terminal_reached_radius'],
+    'goal_change_tolerance': _fp['goal_change_tolerance'],
+    'diagnostics_period': _fp['diagnostics_period'],
+    'state_timeout': _fp['state_timeout'],
+    'publish_visualization': True,
+    'use_warm_start': True,
+    # 限速：实车参数文件不写 limits（唯一来源是 speed_limits.yaml 的
+    # controller_server@minco 段），这里按那份文件的 minco 档取值。
+    # 将来规划器启用后，需要在 speed_limits.yaml 增加 planner_server@minco 覆盖。
+    'limits': {'max_linear_speed': 2.60, 'max_linear_accel': 7.0,
+               'max_angular_speed': 8.50, 'max_angular_accel': 25.0},
+    'safety': copy.deepcopy(_fp['safety']),
+    'validator': {'sample_dt': 0.02, 'max_sample_spacing': 0.02,
+                  'speed_tolerance_ratio': 0.02, 'accel_tolerance_ratio': 0.02,
+                  'required_prefix_duration': 0.6},
+    'minco': copy.deepcopy(_fp['minco']),
+}
+note('planner_server 增补 MincoPlanner/yastar 参数块（规划器侧 MINCO，默认不启用）')
+
 
 # 6) 全量 use_sim_time=True（仿真必须）
 def force_sim_time(node):

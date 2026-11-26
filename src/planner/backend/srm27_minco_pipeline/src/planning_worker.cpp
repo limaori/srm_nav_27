@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "srm27_minco_controller/planning_worker.hpp"
+#include "srm27_minco_pipeline/planning_worker.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -20,10 +20,10 @@
 #include <limits>
 #include <sstream>
 
-#include "srm27_minco_controller/local_path.hpp"
+#include "srm27_minco_pipeline/local_path.hpp"
 #include "srm27_minco_core/kinematics.hpp"
 
-namespace srm27_minco_controller
+namespace srm27_minco_pipeline
 {
 
 namespace
@@ -177,7 +177,7 @@ void PlanningWorker::run()
       busy_.store(true);
     }
 
-    const PlanningResult result = plan(request);
+    const PlanningResult result = runOnce(request);
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -198,7 +198,7 @@ void PlanningWorker::run()
   }
 }
 
-PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
+PlanningResult PlanningWorker::runOnce(const PlanningRequest & _request)
 {
   using srm27_minco_core::MincoOptimizer;
   using srm27_minco_core::MincoOptimizeResult;
@@ -434,4 +434,4 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   return result;
 }
 
-}  // namespace srm27_minco_controller
+}  // namespace srm27_minco_pipeline

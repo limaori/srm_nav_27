@@ -72,9 +72,9 @@
 #   3) 底盘能动之后, 先在 RViz 用很小的目标点试一次, 确认车头方向/正负号都对。
 #
 # 用法:
-#   ./scripts/bringup/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链, 启动全部
+#   ./scripts/bringup/start_real_nav.sh                       # 默认 --reloc + MINCO 迁移链 + YAstar, 启动全部
 #   ./scripts/bringup/start_real_nav.sh --controller minco    # MINCO + MPC (默认, fakeyaw 迁移链)
-#   ./scripts/bringup/start_real_nav.sh --yastar-planner        # YAstar + MINCO/MPC
+#   ./scripts/bringup/start_real_nav.sh --no-yastar-planner     # 全局规划器退回 ThetaStar
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./scripts/bringup/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
 #   ./scripts/bringup/start_real_nav.sh --test-behavior       # 测试树: 导航中 2 rad/s, 到点/无目标原地 5 rad/s
@@ -108,8 +108,8 @@
 #   -p, --params <绝对路径>     Nav2 参数文件（实车默认 = 迁移链那份, 见 -c）
 #   -c, --controller <auto|minco>   控制器（实车另有 omni 可选, 见下）
 #       --minco                 等价于 --controller minco
-#       --yastar-planner         全局规划器换成 YAstar（局部仍为 MINCO/MPC）
-#       --no-yastar-planner      回到 ThetaStar（默认）
+#       --yastar-planner         全局规划器 = YAstar（局部仍为 MINCO/MPC）**默认**
+#       --no-yastar-planner      回到 nav2_theta_star_planner/ThetaStarPlanner
 #       --minisnap-smoother      仅提示：实车默认已是 MinimumSnap 平滑器
 #       --no-minisnap-smoother   仅提示：没有 SimpleSmoother 的正式实车参数
 #       --gicp / --no-gicp      先验点云重定位（= --reloc）/ 关掉它（= --no-reloc, LIO+静态图）
@@ -381,7 +381,10 @@ ZLIO_CONFIG="${ZLIO_CONFIG:-}"
 # 局部控制器: auto (按参数文件内容判断) / omni / minco。
 CONTROLLER="${CONTROLLER:-minco}"
 CONTROLLER_CLI_GIVEN=0
-USE_YASTAR_PLANNER=0
+# 2026-11-26 起 **YAstar 是默认全局规划器**；它只挂在 MINCO/MPC 云台系链路上，
+# 所以走 Omni/旧链时会自动退回 ThetaStar（见下面 MINCO_FAKEYAW_CHAIN 那段）。
+USE_YASTAR_PLANNER=1
+YASTAR_CLI_GIVEN=0
 
 START_SLAM="${START_SLAM:-0}"
 START_RELOC="${START_RELOC:-0}"
@@ -709,10 +712,10 @@ while [ $# -gt 0 ]; do
                       CONTROLLER_CLI_GIVEN=1; shift 2 ;;
     --minco)          CONTROLLER="minco"; CONTROLLER_CLI_GIVEN=1; shift ;;
     --omni)           CONTROLLER="omni"; CONTROLLER_CLI_GIVEN=1; shift ;;
-    --yastar-planner) USE_YASTAR_PLANNER=1; shift ;;
-    --no-yastar-planner) USE_YASTAR_PLANNER=0; shift ;;
+    --yastar-planner) USE_YASTAR_PLANNER=1; YASTAR_CLI_GIVEN=1; shift ;;
+    --no-yastar-planner) USE_YASTAR_PLANNER=0; YASTAR_CLI_GIVEN=1; shift ;;
     # 兼容旧命令：等价于 --yastar-planner（2026-11-24 插件改名后的过渡入口）。
-    --tdt-planner)    USE_YASTAR_PLANNER=1; shift ;;
+    --tdt-planner)    USE_YASTAR_PLANNER=1; YASTAR_CLI_GIVEN=1; shift ;;
     # 参数面与仿真脚本对齐：实车默认参数已固定使用 MinimumSnap 平滑器，
     # 这两个开关只用于提示，不改变链路（仿真/实车共用同一套 start_* 习惯）。
     --minisnap-smoother)
@@ -1276,8 +1279,23 @@ if [ "$CONTROLLER" = "minco" ] && [ "$USE_FAKE_VEL_TRANSFORM" = "1" ] \
   MINCO_FAKEYAW_CHAIN=1
 fi
 if [ "$USE_YASTAR_PLANNER" = "1" ] && [ "$MINCO_FAKEYAW_CHAIN" != "1" ]; then
-  echo "[错误] --yastar-planner 需要 MINCO/MPC 云台系实车配置。" >&2
-  exit 2
+  # YAstar 是默认值，但只挂在 MINCO/MPC 云台系链路上（它的 GridBased 参数与
+  # 云台系速度出口是一套）。显式 --yastar-planner 仍然硬报错；只是在默认值时
+  # 自动退回 ThetaStar，否则 --controller omni 这条正式回退链会被默认值打死。
+  if [ "$YASTAR_CLI_GIVEN" = "1" ]; then
+    echo "[错误] --yastar-planner 需要 MINCO/MPC 云台系实车配置。" >&2
+    exit 2
+  fi
+  USE_YASTAR_PLANNER=0
+  echo "[提示] 默认全局规划器 YAstar 只用于 MINCO/MPC 云台系链路；当前是 Omni/旧链，" >&2
+  echo "       已自动回退 nav2_theta_star_planner/ThetaStarPlanner。" >&2
+fi
+# 实车默认参数文件本身已经是 YAstar：这时 --no-yastar-planner 只能关掉 launch 的注入，
+# 改不动文件里的 GridBased，必须明说，别让人以为已经退回 ThetaStar。
+if [ "$USE_YASTAR_PLANNER" = "0" ] && [ "$YASTAR_CLI_GIVEN" = "1" ] \
+   && grep -q "srm27_nav_planner::YAstarGlobalPlanner" "$PARAMS_FILE" 2>/dev/null; then
+  echo "[提示] $PARAMS_FILE 里的 GridBased 本身就是 YAstar；" >&2
+  echo "       --no-yastar-planner 只关闭 launch 注入，要真正回 ThetaStar 请用 -p 换一份参数文件。" >&2
 fi
 
 # 速度出口：迁移链的出口话题是 fake_vel_transform 的输入 cmd_vel_nav_fake；
@@ -1943,7 +1961,9 @@ else
   echo "  局部控制器  : Omni (srm27_omni_pid_controller::OmniPidPursuitController)"
 fi
 if [ "$USE_YASTAR_PLANNER" = "1" ]; then
-  echo "  全局规划器  : srm27_nav_planner::YAstarGlobalPlanner (GridBased)"
+  echo "  全局规划器  : srm27_nav_planner::YAstarGlobalPlanner (GridBased, 默认)"
+else
+  echo "  全局规划器  : nav2_theta_star_planner/ThetaStarPlanner"
 fi
 echo "  雷达配置    : $LIDAR_CONFIG_FILE"
 if [ "$USE_ROBOT_STATE_PUB" = "1" ]; then

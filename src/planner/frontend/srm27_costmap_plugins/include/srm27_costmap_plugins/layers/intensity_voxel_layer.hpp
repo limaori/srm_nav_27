@@ -15,6 +15,11 @@
 #ifndef SRM27_COSTMAP_PLUGINS__LAYERS__INTENSITY_VOXEL_LAYER_HPP_
 #define SRM27_COSTMAP_PLUGINS__LAYERS__INTENSITY_VOXEL_LAYER_HPP_
 
+#include <cstddef>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
 #include "laser_geometry/laser_geometry.hpp"
 #include "message_filters/subscriber.h"
 #include "nav2_costmap_2d/layer.hpp"
@@ -60,6 +65,16 @@ protected:
     double * max_x, double * max_y);
 
 private:
+  /// \brief 把一个世界格坐标压成 64 位键（两个分量各平移 2^31 后打包）。
+  static std::uint64_t cellKey(long _ix, long _iy);
+  /// \brief 键拆回 (ix, iy)，与 `cellKey` 严格互逆。
+  static void keyToCell(std::uint64_t _key, long & _ix, long & _iy);
+  /// \brief 残影表内存上限保护：超限时整表作废并告警，避免无界增长。
+  void enforceHoldCap();
+  /// \brief 点是否落在（已变换到世界系的）车体多边形内；多边形为空视为"不在"。
+  static bool pointInFootprint(
+    double _x, double _y, const std::vector<geometry_msgs::msg::Point> & _polygon);
+
   bool publish_voxel_{false};
   rclcpp::Publisher<nav2_msgs::msg::VoxelGrid>::SharedPtr voxel_pub_;
   nav2_voxel_grid::VoxelGrid voxel_grid_;
@@ -71,6 +86,31 @@ private:
   bool has_previous_bounds_{false};
   double previous_min_x_{0.0}, previous_min_y_{0.0};
   double previous_max_x_{0.0}, previous_max_y_{0.0};
+
+  // ---- 残影保持（hold_time > 0 时启用；= 0 时行为与旧版完全一致）----
+  //
+  // 旧版每个更新周期 `resetMaps()` 后按"最近 decayTime 秒的点云"重建，图层本身零记忆；
+  // 云台半视野自转时同一障碍会被"看见 0.5 s、丢失 1~2 s"地反复刷新/擦掉。
+  // 残影表把"最近一次被观测到的世界格"留在内存里，超过 hold_time 没再被观测才擦掉，
+  // 使有效记忆 = 点云衰减窗 + hold_time，与云台重访周期解耦。
+  //
+  // 注意：这里只按时间保活，不含"扫过且为空"的证据（见文档 L1/L2 分级）。因此
+  // hold_time 越长，移动目标留下的拖影越久，窄道调参时要一起看。
+  double hold_time_{0.0};
+  std::size_t hold_max_cells_{200000};
+  /// \brief 世界格键 → 最近一次被观测到的时刻（ROS 秒，受 use_sim_time 影响）。
+  std::unordered_map<std::uint64_t, double> last_seen_;
+  /// \brief 残影表建立时的分辨率；分辨率变化时整表作废。
+  double hold_resolution_{0.0};
+  /// \brief 当前图层原点对应的格偏移：`世界格 = 格偏移 + 图层格`。
+  /// 滚动窗口移动时按整数格累加，保证残影键不随窗口漂移。
+  long cell_offset_x_{0};
+  long cell_offset_y_{0};
+  /// \brief 残影表建立时的图层尺寸；尺寸变化（换图/重建窗口）时整表作废。
+  unsigned int hold_size_x_{0}, hold_size_y_{0};
+  /// \brief 本周期车体 footprint 的世界系包围盒，用来给点数很多的观测做快速排除。
+  double fp_min_x_{0.0}, fp_min_y_{0.0}, fp_max_x_{0.0}, fp_max_y_{0.0};
+  bool hold_cap_warned_{false};
   inline bool worldToMap3DFloat(
     double wx, double wy, double wz, double & mx, double & my, double & mz)
   {

@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "srm27_minco_core/timed_trajectory.hpp"
 #include "srm27_minco_core/types.hpp"
 
 namespace srm27_minco_core
@@ -47,7 +48,7 @@ struct ClearanceSample
 ///    上游 GCOPTER `Trajectory<5>` 的 `CoefficientMat` 存的是高阶在前，
 ///    适配器（`fromGcopterCoeffs`）显式翻转，并有往返测试覆盖。
 ///  * 位置、速度、加速度、jerk 都从同一条多项式解析求值；采样点只用于显示。
-class Trajectory2D
+class Trajectory2D : public TimedTrajectory
 {
 public:
   /// \brief 多项式阶数（五次）。
@@ -81,11 +82,11 @@ public:
     const Coefficients & _x_high_first, const Coefficients & _y_high_first, double _duration);
 
   /// \brief 是否为空。
-  bool empty() const { return durations_.empty(); }
+  bool empty() const override { return durations_.empty(); }
   /// \brief 段数。
   int pieceCount() const { return static_cast<int>(durations_.size()); }
   /// \brief 轨迹总时长（s）。
-  double totalDuration() const { return total_duration_; }
+  double totalDuration() const override { return total_duration_; }
   /// \brief 各段时长（s）。
   const std::vector<double> & durations() const { return durations_; }
   /// \brief x 方向系数（c0..c5）。
@@ -113,18 +114,18 @@ public:
   Eigen::Vector2d pieceJerk(int _piece_index, double _tau) const;
 
   /// \brief `odom` 系位置（m）。
-  Eigen::Vector2d positionAt(double _t) const;
+  Eigen::Vector2d positionAt(double _t) const override;
   /// \brief `odom` 系速度（m/s）。
-  Eigen::Vector2d velocityAt(double _t) const;
+  Eigen::Vector2d velocityAt(double _t) const override;
   /// \brief `odom` 系加速度（m/s^2）。
-  Eigen::Vector2d accelerationAt(double _t) const;
+  Eigen::Vector2d accelerationAt(double _t) const override;
   /// \brief `odom` 系 jerk（m/s^3）。
   Eigen::Vector2d jerkAt(double _t) const;
 
   /// \brief 起点状态。
   Eigen::Vector2d startPosition() const { return positionAt(0.0); }
-  /// \brief 终点位置。
-  Eigen::Vector2d endPosition() const { return positionAt(total_duration_); }
+  /// \brief 终点位置（接口实现）。
+  Eigen::Vector2d endPosition() const override { return positionAt(total_duration_); }
   /// \brief 起点速度。
   Eigen::Vector2d startVelocity() const { return velocityAt(0.0); }
   /// \brief 终点速度。
@@ -138,7 +139,13 @@ public:
   std::vector<Eigen::Vector2d> samplePositions(double _dt) const;
 
   /// \brief 轨迹切线方向（单位向量）；速度接近零时返回 false 且不写入输出。
-  bool tangentAt(double _t, Eigen::Vector2d & _tangent) const;
+  bool tangentAt(double _t, Eigen::Vector2d & _tangent) const override;
+
+  /// \brief 末端是否就是全局目标（接口实现，底层是公开字段）。
+  bool isTerminalGlobalGoal() const override { return terminal_is_global_goal; }
+
+  /// \brief 末端是否要求停稳（接口实现，底层是公开字段）。
+  bool terminalRequiresStop() const override { return terminal_requires_stop; }
 
   /// \brief 系数、时长与连续性的基本自检。
   /// \param _reason 失败原因（可为 nullptr）。

@@ -60,8 +60,9 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 > `srm27_nav_planner`（前端），MinimumSnap 平滑器进 `srm27_nav_smoother`（后端），
 > vendored 算法与共用转换层进 `srm27_nav_common`（planner/common）。
 > 插件 ID：`srm27_nav_planner::YAstarGlobalPlanner`、
-> `srm27_nav_smoother::MinimumSnapSmoother`。开关：实车 `--yastar-planner`，
-> 仿真 `--yastar-planner` / `--minisnap-smoother`。
+> `srm27_nav_smoother::MinimumSnapSmoother`。2026-11-26 起 **YAstar 是实车/仿真两个
+> nav 脚本的默认全局规划器**（实车参数文件本身也已是 YAstar）；退回 ThetaStar 用
+> `--no-yastar-planner`。MinimumSnap 平滑器仍要显式 `--minisnap-smoother`（仅仿真）。
 >
 > 2026-11-24：决策模块按同一框架拆成 `srm27_behavior_core`（common）、
 > `srm27_behavior_plugins`（frontend）、`srm27_behavior`（backend）；服务端运行时
@@ -103,9 +104,10 @@ map→odom：静态 TF（--lio）| small_gicp（--reloc）| slam_toolbox（--sla
 ./scripts/bringup/start_sim_nav.sh
 ./scripts/bringup/start_sim_nav.sh --lio --lio-frontend zlio
 
-# 规划插件（可选）：YAstar 全局规划器 / MinimumSnap 平滑器
-./scripts/bringup/start_real_nav.sh --yastar-planner
-./scripts/bringup/start_sim_nav.sh --yastar-planner --minisnap-smoother
+# 规划插件：YAstar 全局规划器**已是默认**；退回 ThetaStar 用 --no-yastar-planner
+./scripts/bringup/start_real_nav.sh --no-yastar-planner
+./scripts/bringup/start_real_nav.sh                      # = YAstar + MINCO/MPC
+./scripts/bringup/start_sim_nav.sh --minisnap-smoother   # 默认 YAstar + 打开 MinimumSnap
 
 # 自转转速测试树：无目标/到点原地 5 rad/s，导航中 2 rad/s（目标在 RViz 里发）
 ./scripts/bringup/start_real_nav.sh --test-behavior

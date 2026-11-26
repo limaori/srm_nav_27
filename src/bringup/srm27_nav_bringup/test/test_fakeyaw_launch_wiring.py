@@ -365,6 +365,36 @@ def test_optional_yastar_and_minisnap_injection():
     )
 
 
+def test_yastar_override_keeps_a_params_file_that_is_already_yastar():
+    """参数文件本身就是 YAstar（例如 maps/<图>/simulation/nav2_params_yastar.yaml）时，
+    launch 只能补它没写的键，不能把里面的调参整段冲掉。"""
+    import tempfile
+
+    import yaml
+
+    module = _load_launch_module()
+    base = yaml.safe_load(FAKEYAW_PARAMS.read_text())
+    base["planner_server"]["ros__parameters"]["GridBased"] = {
+        "plugin": "srm27_nav_planner::YAstarGlobalPlanner",
+        "cost_inflate_radius": 0.7,     # 故意和硬编码 1.0 不同，代表调参现场
+        "simplify_epsilon": 0.25,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        params = Path(tmp) / "nav2_params_yastar.yaml"
+        params.write_text(yaml.safe_dump(base), encoding="utf-8")
+        _, context, includes, _ = _make_context(
+            module, {"params_file": str(params), "use_yastar_planner": "True"}
+        )
+        nav2 = _nav2_include_arguments(includes, context)
+        with open(nav2["params_file"], encoding="utf-8") as stream:
+            grid = yaml.safe_load(stream)["planner_server"]["ros__parameters"]["GridBased"]
+
+    _assert(grid["cost_inflate_radius"] == 0.7, "参数文件里的调参被硬编码值覆盖了")
+    _assert(grid["simplify_epsilon"] == 0.25, "参数文件里的调参被硬编码值覆盖了")
+    _assert(grid["mask_num_layers"] == 4, "文件里没写的规范键应该被补上")
+    _assert(grid["treat_unknown_as_obstacle"] is False, "仿真档 unknown 不挡")
+
+
 def _run_all():
     failures = 0
     for name, function in sorted(globals().items()):

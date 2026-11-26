@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "srm27_minco_controller/local_path.hpp"
+#include "srm27_minco_pipeline/local_path.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-namespace srm27_minco_controller
+namespace srm27_minco_pipeline
 {
 namespace
 {
@@ -292,4 +292,4 @@ LocalPathResult extractLocalPath(
   return result;
 }
 
-}  // namespace srm27_minco_controller
+}  // namespace srm27_minco_pipeline

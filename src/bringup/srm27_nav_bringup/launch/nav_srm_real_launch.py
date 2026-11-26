@@ -279,6 +279,25 @@ def _report_speed_chain(context, params_file, use_fakeyaw, command_frame,
     return [LogInfo(msg="\n".join(messages))]
 
 
+REAL_YASTAR_OVERRIDE = {
+    "plugin": "srm27_nav_planner::YAstarGlobalPlanner",
+    "occupancy_threshold": 252,
+    "treat_unknown_as_obstacle": True,
+    "save_point_max_radius": 0.4,
+    # 0.0 会在目标格被动态障碍/地形点占用后让每次重规划都报 "goal unavailable"
+    # 并触发恢复行为（实车表现为车停住、反复 abort）。放宽到 0.4 让目标吸附到
+    # 最近的可通行格，与 planner 默认值一致。
+    "goal_snap_max_radius": 0.4,
+    # 2026-11-24: 参数与调用逻辑直接对齐 tdt-nav-kit 开源 main.cpp:
+    #   setMaskNumLayers(4), setCostField(1.0, 0.5/(0.1+d)),
+    #   search -> simplifyPath(0.1) -> simplifyPathHypot，不加密。
+    "cost_inflate_radius": 1.0,
+    "mask_num_layers": 4,
+    "simplify_epsilon": 0.1,
+    "orientation_mode": "tangent",
+}
+
+
 class RealPlannerParams(RewrittenYaml):
     def perform(self, context):
         path = super().perform(context)
@@ -290,26 +309,29 @@ class RealPlannerParams(RewrittenYaml):
         planner = config.get("planner_server", {}).get("ros__parameters", {})
         if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
             raise RuntimeError("use_yastar_planner requires planner_server with a single GridBased planner")
-        planner["GridBased"] = {
-            "plugin": "srm27_nav_planner::YAstarGlobalPlanner",
-            "occupancy_threshold": 252,
-            "treat_unknown_as_obstacle": True,
-            "save_point_max_radius": 0.4,
-            # 0.0 会在目标格被动态障碍/地形点占用后让每次重规划都报 "goal unavailable"
-            # 并触发恢复行为（实车表现为车停住、反复 abort）。放宽到 0.4 让目标吸附到
-            # 最近的可通行格，与 planner 默认值一致。
-            "goal_snap_max_radius": 0.4,
-            # 2026-11-24: 参数与调用逻辑直接对齐 tdt-nav-kit 开源 main.cpp:
-            #   setMaskNumLayers(4), setCostField(1.0, 0.5/(0.1+d)),
-            #   search -> simplifyPath(0.1) -> simplifyPathHypot，不加密。
-            "cost_inflate_radius": 1.0,
-            "mask_num_layers": 4,
-            "simplify_epsilon": 0.1,
-            "orientation_mode": "tangent",
-        }
-        with open(path, "w", encoding="utf-8") as stream:
+        existing = planner.get("GridBased") or {}
+        if existing.get("plugin") == REAL_YASTAR_OVERRIDE["plugin"]:
+            # 参数文件本身就是 YAstar：那份文件是调参现场，只补它没写的键。
+            merged = dict(REAL_YASTAR_OVERRIDE)
+            merged.update(existing)
+        else:
+            # 从 ThetaStar 等其它插件切过来：整段替换，避免把别的插件的键带进来。
+            merged = dict(REAL_YASTAR_OVERRIDE)
+        if merged == existing:
+            # 已经一致：**不要**回写源文件。
+            # 旧实现每次 --yastar-planner 都用 yaml.safe_dump 覆盖参数文件：注释全丢、
+            # 键序被重排，源树里的"调参现场"被改成生成物，和 build_realmatch_params.py
+            # 的输出混在一起后很难分辨是谁覆盖了谁（2026-11-26 排查实车配置被覆盖时踩到）。
+            return path
+        planner["GridBased"] = merged
+        # 需要合并时写临时文件，源文件保持只读：launch 不应修改仓库里的配置。
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", prefix="srm27_real_nav_params_", suffix=".yaml", delete=False)
+        with handle as stream:
             yaml.safe_dump(config, stream)
-        return path
+        return handle.name
 
 
 def _default_backend_config(profile):

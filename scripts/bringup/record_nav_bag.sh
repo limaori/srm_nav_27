@@ -64,6 +64,11 @@ TOPICS=(
   "/${NS}/FollowPath/minco_trajectory"
   "/${NS}/FollowPath/mpc_prediction"
   "/${NS}/FollowPath/diagnostics"
+  # MINCO 迁到规划器后（2026-11-26）的新三路：规划器发布的轨迹、可视化路径、诊断。
+  # 控制器还在 internal 模式时这几路也有（只是没被控制器消费），A/B 对照要用。
+  "/${NS}/planning/minco_trajectory"
+  "/${NS}/planning/minco_path"
+  "/${NS}/planning/diagnostics"
   "/${NS}/odometry"
   "/${NS}/cmd_vel_nav_fake"
   "/${NS}/cmd_vel_nav_body"

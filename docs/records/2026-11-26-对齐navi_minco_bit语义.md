@@ -149,3 +149,41 @@ python3 .diag_tmp/ab2/summarize.py
 ```
 
 变体 yaml：`.diag_tmp/ab2/v{0..3}_*.yaml`；录包：`.diag_tmp/ab2/bags/`。
+
+## 7. MINCO 从控制器迁到规划器（同日进行中）
+
+目标：把 MINCO 从 `srm27_minco_controller` 搬到 `planner_server` 的 GlobalPlanner 插件里，
+与参考工程 `minco_planner/MincoPlanner` 同构；控制器退化为纯 MPC。
+
+### 7.1 已落地
+
+| 项 | 内容 |
+| --- | --- |
+| `srm27_minco_pipeline`（新包） | 从控制器抽出 `local_path` + `planning_worker`（不依赖 ROS）。控制器继续用异步 `submit/takeResult`，规划器用新公开的同步入口 `runOnce()`。原 24 个用例（local_path 16 + planning_worker 8）随包迁移并全绿 |
+| `srm27_minco_interfaces/MincoTrajectory`（新包） | 轨迹消息：`header`(odom) + `t/x/y/yaw/vx/vy` 采样数组 + `duration` + 末端标志 + `path_version/goal_epoch`。选采样点而不是多项式系数：控制器只需按时间取 (位置, 速度)，且与 MINCO 实现版本解耦 |
+| `srm27_minco_core::TimedTrajectory` | 只读时间轨迹接口（`positionAt/velocityAt/accelerationAt/tangentAt/…`）。`Trajectory2D` 实现它，`TrackingReferenceBuilder` 改为吃接口 —— 控制器将来无论内部多项式还是外部采样点，跟踪代码只有一份 |
+| `srm27_minco_planner::MincoPlanner`（新包） | GlobalPlanner 插件：`createPlan()` 只调 YAstar 并记录目标/路径；内部 20 Hz 线程做 ESDF → 裁剪 → MINCO → 硬校验，发布 `planning/minco_trajectory`（odom）、`planning/minco_path`、`planning/diagnostics`。输入路径订阅 `/plan_smoothed`（拿不到就退回原始路径），保住走廊居中 |
+
+### 7.2 实测（仿真，目标同前）
+
+- 发布稳定在 **20.1 Hz**（18.7 s 内 260 条），格式 `odom`、采样 8~58 点、时长 0.33~2.81 s；
+- 规划耗时中位 **2.68 ms**、最大 8.59 ms（预算 50 ms @20 Hz）；
+- 轨迹最小净空 0.35~1.11 m（要求 0.245），25 帧全部 `success`；
+- 转角降速在规划器侧同样生效（最大转角 42.9°，逐段上限最低 1.93 m/s）；
+- 与控制器内部 MINCO 对比：**轨迹起点一致（差 ≤0.06 m）**，远端差异来自两者视野/时长不同，不是坐标系错误。
+
+### 7.3 踩到的两个坑（已修）
+
+1. **LifecyclePublisher 必须 `on_activate()`**：插件自己 `create_publisher` 得到的生命周期发布器在激活前 `publish()` 是静默丢弃的 —— 日志显示"发布成功"，话题上一条消息都没有。
+2. **加虚基类后必须整链重建**：`Trajectory2D` 加了 vtable（`TimedTrajectory`）后，没重建的 `srm27_minco_pipeline` 仍按旧布局编译，调用优化器时在 `memmove` 里 SIGSEGV。`--symlink-install` 只保证文件是最新的，不保证消费者重编译。
+
+### 7.4 未完成（下一步）
+
+1. 控制器 `trajectory_source: topic` 模式：订阅 `MincoTrajectory` → `SampledTrajectory` → MPC 跟踪；`internal` 模式保留做 A/B 与回退；
+2. 控制器侧去掉重复的 MINCO 计算与复验（改为信任规划器的 20 Hz 校验 + 自身轻量检查）；
+3. 实车配置（`planner_server@minco` 的限速覆盖、规划器参数）；
+4. 默认切换 + 同目标 A/B（internal vs topic）+ 删掉 internal。
+
+当前仓库默认仍是 YAstar 规划器 + 控制器内部 MINCO（行为与 11-26 上午一致）；
+`planner_server.MincoPlanner` 的参数块已就位，切换只需把 `GridBased.plugin` 改成
+`srm27_minco_planner::MincoPlanner` 并把该段键名改成 `GridBased`。

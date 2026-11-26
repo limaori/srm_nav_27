@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "srm27_minco_core/mpc_model.hpp"
+#include "srm27_minco_core/timed_trajectory.hpp"
 #include "srm27_minco_core/trajectory_2d.hpp"
 #include "srm27_minco_core/types.hpp"
 
@@ -115,13 +116,13 @@ public:
 
   /// \brief 第一次参考构造。
   bool build(
-    const Trajectory2D & _trajectory, const State2D & _state, const MpcModel & _model,
+    const TimedTrajectory & _trajectory, const State2D & _state, const MpcModel & _model,
     YawReferenceProvider & _yaw_provider, TrackingReferenceResult & _result);
 
   /// \brief 第二次参考构造：用第一次预测速度做 alpha 缩放重采样。
   /// \param _predicted_velocity 第一次求解的预测平移速度，形状 `(2, N)`。
   bool buildSecondPass(
-    const Trajectory2D & _trajectory, const Eigen::MatrixXd & _predicted_velocity,
+    const TimedTrajectory & _trajectory, const Eigen::MatrixXd & _predicted_velocity,
     const MpcModel & _model, YawReferenceProvider & _yaw_provider,
     TrackingReferenceResult & _result);
 
@@ -130,13 +131,13 @@ public:
   /// \param _has_previous 是否存在上一次进度。
   /// \return 投影得到的进度；轨迹为空时返回 0。
   double projectProgress(
-    const Trajectory2D & _trajectory, const Eigen::Vector2d & _position, double _previous_progress,
+    const TimedTrajectory & _trajectory, const Eigen::Vector2d & _position, double _previous_progress,
     bool _has_previous) const;
 
 private:
   /// \brief 按采样进度列表组装参考。
   bool assemble(
-    const Trajectory2D & _trajectory, const State2D & _state, const MpcModel & _model,
+    const TimedTrajectory & _trajectory, const State2D & _state, const MpcModel & _model,
     YawReferenceProvider & _yaw_provider, const std::vector<double> & _sample_times,
     TrackingReferenceResult & _result);
 

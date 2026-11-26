@@ -12,9 +12,7 @@ ament_auto_find_build_dependencies()
 ament_auto_add_library(${PROJECT_NAME} SHARED
   src/command_frame.cpp
   src/diagnostics.cpp
-  src/local_path.cpp
   src/minco_mpc_controller.cpp
-  src/planning_worker.cpp
   src/state_adapter.cpp
   src/terminal_stop.cpp
   src/yaw_policy.cpp
@@ -41,10 +39,6 @@ if(BUILD_TESTING)
   # 终点急停：实车终点振荡回归（2026-10-09）引入的状态机。
   ament_add_gtest(test_terminal_stop test/test_terminal_stop.cpp)
   target_link_libraries(test_terminal_stop ${PROJECT_NAME})
-  ament_add_gtest(test_local_path test/test_local_path.cpp)
-  target_link_libraries(test_local_path ${PROJECT_NAME})
-  ament_add_gtest(test_planning_worker test/test_planning_worker.cpp)
-  target_link_libraries(test_planning_worker ${PROJECT_NAME})
   # 状态适配层需要真实节点/话题/TF，属于集成测试但仍不依赖 Gazebo。
   ament_add_gtest(test_state_adapter test/test_state_adapter.cpp)
   target_link_libraries(test_state_adapter ${PROJECT_NAME})

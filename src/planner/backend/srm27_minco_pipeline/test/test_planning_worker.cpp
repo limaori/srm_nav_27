@@ -19,17 +19,17 @@
 #include <thread>
 #include <vector>
 
-#include "srm27_minco_controller/planning_worker.hpp"
+#include "srm27_minco_pipeline/planning_worker.hpp"
 #include "srm27_map_core/grid_snapshot.hpp"
 
-namespace controller = srm27_minco_controller;
+namespace pipeline = srm27_minco_pipeline;
 namespace map = srm27_map_core;
 
 namespace
 {
-controller::PlanningRequest request(double _end_x)
+pipeline::PlanningRequest request(double _end_x)
 {
-  controller::PlanningRequest result;
+  pipeline::PlanningRequest result;
   map::GridSnapshot grid;
   EXPECT_TRUE(grid.reset(
     -6, -6, 0.05, 240, 240, std::vector<map::CellState>(240 * 240, map::CellState::kFree), 1,
@@ -54,12 +54,12 @@ controller::PlanningRequest request(double _end_x)
   return result;
 }
 
-controller::PlanningResult runPlan(const controller::PlanningRequest & _request)
+pipeline::PlanningResult runPlan(const pipeline::PlanningRequest & _request)
 {
-  controller::PlanningWorker worker;
+  pipeline::PlanningWorker worker;
   EXPECT_TRUE(worker.start());
   EXPECT_TRUE(worker.submit(_request));
-  controller::PlanningResult result;
+  pipeline::PlanningResult result;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   bool ready = false;
   while (!(ready = worker.takeResult(result)) && std::chrono::steady_clock::now() < deadline) {
@@ -162,7 +162,7 @@ TEST(PlanningWorkerTest, VeryLowSpeedCanReachAStopWithinLimits)
 
 TEST(PlanningWorkerTest, ClearDiscardsTheResultOfAnAlreadyRunningTask)
 {
-  controller::PlanningWorker worker;
+  pipeline::PlanningWorker worker;
   ASSERT_TRUE(worker.start());
   ASSERT_TRUE(worker.submit(request(5.0)));
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -175,7 +175,7 @@ TEST(PlanningWorkerTest, ClearDiscardsTheResultOfAnAlreadyRunningTask)
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   ASSERT_FALSE(worker.busy());
-  controller::PlanningResult result;
+  pipeline::PlanningResult result;
   EXPECT_FALSE(worker.takeResult(result));
   EXPECT_GE(worker.discardedStaleCount(), 1u);
   worker.stop();

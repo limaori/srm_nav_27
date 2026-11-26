@@ -15,9 +15,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 #include "nav2_costmap_2d/cost_values.hpp"
+#include "nav2_costmap_2d/footprint.hpp"
 #include "nav2_costmap_2d/observation.hpp"
 #include "nav2_util/lifecycle_node.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
@@ -75,16 +78,22 @@ const bool registered = []() {
 class IntensityVoxelLayerTest : public ::testing::Test
 {
 protected:
-  void configure(bool _rolling = false, bool _persistent_obstacle = false)
+  void configure(
+    bool _rolling = false, bool _persistent_obstacle = false, double _hold_time = 0.0,
+    bool _footprint_clearing = false)
   {
     rclcpp::NodeOptions options;
     options.parameter_overrides(
-      {rclcpp::Parameter("terrain.footprint_clearing_enabled", false),
-       rclcpp::Parameter("terrain.origin_z", 0.0)});
+      {rclcpp::Parameter("terrain.footprint_clearing_enabled", _footprint_clearing),
+       rclcpp::Parameter("terrain.origin_z", 0.0),
+       rclcpp::Parameter("terrain.hold_time", _hold_time)});
     node_ = std::make_shared<nav2_util::LifecycleNode>("intensity_layer_test", "", options);
     tf_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
     map_ = std::make_unique<nav2_costmap_2d::LayeredCostmap>("map", _rolling, false);
     map_->resizeMap(100, 100, 0.1, -5.0, -5.0);
+    if (_footprint_clearing) {
+      map_->setFootprint(nav2_costmap_2d::makeFootprintFromRadius(0.3));
+    }
     if (_persistent_obstacle) {
       persistent_layer_ = std::make_shared<PersistentObstacleLayer>();
       map_->addPlugin(persistent_layer_);
@@ -187,5 +196,66 @@ TEST_F(IntensityVoxelLayerTest, DisappearedObservationDoesNotEraseOtherLayerObst
   ASSERT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
   layer_->clearStaticObservations(true, false);
   map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+// ---- hold_time（残影保持）：云台半视野自转时"看见一下又丢几秒"的补偿 ----
+
+TEST_F(IntensityVoxelLayerTest, HoldTimeKeepsMarkAfterObservationStops)
+{
+  configure(false, false, 10.0);
+  observe(2.05, 2.05);
+  map_->updateMap(0, 0, 0);
+  ASSERT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+  // 视野转走：本周期没有任何观测，残影表必须把它留在图上。
+  layer_->clearStaticObservations(true, false);
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(IntensityVoxelLayerTest, HoldTimeExpiresMarkAfterDeadline)
+{
+  configure(false, false, 0.15);
+  observe(2.05, 2.05);
+  map_->updateMap(0, 0, 0);
+  ASSERT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+  layer_->clearStaticObservations(true, false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::FREE_SPACE);
+}
+
+TEST_F(IntensityVoxelLayerTest, HoldTimeSurvivesRollingWindowShift)
+{
+  configure(true, false, 10.0);
+  observe(2.05, 2.05);
+  map_->updateMap(0, 0, 0);
+  ASSERT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+  // 窗口向右滚动 1 m（10 格），残影键是世界格，障碍物必须还在原世界位置。
+  layer_->clearStaticObservations(true, false);
+  map_->updateMap(1.0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(IntensityVoxelLayerTest, HoldTimeDoesNotRecordObstacleInsideFootprint)
+{
+  configure(false, false, 10.0, true);
+  observe(0.25, 0.0);   // 车体 footprint（半径 0.3 m）内
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(0.25, 0.0), nav2_costmap_2d::FREE_SPACE);  // 每周期被 footprint 清掉
+
+  // 机器人让开这个格子：残影表里没有它，所以不会变成跟车的幽灵障碍。
+  layer_->clearStaticObservations(true, false);
+  map_->updateMap(1.0, 0, 0);
+  EXPECT_EQ(cost(0.25, 0.0), nav2_costmap_2d::FREE_SPACE);
+
+  // 车体外的障碍照常进残影表：丢观测后仍保持。
+  observe(2.05, 2.05);
+  map_->updateMap(1.0, 0, 0);
+  ASSERT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+  layer_->clearStaticObservations(true, false);
+  map_->updateMap(1.0, 0, 0);
   EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
 }

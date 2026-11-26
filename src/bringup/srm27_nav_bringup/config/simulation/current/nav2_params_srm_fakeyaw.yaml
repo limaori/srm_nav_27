@@ -334,7 +334,7 @@ sensor_scan_generation:
 terrain_analysis:
   ros__parameters:
     scanVoxelSize: 0.05                 # 地形点云体素下采样尺寸（米）
-    decayTime: 0.5                      # 点云时间衰减阈值（秒）
+    decayTime: 1.0                      # 点云时间衰减阈值（秒）：0.5->1.0，配合图层 hold_time 覆盖云台半视野自转的丢失窗
     noDecayDis: 0.0                     # 小于该距离的点不进行时间衰减（米）
     clearingDis: 0.0                    # 执行点云清理时使用的距离阈值（米）
     useSorting: True                    # 这个参数开起来就能上坡了；如果 use_sorting,那么就以周围点中的分位点作为地面点，否则以最低点作为地面点；周围其余点相对于地面点的高度作为通过代价，所以对于坡面，有的点的代价是正，有的是负，就相互抵消了；不要与 consider_drop 同时开启，计算上会有冲突
@@ -363,7 +363,7 @@ terrain_analysis:
 terrain_analysis_ext:
   ros__parameters:
     scanVoxelSize: 0.1                   # 扩展地形点云体素尺寸（米）
-    decayTime: 0.2                       # 点云时间衰减阈值（秒）
+    decayTime: 0.5                       # 点云时间衰减阈值（秒）：0.2->0.5，全局层 5 Hz，衰减窗过短会让全局规划漏掉障碍
     noDecayDis: 0.0                      # 不进行时间衰减的近距离范围（米）
     clearingDis: 20.0                    # 执行点云清理时使用的距离阈值（米）
     useSorting: true                     # 是否用分位数估计地面
@@ -849,6 +849,7 @@ local_costmap:
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
+        hold_time: 2.0                          # 残影保持(s)：超过该时长未再被观测才擦除；0=旧行为(每周期重建)
         enabled: true                                     # 是否启用体素障碍层
         track_unknown_space: true                         # 是否跟踪未知空间
         footprint_clearing_enabled: true                  # 是否清除机器人 footprint 内障碍
@@ -896,6 +897,7 @@ global_costmap:
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] # 启用的代价地图图层
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer   # 强度体素障碍图层插件
+        hold_time: 2.0                          # 残影保持(s)：超过该时长未再被观测才擦除；0=旧行为(每周期重建)
         enabled: true                                     # 是否启用体素障碍层
         track_unknown_space: true                         # 是否跟踪未知空间
         footprint_clearing_enabled: true                  # 是否清除机器人 footprint 内障碍

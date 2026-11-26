@@ -28,11 +28,14 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <vector>
 
-#include "srm27_minco_controller/local_path.hpp"
+#include "srm27_minco_pipeline/local_path.hpp"
 #include "srm27_minco_core/kinematics.hpp"
 
 namespace srm27_minco_controller
 {
+
+using srm27_minco_pipeline::forwardPathDirection;
+using srm27_minco_pipeline::improvePathClearance;
 
 using nav2_util::declare_parameter_if_not_declared;
 using srm27_minco_core::Limits2D;
