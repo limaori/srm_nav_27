@@ -335,8 +335,10 @@ double MincoOptimizer::evaluate(
   const double max_accel_sq = limits_max_accel_sq_;
   // Keep the hinge sharp at low limits, where an equally large relative
   // overrun has a much smaller magnitude in squared SI units.
-  const double speed_scale_sq = std::clamp(max_speed_sq, 1.0e-6, 1.0);
+  // （速度铰链的缩放系数逐段计算，见下面的 piece_speed_scale_sq。）
   const double accel_scale_sq = std::clamp(max_accel_sq, 1.0e-6, 1.0);
+  // 逐段速度上限（转角降速）：仅在段数匹配时启用，且只允许比全局上限更严。
+  const bool use_piece_speed = static_cast<int>(piece_speed_sq_.size()) == pieces;
   const int samples = config_.samples_per_piece;
   const double quadrature_weight = 1.0 / static_cast<double>(samples);
   const double beta = config_.soft_hinge_beta;
@@ -356,6 +358,12 @@ double MincoOptimizer::evaluate(
     const double duration = problem_.durations(i);
     const Eigen::VectorXd xc = coeffs.block<6, 1>(6 * i, 0);
     const Eigen::VectorXd yc = coeffs.block<6, 1>(6 * i, 1);
+    // 本段的速度软约束阈值：转角段取前端给的局部上限，其余取全局上限。
+    const double piece_max_speed_sq =
+      use_piece_speed
+        ? std::min(max_speed_sq, piece_speed_sq_[static_cast<std::size_t>(i)])
+        : max_speed_sq;
+    const double piece_speed_scale_sq = std::clamp(piece_max_speed_sq, 1.0e-6, 1.0);
 
     for (int j = 0; j < samples; ++j) {
       // midpoint 规则：节点取在段内部，避免在段边界处取到 hinge 的折点。
@@ -437,11 +445,13 @@ double MincoOptimizer::evaluate(
         const double speed_sq = velocity.squaredNorm();
         double value = 0.0;
         double derivative = 0.0;
-        if (!softplusHinge((speed_sq - max_speed_sq) / speed_scale_sq, beta, value, derivative)) {
+        if (!softplusHinge(
+              (speed_sq - piece_max_speed_sq) / piece_speed_scale_sq, beta, value, derivative)) {
           return std::numeric_limits<double>::infinity();
         }
         integrand += config_.w_velocity * value;
-        grad_velocity += config_.w_velocity * derivative * (2.0 / speed_scale_sq) * velocity;
+        grad_velocity +=
+          config_.w_velocity * derivative * (2.0 / piece_speed_scale_sq) * velocity;
       }
 
       // 7.3 加速度软约束。
@@ -707,6 +717,14 @@ bool MincoOptimizer::optimize(
   // 软约束阈值统一取自有效约束（方案 §7.2 的“约束一致性”要求）。
   limits_max_speed_sq_ = _limits.max_linear_speed * _limits.max_linear_speed;
   limits_max_accel_sq_ = _limits.max_linear_accel * _limits.max_linear_accel;
+  piece_speed_sq_.clear();
+  if (_guess.speed_limits.size() == _guess.durations.size()) {
+    piece_speed_sq_.reserve(_guess.speed_limits.size());
+    for (const double limit : _guess.speed_limits) {
+      const double clamped = std::isfinite(limit) && limit > 0.0 ? limit : _limits.max_linear_speed;
+      piece_speed_sq_.push_back(clamped * clamped);
+    }
+  }
 
   problem_ = Problem();
   problem_.pieces = pieces;
@@ -806,6 +824,14 @@ bool MincoOptimizer::evaluateObjective(
 
   limits_max_speed_sq_ = _limits.max_linear_speed * _limits.max_linear_speed;
   limits_max_accel_sq_ = _limits.max_linear_accel * _limits.max_linear_accel;
+  piece_speed_sq_.clear();
+  if (_guess.speed_limits.size() == _guess.durations.size()) {
+    piece_speed_sq_.reserve(_guess.speed_limits.size());
+    for (const double limit : _guess.speed_limits) {
+      const double clamped = std::isfinite(limit) && limit > 0.0 ? limit : _limits.max_linear_speed;
+      piece_speed_sq_.push_back(clamped * clamped);
+    }
+  }
 
   problem_ = Problem();
   problem_.pieces = pieces;

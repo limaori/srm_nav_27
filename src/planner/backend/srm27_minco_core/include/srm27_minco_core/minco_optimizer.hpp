@@ -252,6 +252,12 @@ private:
   /// \brief 单次评估使用的约束快照（由 optimize/evaluateObjective 写入）。
   double limits_max_speed_sq_{0.0};
   double limits_max_accel_sq_{0.0};
+  /// \brief 逐段速度上限的平方（m²/s²）；为空表示所有段都用 `limits_max_speed_sq_`。
+  ///
+  /// 来源是前端 `TrajectoryInitialGuess::speed_limits`（转角降速）。参考工程
+  /// navi_minco_bit 把 `local_vmaxs` 直接传进 `optimize()` 当每段的速度约束；
+  /// 这里用同一语义，让“转角降速”在优化后仍然成立。
+  std::vector<double> piece_speed_sq_{};
   /// \brief 上一次 L-BFGS 实际执行的迭代次数。
   int last_iteration_{0};
   /// \brief 上一次 `runStage` 的耗时（ms），由 `optimize` 汇总到分项字段。

@@ -475,7 +475,9 @@ controller_server:
       base_frame: base_link                             # 车体系（速度输出坐标系）
       odom_topic: odometry                              # 状态适配输入话题
       replan_frequency: 10.0                            # 后台重规划频率（Hz）
-      planning_horizon: 3.0                             # 局部路径截取视野（米），与 8 m 局部地图配套
+      # 局部路径截取视野（米）：2026-11-26 对齐 navi_minco_bit 的 lookahead_dist = 6.0。
+      # 6 m 在 2.6 m/s 档约 2.3 s 视野，弯道能提前进视野；仍在 8 m 局部地图内。
+      planning_horizon: 6.0
       planning_deadline_ms: 30.0                        # 单次规划时间预算（毫秒）
       state_timeout: 0.10                               # 状态允许的最大年龄（秒）
       map_timeout: 0.30                                 # 距离场允许的最大年龄（秒）
@@ -541,7 +543,22 @@ controller_server:
         # 净空 0.3737~0.3798 对 required 0.38），轨迹被整条丢弃、车来回跑。
         optimization_clearance_margin: 0.1
         resample_step: 0.10                             # 前端弧长重采样步长（米）
-        corner_speed_ratio: 0.8                       # 转角处最低速度比例
+        # 参考吸引项（对齐 navi_minco_bit 的 penalty_weight_att = 100）：把内部路标点拉回
+        # 前端折线。关掉它 MINCO 只剩 jerk/时间/障碍三项，弯心会朝“更短更省时”的内侧切
+        # —— 2026-11-26 实测：关=弯中偏离 0.50 m，开=0.05 m（同一目标、同一速度档）。
+        w_reference: 100.0                              # 路标点参考吸引权重（0 = 关闭）
+        # 转角降速（对齐 navi_minco_bit 的 turn_angle_deadzone/saturation/min_turn_vel/
+        # decay_power，衰减式逐字一致）。作用对象是弦长窗口量出来的转角：本项目输入是
+        # 平滑后的密集路径，逐点夹角只有 1° 量级，所以旧的 corner_speed_ratio 长期不生效。
+        # 地板用比例（0.23 ≈ 参考工程 0.7/3.0），因为速度档会在 0.5~2.6 m/s 之间切换。
+        turn_angle_deadzone: 0.10                       # 转角死区（弧度）
+        turn_angle_saturation: 0.80                     # 转角饱和值（弧度）
+        min_turn_vel: 0.12                              # 转角速度地板绝对值（比例 > 0 时不生效）
+        min_turn_vel_ratio: 0.23                        # 转角速度地板 = 比例 × v_max
+        decay_power: 1.6                                # 转角衰减指数
+        corner_chord_window: 0.40                       # 量转角用的弦长窗口（米）
+        # 已废弃：旧实现按逐点方向变化线性插值降速，代码不再读取，保留键名只为兼容旧配置。
+        corner_speed_ratio: 0.8
         min_pieces: 2                                   # 最少段数
         max_pieces: 12                                  # 最多段数
         terminal_speed: 0.8                             # 仅视野截断且制动延伸已验证时保留；目标/地图/障碍边界停稳

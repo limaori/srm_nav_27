@@ -7,16 +7,20 @@
   world.sdf                 srm_empty + 上面那张网
   sim.yaml                  机器人出生点（地图系坐标）
   nav2_params_yastar.yaml   仿真参数 + YAstar 规划器段（单一来源，直接改这里调参）
+                            **已存在时不覆盖**（那份是调参现场），要重生成加 --force-params
   scene_manifest.json       出生点/目标点/连通性自检结果
   scene_preview.png         预览图
 
 用法:
   python3 maps/227to219_1125/simulation/build_scene.py
+  python3 maps/227to219_1125/simulation/build_scene.py --force-params   # 连参数一起重写
 """
 import heapq
 import json
 import math
 import struct
+import sys
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -196,8 +200,15 @@ def force_sim_time(node):
 
 
 force_sim_time(nav)
-(OUT / 'nav2_params_yastar.yaml').write_text(
-    yaml.safe_dump(nav, sort_keys=False), encoding='utf-8')
+# 参数文件是**调参现场**（run.sh 的注释写明只改这一份），重建场景不能把它冲掉：
+# 只有文件不存在、或显式 --force-params 时才重写。2026-11-25：之前 --rebuild 会把
+# robot_radius / clearance_margin / stuck_clearance 这几处手调值静默还原成模板值。
+params_path = OUT / 'nav2_params_yastar.yaml'
+if '--force-params' in sys.argv[1:] or not params_path.exists():
+    params_path.write_text(yaml.safe_dump(nav, sort_keys=False), encoding='utf-8')
+    print(f'nav2 参数已写入 {params_path}')
+else:
+    print(f'nav2 参数已保留（存在即不覆盖，要重生成加 --force-params）：{params_path}')
 
 # ---------------------------------------------------------------- manifest / 预览
 manifest = {
@@ -235,6 +246,11 @@ for label, (x, y), colour in ([('S', spawn, 'blue')]
     draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=colour)
     draw.text((px + 9, py - 8), label, fill=colour)
 preview.save(OUT / 'scene_preview.png')
+
+# 顺带生成「与实车同链」的那份参数（MinimumSnap + SmoothPath 行为树 + 实车 safety/
+# corner/costmap），run.sh 默认用的就是它；两份必须成对更新。
+import subprocess
+subprocess.run([sys.executable, str(OUT / 'build_realmatch_params.py')], check=True)
 
 print(json.dumps({k: manifest[k] for k in
                   ('free_fraction', 'occupied_cells_total', 'shell_cells', 'mesh_triangles',

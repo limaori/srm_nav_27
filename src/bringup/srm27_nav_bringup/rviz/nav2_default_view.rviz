@@ -430,6 +430,36 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: plan
           Value: true
+        # 2026-11-26: MinimumSnap 平滑后的路径（比全局粗、黄色），
+        # 用它和红线对比能一眼看出平滑器把路径挪了多少。
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 255; 215; 0
+          Enabled: true
+          Head Diameter: 0.02
+          Head Length: 0.02
+          Length: 0.3
+          Line Style: Lines
+          Line Width: 0.05999999865889549
+          Name: Smoothed Path (/plan_smoothed)
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.004999999888241291
+          Shaft Length: 0.019999999552965164
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: plan_smoothed
+          Value: true
         # SFC 方形走廊（同一个 MarkerArray 里有两组颜色 + 两行白字）：
         #   黄色细线 = 初始 getCorridor 方块（未碰撞收缩），看"自由空间还剩多少"
         #   橙色粗线 = OSQP 迭代后的最终约束（可能被 shrink 成小方块/点），
@@ -515,6 +545,66 @@ Visualization Manager:
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: FollowPath/minco_trajectory
+          Value: true
+        # 2026-11-26: 控制器真正喂给 MINCO 的本地参考（裁剪 3 m + 净空预推后）。
+        # 对比 "Reference(绿) vs Local Plan(MINCO)(蓝)" 才能判断是参考歪了还是优化器拐出去了；
+        # 只对比 /plan(红) 与蓝线会隔着平滑器一层，容易误判。
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 20; 200; 90
+          Enabled: false
+          Head Diameter: 0.2
+          Head Length: 0.2
+          Length: 0.3
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Name: Reference (planning_input_path)
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: FollowPath/planning_input_path
+          Value: false
+        # MPC 未来 0.6 s 的预测（30 x 0.02 s），看"车打算怎么走"用
+        - Alpha: 1
+          Buffer Length: 1
+          Class: rviz_default_plugins/Path
+          Color: 255; 160; 0
+          Enabled: true
+          Head Diameter: 0.2
+          Head Length: 0.2
+          Length: 0.3
+          Line Style: Lines
+          Line Width: 0.029999999329447746
+          Name: MPC Prediction
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0
+          Pose Color: 255; 85; 255
+          Pose Style: None
+          Radius: 0.029999999329447746
+          Shaft Diameter: 0.10000000149011612
+          Shaft Length: 0.10000000149011612
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: FollowPath/mpc_prediction
           Value: true
         - Alpha: 1
           Buffer Length: 1

@@ -215,6 +215,21 @@ void MincoMpcController::configure(
   }
   RCLCPP_INFO(
     node->get_logger(),
+    "MincoMpcController 转角降速: deadzone=%.2f rad saturation=%.2f rad "
+    "地板=%.2f m/s（比例 %.2f，绝对值 %.2f，比例 > 0 时以比例 × v_max 为准）"
+    " decay=%.2f chord_window=%.2f m（地板 >= v_max 时等价于关闭）",
+    initializer_config_.turn_angle_deadzone, initializer_config_.turn_angle_saturation,
+    (initializer_config_.min_turn_vel_ratio > 0.0
+       ? initializer_config_.min_turn_vel_ratio * base_limits_.max_linear_speed
+       : initializer_config_.min_turn_vel),
+    initializer_config_.min_turn_vel_ratio, initializer_config_.min_turn_vel,
+    initializer_config_.decay_power, initializer_config_.corner_chord_window);
+  RCLCPP_INFO(
+    node->get_logger(),
+    "MincoMpcController 参考吸引: w_reference=%.1f（0 = 关闭，MINCO 只受 jerk/时间/障碍约束）",
+    minco_config_.w_reference);
+  RCLCPP_INFO(
+    node->get_logger(),
     "MincoMpcController 脱困参数: fail_threshold=%d cooldown=%.2f s window=%.2f s "
     "escape_speed=%.2f m/s stuck_clearance=%.2f m escaped_clearance=%.2f m "
     "search=radius %.2f m/%d samples repeat_guard=%.2f m/%.0f deg",
@@ -289,11 +304,26 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("minco.w_obstacle", 100.0);
   declare("minco.w_velocity", 20.0);
   declare("minco.w_acceleration", 2.0);
+  // 参考吸引项（对应 navi_minco_bit `minco_optimizer.penalty_weight_att`）：把内部路标点
+  // 拉回前端给定的折线。0 表示关闭 —— 关闭后 MINCO 只剩 jerk/时间/障碍三项，直道与
+  // 弯道都会朝“更短、更省时”的内侧切，这是 11-25 实测里弯心偏差 0.4~0.7 m 的来源。
+  declare("minco.w_reference", 0.0);
   declare("minco.w_time_ratio", 1.0);
   declare("minco.soft_hinge_beta", 20.0);
   declare("minco.optimization_clearance_margin", 0.05);
   declare("minco.resample_step", 0.10);
+  // 转角降速（与 navi_minco_bit `minco_optimizer.turn_angle_*` 同名同义）。
+  // corner_speed_ratio / corner_angle_threshold 是旧实现的参数，已不再生效，
+  // 只为兼容旧配置文件保留声明（见 TrajectoryInitializer::Config 的注释）。
   declare("minco.corner_speed_ratio", 0.35);
+  declare("minco.turn_angle_deadzone", 0.10);
+  declare("minco.turn_angle_saturation", 0.80);
+  declare("minco.min_turn_vel", 0.12);
+  // 转角地板占速度上限的比例（本仓库扩展）：> 0 时覆盖上面的绝对速度，
+  // 换速度档不用改参数。0.23 等价于参考工程 0.7/3.0。
+  declare("minco.min_turn_vel_ratio", 0.0);
+  declare("minco.decay_power", 1.6);
+  declare("minco.corner_chord_window", 0.40);
   declare("minco.min_pieces", 2);
   declare("minco.max_pieces", 12);
   declare("minco.terminal_speed", 0.0);
@@ -403,12 +433,20 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   node->get_parameter(name + ".minco.w_obstacle", minco_config_.w_obstacle);
   node->get_parameter(name + ".minco.w_velocity", minco_config_.w_velocity);
   node->get_parameter(name + ".minco.w_acceleration", minco_config_.w_acceleration);
+  node->get_parameter(name + ".minco.w_reference", minco_config_.w_reference);
   node->get_parameter(name + ".minco.w_time_ratio", minco_config_.w_time_ratio);
   node->get_parameter(name + ".minco.soft_hinge_beta", minco_config_.soft_hinge_beta);
   node->get_parameter(
     name + ".minco.optimization_clearance_margin", minco_config_.optimization_clearance_margin);
   node->get_parameter(name + ".minco.resample_step", initializer_config_.resample_step);
   node->get_parameter(name + ".minco.corner_speed_ratio", initializer_config_.corner_speed_ratio);
+  node->get_parameter(name + ".minco.turn_angle_deadzone", initializer_config_.turn_angle_deadzone);
+  node->get_parameter(
+    name + ".minco.turn_angle_saturation", initializer_config_.turn_angle_saturation);
+  node->get_parameter(name + ".minco.min_turn_vel", initializer_config_.min_turn_vel);
+  node->get_parameter(name + ".minco.min_turn_vel_ratio", initializer_config_.min_turn_vel_ratio);
+  node->get_parameter(name + ".minco.decay_power", initializer_config_.decay_power);
+  node->get_parameter(name + ".minco.corner_chord_window", initializer_config_.corner_chord_window);
   node->get_parameter(name + ".minco.min_pieces", initializer_config_.min_pieces);
   node->get_parameter(name + ".minco.max_pieces", initializer_config_.max_pieces);
   node->get_parameter(name + ".minco.terminal_speed", initializer_config_.terminal_speed);
@@ -511,6 +549,33 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   }
   if (!(planning_horizon_ > 0.0) || !std::isfinite(planning_horizon_)) {
     return fail("planning_horizon must be positive");
+  }
+  // 转角降速参数：死区必须小于饱和值，否则 `ratio` 的分母会退化；
+  // `min_turn_vel` 允许大于等于速度上限（等价于关闭转角降速），但不允许为负。
+  if (
+    !std::isfinite(initializer_config_.turn_angle_deadzone) ||
+    !std::isfinite(initializer_config_.turn_angle_saturation) ||
+    !(initializer_config_.turn_angle_deadzone >= 0.0) ||
+    !(initializer_config_.turn_angle_saturation > initializer_config_.turn_angle_deadzone)) {
+    return fail("minco.turn_angle_deadzone must be >= 0 and < minco.turn_angle_saturation");
+  }
+  if (
+    !std::isfinite(initializer_config_.min_turn_vel) || !(initializer_config_.min_turn_vel >= 0.0)) {
+    return fail("minco.min_turn_vel must be non-negative");
+  }
+  if (
+    !std::isfinite(initializer_config_.min_turn_vel_ratio) ||
+    initializer_config_.min_turn_vel_ratio < 0.0 || initializer_config_.min_turn_vel_ratio > 1.0) {
+    return fail("minco.min_turn_vel_ratio must be within [0, 1]");
+  }
+  if (
+    !std::isfinite(initializer_config_.decay_power) || !(initializer_config_.decay_power > 0.0)) {
+    return fail("minco.decay_power must be positive");
+  }
+  if (
+    !std::isfinite(initializer_config_.corner_chord_window) ||
+    !(initializer_config_.corner_chord_window > 0.0)) {
+    return fail("minco.corner_chord_window must be positive");
   }
   if (!(planning_deadline_ms_ > 0.0) || !std::isfinite(planning_deadline_ms_)) {
     return fail("planning_deadline_ms must be positive");
@@ -1511,6 +1576,9 @@ void MincoMpcController::harvestPlanningResult(const State2D & _state, double _n
   diagnostics_.planning_result = result.status;
   diagnostics_.terminal_reason = result.terminal_reason;
   diagnostics_.terminal_speed = result.terminal_speed;
+  diagnostics_.corner_angle_max_deg = result.corner_angle_max * 180.0 / M_PI;
+  diagnostics_.corner_speed_limit_min = result.corner_speed_limit_min;
+  diagnostics_.corner_limited_pieces = result.corner_limited_pieces;
   diagnostics_.minimum_clearance = result.min_clearance;
   diagnostics_.maximum_speed = result.max_speed;
   diagnostics_.maximum_acceleration = result.max_acceleration;

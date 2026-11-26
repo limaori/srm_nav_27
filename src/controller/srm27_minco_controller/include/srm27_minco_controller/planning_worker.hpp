@@ -117,6 +117,12 @@ struct PlanningResult
   int speed_repair_count{0};
   /// \brief 累计时间拉伸倍数（1 表示未修复）。速度按 1/倍数、加速度按 1/倍数² 下降。
   double time_scale{1.0};
+  /// \brief 转角降速诊断：本次参考折线上量到的最大转角（rad）。
+  double corner_angle_max{0.0};
+  /// \brief 转角降速诊断：逐段速度上限里的最小值（m/s）；等于场景上限表示未生效。
+  double corner_speed_limit_min{0.0};
+  /// \brief 转角降速诊断：低于场景速度上限的段数。
+  int corner_limited_pieces{0};
   /// \brief 优化后的最小净空与最大速度/加速度。
   double min_clearance{0.0};
   double max_speed{0.0};

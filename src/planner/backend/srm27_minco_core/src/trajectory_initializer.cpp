@@ -44,6 +44,29 @@ std::size_t locateTimeIndex(const std::vector<double> & _times, double _t)
   return std::min(index, _times.size() - 1);
 }
 
+/// \brief 转角速度衰减（与 navi_minco_bit `utils::calCurvatureDecay` 同构）。
+///
+/// 角度小于死区时不降速；超过饱和值后角速度不再继续下降（避免直角与回头弯的差别被放大）。
+/// 衰减形式为 `min_vel + (vmax - min_vel) * exp(-ratio * power)`，`ratio` 取
+/// `(min(angle, saturation) - deadzone) / saturation` —— 与参考工程逐字一致（注意分母是
+/// `saturation` 而不是 `saturation - deadzone`，这样参数可以直接照抄）。
+///
+/// \return 该角度下的局部速度上限（m/s），保证不超过 `_vmax`。
+double curvatureDecay(
+  double _angle, double _vmax, double _deadzone, double _saturation, double _min_vel,
+  double _power)
+{
+  if (!(_angle >= _deadzone)) {
+    return _vmax;
+  }
+  const double saturation = std::max(_saturation, _deadzone + 1.0e-6);
+  const double clamped_angle = std::min(_angle, saturation);
+  const double ratio = (clamped_angle - _deadzone) / saturation;
+  const double min_vel = std::clamp(_min_vel, 0.0, _vmax);
+  const double local_vmax = min_vel + (_vmax - min_vel) * std::exp(-ratio * std::max(0.0, _power));
+  return std::clamp(local_vmax, min_vel, _vmax);
+}
+
 }  // namespace
 
 std::vector<Eigen::Vector2d> TrajectoryInitializer::cleanAndResample(
@@ -166,32 +189,98 @@ bool TrajectoryInitializer::initialize(
     return fail("polyline has zero length");
   }
 
-  // 转角降速：用相邻点方向变化估计局部曲率。
+  // 转角降速（2026-11-26 改为 navi_minco_bit 的语义）：
+  //
+  // 参考工程在**稀疏**路径的顶点上量转向角，再按 `calCurvatureDecay` 求该段的局部速度上限，
+  // 并把 `local_vmaxs` 一起交给优化器。本项目输入的是已平滑的密集路径，圆角被展成很多
+  // 小转角 —— 逐点夹角只有 1° 左右，旧实现按 `angle / corner_angle_threshold` 线性插值，
+  // `blend` 常年贴近 0，所以 `corner_speed_ratio` 改了也不生效（现场实测证实）。
+  //
+  // 这里用“前后各半窗的弦”的夹角代替顶点夹角：窗口按弧长取固定长度，能把一个圆角
+  // 累积的转向角重新量出来，同时对直道上的小幅横向抖动（`improvePathClearance` 的
+  // 居中微调）不敏感 —— 那些抖动在 0.4 m 窗口里只有几度，落在死区内。
+  double corner_angle_max = 0.0;
+  // 转角速度地板：绝对速度与"占上限比例"两种写法，比例优先（见 Config 注释）。
+  const double turn_min_vel =
+    (_config.min_turn_vel_ratio > 0.0)
+      ? clampToRange(_config.min_turn_vel_ratio, 0.0, 1.0) * _config.max_speed
+      : _config.min_turn_vel;
   std::vector<double> speed_limit(sample_count, _config.max_speed);
-  for (std::size_t i = 0; i < sample_count; ++i) {
-    const std::size_t prev = (i == 0) ? 0 : i - 1;
-    const std::size_t next = (i + 1 < sample_count) ? i + 1 : sample_count - 1;
-    if (prev == next) {
-      continue;
+  {
+    const double window = std::max(2.0 * _config.resample_step, _config.corner_chord_window);
+    const int half =
+      std::max(1, static_cast<int>(std::lround(0.5 * window / std::max(1.0e-6, _config.resample_step))));
+    const int last = static_cast<int>(sample_count) - 1;
+    std::vector<double> heading(sample_count, 0.0);
+    std::vector<bool> heading_valid(sample_count, false);
+    for (int i = 0; i <= last; ++i) {
+      const int a = std::max(0, i - half);
+      const int b = std::min(last, i + half);
+      if (b <= a) {
+        continue;
+      }
+      const Eigen::Vector2d chord = points[static_cast<std::size_t>(b)] -
+                                   points[static_cast<std::size_t>(a)];
+      if (chord.norm() < 1.0e-6) {
+        continue;
+      }
+      heading[static_cast<std::size_t>(i)] = std::atan2(chord.y(), chord.x());
+      heading_valid[static_cast<std::size_t>(i)] = true;
     }
-    const Eigen::Vector2d d0 = (points[i] - points[prev]);
-    const Eigen::Vector2d d1 = (points[next] - points[i]);
-    if (d0.norm() < 1.0e-9 || d1.norm() < 1.0e-9) {
-      continue;
+    for (int i = 0; i <= last; ++i) {
+      const std::size_t index = static_cast<std::size_t>(i);
+      if (!heading_valid[index]) {
+        continue;
+      }
+      const int prev = std::max(0, i - half);
+      const int next = std::min(last, i + half);
+      // 用窗口两端的局部切向做差：等价于参考工程在稀疏顶点上量的转角。
+      if (!heading_valid[static_cast<std::size_t>(prev)]) {
+        continue;
+      }
+      double delta = heading[index] - heading[static_cast<std::size_t>(prev)];
+      delta = std::atan2(std::sin(delta), std::cos(delta));
+      const double angle = std::abs(delta);
+      if (angle <= _config.turn_angle_deadzone) {
+        continue;
+      }
+      corner_angle_max = std::max(corner_angle_max, angle);
+      const double local_vmax = curvatureDecay(
+        angle, _config.max_speed, _config.turn_angle_deadzone, _config.turn_angle_saturation,
+        turn_min_vel, _config.decay_power);
+      speed_limit[index] = std::max(kZeroSpeed, std::min(speed_limit[index], local_vmax));
+      // 转向发生在窗口中点附近：把上限也铺到窗口后半段，避免上限只落在一个采样点上，
+      // 被后续的等时间取点跳过。
+      for (int k = i; k <= next; ++k) {
+        speed_limit[static_cast<std::size_t>(k)] =
+          std::max(kZeroSpeed, std::min(speed_limit[static_cast<std::size_t>(k)], local_vmax));
+      }
     }
-    const Eigen::Vector2d u0 = d0.normalized();
-    const Eigen::Vector2d u1 = d1.normalized();
-    const double angle = std::abs(std::atan2(u0.x() * u1.y() - u0.y() * u1.x(), u0.dot(u1)));
-    const double blend =
-      clampToRange(angle / std::max(1.0e-6, _config.corner_angle_threshold), 0.0, 1.0);
-    const double ratio = 1.0 - (1.0 - clampToRange(_config.corner_speed_ratio, 0.05, 1.0)) * blend;
-    speed_limit[i] = std::max(kZeroSpeed, _config.max_speed * ratio);
+  }
+
+  // 逐段上限的可达化（与 navi_minco_bit `utils::VelPropogation` 同序：先后向制动扫描、
+  // 再前向加速扫描）。参考工程把 `local_vmaxs` 直接作为优化器的逐段速度约束，而原始
+  // 转角上限在弯前一段是“不可达”的 —— 直接拿它当阈值会和起点实测速度自相矛盾
+  // （例如车正以 0.5 m/s 进弯，弯所在段的原始上限只有 0.12 m/s，整条轨迹一出发就越界）。
+  // 这里把上限本身做成“减速度可达”的剖面，并把起点抬到不低于实测速度。
+  const double head_speed = std::min(_head_velocity.norm(), _config.max_speed);
+  std::vector<double> limit_profile = speed_limit;
+  for (std::size_t i = sample_count - 1; i > 0; --i) {
+    const double reachable = std::sqrt(
+      limit_profile[i] * limit_profile[i] + 2.0 * _config.max_brake * segment_length[i - 1]);
+    limit_profile[i - 1] = std::min(limit_profile[i - 1], reachable);
+  }
+  limit_profile.front() = std::max(limit_profile.front(), head_speed);
+  for (std::size_t i = 1; i < sample_count; ++i) {
+    const double reachable = std::sqrt(
+      limit_profile[i - 1] * limit_profile[i - 1] + 2.0 * _config.max_accel * segment_length[i - 1]);
+    limit_profile[i] = std::min(limit_profile[i], reachable);
   }
 
   // 速度剖面：前向加速扫描 + 后向制动扫描。
   std::vector<double> speed(sample_count, _config.max_speed);
-  const double head_speed = std::min(_head_velocity.norm(), speed_limit.front());
-  speed.front() = head_speed;
+  const double head_speed_profile = std::min(_head_velocity.norm(), speed_limit.front());
+  speed.front() = head_speed_profile;
   for (std::size_t i = 1; i < sample_count; ++i) {
     const double reachable =
       std::sqrt(speed[i - 1] * speed[i - 1] + 2.0 * _config.max_accel * segment_length[i - 1]);
@@ -207,7 +296,7 @@ bool TrajectoryInitializer::initialize(
     speed[i - 1] = std::min(speed[i - 1], reachable);
   }
   // 制动扫描可能把起点速度压到低于实测速度；起点必须与真实状态一致，因此恢复后重扫。
-  speed.front() = head_speed;
+  speed.front() = head_speed_profile;
   for (std::size_t i = 1; i < sample_count; ++i) {
     const double reachable =
       std::sqrt(speed[i - 1] * speed[i - 1] + 2.0 * _config.max_accel * segment_length[i - 1]);
@@ -253,12 +342,15 @@ bool TrajectoryInitializer::initialize(
 
   // 按近似等时间间隔取路标点。
   std::vector<Eigen::Vector2d> waypoints;
+  // 每段起点对应的采样下标，用于统计段内的局部速度上限（见 speed_limits）。
+  std::vector<std::size_t> waypoint_sample(static_cast<std::size_t>(pieces) + 1, 0);
   const double piece_duration = total_time / static_cast<double>(pieces);
   waypoints.reserve(static_cast<std::size_t>(pieces) + 1);
   waypoints.push_back(points.front());
   for (int k = 1; k < pieces; ++k) {
     const double target_time = static_cast<double>(k) * piece_duration;
     const std::size_t index = locateTimeIndex(sample_time, target_time);
+    waypoint_sample[static_cast<std::size_t>(k)] = index;
     const std::size_t next = std::min(index + 1, sample_count - 1);
     const double span = sample_time[next] - sample_time[index];
     double alpha = 0.0;
@@ -268,6 +360,7 @@ bool TrajectoryInitializer::initialize(
     waypoints.push_back(points[index] + (points[next] - points[index]) * alpha);
   }
   waypoints.push_back(points.back());
+  waypoint_sample[static_cast<std::size_t>(pieces)] = sample_count - 1;
 
   // 末端切向：非全局目标时用它给出末端速度方向。
   Eigen::Vector2d tail_direction = points.back() - points[sample_count - 2];
@@ -277,11 +370,29 @@ bool TrajectoryInitializer::initialize(
     tail_direction = Eigen::Vector2d::Zero();
   }
 
+  _guess.corner_angle_max = corner_angle_max;
   _guess.waypoints = waypoints;
   _guess.durations.assign(static_cast<std::size_t>(pieces), piece_duration);
   // 逐段时长在最小/最大约束内做一次温和的边界修正，保持总时长不变。
   for (double & duration : _guess.durations) {
     duration = clampToRange(duration, _config.min_piece_duration, _config.max_piece_duration);
+  }
+  // 逐段速度上限 = 段内所有采样点局部上限的最小值。优化器用这个值当该段的速度软约束
+  // 阈值，转角降速才会真正留在最优解里，而不是被最优解改回全局上限。
+  _guess.speed_limits.assign(static_cast<std::size_t>(pieces), _config.max_speed);
+  const bool corner_limited = turn_min_vel < _config.max_speed;
+  if (corner_limited) {
+    for (int k = 0; k < pieces; ++k) {
+      const std::size_t begin = waypoint_sample[static_cast<std::size_t>(k)];
+      const std::size_t end = std::max(begin, waypoint_sample[static_cast<std::size_t>(k) + 1]);
+      // 段内取**可达化上限**的较大者：一段内的速度可以到该段允许的最高值，
+      // 真正需要降速的地方（转角所在段）本身的上限就低。
+      double cap = kZeroSpeed;
+      for (std::size_t i = begin; i <= end && i < sample_count; ++i) {
+        cap = std::max(cap, limit_profile[i]);
+      }
+      _guess.speed_limits[static_cast<std::size_t>(k)] = std::clamp(cap, kZeroSpeed, _config.max_speed);
+    }
   }
   _guess.head_position = points.front();
   _guess.head_velocity = _head_velocity;

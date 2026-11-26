@@ -450,8 +450,8 @@ controller_server:
         topic: rotation_cmd
         timeout: 0.25
       safety:
-        robot_radius: 0.33
-        clearance_margin: 0.06
+        robot_radius: 0.28        # 原 0.33：仿真档比实车(0.245)严 60%，净空 0.382 就判死
+        clearance_margin: 0.02    # 原 0.06：硬门槛 0.28+0.02=0.30
         unknown_is_obstacle: true
         braking_deceleration: 0.0
         reaction_latency: 0.15
@@ -460,7 +460,7 @@ controller_server:
         cooldown_sec: 2.0
         window_sec: 3.0
         escape_speed: 1.0
-        stuck_clearance: 0.4
+        stuck_clearance: 0.3      # 原 0.4：> 硬门槛会让 [0.30,0.40) 成死区
         escaped_clearance: 0.5
         search_radius: 0.4
         search_samples: 36

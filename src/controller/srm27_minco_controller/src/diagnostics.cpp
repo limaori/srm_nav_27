@@ -99,6 +99,10 @@ diagnostic_msgs::msg::DiagnosticArray toDiagnosticArray(
   addCount(values, "rejected_stale_result_count", _diagnostics.rejected_stale_result_count);
   addCount(values, "missed_deadline_count", _diagnostics.missed_deadline_count);
 
+  addNumber(values, "corner_angle_max_deg", _diagnostics.corner_angle_max_deg);
+  addNumber(values, "corner_speed_limit_min", _diagnostics.corner_speed_limit_min);
+  addInteger(values, "corner_limited_pieces", _diagnostics.corner_limited_pieces);
+
   addNumber(values, "minimum_clearance", _diagnostics.minimum_clearance);
   addNumber(values, "maximum_speed", _diagnostics.maximum_speed);
   addNumber(values, "maximum_acceleration", _diagnostics.maximum_acceleration);

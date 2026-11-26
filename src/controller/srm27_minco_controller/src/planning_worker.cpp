@@ -284,6 +284,22 @@ PlanningResult PlanningWorker::plan(const PlanningRequest & _request)
   }
   result.frontend_time_ms = (steadyNow() - frontend_begin) * 1.0e3;
 
+  // 转角降速诊断（对齐 navi_minco_bit 语义时新增）：量到的最大转角 + 逐段上限的最小值。
+  // 逐段上限 = 场景上限表示这一段没有被转角降速约束；全部等于上限说明这条参考折线上
+  // 根本没有“够尖”的转角（平滑后的密集路径很常见）。
+  {
+    result.corner_angle_max = guess.corner_angle_max;
+    const double scene_limit = _request.limits.max_linear_speed;
+    result.corner_speed_limit_min = scene_limit;
+    result.corner_limited_pieces = 0;
+    for (const double limit : guess.speed_limits) {
+      result.corner_speed_limit_min = std::min(result.corner_speed_limit_min, limit);
+      if (limit < scene_limit - 1.0e-6) {
+        result.corner_limited_pieces += 1;
+      }
+    }
+  }
+
   // 3) MINCO 优化（PRE / FINELY 两阶段）。
   MincoOptimizer optimizer;
   srm27_minco_core::MincoOptimizerConfig minco_config = _request.minco_config;

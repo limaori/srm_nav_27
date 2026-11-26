@@ -1,111 +1,118 @@
-# ROS 2 / colcon output
+# ===========================================================================
+# 规则按用途分栏。原则：
+#   1. 可再生成的（build/、日志、录包、__pycache__）一律忽略；
+#   2. 一次性的诊断/实验目录（.diag_tmp/ 等）整目录忽略，结论写 docs/，产物放
+#      ~/srm_nav_27_data/（SRM27_DATA_DIR 可覆盖）；
+#   3. 大体积、场地相关的地图产物默认只留本地，见文末「地图与点云」。
+# ===========================================================================
+
+# --- colcon / ament 构建产物 ------------------------------------------------
 /build/
 /install/
 /log/
 /devel/
-/.cache/
-/.roslog/
-/log_diag/
-/**/__pycache__/
-*.py[cod]
-# colcon 的临时日志：若某次把 ROS_LOG_DIR 指到工作区内（例如 build/），
-# 日志会堆在 build 下而不是 log/，上面 `/log_diag/` 之类规则盖不住它。
+# 干净构建验收用的独立 build/install 目录（见 docs/records/2026-11-16-*）
+/build_clean/
+/install_clean/
+/build_zloc/
+/install_zloc/
+# 若某次把 ROS_LOG_DIR 指到工作区内，日志会堆在 build/ 下而不是 log/
 /build/roslog/
+# colcon 在包根生成的编译数据库软链接
+/compile_commands.json
 
-# Runtime data and logs
+# --- Python / 测试缓存 ------------------------------------------------------
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+*.egg-info/
+/.cache/
+/.venv/
+/venv/
+
+# --- 第三方依赖（本地生成，不入库）------------------------------------------
+# GTSAM 4.2.x 的 deb/解包前缀，由 scripts/setup/install_gtsam_4_2.sh 生成
+/.deps/
+
+# --- 一次性诊断 / 实验临时目录 ----------------------------------------------
+# 只放定位问题时的探针脚本、截图、CSV/rosbag、colcon 临时构建树。
+# 需要留的结论写进 docs/records/，需要留的数据移到 ~/srm_nav_27_data/。
+# 2026-11-26 清理：.diag_tmp/.diag2/.dsh_run/.revert_scratch 已从索引移除，
+# 规则留住以防再次 `git add -A`。
+/.diag_tmp/
+/.diag2/
+/.dsh_run/
+/.revert_scratch/
+/.sim_run/
+/.tmp_diag/
+/.tmp_roslog/
+/.roslog/
+/.mapcheck/
+/.rm_scratch/
+/log_diag/
+/tmp/
+
+# --- 运行数据 / 录包 / 日志 -------------------------------------------------
 *.log
 *.db3
 *.mcap
 *.bag
 *.bag2
 *.pcap
+*.pid
+*.npz
 *~
 
+# --- 现场测试产物（波形图/CSV/日志片段）-------------------------------------
+# 随时可删，不进版本库；需要保留的结论请写进 docs/。
+/user_test_log/
+/user_log/
 
-# Local editor files
-.vscode/
-tmp/
+# --- 编辑器 / 系统文件 ------------------------------------------------------
 .idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
 
-# 本地测试/仿真产生的运行时目录。
-# 这两项此前没有规则覆盖：内容虽小但每次跑测试或仿真脚本都会重新生成，
-# 放任它们变成未跟踪文件，容易被 `git add -A` 误提交。
-/.pytest_cache/
-/.sim_run/
+# --- 上游导航仓库沿用的历史规则（当前工作区无匹配项，保留兼容）--------------
+symlink
+sentry_*/
 
-# Generated map and visualization artifacts
+# --- 地图与点云 -------------------------------------------------------------
+# 工作区根目录的临时地图/可视化产物
 /*.pcd
-/src/localization/frontend/point_lio/PCD/*.pcd
 /*.pgm
 /*.gv
 /*.pdf
 # 图像编辑器/地图工具处理过程中留下的备份件（如 GIMP 另存 pgm 时的 .pgm.orig）
 *.pgm.orig
 
-# 以下三条原先由导航仓库的 .gitignore 提供。该文件已作为冗余文件删除，
+# 现场扫图的大点云（maps/pcd/*.pcd 单份动辄 200 MB+，超过 GitHub 单文件 100 MB
+# 上限，push 会被 pre-receive 直接拒收）。默认只留本地，需要版本化的请走
+# Release 附件或 Git LFS。注：此规则只拦新增文件，已跟踪的老文件不受影响。
+maps/pcd/*.pcd
+# 先验/定位地图包（maps/pcd/map_bundles/<场地>/，含 keyframes + clouds）同理不入库。
+maps/pcd/map_bundles/
+
+# 以下三条原由导航仓库的 .gitignore 提供，该文件已作为冗余文件删除，
 # 规则上提到此统一维护，避免本地实车地图产物变成未跟踪文件而被误提交。
 /src/bringup/srm27_nav_bringup/pcd/**/*.pcd
 /src/bringup/srm27_nav_bringup/map/real/*.yaml
 /src/bringup/srm27_nav_bringup/map/real/*.pgm
 
-symlink
-sentry_*/
-
-# Cartographer raw map artifacts (大体积二进制，默认不跟踪)
-*.posegraph
-*.data
-# 例外：随地图一起版本化的原始产物仍要跟踪（main 已提交 maps/227_1006/ 下的
-# .data 与 .posegraph；没有这两条否定规则，它们会在这里被静默丢弃）
-!maps/**/*.data
-!maps/**/*.posegraph
-
-# 现场测试产物（波形图/CSV/日志片段），随时可删，不进版本库；
-# 需要保留的结论请写进 docs/。
-/user_test_log/
-/user_log/
-
-# 临时工作目录（抓取的参考文章/图片、解包的第三方仓库等），仅供本地查阅，
-# 不属于工程产物，随时可删，不进版本库。
-/.rm_scratch/
-
-# 现场扫图的大点云（maps/pcd/*.pcd 单份动辄 200 MB+，超过 GitHub 单文件 100 MB 上限，
-# push 会被 pre-receive 直接拒收）。默认只留本地，需要版本化的请走 Release 附件或 Git LFS。
-# 注：此规则只拦新增文件；227_1011*.pcd 等已跟踪的老文件不受影响。
-maps/pcd/*.pcd
-# 同理，先验/定位地图包（maps/pcd/maps_bundles/<场地>/，含 keyframes + clouds）也不入库。
-maps/pcd/maps_bundles/
-
-# ---------------------------------------------------------------------------
-# 2026-11-14 工作区清理：运行数据/实验产物统一移出源码树
-# 默认根目录：~/srm_nav_27_data/（SRM27_DATA_DIR 可覆盖）
-# 这些规则只防误提交；真正长期保留的数据放工作区外。
-# ---------------------------------------------------------------------------
-/data/
-/artifacts/
-/log_diag/
-/.mapcheck/
-/.tmp_diag/
-/.tmp_roslog/
-/.rm_scratch/
-/.sim_run/
-/**/.pytest_cache/
-
 # Point-LIO 生成点云：源码包只保留说明文件
 /src/localization/frontend/point_lio/PCD/*
 !/src/localization/frontend/point_lio/PCD/readme.md
 
-# ---------------------------------------------------------------------------
-# 2026-11-16 Z-Localization backend 迁入
-# ---------------------------------------------------------------------------
-# 第三方重依赖（GTSAM 4.2.x 的 deb/解包前缀）与验收用的地图包都由
-# scripts/setup/install_gtsam_4_2.sh / 地图工具在本地生成，不入版本库。
-/.deps/
-# 干净构建验收用的独立 build/install 目录（见 docs/records/2026-11-16-*）。
-/build_clean/
-/install_clean/
-/build_zloc/
-/install_zloc/
-# 先验地图包（keyframes + clouds/*.pcd + 描述子）体积大、按场地生成。
-# 现在统一放在工作空间内的 maps/pcd/map_bundles/（不再放 $HOME/srm_nav_27_data）。
-/data/map_bundles/
-/maps/pcd/map_bundles/
+# Cartographer 原始地图产物（大体积二进制，默认不跟踪）
+*.posegraph
+*.data
+# 例外：随地图一起版本化的原始产物仍要跟踪（maps/227_1006/ 下的 .data 与
+# .posegraph 已提交；没有这两条否定规则，它们会在这里被静默丢弃）
+!maps/**/*.data
+!maps/**/*.posegraph
+
+# 2026-11-14 工作区清理后确定的数据根目录：真正常期保留的数据放工作区外。
+/data/
+/artifacts/

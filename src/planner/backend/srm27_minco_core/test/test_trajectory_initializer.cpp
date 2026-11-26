@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <Eigen/Core>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -309,6 +310,157 @@ TEST(TrajectoryInitializerTest, Initialize_SharpCornerIncreasesTotalDuration)
   EXPECT_GT(SumDurations(corner) - SumDurations(straight), 0.1);
 }
 
+TEST(TrajectoryInitializerTest, Initialize_SharpCornerLimitsPieceSpeeds)
+{
+  // 直角折线的转角段必须给出比场景上限更低、但不低于 min_turn_vel 的速度上限；
+  // 直线路径不允许出现任何额外的速度限制。
+  const minco::TrajectoryInitializer::Config config;
+  std::string reason;
+  minco::TrajectoryInitialGuess corner;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    RightAnglePolyline(), Eigen::Vector2d::Zero(), config, corner, &reason))
+    << reason;
+  ASSERT_EQ(corner.speed_limits.size(), corner.durations.size());
+
+  const auto corner_min = std::min_element(corner.speed_limits.begin(), corner.speed_limits.end());
+  ASSERT_NE(corner_min, corner.speed_limits.end());
+  EXPECT_LT(*corner_min, config.max_speed) << "转角段没有降速，逐段速度上限未生效";
+  EXPECT_GE(*corner_min, config.min_turn_vel - 1.0e-9) << "低于转角速度地板";
+  for (const double limit : corner.speed_limits) {
+    EXPECT_LE(limit, config.max_speed + 1.0e-12);
+    EXPECT_GT(limit, 0.0);
+  }
+
+  minco::TrajectoryInitialGuess straight;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    StraightPolyline(), Eigen::Vector2d::Zero(), config, straight, &reason))
+    << reason;
+  ASSERT_EQ(straight.speed_limits.size(), straight.durations.size());
+  for (const double limit : straight.speed_limits) {
+    EXPECT_DOUBLE_EQ(limit, config.max_speed) << "直线段不应被转角降速影响";
+  }
+}
+
+TEST(TrajectoryInitializerTest, Initialize_CornerSlowdownDisabledWhenMinTurnVelEqualsMaxSpeed)
+{
+  // min_turn_vel >= max_speed 等价于关闭转角降速：折线与直线的总时长应当一致。
+  minco::TrajectoryInitializer::Config config;
+  config.min_turn_vel = config.max_speed;
+  std::string reason;
+
+  minco::TrajectoryInitialGuess corner;
+  minco::TrajectoryInitialGuess straight;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    RightAnglePolyline(), Eigen::Vector2d::Zero(), config, corner, &reason))
+    << reason;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    StraightPolyline(), Eigen::Vector2d::Zero(), config, straight, &reason))
+    << reason;
+
+  for (const double limit : corner.speed_limits) {
+    EXPECT_DOUBLE_EQ(limit, config.max_speed);
+  }
+  EXPECT_NEAR(SumDurations(corner), SumDurations(straight), 1.0e-6);
+}
+
+TEST(TrajectoryInitializerTest, Initialize_DeadzoneSuppressesCornerSlowdown)
+{
+  // 死区大于折角（直角经弦长窗口量化后必然小于 pi/2）时不应降速 ——
+  // 这条同时说明“直道上的小幅横向抖动不会误触发降速”。
+  minco::TrajectoryInitializer::Config config;
+  config.turn_angle_deadzone = 1.50;
+  config.turn_angle_saturation = 1.60;
+  std::string reason;
+  minco::TrajectoryInitialGuess guess;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    RightAnglePolyline(), Eigen::Vector2d::Zero(), config, guess, &reason))
+    << reason;
+  for (const double limit : guess.speed_limits) {
+    EXPECT_DOUBLE_EQ(limit, config.max_speed);
+  }
+}
+
+TEST(TrajectoryInitializerTest, Initialize_SaturationControlsCornerSlowdownMonotonically)
+{
+  // 饱和角越大，`ratio` 越小、衰减越弱，转角速度上限越高（同一条折线）。
+  const auto corner_min_limit = [](const double _saturation) {
+    minco::TrajectoryInitializer::Config config;
+    config.turn_angle_saturation = _saturation;
+    minco::TrajectoryInitialGuess guess;
+    std::string reason;
+    const bool ok = minco::TrajectoryInitializer::initialize(
+      RightAnglePolyline(), Eigen::Vector2d::Zero(), config, guess, &reason);
+    EXPECT_TRUE(ok) << reason;
+    if (guess.speed_limits.empty()) {
+      return 0.0;
+    }
+    return *std::min_element(guess.speed_limits.begin(), guess.speed_limits.end());
+  };
+
+  const double tight = corner_min_limit(0.40);
+  const double loose = corner_min_limit(1.20);
+  EXPECT_GT(loose, tight);
+}
+
+TEST(TrajectoryInitializerTest, Initialize_PieceLimitNeverBelowHeadSpeed)
+{
+  // 起点正好在弯里、车还在以场景上限速度行驶：逐段上限不能低于起点实测速度，
+  // 否则轨迹一出发就越界（无解或代价爆炸）。上限应当做成“可制动到达”的剖面。
+  minco::TrajectoryInitializer::Config config;
+  std::string reason;
+  const std::vector<Eigen::Vector2d> polyline{P(0.0, 0.0), P(2.0, 0.0), P(2.0, 2.0)};
+  const Eigen::Vector2d head_velocity(config.max_speed, 0.0);
+
+  minco::TrajectoryInitialGuess guess;
+  ASSERT_TRUE(minco::TrajectoryInitializer::initialize(
+    polyline, head_velocity, config, guess, &reason))
+    << reason;
+  ASSERT_FALSE(guess.speed_limits.empty());
+  EXPECT_GE(guess.speed_limits.front(), config.max_speed - 1.0e-9)
+    << "起点段上限低于实测速度，边界条件与速度约束自相矛盾";
+  // 但弯里的段必须真的降下来（否则等于没有转角降速）。
+  EXPECT_LT(*std::min_element(guess.speed_limits.begin(), guess.speed_limits.end()),
+            config.max_speed);
+}
+
+TEST(TrajectoryInitializerTest, Initialize_TurnVelocityRatioScalesWithSpeedLimit)
+{
+  // 比例写法：地板 = ratio × max_speed，所以同一 ratio 下两个速度档的转角上限应成正比，
+  // 换速度档不用改参数。
+  const std::vector<Eigen::Vector2d> polyline = RightAnglePolyline();
+  const auto min_limit = [&polyline](double _max_speed, double _ratio) {
+    minco::TrajectoryInitializer::Config config;
+    config.max_speed = _max_speed;
+    config.max_accel = _max_speed;
+    config.max_brake = _max_speed;
+    config.min_turn_vel = 0.0;  // 故意留 0，确认比例优先
+    config.min_turn_vel_ratio = _ratio;
+    minco::TrajectoryInitialGuess guess;
+    std::string reason;
+    const bool ok = minco::TrajectoryInitializer::initialize(
+      polyline, Eigen::Vector2d::Zero(), config, guess, &reason);
+    EXPECT_TRUE(ok) << reason;
+    if (guess.speed_limits.empty()) {
+      return 0.0;
+    }
+    return *std::min_element(guess.speed_limits.begin(), guess.speed_limits.end());
+  };
+
+  const double slow = min_limit(0.5, 0.23);
+  const double fast = min_limit(2.6, 0.23);
+  RecordProperty("slow_limit", std::to_string(slow));
+  RecordProperty("fast_limit", std::to_string(fast));
+  EXPECT_GT(slow, 0.0);
+  EXPECT_LT(slow, 0.5);
+  EXPECT_GT(fast, slow);
+  // 同一个 ratio、不同速度档：转角上限按速度上限等比缩放（同一几何、同一衰减）。
+  // 容差 6%：段边界按“等时间”取点，速度档不同会让角点落在不同的段里，量化误差在百分级。
+  EXPECT_NEAR(fast / slow, 2.6 / 0.5, 0.30);
+
+  // ratio = 1 等价于关闭转角降速（地板就是上限）。
+  EXPECT_NEAR(min_limit(2.6, 1.0), 2.6, 1.0e-9);
+}
+
 TEST(TrajectoryInitializerTest, Initialize_RejectsDegenerateInput)
 {
   const minco::TrajectoryInitializer::Config config;
@@ -415,8 +567,10 @@ TEST(TrajectoryInitializerTest, BuildInitialTrajectory_MatchesGuessBoundaryAndWa
       trajectory.positionAt(elapsed), guess.waypoints[static_cast<std::size_t>(i)], 1.0e-8);
   }
 
-  // 折角位于路径中点，应落在某个路标点上并被轨迹精确经过。
-  ExpectNearVector(trajectory.positionAt(trajectory.totalDuration() * 0.5), P(3.0, 0.0), 1.0e-8);
+  // 说明：这里**不能**再假设“折角位于时间中点”。2026-11-26 起转角降速按
+  // navi_minco_bit 的 `calCurvatureDecay` 语义生效，折角前后速度不对称（进弯前从
+  // 巡航减速、出弯后要一路减速到终点零速），所以折角不再落在 totalDuration()/2。
+  // 折角是否被精确经过由上面的“经过点”循环保证（前提是它确实是某个内部路标点）。
 }
 
 TEST(TrajectoryInitializerTest, BuildInitialTrajectory_StraightLineKeepsDurationSum)

@@ -57,6 +57,12 @@ struct ControllerDiagnostics
   std::uint64_t rejected_stale_result_count{0};
   std::uint64_t missed_deadline_count{0};
 
+  // 转角降速（对齐 navi_minco_bit 的 turn_angle_* 后新增）：角度与逐段上限，
+  // 现场用它回答“转角降速到底有没有生效、为什么没生效”。
+  double corner_angle_max_deg{0.0};
+  double corner_speed_limit_min{0.0};
+  int corner_limited_pieces{0};
+
   // 轨迹质量
   double minimum_clearance{0.0};
   double maximum_speed{0.0};

@@ -925,6 +925,65 @@ TEST(MincoOptimizerOptimize, WallObstacleImprovesMinimumClearance)
   EXPECT_TRUE(result.trajectory.sanityCheck(&sanity_reason)) << sanity_reason;
 }
 
+TEST(MincoOptimizerOptimize, PieceSpeedLimitsLowerTheCruiseSpeed)
+{
+  // 逐段速度上限（转角降速）必须真正约束最优解：同样的初值、同样的约束，
+  // 把 `speed_limits` 压到 0.2 m/s 后轨迹巡航速度应显著低于不限速的情形。
+  // 回归背景（2026-11-26）：此前降速只存在于前端初值里，优化后会被改回全局上限。
+  Limits2D limits;
+  limits.max_linear_speed = 0.8;
+  limits.max_linear_accel = 0.5;
+
+  // 6 段、每段 0.5 m、段时长 2.5 s —— 初值本身就慢（0.2 m/s），两条分支起点一致。
+  TrajectoryInitialGuess guess;
+  guess.waypoints = {{0.0, 0.0}, {0.5, 0.0}, {1.0, 0.0}, {1.5, 0.0},
+                     {2.0, 0.0}, {2.5, 0.0}, {3.0, 0.0}};
+  guess.durations.assign(6, 2.5);
+  guess.head_position = {0.0, 0.0};
+  guess.head_velocity = Eigen::Vector2d::Zero();
+  guess.head_acceleration = Eigen::Vector2d::Zero();
+  guess.tail_position = {3.0, 0.0};
+  guess.tail_velocity = Eigen::Vector2d::Zero();
+  guess.tail_acceleration = Eigen::Vector2d::Zero();
+
+  MincoOptimizerConfig config = makeLineConfig();
+  config.max_piece_duration = 10.0;
+  std::string reason;
+
+  const auto peak_speed = [](const Trajectory2D & _trajectory) {
+    double peak = 0.0;
+    constexpr int kSamples = 400;
+    for (int i = 0; i <= kSamples; ++i) {
+      const double t = _trajectory.totalDuration() * static_cast<double>(i) / kSamples;
+      peak = std::max(peak, _trajectory.velocityAt(t).norm());
+    }
+    return peak;
+  };
+
+  MincoOptimizer optimizer_free;
+  ASSERT_TRUE(optimizer_free.configure(config, &reason)) << reason;
+  optimizer_free.setEsdf(nullptr);
+  MincoOptimizeResult free_result;
+  ASSERT_TRUE(optimizer_free.optimize(guess, limits, free_result)) << free_result.message;
+  ASSERT_EQ(free_result.status, SolveStatus::kSuccess);
+
+  MincoOptimizer optimizer_capped;
+  ASSERT_TRUE(optimizer_capped.configure(config, &reason)) << reason;
+  optimizer_capped.setEsdf(nullptr);
+  TrajectoryInitialGuess capped = guess;
+  capped.speed_limits.assign(capped.durations.size(), 0.20);
+  MincoOptimizeResult capped_result;
+  ASSERT_TRUE(optimizer_capped.optimize(capped, limits, capped_result)) << capped_result.message;
+  ASSERT_EQ(capped_result.status, SolveStatus::kSuccess);
+
+  const double free_peak = peak_speed(free_result.trajectory);
+  const double capped_peak = peak_speed(capped_result.trajectory);
+  RecordProperty("free_peak_speed", formatMetric(free_peak));
+  RecordProperty("capped_peak_speed", formatMetric(capped_peak));
+  EXPECT_LT(capped_peak, free_peak) << "逐段速度上限没有降低巡航速度";
+  EXPECT_LT(capped_peak, 0.20 + 0.06) << "逐段速度上限没有约束住最优解";
+}
+
 TEST(MincoOptimizerOptimize, RejectsInvalidInputs)
 {
   MincoOptimizer optimizer;

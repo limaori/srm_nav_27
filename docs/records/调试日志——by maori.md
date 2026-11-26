@@ -719,12 +719,25 @@ python3 scripts/mapping/level_map_pcd.py --pcd maps/pcd/地图名_mapframe.pcd
   ```
 ### 简单长地图的仿真
 ```bash
-# 带定位前后端版本(非真值定位)
+# 带定位前后端版本(非真值定位)不开gzb
+USE_GUI=False ./maps/227to219_1125/simulation/run.sh
 
 
-./maps/227to219_1125/simulation/run.sh            # 不带 GUI 的 Gazebo、RViz 和全栈导航
-USE_RVIZ=False ./maps/227to219_1125/simulation/run.sh   # 不开 RViz
-./maps/227to219_1125/simulation/run.sh --rebuild        # 改了图重新生成场景
+# 带定位前后端版本(非真值定位)开gzb
+USE_GUI=True ./maps/227to219_1125/simulation/run.sh
+
+
+# 不带定位的版本
+./scripts/bringup/start_sim_nav.sh -m 227to219_1125 -w srm_empty --yastar-planner
+
+# 另起终端录包
+./scripts/bringup/record_nav_bag.sh
 ```
 
 
+
+# 2026-11-26
+## 对齐 navi_minco_bit 的参数语义（MINCO 仍在控制器）
+- 结论：弯道切内道是 MINCO **缺参考吸引项**，不是转角降速的问题。`w_reference=100` 后弯中偏离 0.50 → 0.05 m。
+- 细节、对照表、A/B 数据：`docs/records/2026-11-26-对齐navi_minco_bit语义.md`
+- 复跑：`bash .diag_tmp/ab2/run_ab.sh .diag_tmp/ab2/v4_final.yaml .diag_tmp/ab2/out final` + `python3 .diag_tmp/ab2/summarize.py`
