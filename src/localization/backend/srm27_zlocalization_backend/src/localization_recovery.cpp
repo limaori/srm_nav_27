@@ -9,6 +9,7 @@
 #include "backend/localization.hpp"
 #include "backend/logger.hpp"
 #include "backend/math.hpp"
+#include "backend/recovery_budget.hpp"
 
 namespace backend {
 /// 校验恢复任务的代次、状态及请求身份；不要求捕获帧仍是最新帧。
@@ -99,16 +100,22 @@ std::optional<RelocalizationPositionPrior> Localization::makeStartupHintPriorLoc
     }
 
     const Eigen::Matrix4d& T_map_sensor = *config_.startup_hint.T_map_sensor;
+    // 提示只给"车体在地图里的位置 + 航向"：传感器相对车体的 roll/pitch/yaw 取自当前
+    // 前端帧（odom 出生系就是车体系，已重力对齐）。云台转角、倾斜安装都会体现在
+    // odom 姿态里，配置里不需要（也不应该）写死，否则种子会差一整个安装角。
+    const Eigen::Matrix3d R_map_sensor =
+        yawGuess(config_.startup_hint.yaw_rad, Eigen::Vector3d::Zero()).block<3, 3>(0, 0) *
+        frame.odom_pose.block<3, 3>(0, 0);
     const Eigen::Matrix3d R_map_body =
-        T_map_sensor.block<3, 3>(0, 0) * config_.uwb.T_sensor_body.block<3, 3>(0, 0);
+        R_map_sensor * config_.uwb.T_sensor_body.block<3, 3>(0, 0);
     const double body_yaw = yawFromRotation(R_map_body);
 
     RelocalizationPositionPrior prior;
     prior.source = "startup_hint";
     prior.map_point = T_map_sensor.block<3, 1>(0, 3);
     prior.runtime_sensor_point = Eigen::Vector3d::Zero();
-    prior.R_yawless_sensor = yawGuess(-body_yaw, Eigen::Vector3d::Zero()).block<3, 3>(0, 0) *
-                             T_map_sensor.block<3, 3>(0, 0);
+    prior.R_yawless_sensor =
+        yawGuess(-body_yaw, Eigen::Vector3d::Zero()).block<3, 3>(0, 0) * R_map_sensor;
     prior.yaw_seed_rad = body_yaw;
     prior.allow_yaw_sweep_fallback = false;
     prior.search_radius = config_.recovery.suspect_search_radius;
@@ -164,6 +171,35 @@ std::optional<RecoveryWork> Localization::captureRecovery() {
     return work;
 }
 
+/// 预估一次恢复提交相对当前冻结输出的位姿变化；不改变任何状态。
+std::optional<PoseCorrectionDelta> Localization::prospectiveRecoveryCorrectionLocked(
+    const RecoveryWork& work, const RecoveryResult& result) const {
+    if (!result.pose.allFinite() || !work.frame.odom_pose.allFinite()) {
+        return std::nullopt;
+    }
+    Eigen::Matrix4d output_pose_before = poses_.transform() * frames_.latest().odom_pose;
+    if (poses_.trusted().hasPose()) {
+        output_pose_before = poses_.trusted().mapSensorPose();
+    }
+    const Eigen::Matrix4d transform = result.pose * work.frame.odom_pose.inverse();
+    const Eigen::Matrix4d correction =
+        output_pose_before.inverse() * (transform * frames_.latest().odom_pose);
+    if (!transform.allFinite() || !correction.allFinite()) {
+        return std::nullopt;
+    }
+    PoseCorrectionDelta delta;
+    delta.translation = correction.block<3, 1>(0, 3).norm();
+    delta.rotation_rad = rotationAngleFromMatrix(correction);
+    return delta;
+}
+
+/// 判断恢复提交幅度是否落在预算内；没有可信位姿（冷启动）时不设限。
+bool Localization::recoveryCorrectionWithinBudgetLocked(const PoseCorrectionDelta& delta) const {
+    // 判据本身在 backend/recovery_budget.hpp（纯函数，单测覆盖）；这里只提供可信位姿与否。
+    return recoveryCorrectionWithinBudget(delta, config_.recovery, poses_.trusted().hasPose());
+}
+
+
 /// 安装恢复位姿锚，并把匹配期间的新里程计运动传播到当前可信输出。
 PoseCorrectionDelta Localization::applyRecoveryLocked(const RecoveryWork& work,
                                                       const RecoveryResult& result,
@@ -191,6 +227,15 @@ PoseCorrectionDelta Localization::applyRecoveryLocked(const RecoveryWork& work,
     clearManualRelocalizationRequestLocked();
     transition = state_.onTrustedCorrection("recovered via " + result.source,
                                             TrustedCorrectionSource::Relocalization);
+    if (config_.prior_map_enabled && config_.prior_map_initialization_only &&
+        transition.previous == LocalizationStatus::Initializing) {
+        // 一次性先验：初始匹配已建立 map->odom，此后不再产生先验观测，
+        // 全局位姿完全由前端里程计传播（等价于静态 map->odom + LIO）。
+        prior_initialization_only_done_ = true;
+        BACKEND_INFO_STREAM(
+            "prior_map.initialization_only: initial match accepted; "
+            "map->odom frozen, localization continues on frontend odometry");
+    }
     // 将匹配期间到达的里程计运动传播到最新同步帧，并提交可信输出。
     commitCurrentTrustedPoseLocked();
     const Eigen::Matrix4d output_pose_after = poses_.transform() * frames_.latest().odom_pose;
@@ -209,6 +254,11 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
     const bool matched = result.outcome == RecoveryOutcome::Matched;
     PoseCorrectionDelta applied_correction;
     LocalizationTransition transition;
+    // 幅度预算的裁决结果，供锁外打印：rejected=拒绝提交，overridden=手动请求越过预算。
+    bool budget_rejected = false;
+    bool budget_overridden = false;
+    PoseCorrectionDelta budget_delta;
+    bool accepted = false;
     if (!withOutputCommit([&] {
             if (!recoveryIsCurrentLocked(work.identity)) {
                 BACKEND_INFO_STREAM("discarding stale recovery result: runtime="
@@ -220,8 +270,33 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                 return false;
             }
             if (matched) {
+                const bool manual = work.identity.manual_request_id != 0;
+                const bool gated =
+                    !manual || !config_.recovery.manual_bypasses_correction_budget;
+                const auto prospective = prospectiveRecoveryCorrectionLocked(work, result);
+                const bool within_budget =
+                    !prospective || recoveryCorrectionWithinBudgetLocked(*prospective);
+                if (gated && !within_budget) {
+                    // 恢复结果会把冻结位姿一次性搬走太远：判为一次失败，等更强的证据
+                    // 或人工介入，而不是直接 commit —— 对称场景的 180° 混叠正是这样
+                    // 靠"残差好看"骗过验收的（2026-11-26 实车：+45 / +11 / +30 m）。
+                    budget_rejected = true;
+                    budget_delta = *prospective;
+                    if (manual)
+                        clearManualRelocalizationRequestLocked();
+                    transition = state_.onRecoveryRelocalizationFailure(
+                        config_.recovery.suspect_failures_before_lost,
+                        result.source + " over correction budget");
+                    return true;
+                }
+                if (!within_budget) {
+                    // manual_bypasses_correction_budget 命中：人工请求越过预算，照常提交。
+                    budget_overridden = true;
+                    budget_delta = *prospective;
+                }
                 applied_correction = applyRecoveryLocked(work, result, transition);
                 estimator_failed_ = false;
+                accepted = true;
             } else {
                 if (work.identity.manual_request_id != 0)
                     clearManualRelocalizationRequestLocked();
@@ -232,7 +307,16 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
         }))
         return;
     publishState();
-    if (matched) {
+    if (accepted) {
+        if (budget_overridden) {
+            BACKEND_WARN_STREAM("manual relocalization accepted over correction budget: delta_t="
+                                << budget_delta.translation << "m (limit "
+                                << config_.recovery.max_translation_correction
+                                << "m), delta_r_deg=" << budget_delta.rotation_rad * 180.0 / M_PI
+                                << " (limit "
+                                << config_.recovery.max_rotation_correction_rad * 180.0 / M_PI
+                                << "); 这是人工请求，请确认位移与现场一致");
+        }
         visualization_sink_.publishVisualization(visualization());
         BACKEND_INFO_STREAM("localization state -> "
                             << LocalizationStateMachine::statusName(transition.current) << " ("
@@ -242,6 +326,15 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                             << "s, delta_t=" << applied_correction.translation << "m, delta_r_deg="
                             << applied_correction.rotation_rad * 180.0 / M_PI << ")");
     } else {
+        if (budget_rejected) {
+            BACKEND_WARN_STREAM("recovery rejected by correction budget: source="
+                                << result.source << ", delta_t=" << budget_delta.translation
+                                << "m (limit " << config_.recovery.max_translation_correction
+                                << "m), delta_r_deg=" << budget_delta.rotation_rad * 180.0 / M_PI
+                                << " (limit "
+                                << config_.recovery.max_rotation_correction_rad * 180.0 / M_PI
+                                << "); keeping the frozen pose");
+        }
         BACKEND_WARN_STREAM("localization recovery pending: " << transition.reason);
         if (transition.current == LocalizationStatus::Lost)
             triggerFrontendReset();

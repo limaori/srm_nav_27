@@ -737,7 +737,13 @@ USE_GUI=True ./maps/227to219_1125/simulation/run.sh
 
 
 # 2026-11-26
-## 对齐 navi_minco_bit 的参数语义（MINCO 仍在控制器）
-- 结论：弯道切内道是 MINCO **缺参考吸引项**，不是转角降速的问题。`w_reference=100` 后弯中偏离 0.50 → 0.05 m。
-- 细节、对照表、A/B 数据：`docs/records/2026-11-26-对齐navi_minco_bit语义.md`
-- 复跑：`bash .diag_tmp/ab2/run_ab.sh .diag_tmp/ab2/v4_final.yaml .diag_tmp/ab2/out final` + `python3 .diag_tmp/ab2/summarize.py`
+### 实车录车
+```bash
+ros2 bag record -o ~/srm_nav_27_data/bags/real_zloc_$(date +%m%d_%H%M%S) \
+  --max-cache-size 200000000 \
+  /tf /tf_static /livox/imu \
+  /zlio/frame /zlio/session /zlio_bridge/events /zlio_bridge/matches \
+  /registered_scan /lidar_odometry /odometry \
+  /backend_node/localization_state /backend_node/localization_pose \
+  /mapw
+  ```

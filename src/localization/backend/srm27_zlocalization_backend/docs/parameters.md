@@ -93,11 +93,12 @@
 | `exclude_recent` | 整数，帧 | `15` | 回环检索时跳过最近多少个关键帧；须 `≥1` |
 | `candidates` | 整数，候选 | `30` | 描述子检索最终返回的候选数上限；须 `≥1` |
 
-#### `prior_map` · 先验地图（3 项）
+#### `prior_map` · 先验地图（4 项）
 
 | 键 | 类型 / 单位 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `enabled` | 布尔 | `false` | 是否加载固定先验地图定位；可与运行回环和 UWB 共存；先验模式关闭退出保存和运行地图显示 |
+| `initialization_only` | 布尔 | `false` | 先验只在初始化时匹配一次：首次验收的先验全局位姿建立 `map->odom` 后锁存，跟踪和恢复都不再产生先验观测，全局位姿完全由前端里程计传播（入口 `--zloc-prior-once`）；需 `enabled`，无先验地图时由配置解析自动关闭并记录 override |
 | `directory` | 路径 | `pcd/rmuc` | 先验关键帧地图包目录；启用先验时必填，相对路径从运行目录算起 |
 | `voxel_resolution` | 浮点，m | `0.15` | 先验地图显示点云的体素边长，不影响配准；须 `≥0`，`0` 不降采样 |
 
@@ -165,7 +166,7 @@
 | `rejection_probability` | 浮点，无量纲 | `0.001` | 观测与预测的卡方一致性检验 p 值低于此值时判为冲突；越大越严格，范围 `[1e-12,0.5]` |
 | `conflicts_before_suspect` | 整数，次 | `7` | 所有可用全局观测均冲突，连续达到多少次后进入 `SUSPECT`；须 `≥1` |
 
-#### `recovery` · 初始化与重定位（18 项）
+#### `recovery` · 初始化与重定位（21 项）
 
 | 键 | 类型 / 单位 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -175,6 +176,9 @@
 | `global_fallback_candidates` | 整数，候选 | `5` | 局部搜索失败后补充的全局描述子候选数；须 `≥0`，`0` 关闭全局补充 |
 | `suspect_failures_before_lost` | 整数，次 | `3` | `SUSPECT` 下连续重定位失败多少次后转为 `LOST`；须 `≥1` |
 | `automatic_when_lost` | 布尔 | `true` | 丢失后是否自动重定位；关闭则等待重定位服务请求 |
+| `max_translation_correction` | 浮点，m | `2.5` | ★本工作区新增。自动恢复提交相对**最后可信位姿**允许的最大平移；须 `≥0`，`0` 关闭。已有可信位姿时生效，冷启动（`INITIALIZING`）不设限；越过预算的恢复不提交、保持 `tf` 冻结，并按一次恢复失败累计（`suspect_failures_before_lost`） |
+| `max_rotation_correction_deg` | 浮点，° | `20.0` | ★本工作区新增。同上，允许的最大旋转；须 `≥0`，`0` 关闭 |
+| `manual_bypasses_correction_budget` | 布尔 | `true` | ★本工作区新增。人工下发 `/backend_node/relocalize` 是否绕过上面两项预算；`true` 时越过预算仍提交，但打 WARN 并打印实际幅度 |
 | `source.min_frames` | 整数，帧 | `2` | 至少累积多少帧点云才尝试重定位；须在 `[1,source.max_frames]` |
 | `source.max_frames` | 整数，帧 | `5` | 重定位最多累积的同步观测帧数，含当前帧；须 `≥1` |
 | `source.max_time` | 浮点，s | `0.5` | 参与累积的历史帧与当前帧的最大时间差；须 `≥0`，`0` 不限 |
@@ -313,6 +317,12 @@
 | `z` | 浮点，m | `0.15` | 启动时车体原点在 map 系中的 Z 坐标 |
 | `yaw_deg` | 浮点，° | `0.0` | 启动时车体在 map 系中的航向角 |
 
+提示只给出**车体**位置与航向；传感器相对车体的 roll/pitch/yaw 由 backend 从启动时的实时
+odom 姿态取（odom 出生系即车体系），因此云台转角、倾斜安装不需要写进配置——把提示当成
+`T_map_sensor` 的 level 位姿会在倾斜安装下让匹配种子差一整个安装角。有先验地图 +
+`force_until_matched: true` 时，backend 只在提示位置附近做几何验证，不进入全局 Scan Context
+检索（`--zloc-start-hint` 就是这个用法）。
+
 #### `visualization` · 可视化（7 项）
 
 | 键 | 类型 / 单位 | 默认值 | 说明 |
@@ -379,6 +389,7 @@
 | `config_file` | 路径 | `<backend share>/config/backend.yaml` | 后端 YAML 路径，支持 `extends` 继承 |
 | `mode` | 字符串 | `config` | `config` 沿用 YAML；`mapping` 关闭先验地图；`localization` 开启先验地图，均不改变 UWB 开关 |
 | `prior_map` | 路径 | `""` | 覆盖 YAML 中的先验地图目录；留空则沿用 YAML |
+| `prior_initialization_only` | `config` / 布尔 | `config` | `true` 让先验只在初始化时匹配一次（覆盖 `prior_map.initialization_only`）；`config` 沿用 YAML |
 | `use_sim_time` | 布尔 | `false` | 后端和 RViz 是否使用 `/clock` 仿真时间 |
 | `rviz` | 布尔 | `false` | 是否启动 RViz，并开启当前地图、坐标轴、轨迹和配准点云显示 |
 

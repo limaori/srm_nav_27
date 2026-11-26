@@ -6,3 +6,12 @@ extends: backend.yaml
 common:
   # 仿真的 ZLIO body_frame / IMU 与雷达同 link，是 front_mid360。
   sensor_frame: front_mid360
+
+recovery:
+  # 恢复幅度预算（backend.yaml 里新增的 2.5 m / 20°）**只在实车 profile 生效**：
+  # 仿真里程计是它自己的 LIO/真值链路，恢复偏差本来就小，而一旦命中就等于给仿真
+  # 基线加了一条新约束、破坏与历史 A/B 的可比性。判据本身由
+  # test/unit/recovery_budget_test.cpp 覆盖；要在仿真里验证这道闸，
+  # 把这里改成非 0（例如 2.5 / 20）即可，不需要改代码。
+  max_translation_correction: 0.0
+  max_rotation_correction_deg: 0.0

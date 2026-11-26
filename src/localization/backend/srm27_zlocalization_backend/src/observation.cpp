@@ -24,8 +24,13 @@ std::optional<GlobalObservationWork> Localization::captureTracking() {
     }
     work.state_generation = state_.generation();
     work.runtime = trajectory_.latest();
+    // initialization_only：首次先验匹配验收后，先验不再参与任何全局观测；
+    // 若同时启用了 UWB 等独立来源，跟踪周期仍可为它们运行。
+    const bool prior_observations_allowed =
+        config_.prior_map_enabled &&
+        !(config_.prior_map_initialization_only && prior_initialization_only_done_);
     work.prior_input.configured =
-        config_.prior_map_enabled && work.runtime.index != last_lidar_observation_runtime_index_;
+        prior_observations_allowed && work.runtime.index != last_lidar_observation_runtime_index_;
     work.uwb = uwb_.captureFresh(work.runtime);
     if ((!work.prior_input.configured && !work.uwb) ||
         !tryStartCycle(clock_.nowSteadyTimestamp(), config_.tracking.correction_period,
@@ -256,6 +261,15 @@ void Localization::applyGlobalObservationFactorsLocked(const GlobalObservationWo
     }
     if (!transaction.observations.accepted_evidence.empty()) {
         commit.applied_correction = updateGraphLocked(/*global_factor_added=*/true);
+    }
+    // 一次性先验：若初始位姿来自 UWB 等其它来源，首次被验收的先验观测同样会锁存，
+    // 此后跟踪周期不再产生先验观测。
+    if (config_.prior_map_enabled && config_.prior_map_initialization_only &&
+        commit.prior_accepted && !prior_initialization_only_done_) {
+        prior_initialization_only_done_ = true;
+        BACKEND_INFO_STREAM(
+            "prior_map.initialization_only: first prior observation accepted; "
+            "map->odom frozen, localization continues on frontend odometry");
     }
 }
 

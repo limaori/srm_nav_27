@@ -1163,9 +1163,10 @@ geometry_msgs::msg::TwistStamped MincoMpcController::makeEscapeCommand(
   // 脱困期间也不再否决底盘 wz：自转只归决策层的 rotation_cmd。
   Eigen::Vector2d velocity_odom = _escape_velocity;
   diagnostics_.applied_speed_scale = 1.0;
-  const auto planar = rotatingFrameLimits(
-    limits_.max_linear_speed, limits_.max_linear_accel,
-    command_frame_mode_ == CommandFrameMode::kOdomAlignedFake ? _state.omega : 0.0);
+  // 2026-11-26：云台转速与导航平移**完全解耦**。平移上限只取配置值，不再按
+  // state.omega（云台 yaw 转速）收缩；MINCO 也不控制云台转速（wz 恒 0，自转走
+  // 决策层 rotation_cmd）。旋转帧的加速度预算问题交给下游/执行层处理。
+  const PlanarCommandLimits planar{limits_.max_linear_speed, limits_.max_linear_accel};
   const double speed = velocity_odom.norm();
   if (speed > planar.speed) {
     diagnostics_.applied_speed_scale = planar.speed / speed;
@@ -1832,17 +1833,17 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   if (diagnostics_.map_age > map_timeout_) {
     return fail("distance field is older than map_timeout");
   }
-  // 云台系快速旋转时，给坐标旋转和世界系转向分别留出串口加速度预算。
-  auto planar = rotatingFrameLimits(
-    limits_.max_linear_speed, limits_.max_linear_accel,
-    command_frame_mode_ == CommandFrameMode::kOdomAlignedFake ? state.omega : 0.0);
+  // 2026-11-26：云台转速与导航平移**完全解耦**。平移上限只取配置值，不再按
+  // state.omega（云台 yaw 转速）收缩；MINCO 也不控制云台转速（wz 恒 0，自转走
+  // 决策层 rotation_cmd）。云台转多快都不会改变这里的 v_max / a_max。
+  const PlanarCommandLimits planar{limits_.max_linear_speed, limits_.max_linear_accel};
   const auto & safety = validator_.config();
   const double brake_deceleration = std::min(safety.braking_deceleration, planar.accel);
   const double reaction_time = safety.reaction_latency + diagnostics_.state_age;
   const double required_clearance = safety.robot_radius + safety.clearance_margin;
   // 2026-11-23：这里原来是"窄区禁转 + 窄区平移降速"的联合判断。禁转整条线已下线
   // （wz 只归决策层 rotation_cmd），降速档 safety.narrow_linear_speed 一并删除；
-  // 平移限速仍由上面 rotatingFrameLimits 与下面的净空限幅负责。
+  // 平移限速仍由上面的配置上限与下面的净空限幅负责。
 
   // 5) 取回后台结果（失败会触发脱困判定，所以需要当前状态）。
   harvestPlanningResult(state, now_stamp);

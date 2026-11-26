@@ -68,6 +68,16 @@ void resolveStartupHint(EffectiveConfig& effective) {
     }
 }
 
+/// 一次性先验必须以先验地图为唯一先验来源；没有先验地图时该开关无意义。
+void resolvePriorInitializationOnly(EffectiveConfig& effective) {
+    Config& config = effective.values;
+    if (config.prior_map_initialization_only && !config.prior_map_enabled) {
+        config.prior_map_initialization_only = false;
+        recordOverride(&effective, "prior_map.initialization_only", "true", "false",
+                       "initialization-only matching requires an enabled prior map");
+    }
+}
+
 /// 根据运行轨迹描述子的可用性解析回环能力，先验不排斥回环。
 void resolveLoopCapability(EffectiveConfig& effective, const bool descriptor_available) {
     Config& config = effective.values;
@@ -140,6 +150,7 @@ EffectiveConfig resolveConfig(Config requested, const bool descriptor_available)
     normalizeBackendConfigNumerics(&effective.values);
     resolveKeyframePolicy(effective);
     resolveStartupHint(effective);
+    resolvePriorInitializationOnly(effective);
     resolveLoopCapability(effective, descriptor_available);
     resolveOdometryOrigin(effective);
     resolveUwbCalibration(effective);
@@ -218,7 +229,8 @@ void normalizeObservationNumerics(Config& c, const Config& d) {
     c.recovery.suspect_failures_before_lost = std::max(1, c.recovery.suspect_failures_before_lost);
     fields(c.recovery, d.recovery,
            {&RecoveryConfig::period, &RecoveryConfig::suspect_search_radius,
-            &RecoveryConfig::lost_search_radius},
+            &RecoveryConfig::lost_search_radius, &RecoveryConfig::max_translation_correction,
+            &RecoveryConfig::max_rotation_correction_rad},
            nonnegativeOr);
     source(c.tracking.source, d.tracking.source);
     source(c.recovery.source, d.recovery.source);

@@ -89,6 +89,8 @@ def generate_launch_description():
     use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
     zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
     zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
+    zlocalization_prior_initialization_only = LaunchConfiguration(
+        "zlocalization_prior_initialization_only")
     zlocalization_loop_enabled = LaunchConfiguration("zlocalization_loop_enabled")
     zlocalization_uwb_enabled = LaunchConfiguration("zlocalization_uwb_enabled")
     zlocalization_prior_map = LaunchConfiguration("zlocalization_prior_map")
@@ -278,6 +280,10 @@ def generate_launch_description():
         "zlocalization_prior_enabled", default_value="False",
         description="启用先验配准，独立开关，默认关闭",
     )
+    declare_zlocalization_prior_initialization_only_cmd = DeclareLaunchArgument(
+        "zlocalization_prior_initialization_only", default_value="False",
+        description="先验只在初始化时匹配一次，之后定位全走前端里程计",
+    )
     declare_zlocalization_loop_enabled_cmd = DeclareLaunchArgument(
         "zlocalization_loop_enabled", default_value="False",
         description="启用运行轨迹回环，独立开关，默认关闭",
@@ -371,6 +377,8 @@ def generate_launch_description():
                     "use_zlocalization_backend": use_zlocalization_backend,
                     "zlocalization_backend_config": zlocalization_backend_config,
                     "zlocalization_prior_enabled": zlocalization_prior_enabled,
+                    "zlocalization_prior_initialization_only":
+                        zlocalization_prior_initialization_only,
                     "zlocalization_loop_enabled": zlocalization_loop_enabled,
                     "zlocalization_uwb_enabled": zlocalization_uwb_enabled,
                     "zlocalization_prior_map": zlocalization_prior_map,
@@ -438,6 +446,7 @@ def generate_launch_description():
     ld.add_action(declare_use_zlocalization_backend_cmd)
     ld.add_action(declare_zlocalization_backend_config_cmd)
     ld.add_action(declare_zlocalization_prior_enabled_cmd)
+    ld.add_action(declare_zlocalization_prior_initialization_only_cmd)
     ld.add_action(declare_zlocalization_loop_enabled_cmd)
     ld.add_action(declare_zlocalization_uwb_enabled_cmd)
     ld.add_action(declare_zlocalization_prior_map_cmd)

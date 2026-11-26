@@ -15,7 +15,7 @@
 | `src/localization/backend/srm27_localization_adapter/scripts/zlocalization_backend_adapter.py` | backend 专用输入适配 + reset 服务代理 |
 | `src/localization/backend/srm27_localization_adapter/scripts/zlio_bridge.py` | 持有该适配层（`backend_enabled:=true` 时启用） |
 | `src/bringup/srm27_nav_bringup/launch/localization_launch.py` | 启动接线 + 冲突检查 |
-| `scripts/bringup/start_real_nav.sh` / `start_sim_nav.sh` | `--zloc-backend` + `--zloc-prior` / `--zloc-loop` / `--zloc-uwb` |
+| `scripts/bringup/start_real_nav.sh` / `start_sim_nav.sh` | `--zloc-backend` + `--zloc-prior` / `--zloc-prior-once` / `--zloc-loop` / `--zloc-uwb` |
 
 ## 1. 谁拥有 `map → odom`
 
@@ -222,6 +222,44 @@ backend_node ──ResetFrontend──► zlocalization/reset_frontend（适配�
 UWB 的 `topic/frame`、天线杆臂、时间偏置及固定/在线坐标对齐需按场上配置核对。
 当前 UWB 因子假设天线到前端传感器的杆臂固定；若跨越旋转云台关节，需要另外处理动态外参。
 无先验时在线坐标/时间标定会关闭，固定对齐配置仍需有效。
+
+### 先验只匹配一次（2026-11-27）
+
+`--zloc-prior-once`（`prior_map.initialization_only: true`，隐含 `--zloc-prior`）用于
+"起步对准一次、之后只信 LIO"的跑法，例如上电后先让车静止、用先验匹配一次，
+随后带小陀螺等动作跑：
+
+- 首次被验收的先验全局位姿（恢复匹配，或先由 UWB 建立初值后的首个先验跟踪观测）
+  建立 `map→odom` 后**锁存**：跟踪周期不再产生先验观测，`SUSPECT`/`LOST` 也不再做先验恢复；
+- 之后 `map→odom` 是常量，全局位姿 = 该常量 × 前端 ZLIO 里程计。等价于"静态
+  `map→odom` + `--lio`"，只是初值来自一次先验匹配而不是 `--map-to-odom`；
+- 行为边界：锁存后若进入 `SUSPECT`/`LOST`，输出会停在冻结位姿（backend 只告警一次），
+  不会自动恢复——这是"不再使用先验"的直接后果，需要现场重启或触发前端 reset；
+- 与 `--zloc-loop` 同开时回环仍会修正 `map→odom`（脚本会告警）；估计器数值故障会清
+  运行图并允许新一次初始化重新做一次匹配；
+- 入口链：`start_real_nav.sh` / `start_sim_nav.sh` 的 `--zloc-prior-once`
+  → launch `zlocalization_prior_initialization_only` → `backend.launch.py`
+  `prior_initialization_only` → 参数 `prior_map.initialization_only`。
+
+### 已知起点：`--zloc-start-hint`（2026-11-27）
+
+全局 Scan Context + scan-to-map 在"起点附近结构少/动态物多"时会持续失败（实车 22:19
+那次 20 次尝试全灭、backend 一直 `INITIALIZING`，`map→odom` 从未发布 → RViz 里什么都
+看不到）。若每次都在同一个已知起点，用 `--zloc-start-hint "x y yaw_deg [z]"` 直接给初值：
+
+- `x/y/yaw_deg` 是**车体**（`gimbal_yaw`，即 RViz 2D Pose Estimate 的读数）在 map 系的
+  位置与航向，`z` 缺省 `0.2966`（雷达离地高度，与先验地图关键帧一致）；
+- 脚本生成一份 `extends` 平台 profile 的临时 overlay，设置
+  `startup_hint.{enabled,force_until_matched,x,y,z,yaw_deg}`，再走 `--zloc-config` 传入；
+  backend 在最近的先验关键帧上做局部几何验证，不进入全局描述子检索，通常 1 个周期内成功；
+- **传感器安装角不写进提示**：`makeStartupHintPriorLocked` 用提示航向左乘当前前端帧的
+  odom 姿态（odom 出生系 = 车体系），云台转角/倾斜安装自动进入种子，避免"提示按 level
+  位姿解释、种子差 30° 安装角"的老问题；
+- 与 `--zloc-prior-once` 组合就是标准的"已知起点匹配一次 → `map→odom` 锁存 → 之后全走
+  ZLIO"流程；提示错误（起点报错）时 `force_until_matched` 会让它一直重试，不会悄悄
+  退回全局检索——现场必须核对 x/y/yaw。
+- **backend 不订阅 `/initialpose`**：RViz 的 2D Pose Estimate 只是发一条消息，backend
+  没有消费者；起点只能通过 `--zloc-start-hint`（或 `--map-to-odom` + `--lio`）给。
 
 ## 6. 依赖：GTSAM 4.2.x
 

@@ -116,6 +116,8 @@
 #                                需要 --lio + --lio-frontend zlio；三项融合能力独立选择；
 #                                与 --gicp/--no-lio 互斥（map->odom 只能有一个所有者）。
 #       --zloc-prior            启用先验配准（默认关闭；需要 --zloc-map）
+#       --zloc-prior-once       先验只在初始化时匹配一次（隐含 --zloc-prior）:
+#                               首次匹配建立 map->odom 后锁存，之后定位全走前端 zlio 里程计。
 #       --zloc-loop             启用运行轨迹回环（默认关闭，可与先验/UWB 同开）
 #       --zloc-uwb              启用 UWB 融合（默认关闭；需配置实际话题/坐标/外参）
 #       --zloc-config <文件>    backend YAML 绝对路径（可用 extends 继承默认配置）
@@ -298,6 +300,8 @@ INIT_POSE="${INIT_POSE:-}"                   # map->odom 初值 [x,y,z,roll,pitc
 USE_ZLOC="${USE_ZLOC:-0}"
 # 三项能力仅由本次 CLI 显式开启，不继承环境变量中的历史开关。
 ZLOC_PRIOR=0
+# 先验只在初始化时匹配一次（--zloc-prior-once）。
+ZLOC_PRIOR_ONCE=0
 ZLOC_LOOP=0
 ZLOC_UWB=0
 ZLOC_CONFIG=""
@@ -340,6 +344,8 @@ while [ $# -gt 0 ]; do
     --no-gicp)    USE_GICP="0"; shift ;;
     --zloc-backend|--backend) USE_ZLOC="1"; shift ;;
     --zloc-prior) ZLOC_PRIOR=1; shift ;;
+    --zloc-prior-once|--zloc-prior-init-only|--zloc-prior-initialization-only)
+                  ZLOC_PRIOR=1; ZLOC_PRIOR_ONCE=1; shift ;;
     --zloc-loop)  ZLOC_LOOP=1; shift ;;
     --zloc-uwb)   ZLOC_UWB=1; shift ;;
     --zloc-config) ZLOC_CONFIG="${2:?--zloc-config 需要配置文件}"; shift 2 ;;
@@ -787,8 +793,8 @@ if [ "$USE_ZLOC" = "true" ] && [ "$USE_LIO_ODOMETRY" != "true" ]; then
   echo "       用法: ./scripts/bringup/start_sim_nav.sh --lio --zloc-backend --zloc-prior --zloc-map <dir>" >&2
   exit 2
 fi
-if [ "$USE_ZLOC" != "true" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_LOOP" = "1" ] || [ "$ZLOC_UWB" = "1" ] || [ -n "$ZLOC_CONFIG" ]; }; then
-  echo "[错误] --zloc-prior / --zloc-loop / --zloc-uwb / --zloc-config 需要 --zloc-backend。" >&2
+if [ "$USE_ZLOC" != "true" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_PRIOR_ONCE" = "1" ] || [ "$ZLOC_LOOP" = "1" ] || [ "$ZLOC_UWB" = "1" ] || [ -n "$ZLOC_CONFIG" ]; }; then
+  echo "[错误] --zloc-prior / --zloc-prior-once / --zloc-loop / --zloc-uwb / --zloc-config 需要 --zloc-backend。" >&2
   exit 2
 fi
 if [ "$USE_ZLOC" = "true" ]; then
@@ -967,6 +973,7 @@ else
       # 唯一 map->odom 所有者换成 backend_node（launch 会同时关掉静态 TF 与 GICP）。
       NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS use_zlocalization_backend:=True"
       NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS zlocalization_prior_enabled:=$ZLOC_PRIOR"
+      NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS zlocalization_prior_initialization_only:=$ZLOC_PRIOR_ONCE"
       NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS zlocalization_loop_enabled:=$ZLOC_LOOP"
       NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS zlocalization_uwb_enabled:=$ZLOC_UWB"
       if [ -n "$ZLOC_CONFIG" ]; then
@@ -1199,7 +1206,7 @@ printf '控制器    : %s%s\n' "$CONTROLLER" \
 if [ "$USE_ZLOC" = "true" ]; then
   printf '定位方式  : Z-Localization backend (map->odom 由 backend_node 发布, 实验模式)\n'
   printf '先验地图包: %s\n' "$ZLOC_MAP"
-  printf '融合开关  : prior=%s loop=%s uwb=%s (1=开, 0=关)\n' "$ZLOC_PRIOR" "$ZLOC_LOOP" "$ZLOC_UWB"
+  printf '融合开关  : prior=%s prior-once=%s loop=%s uwb=%s (1=开, 0=关)\n' "$ZLOC_PRIOR" "$ZLOC_PRIOR_ONCE" "$ZLOC_LOOP" "$ZLOC_UWB"
   printf '            static map->odom / small_gicp / slam_toolbox 均不启动\n'
 elif [ "$USE_GICP" = "true" ]; then
   printf '定位方式  : GICP 初始重定位 (slam:=False, use_pcd_localization:=True, use_lio_odometry:=False)\n'

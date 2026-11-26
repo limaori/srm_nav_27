@@ -155,6 +155,9 @@ void Localization::isolateEstimatorFailureLocked(const std::string& reason) {
     clearManualRelocalizationRequestLocked();
     last_lidar_observation_runtime_index_ = -1;
     last_tracking_reference_index_ = -1;
+    // 估计器故障会丢弃运行图并回到 LOST，允许在新一次初始化里重新做一次先验匹配。
+    prior_initialization_only_done_ = false;
+    prior_initialization_only_recovery_warned_ = false;
     last_recovery_timestamp_ = -std::numeric_limits<double>::infinity();
     last_global_observation_cycle_time_ = Timestamp();
     last_recovery_cycle_time_ = Timestamp();
@@ -203,6 +206,8 @@ void Localization::initialize() {
         last_global_observation_cycle_time_ = Timestamp();
         last_recovery_cycle_time_ = Timestamp();
         last_tracking_reference_index_ = -1;
+        prior_initialization_only_done_ = false;
+        prior_initialization_only_recovery_warned_ = false;
         empty_loop_.reset();
         const bool pure_odometry = !config_.prior_map_enabled && !config_.uwb.enabled &&
                                    !config_.loop.enabled &&
@@ -366,22 +371,37 @@ void Localization::runMaintenanceCycle() {
         return;
     expireFrontendResetIfTimedOut();
     bool failed = false;
+    bool prior_locked = false;
+    bool warn_locked_recovery = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (frontend_status_ != FrontendStatus::Active)
             return;
         failed = estimator_failed_;
+        // initialization_only 的锁存：首次先验匹配验收后不再产生任何先验观测。
+        prior_locked = config_.prior_map_enabled && config_.prior_map_initialization_only &&
+                       prior_initialization_only_done_;
+        if (prior_locked && LocalizationStateMachine::recoveryPath(state_.status()) &&
+            !prior_initialization_only_recovery_warned_) {
+            prior_initialization_only_recovery_warned_ = true;
+            warn_locked_recovery = true;
+        }
+    }
+    if (warn_locked_recovery) {
+        BACKEND_WARN_STREAM(
+            "prior_map.initialization_only is latched: no further prior matching; "
+            "map->odom stays frozen in this state until a frontend/session reset");
     }
     if (failed && !config_.prior_map_enabled) {
         triggerFrontendReset();
         return;
     }
     if (LocalizationStateMachine::recoveryPath(status())) {
-        if (config_.prior_map_enabled)
+        if (config_.prior_map_enabled && !prior_locked)
             execute(&Localization::captureRecovery, recovery_);
         return;
     }
-    if (config_.prior_map_enabled || config_.uwb.enabled)
+    if ((config_.prior_map_enabled && !prior_locked) || config_.uwb.enabled)
         execute(&Localization::captureTracking, tracking_);
     if (config_.loop.enabled)
         execute(&Localization::captureLoop, loop_cycle_);

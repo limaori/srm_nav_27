@@ -74,17 +74,6 @@ struct PlanarCommandLimits
   double accel;
 };
 
-/// In a rotating frame, maintaining a world velocity consumes |yaw_rate| * speed
-/// of the serial acceleration budget. Reserve at least half for steering/braking.
-inline PlanarCommandLimits rotatingFrameLimits(double _speed, double _accel, double _yaw_rate)
-{
-  const double frame_rate = std::abs(_yaw_rate);
-  if (frame_rate * _speed <= 0.5 * _accel) {
-    return {_speed, _accel - frame_rate * _speed};
-  }
-  return {0.5 * _accel / frame_rate, 0.5 * _accel};
-}
-
 /// Limit only inward velocity so reaction travel plus braking distance fits
 /// the available clearance: v*tau + v^2/(2*a) <= distance - required_clearance.
 /// Tangential and outward motion retain the original speed limit.

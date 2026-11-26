@@ -212,11 +212,13 @@ void ParameterReader::loadResetAndStartup() {
     double startup_yaw_deg = 0.0;
     getParam<double>("startup_hint/yaw_deg", startup_yaw_deg, 0.0);
     if (startup_hint_enabled) {
+        parameters_.runtime.startup_hint.yaw_rad = degreesToRadians(startup_yaw_deg);
         const Eigen::Matrix4d T_map_body =
             yawGuess(degreesToRadians(startup_yaw_deg), startup_position);
         parameters_.runtime.startup_hint.T_map_sensor =
             parameters_.input.body_transform.sensorPoseFromBodyPose(T_map_body);
     } else {
+        parameters_.runtime.startup_hint.yaw_rad = 0.0;
         parameters_.runtime.startup_hint.T_map_sensor.reset();
     }
 }

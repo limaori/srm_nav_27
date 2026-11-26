@@ -74,6 +74,11 @@ common:
 prior_map:
   # 是否加载并冻结不可变先验地图；入口 --zloc-prior 显式开启。
   enabled: false
+  # 先验只在初始化时匹配一次；入口 --zloc-prior-once 显式开启（隐含 prior_map.enabled）。
+  # true 时：首次验收的先验全局位姿建立 map->odom 后锁存，跟踪与恢复都不再产生先验观测，
+  # 全局位姿完全靠前端（ZLIO）里程计传播，等价于"静态 map->odom + LIO"但初值是先验匹配
+  # 出来的。没有先验地图时该开关无效（resolveConfig 会关掉并记录 override）。
+  initialization_only: false
   # 先验地图包目录。必须由入口以**绝对路径**传入（backend.launch.py 的 prior_map:=）。
   # 上游默认 pcd/rmuc 相对进程 CWD 解析，本工作区不允许这种隐式依赖。
   directory: ""
@@ -168,6 +173,17 @@ recovery:
   suspect_search_radius: 30.0
   # LOST 描述子候选的宽域搜索半径，单位为米；0 表示不限。
   lost_search_radius: 35.0
+  # ★ 本工作区新增（上游没有）：自动恢复提交相对"最后可信位姿"允许的最大平移，米；0 关闭。
+  #   上游靠 UWB 把恢复的候选搜索半径压到 2 m（uwb.recovery_search_radius），
+  #   所以恢复结果不可能离位太远；没有 UWB 时恢复会退化成 30/35 m 的全局描述子检索，
+  #   对称走廊下 180° 混叠能凭"残差好看"通过验收，一次提交就把车传送十几米
+  #   （2026-11-26 实车：+45.2 / +11.4 / +30.4 m）。这个门限就是那条不变式的替代品：
+  #   越过预算的恢复不提交、保持 tf 冻结，并按一次恢复失败累计。
+  max_translation_correction: 2.5
+  # 同上，最大旋转，单位为度。
+  max_rotation_correction_deg: 20.0
+  # 人工下发的 relocalize 请求是否绕过上面的预算（越过时仍打 WARN 并打印幅度）。
+  manual_bypasses_correction_budget: true
   source:
     # 一次观测成立所需的最少因果点云帧数。
     min_frames: 2
@@ -372,6 +388,8 @@ startup_hint:
   # 启动提示中 body 在 map 下的 Z 坐标，单位为米。
   z: 0.15
   # 启动提示中 body 在 map 下的偏航角，单位为度。
+  # 注意：提示只表达 body 的位置与航向；传感器相对 body 的 roll/pitch/yaw 由后端从
+  # 启动时的实时 odom 姿态取（odom 出生系即 body 系），云台转角/倾斜安装不必写在这里。
   yaw_deg: 0.0
 innovation:
   # 联合 NIS 卡方上尾概率低于该值时判定观测冲突。

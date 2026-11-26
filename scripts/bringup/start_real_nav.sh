@@ -87,6 +87,10 @@
 #                                                             # 地图/先验点云都只给名字
 #   ./scripts/bringup/start_real_nav.sh -m 227_1113pro --zloc-backend --zloc-prior
 #                                                             # 先验地图包也按地图名自动找
+#   ./scripts/bringup/start_real_nav.sh -m 227_1113pro --zloc-backend --zloc-prior-once
+#                                                             # 先验只匹配一次, 之后全靠 zlio
+#   ./scripts/bringup/start_real_nav.sh -m 227to219_1125 --zloc-backend --zloc-prior-once \
+#         --zloc-start-hint "0.33 -0.08 0"                    # 已知起点: 只在该点附近匹配一次
 #   ./scripts/bringup/start_real_nav.sh --prior-pcd /abs/map.pcd      # 指定重定位先验点云
 #   ./scripts/bringup/start_real_nav.sh --no-reloc                    # 不用重定位: LIO + 静态 map->odom, 不需要先验 PCD
 #   ./scripts/bringup/start_real_nav.sh -c omni                       # 换回 Omni 旧链 (fake_vel_transform legacy)
@@ -144,6 +148,20 @@
 #                               与 --reloc/--slam/--static 互斥（同一时刻只能有一个
 #                               map->odom 所有者）。验收未通过前不要用于正式比赛。
 #       --zloc-prior            启用先验配准（默认关闭；需要 --zloc-map）
+#       --zloc-prior-once       先验只在初始化时匹配一次（隐含 --zloc-prior）:
+#                               首次匹配建立 map->odom 后锁存，backend 不再做任何先验
+#                               观测（跟踪/恢复都不再匹配），之后定位完全靠前端 ZLIO
+#                               里程计传播。适合"起步对准一次、后面只信 LIO"的跑法。
+#       --zloc-start-hint "X Y YAW [Z]"
+#                               起始位姿提示（车体 gimbal_yaw 在 map 的位姿，YAW 单位为度）:
+#                               配合先验时 backend 只在该位置附近做几何验证
+#                               (startup_hint.force_until_matched)，不再靠全局 Scan Context
+#                               碰运气；Z 缺省 0.2966（雷达离地高度）。与 --zloc-prior-once
+#                               一起用就是"在已知起点匹配一次，之后全走 zlio"。
+#                               传感器安装角（云台转角/倾斜）由 backend 取实时 odom 姿态，
+#                               不需要写进提示。
+#                               ⚠ backend 模式**不订阅 /initialpose**: RViz 里用 2D Pose
+#                               Estimate 点一下不会给 backend 初值，必须用这个参数。
 #       --zloc-loop             启用运行轨迹回环（默认关闭，可与先验/UWB 同开）
 #       --zloc-uwb              启用 UWB 融合（默认关闭；需配置实际话题/坐标/外参）
 #       --zloc-config <文件>    backend YAML 绝对路径（可用 extends 继承默认配置）
@@ -395,9 +413,18 @@ START_STATIC="${START_STATIC:-0}"
 START_ZLOC="${START_ZLOC:-0}"
 # 三项能力仅由本次 CLI 显式开启，不继承环境变量中的历史开关。
 ZLOC_PRIOR=0
+# 先验只在初始化时匹配一次（--zloc-prior-once）: 首次匹配建立 map->odom 后锁存，
+# 之后 backend 不再产生先验观测，定位完全由前端 zlio 里程计传播。
+ZLOC_PRIOR_ONCE=0
 ZLOC_LOOP=0
 ZLOC_UWB=0
 ZLOC_CONFIG=""
+# 起始位姿提示（--zloc-start-hint "x y yaw_deg [z]"）：只给车体（gimbal_yaw）在地图里的
+# 位置与航向，backend 用它做一次局部几何验证，不靠全局 Scan Context 碰运气。
+# 实现上是生成一份 extends 平台 profile 的临时 YAML，再走 --zloc-config 传下去。
+ZLOC_START_HINT=""
+# 传感器（livox_imu）离地高度，提示里的 z 默认取它；与先验地图关键帧的 z 一致（0.2966）。
+ZLOC_START_HINT_Z="${ZLOC_START_HINT_Z:-0.2966}"
 # 先验地图包目录（必须绝对路径，且必须由 maps/pcd/<site>_mapframe.pcd 生成）。
 ZLOC_MAP="${ZLOC_MAP:-}"
 # 先验地图包的根目录: 没给 --zloc-map 时按"地图名"在这里找
@@ -739,9 +766,17 @@ while [ $# -gt 0 ]; do
     --static)         START_STATIC=1; MODE_GIVEN=1; shift ;;
     --zloc-backend|--backend) START_ZLOC=1; MODE_GIVEN=1; shift ;;
     --zloc-prior) ZLOC_PRIOR=1; shift ;;
+    # 先验只在初始化时匹配一次（隐含 --zloc-prior）：首次匹配建立 map->odom 后锁存，
+    # 之后 backend 不再产生先验观测，定位全走前端 zlio 里程计。
+    --zloc-prior-once|--zloc-prior-init-only|--zloc-prior-initialization-only)
+                      ZLOC_PRIOR=1; ZLOC_PRIOR_ONCE=1; shift ;;
     --zloc-loop)  ZLOC_LOOP=1; shift ;;
     --zloc-uwb)   ZLOC_UWB=1; shift ;;
     --zloc-config) ZLOC_CONFIG="${2:?--zloc-config 需要配置文件}"; shift 2 ;;
+    # 起始位姿提示: "x y yaw_deg [z]"。x/y 是车体（gimbal_yaw）在地图里的位置，
+    # yaw_deg 是车头在地图里的朝向（RViz 2D Pose Estimate 的读数即可），z 可选（默认 0.2966）。
+    # 只用来给先验匹配一个初值，匹配一次成功后仍按 --zloc-prior-once 锁存。
+    --zloc-start-hint) ZLOC_START_HINT="${2:?--zloc-start-hint 需要 \"x y yaw_deg [z]\"}"; shift 2 ;;
     # 空路径交给启用先验时的自检统一报告，避免未设置 BUNDLE 时难以理解的 bash 错误。
     --zloc-map)       ZLOC_MAP="${2:-}"
                       if [ $# -ge 2 ]; then shift 2; else shift; fi
@@ -1086,8 +1121,8 @@ fi
 #   * 没有 --lio: backend 拿不到 FrontendFrame，输出永远 INITALIZING；
 #   * 前端不是 zlio: legacy/point_lio 输入没有本仓库的 odom/T_off 契约；
 #   * 启用先验却未给地图包，或地图坐标系错误: backend 无法建立可信地图定位。
-if [ "$ZLOC_ON" != "1" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_LOOP" = "1" ] || [ "$ZLOC_UWB" = "1" ] || [ -n "$ZLOC_CONFIG" ]; }; then
-  echo "[错误] --zloc-prior / --zloc-loop / --zloc-uwb / --zloc-config 需要 --zloc-backend。" >&2
+if [ "$ZLOC_ON" != "1" ] && { [ "$ZLOC_PRIOR" = "1" ] || [ "$ZLOC_PRIOR_ONCE" = "1" ] || [ "$ZLOC_LOOP" = "1" ] || [ "$ZLOC_UWB" = "1" ] || [ -n "$ZLOC_CONFIG" ]; }; then
+  echo "[错误] --zloc-prior / --zloc-prior-once / --zloc-loop / --zloc-uwb / --zloc-config 需要 --zloc-backend。" >&2
   exit 2
 fi
 if [ "$ZLOC_ON" = "1" ]; then
@@ -1130,15 +1165,95 @@ if [ "$ZLOC_ON" = "1" ]; then
       *) _zloc_problems+=("--zloc-config 必须是绝对路径: $ZLOC_CONFIG") ;;
     esac
   fi
+  # 起始位姿提示: 只给先验匹配一个"车现在在哪、朝哪"的初值。
+  ZLOC_START_HINT_X=""; ZLOC_START_HINT_Y=""; ZLOC_START_HINT_YAW=""
+  if [ -n "$ZLOC_START_HINT" ]; then
+    if [ "$ZLOC_PRIOR" != "1" ]; then
+      _zloc_problems+=("--zloc-start-hint 需要 --zloc-prior / --zloc-prior-once（提示只服务于先验匹配）")
+    fi
+    # 允许空格或逗号分隔；3 个数 (x y yaw_deg) 或 4 个数 (x y yaw_deg z)。
+    read -r -a _hint_parts <<< "$(printf '%s' "$ZLOC_START_HINT" | tr ',' ' ')"
+    if [ "${#_hint_parts[@]}" -lt 3 ] || [ "${#_hint_parts[@]}" -gt 4 ]; then
+      _zloc_problems+=("--zloc-start-hint 需要 \"x y yaw_deg [z]\"（收到: $ZLOC_START_HINT）")
+    else
+      _hint_bad=""
+      for _v in "${_hint_parts[@]}"; do
+        awk -v v="$_v" 'BEGIN{ exit !(v == v + 0) }' || _hint_bad="$_v"
+      done
+      if [ -n "$_hint_bad" ]; then
+        _zloc_problems+=("--zloc-start-hint 含非数值: $_hint_bad")
+      else
+        ZLOC_START_HINT_X="${_hint_parts[0]}"
+        ZLOC_START_HINT_Y="${_hint_parts[1]}"
+        ZLOC_START_HINT_YAW="${_hint_parts[2]}"
+        if [ "${#_hint_parts[@]}" -eq 4 ]; then ZLOC_START_HINT_Z="${_hint_parts[3]}"; fi
+      fi
+    fi
+  fi
   if [ "${#_zloc_problems[@]}" -gt 0 ]; then
     echo "[错误] --zloc-backend 模式配置不完整:" >&2
     for _p in "${_zloc_problems[@]}"; do echo "[错误]   - $_p" >&2; done
     echo "[错误] 参考: docs/architecture/localization_backend.md" >&2
     exit 1
   fi
+  # 生成起始提示覆盖配置：extends 平台 profile（或用户自己的 --zloc-config），
+  # 只覆盖 startup_hint。backend 的 startup_hint 只表达车体位置+航向，
+  # 传感器安装角（云台转角/倾斜）由它从实时 odom 姿态取。
+  if [ -n "$ZLOC_START_HINT" ]; then
+    _hint_base="$ZLOC_CONFIG"
+    if [ -z "$_hint_base" ]; then
+      for _d in "$WS_DIR/install/srm27_zlocalization_backend/share/srm27_zlocalization_backend" \
+                "$WS_DIR/src/localization/backend/srm27_zlocalization_backend"; do
+        if [ -f "$_d/config/srm27_localization_real.yaml" ]; then
+          _hint_base="$_d/config/srm27_localization_real.yaml"
+          break
+        fi
+      done
+    fi
+    if [ -z "$_hint_base" ] || [ ! -f "$_hint_base" ]; then
+      echo "[错误] --zloc-start-hint 找不到要继承的 backend 配置（实车 profile）。" >&2
+      echo "[错误]   可用 --zloc-config <绝对路径> 显式指定，或先构建 srm27_zlocalization_backend。" >&2
+      exit 1
+    fi
+    _hint_base="$(readlink -f "$_hint_base")"
+    # 输出放在工作空间内（持久、可检查），不要用 /tmp：launch 在别的终端里读这份文件，
+    # 某些受限环境（容器/沙箱）的 /tmp 是私有的，写进去对方读不到。
+    _hint_dir="$WS_DIR/.tmp_roslog"
+    mkdir -p "$_hint_dir"
+    _hint_file="$_hint_dir/zloc_start_hint.yaml"
+    cat > "$_hint_file" <<EOF
+# 由 scripts/bringup/start_real_nav.sh --zloc-start-hint 生成（临时文件，可删除）。
+# x/y 是车体（gimbal_yaw）在地图里的位置，yaw_deg 是车头在地图里的朝向；
+# 传感器相对车体的安装角（云台转角/倾斜安装）不写在这里，由 backend 取实时 odom 姿态。
+extends: $_hint_base
+startup_hint:
+  enabled: true
+  force_until_matched: true
+  x: $ZLOC_START_HINT_X
+  y: $ZLOC_START_HINT_Y
+  z: $ZLOC_START_HINT_Z
+  yaw_deg: $ZLOC_START_HINT_YAW
+EOF
+    ZLOC_CONFIG="$(readlink -f "$_hint_file")"
+    echo "[提示] --zloc-start-hint: 起始位姿提示 overlay = $ZLOC_CONFIG"
+    echo "[提示]   车体在 map: x=$ZLOC_START_HINT_X y=$ZLOC_START_HINT_Y yaw=${ZLOC_START_HINT_YAW}° z=$ZLOC_START_HINT_Z"
+    echo "[提示]   backend 只在这个位置附近做几何验证 (startup_hint.force_until_matched=true)，"
+    echo "[提示]   匹配成功后仍按 --zloc-prior-once 锁存 map->odom。"
+  fi
   echo "[提示] --zloc-backend: map->odom 由 srm27_zlocalization_backend 发布,"
   echo "[提示]   静态 TF / small_gicp / slam_toolbox 都不会启动（launch 里也有冲突检查）。"
   echo "[提示]   这是**实验模式**（默认关闭）: 验收通过前请保留 --lio 作为现场回退。"
+  if [ "$ZLOC_PRIOR_ONCE" = "1" ]; then
+    echo "[提示] --zloc-prior-once: 先验只做**一次**初始化匹配 (prior_map.initialization_only);"
+    echo "[提示]   首次匹配建立 map->odom 后锁存, backend 不再做先验校正/先验恢复,"
+    echo "[提示]   之后定位完全由前端 ZLIO 里程计传播 (map->odom 保持常量)。"
+    echo "[提示]   等 /backend_node/localization_state 变成 NORMAL 再开小陀螺/大机动,"
+    echo "[提示]   这之前车最好保持静止; 匹配没成功时 backend 会一直重试。"
+    if [ "$ZLOC_LOOP" = "1" ]; then
+      echo "[警告] --zloc-loop 与 --zloc-prior-once 同开: 回环仍会修正 map->odom," >&2
+      echo "[警告]   不再满足\"之后定位全走前端 zlio\"，请确认这是有意为之。" >&2
+    fi
+  fi
 fi
 
 if [ "$STATIC_ON" = "1" ]; then
@@ -1793,6 +1908,8 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ]; then
     # （localization_launch 会按平台选 real/sim 那份）。
     NAV_CMD="$NAV_CMD use_zlocalization_backend:=True"
     NAV_CMD="$NAV_CMD zlocalization_prior_enabled:=$ZLOC_PRIOR"
+    # 先验只做一次初始化匹配：backend 锁存首次匹配结果后不再产生先验观测。
+    NAV_CMD="$NAV_CMD zlocalization_prior_initialization_only:=$ZLOC_PRIOR_ONCE"
     NAV_CMD="$NAV_CMD zlocalization_loop_enabled:=$ZLOC_LOOP"
     NAV_CMD="$NAV_CMD zlocalization_uwb_enabled:=$ZLOC_UWB"
     if [ -n "$ZLOC_CONFIG" ]; then
@@ -1906,6 +2023,9 @@ elif [ "$RELOC_ON" = "1" ]; then
   MODE_DESC="先验 PCD 重定位 (small_gicp 发布 map->odom)"
 elif [ "$ZLOC_ON" = "1" ]; then
   MODE_DESC="$LIO_LABEL 里程计 + Z-Localization backend 发布 map->odom (实验)"
+  if [ "$ZLOC_PRIOR_ONCE" = "1" ]; then
+    MODE_DESC="$MODE_DESC; 先验只在初始化时匹配一次, 之后全靠前端里程计"
+  fi
 elif [ "$LIO_ON" = "1" ]; then
   MODE_DESC="$LIO_LABEL 里程计 + 静态 map->odom"
 else
@@ -1946,7 +2066,10 @@ echo "  定位方式    : $MODE_DESC"
 echo "  slam        : $SLAM_ARG   use_pcd_localization: $RELOC_ARG   use_lio_odometry: $LIO_ARG$([ "$MINCO_FAKEYAW_CHAIN" = "1" ] && echo '   (迁移链按定位方式自动定 use_lio_odometry)')"
 if [ "$ZLOC_ON" = "1" ]; then
   echo "  zloc 先验图 : $ZLOC_MAP"
-  echo "  zloc 开关   : prior=$ZLOC_PRIOR loop=$ZLOC_LOOP uwb=$ZLOC_UWB (1=开, 0=关)"
+  echo "  zloc 开关   : prior=$ZLOC_PRIOR prior-once=$ZLOC_PRIOR_ONCE loop=$ZLOC_LOOP uwb=$ZLOC_UWB (1=开, 0=关)"
+  if [ -n "$ZLOC_START_HINT" ]; then
+    echo "  zloc 起点   : x=$ZLOC_START_HINT_X y=$ZLOC_START_HINT_Y yaw=${ZLOC_START_HINT_YAW}° z=$ZLOC_START_HINT_Z (车体在 map; 局部验证一次)"
+  fi
 fi
 echo "  地图 (yaml) : $MAP_YAML$([ "$SLAM_ON" = "1" ] && echo '   (SLAM 模式未加载)')"
 if [ "$RELOC_ON" = "1" ]; then
@@ -1982,7 +2105,7 @@ echo "  组合节点    : $COMPOSITION_ARG    RViz: $RVIZ_ARG    手柄: $USE_JO
 if [ "$USE_RVIZ" = "1" ]; then
   echo "  RViz 配置   : ${RVIZ_CONFIG:-<包内 nav2_default_view.rviz>}"
 fi
-if [ "$RELOC_ON" != "1" ] && [ "$SLAM_ON" != "1" ]; then
+if [ "$RELOC_ON" != "1" ] && [ "$SLAM_ON" != "1" ] && [ "$ZLOC_ON" != "1" ]; then
   echo "  map->odom   : x=$MAP_TO_ODOM_X y=$MAP_TO_ODOM_Y yaw=$MAP_TO_ODOM_YAW (静态)"
   if [ "$LIO_ON" = "1" ] && [ "$MAP_TO_ODOM_X" = "0.0" ] && [ "$MAP_TO_ODOM_Y" = "0.0" ] \
      && [ "$MAP_TO_ODOM_YAW" = "0.0" ]; then

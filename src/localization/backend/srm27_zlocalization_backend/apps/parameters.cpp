@@ -87,6 +87,8 @@ void ParameterReader::loadMapTrajectoryAndRegistration() {
     parameters_.runtime.storage.submap_cache_bytes =
         static_cast<std::size_t>(std::max(0, submap_cache_mb)) * 1024U * 1024U;
     getParam("prior_map/enabled", parameters_.runtime.prior_map_enabled);
+    getParam("prior_map/initialization_only",
+             parameters_.runtime.prior_map_initialization_only);
     getParam<std::string>("prior_map/directory", parameters_.maps.prior_directory, "pcd/prior_map");
     getParam("prior_map/voxel_resolution", parameters_.maps.prior_voxel);
 
@@ -177,6 +179,15 @@ void ParameterReader::loadRecovery() {
     getParam("recovery/suspect_failures_before_lost",
              parameters_.runtime.recovery.suspect_failures_before_lost);
     getParam("recovery/automatic_when_lost", parameters_.runtime.recovery.automatic_when_lost);
+    getParam("recovery/max_translation_correction",
+             parameters_.runtime.recovery.max_translation_correction);
+    double recovery_max_rotation_correction_deg = 20.0;
+    getParam<double>("recovery/max_rotation_correction_deg", recovery_max_rotation_correction_deg,
+                     20.0);
+    parameters_.runtime.recovery.max_rotation_correction_rad =
+        degreesToRadians(recovery_max_rotation_correction_deg);
+    getParam("recovery/manual_bypasses_correction_budget",
+             parameters_.runtime.recovery.manual_bypasses_correction_budget);
     getParam("recovery/source/min_frames", parameters_.runtime.recovery.source.min_frames);
     getParam("recovery/source/max_frames", parameters_.runtime.recovery.source.max_frames);
     getParam("recovery/source/max_time", parameters_.runtime.recovery.source.max_time);

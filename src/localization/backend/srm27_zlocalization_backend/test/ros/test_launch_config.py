@@ -106,6 +106,24 @@ def test_independent_switches_override_yaml_without_map_implying_prior(tmp_path,
         assert params[f'{section}.enabled'] is bool(mask & bit)
 
 
+def test_prior_initialization_only_overrides_yaml_but_config_keeps_it(tmp_path):
+    """prior_initialization_only 显式覆盖 YAML；config 表示沿用 YAML。"""
+    from launch_ros.utilities import evaluate_parameters
+
+    config = tmp_path / 'configuration.yaml'
+    config.write_text('prior_map: {enabled: true, initialization_only: true}\n',
+                      encoding='utf-8')
+    context, actions = launch_actions(
+        config, prior_map=str(tmp_path), prior_enabled='true',
+        prior_initialization_only='false')
+    params = evaluate_parameters(context, actions[0]._Node__parameters)[0]
+    assert params['prior_map.initialization_only'] is False
+
+    context, actions = launch_actions(config, prior_map=str(tmp_path), prior_enabled='true')
+    params = evaluate_parameters(context, actions[0]._Node__parameters)[0]
+    assert params['prior_map.initialization_only'] is True
+
+
 def test_shipping_profiles_default_all_features_off():
     root = Path(__file__).resolve().parents[2] / 'config'
     for name in ('backend.yaml', 'srm27_localization_real.yaml', 'srm27_localization_sim.yaml'):

@@ -24,3 +24,24 @@ output:
   # 不共面（2026-11-24 实测 z 已由先验地图摆正降到 ~0，但 roll/pitch 仍有 ~1.4°/2.4°）。
   # 打开 4-DoF 投影后 TF 只保留 x/y/yaw，两张 costmap 共面；内部估计仍是 6-DoF。
   planar_map_to_odom: true
+
+recovery:
+  # ★ 2026-11-26 实车复盘（bag real_zloc_1126_215042 / 21:30 那次）：
+  #
+  # 上游把恢复搜索压到 2 m 靠的是 UWB（uwb.recovery_search_radius: 2.0）。本车没有 UWB，
+  # 恢复退化成"围绕最后可信位姿 30/35 m 的全局描述子检索"，而 227/219 两段走廊同构、
+  # 相距约 45 m —— Scan Context 的 180° 混叠以 rmse 0.084 / corr 0.83 的"好成绩"通过验收，
+  # 一次提交就把车传送十几米（实测 +45.2 / +11.4 / +30.4 m，其中两次还被 6 s 后反向弹回）。
+  #
+  # 这里按"上游 UWB 的等效尺度"收紧，把那条不变式在没有 UWB 的情况下补回来：
+  #   1) 可信位姿的实测漂移在 1–2 m 内，SUSPECT 半径 5 m 足够召回正确候选；
+  #   2) LOST 的 12 m 覆盖一段走廊，但不会跨到另一段同构走廊；
+  #   3) LOST 后不自动乱找，保持冻结等人工 /backend_node/relocalize；
+  #   4) 幅度预算 2.5 m / 20° 是最后一道闸（见 backend.yaml 同名键）。
+  suspect_search_radius: 5.0
+  lost_search_radius: 12.0
+  automatic_when_lost: false
+  # 与 backend.yaml 默认值相同，写在这里是为了让"实车只看这一份"也能看到闸门在哪。
+  max_translation_correction: 2.5
+  max_rotation_correction_deg: 20.0
+  # 车被搬动/推走超过预算时，先调大上面两项或手动 relocalize（人工请求默认绕过预算）。

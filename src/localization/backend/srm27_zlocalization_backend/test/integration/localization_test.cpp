@@ -65,10 +65,68 @@ TEST_F(LocalizationFlow, PriorAndLoopRejectSharedDescriptorStorage) {
                                reset, states, visualization)), std::invalid_argument);
 }
 
+/// 先验 initialization_only 的对照场景：里程计相对真值持续漂移。
+class PriorInitializationOnlyFlow : public LocalizationFlow,
+                                    public ::testing::WithParamInterface<bool> {};
+
+/// 一次性先验：首次匹配验收后 map->odom 冻结（定位全走前端里程计）；
+/// 常规先验仍按跟踪周期持续把漂移拉回。
+TEST_P(PriorInitializationOnlyFlow, PriorCorrectionsFollowTheConfiguredLatch) {
+    const bool initialization_only = GetParam();
+    const auto anchor = testing::scenePose(.2, -.1, .05, .05);
+    config.startup_hint.T_map_sensor = anchor;
+    config.startup_hint.yaw_rad = .05;
+    config.prior_map_initialization_only = initialization_only;
+    start(true);
+    ASSERT_TRUE(ingest(frame(10, anchor, Eigen::Matrix4d::Identity())));
+    EXPECT_EQ(controller->status(), LocalizationStatus::Initializing);
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+    const auto initial = output(frame(10, anchor, Eigen::Matrix4d::Identity()));
+    ASSERT_TRUE(initial.valid);
+    // 之后里程计比真值多走 0.03 m：常规跟踪会把 map->odom 拉回来；
+    // initialization_only 则不再产生先验观测，map->odom 保持常量。
+    bool changed = false;
+    for (int index = 1; index <= 3; ++index) {
+        const auto truth = anchor * testing::scenePose(.1 * index, 0, 0, 0);
+        const auto odom = testing::scenePose(.1 * index + .03, 0, 0, 0);
+        const auto next = frame(10 + index, truth, odom);
+        ASSERT_TRUE(ingest(next));
+        maintain();
+        ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+        const auto current = output(next);
+        ASSERT_TRUE(current.valid);
+        changed = changed || (current.T_map_odom - initial.T_map_odom).norm() > 1e-4;
+    }
+    EXPECT_EQ(changed, !initialization_only);
+}
+
+INSTANTIATE_TEST_SUITE_P(PriorInitializationOnly, PriorInitializationOnlyFlow, ::testing::Bool());
+
+/// 启动提示只表达车体航向；传感器相对车体的安装角（云台转角/倾斜）取当前端 odom 姿态。
+/// 倾斜安装时若把提示的 level 旋转当传感器位姿，种子会差一整个安装角而匹配失败。
+TEST_F(LocalizationFlow, StartupHintTakesSensorAttitudeFromLiveOdom) {
+    Eigen::Matrix4d mount = Eigen::Matrix4d::Identity();
+    mount.block<3, 3>(0, 0) =
+        Eigen::AngleAxisd(.5, Eigen::Vector3d::UnitX()).toRotationMatrix() *
+        Eigen::AngleAxisd(.35, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    const Eigen::Matrix4d hint = testing::scenePose(0, 0, 0, .1);
+    const Eigen::Matrix4d truth = hint * mount;
+    config.startup_hint.T_map_sensor = hint;
+    config.startup_hint.yaw_rad = .1;
+    start(true);
+    ASSERT_TRUE(ingest(frame(10, truth, mount)));
+    EXPECT_EQ(controller->status(), LocalizationStatus::Initializing);
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+    EXPECT_LT((output(frame(10, truth, mount)).T_map_sensor - truth).norm(), 5e-3);
+}
+
 /// 验证先验重定位、后续跟踪及输出版本更新，同一几何观测只提交一次。
 TEST_F(LocalizationFlow, PriorRecoveryAndTrackingCommitGeometryOnce) {
     const auto anchor = testing::scenePose(.2, -.1, .05, .05);
     config.startup_hint.T_map_sensor = testing::scenePose(.15, -.1, .05, .05);
+    config.startup_hint.yaw_rad = .05;
     start(true);
     const auto prior_revision = prior.revision();
     auto first = frame(10, anchor, Eigen::Matrix4d::Identity());

@@ -63,6 +63,8 @@ def generate_launch_description():
         'mode': 'config',
         # config 保留直接启动时显式 YAML / legacy mode 的语义；导航入口一律传 true/false。
         'prior_enabled': 'config',
+        # 先验只在初始化时匹配一次；true/false 覆盖 YAML，config 沿用 YAML。
+        'prior_initialization_only': 'config',
         'loop_enabled': 'config',
         'uwb_enabled': 'config',
         'prior_map': '',
@@ -85,6 +87,9 @@ def generate_launch_description():
                                   ('loop_enabled', 'loop'), ('uwb_enabled', 'uwb')):
             if args[argument] != 'config':
                 params.setdefault(section, {})['enabled'] = launch_bool(args[argument])
+        if args['prior_initialization_only'] != 'config':
+            params.setdefault('prior_map', {})['initialization_only'] = launch_bool(
+                args['prior_initialization_only'])
         if args['prior_map']:
             params.setdefault('prior_map', {})['directory'] = require_absolute(
                 'prior_map', args['prior_map'])

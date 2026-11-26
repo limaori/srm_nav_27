@@ -101,6 +101,9 @@ def generate_launch_description():
         ["'", zlocalization_backend_config, "' or '", default_backend_config, "'"]
     )
     zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
+    # 先验只在初始化时匹配一次（首次匹配后 map->odom 冻结，定位全走前端 ZLIO）。
+    zlocalization_prior_initialization_only = LaunchConfiguration(
+        "zlocalization_prior_initialization_only")
     zlocalization_loop_enabled = LaunchConfiguration("zlocalization_loop_enabled")
     zlocalization_uwb_enabled = LaunchConfiguration("zlocalization_uwb_enabled")
     zlocalization_prior_map = LaunchConfiguration("zlocalization_prior_map")
@@ -216,6 +219,13 @@ def generate_launch_description():
     declare_zlocalization_prior_enabled_cmd = DeclareLaunchArgument(
         "zlocalization_prior_enabled", default_value="False",
         description="启用先验配准，独立开关，默认关闭",
+    )
+    declare_zlocalization_prior_initialization_only_cmd = DeclareLaunchArgument(
+        "zlocalization_prior_initialization_only", default_value="False",
+        description=(
+            "先验只在初始化时匹配一次；首次匹配成功后 map->odom 冻结，"
+            "定位完全由前端 ZLIO 里程计传播（需要 zlocalization_prior_enabled:=True）"
+        ),
     )
     declare_zlocalization_loop_enabled_cmd = DeclareLaunchArgument(
         "zlocalization_loop_enabled", default_value="False",
@@ -540,6 +550,7 @@ def generate_launch_description():
             launch_arguments={
                 "config_file": effective_backend_config,
                 "prior_enabled": zlocalization_prior_enabled,
+                "prior_initialization_only": zlocalization_prior_initialization_only,
                 "loop_enabled": zlocalization_loop_enabled,
                 "uwb_enabled": zlocalization_uwb_enabled,
                 "prior_map": zlocalization_prior_map,
@@ -633,6 +644,7 @@ def generate_launch_description():
     ld.add_action(declare_use_zlocalization_backend_cmd)
     ld.add_action(declare_zlocalization_backend_config_cmd)
     ld.add_action(declare_zlocalization_prior_enabled_cmd)
+    ld.add_action(declare_zlocalization_prior_initialization_only_cmd)
     ld.add_action(declare_zlocalization_loop_enabled_cmd)
     ld.add_action(declare_zlocalization_uwb_enabled_cmd)
     ld.add_action(declare_zlocalization_prior_map_cmd)

@@ -241,6 +241,11 @@ private:
     /// 在第零代初始化期间构造待几何验证的启动提示。
     std::optional<RelocalizationPositionPrior> makeStartupHintPriorLocked(
         const FrontendFrame& frame) const;
+    /// 预估一次恢复提交相对当前冻结输出的位姿变化；不改变任何状态。
+    std::optional<PoseCorrectionDelta> prospectiveRecoveryCorrectionLocked(
+        const RecoveryWork& work, const RecoveryResult& result) const;
+    /// 判断恢复提交幅度是否落在预算内；判据见 backend/recovery_budget.hpp。
+    bool recoveryCorrectionWithinBudgetLocked(const PoseCorrectionDelta& delta) const;
 
     /// 清除已经完成或失效的手动恢复请求。
     void clearManualRelocalizationRequestLocked();
@@ -332,6 +337,10 @@ private:
     Timestamp last_global_observation_cycle_time_;
     Timestamp last_recovery_cycle_time_;
     int last_tracking_reference_index_ = -1;
+    /// prior_map.initialization_only：首次先验匹配已验收，此后不再产生先验观测。
+    bool prior_initialization_only_done_ = false;
+    /// 一次性先验锁存后进入恢复状态只告警一次，避免 5 Hz 刷屏。
+    bool prior_initialization_only_recovery_warned_ = false;
 
     std::optional<EmptyLoopIdentity> empty_loop_;
     int last_loop_checked_index_ = -1;

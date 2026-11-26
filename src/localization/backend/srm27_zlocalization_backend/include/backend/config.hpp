@@ -150,6 +150,9 @@ struct SourceAccumulationConfig {
 struct StartupHintConfig {
     /// 初始传感器在 map 系中的位姿；空值表示未设置提示。
     std::optional<Eigen::Matrix4d> T_map_sensor;
+    /// 提示中的车体航向（map 系，rad）。传感器相对车体的 roll/pitch/yaw 由当前前端帧
+    /// 给出（odom 出生系即车体系），因此云台转角/倾斜安装不需要写进提示。
+    double yaw_rad = 0.0;
     /// 有先验图时，初始代次持续使用提示位姿执行地图匹配，直至成功。
     bool force_until_matched = false;
 };
@@ -192,6 +195,21 @@ struct RecoveryConfig {
     int global_fallback_candidates = 8;
     int suspect_failures_before_lost = 3;
     bool automatic_when_lost = true;
+    /// 自动恢复相对最后可信位姿允许的最大平移，m；0 关闭此门限。
+    ///
+    /// 恢复路径原先没有幅度上限：`applyRecoveryLocked` 直接把匹配结果装成 map->odom。
+    /// 在对走廊一类对称场景里，Scan Context 的 180° 混叠可以凭"残差好看"通过验收，
+    /// 一次提交就把车传送到十几米外（实车 2026-11-26：+45.2 / +11.4 / +30.4 m）。
+    /// 与 `tracking.max_translation_correction` 对称，但**只在已有可信位姿时生效**：
+    /// 冷启动（INITIALIZING）本来就没有"上一时刻"可比，不设限。
+    double max_translation_correction = 2.5;
+    /// 自动恢复相对最后可信位姿允许的最大旋转，rad；0 关闭此门限。
+    double max_rotation_correction_rad = 20.0 * M_PI / 180.0;
+    /// 手动重定位请求是否绕过上面的幅度预算。
+    ///
+    /// 默认 true：人工下发 `/backend_node/relocalize` 视为"我知道车在哪"，允许大修正，
+    /// 但越过预算时仍打 WARN 并打印实际幅度；置 false 则手动请求也受同一预算约束。
+    bool manual_bypasses_correction_budget = true;
     SourceAccumulationConfig source;
 };
 
@@ -268,6 +286,9 @@ struct Config {
     StorageConfig storage;
     /// 是否使用固定先验地图进行全局定位。
     bool prior_map_enabled = false;
+    /// 先验地图只在初始化时匹配一次：首次验收的先验全局位姿建立 map->odom 后，
+    /// 不再产生任何先验观测（跟踪与恢复都不再匹配），全局位姿完全由前端里程计传播。
+    bool prior_map_initialization_only = false;
     StartupHintConfig startup_hint;
     PureOdometryConfig pure_odometry;
     KeyframePolicy keyframes;

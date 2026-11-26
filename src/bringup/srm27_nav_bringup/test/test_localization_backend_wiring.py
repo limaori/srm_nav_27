@@ -212,6 +212,7 @@ def _backend_overrides(**extra):
         "use_pcd_localization": "False",
         "odometry_frontend": "zlio",
         "zlocalization_prior_enabled": "True",
+        "zlocalization_prior_initialization_only": "False",
         "zlocalization_prior_map": prior_map,
     }
     overrides.update(extra)
@@ -385,6 +386,7 @@ def test_nav2_stack_forwards_backend_arguments():
     _assert(arguments.get("use_zlocalization_backend") == "True", "backend 开关未透传")
     for key in ("zlocalization_backend_config", "zlocalization_prior_map",
                 "zlocalization_trajectory_directory", "zlocalization_prior_enabled",
+                "zlocalization_prior_initialization_only",
                 "zlocalization_loop_enabled", "zlocalization_uwb_enabled"):
         _assert(key in arguments, f"nav2_stack 未透传 {key}")
 
@@ -407,7 +409,8 @@ def test_entry_launches_forward_backend_arguments():
         _assert(include is not None, f"{filename} 里没有 nav2_stack 的 include")
         arguments = {key: _render(value, context) for key, value in include.launch_arguments}
         for key in ("use_zlocalization_backend", "zlocalization_backend_config",
-                    "zlocalization_prior_map", "zlocalization_trajectory_directory"):
+                    "zlocalization_prior_map", "zlocalization_trajectory_directory",
+                    "zlocalization_prior_initialization_only"):
             _assert(key in arguments, f"{filename} 未透传 {key}")
         _assert(
             arguments["use_zlocalization_backend"] == "False",
@@ -416,6 +419,36 @@ def test_entry_launches_forward_backend_arguments():
         for feature in ("prior", "loop", "uwb"):
             _assert(arguments[f"zlocalization_{feature}_enabled"] == "False",
                     f"{filename} 的 {feature} 默认必须关闭")
+        _assert(
+            arguments["zlocalization_prior_initialization_only"] == "False",
+            f"{filename} 的 prior-once 默认必须关闭（默认行为不变）",
+        )
+
+
+def test_prior_initialization_only_flows_through_every_layer():
+    """--zloc-prior-once 必须是独立开关：四层都透传，且不隐式改 prior_enabled。"""
+    cases = (
+        ("nav_srm_real_launch.py", "nav2_stack_launch.py",
+         "zlocalization_prior_initialization_only"),
+        ("nav_srm_simulation_launch.py", "nav2_stack_launch.py",
+         "zlocalization_prior_initialization_only"),
+        ("nav2_stack_launch.py", "localization_launch.py",
+         "zlocalization_prior_initialization_only"),
+        ("localization_launch.py", "backend.launch.py", "prior_initialization_only"),
+    )
+    for filename, child, target in cases:
+        module = _load_launch_module("prior_once_" + filename, filename)
+        for value in ("True", "False"):
+            description, context = _prepare(
+                module,
+                _backend_overrides(slam="False",
+                                   zlocalization_prior_initialization_only=value),
+            )
+            include = _include_for(description, child)
+            _assert(include is not None, f"{filename} 里没有 {child} 的 include")
+            arguments = {key: _render(v, context) for key, v in include.launch_arguments}
+            _assert(arguments.get(target) == value,
+                    f"{filename} 未按 {value} 透传 {target}: {arguments.get(target)}")
 
 
 def test_all_eight_feature_combinations_survive_each_launch_layer():
@@ -451,6 +484,7 @@ def main():
         test_nav2_stack_rejects_backend_with_slam,
         test_nav2_stack_forwards_backend_arguments,
         test_entry_launches_forward_backend_arguments,
+        test_prior_initialization_only_flows_through_every_layer,
         test_all_eight_feature_combinations_survive_each_launch_layer,
     ]
     for test in tests:

@@ -308,19 +308,3 @@ TEST(BrakingPathTest, CurrentMomentumAllowsAnAlreadySafeSlowerCommand)
   EXPECT_NEAR(limited.x(), 0.5, 1.0e-9);
 }
 
-TEST(RotatingFrameLimitsTest, StationaryGimbalPreservesStraightLineLimits)
-{
-  const auto planar = srm27_minco_controller::rotatingFrameLimits(2.6, 7.0, 0.0);
-  EXPECT_DOUBLE_EQ(planar.speed, 2.6);
-  EXPECT_DOUBLE_EQ(planar.accel, 7.0);
-}
-
-TEST(RotatingFrameLimitsTest, BothFullRateDirectionsLeaveBrakingRoom)
-{
-  for (double yaw_rate : {8.5, -8.5}) {
-    const auto planar = srm27_minco_controller::rotatingFrameLimits(2.6, 7.0, yaw_rate);
-    EXPECT_NEAR(planar.speed, 3.5 / 8.5, 1.0e-9);
-    EXPECT_DOUBLE_EQ(planar.accel, 3.5);
-    EXPECT_LE(std::abs(yaw_rate) * planar.speed + planar.accel, 7.0 + 1.0e-9);
-  }
-}

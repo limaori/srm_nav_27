@@ -11,6 +11,7 @@ namespace {
 TEST(BackendCapabilities, DefaultsOffAndAllEightSelectionsRemainIndependent) {
     const Config defaults;
     EXPECT_FALSE(defaults.prior_map_enabled);
+    EXPECT_FALSE(defaults.prior_map_initialization_only);
     EXPECT_FALSE(defaults.loop.enabled);
     EXPECT_FALSE(defaults.uwb.enabled);
     for (int mask = 0; mask < 8; ++mask) {
@@ -30,6 +31,17 @@ TEST(BackendCapabilities, DefaultsOffAndAllEightSelectionsRemainIndependent) {
     unavailable.prior_map_enabled = true;
     unavailable.loop.enabled = true;
     EXPECT_FALSE(resolveConfig(unavailable, false).values.loop.enabled);
+}
+
+/// 一次性先验必须以先验地图为前提；有先验地图时开关原样保留。
+TEST(BackendCapabilities, PriorInitializationOnlyRequiresPriorMap) {
+    Config requested;
+    requested.prior_map_initialization_only = true;
+    EXPECT_FALSE(resolveConfig(requested, true).values.prior_map_initialization_only);
+    requested.prior_map_enabled = true;
+    const auto effective = resolveConfig(requested, true);
+    EXPECT_TRUE(effective.values.prior_map_initialization_only);
+    EXPECT_TRUE(effective.overrides.empty());
 }
 
 /// 同一 UWB 位置解的高频保持重发不推进有效观测时间。

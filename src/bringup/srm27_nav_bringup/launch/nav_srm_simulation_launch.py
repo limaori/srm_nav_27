@@ -347,6 +347,8 @@ def generate_launch_description():
     use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
     zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
     zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
+    zlocalization_prior_initialization_only = LaunchConfiguration(
+        "zlocalization_prior_initialization_only")
     zlocalization_loop_enabled = LaunchConfiguration("zlocalization_loop_enabled")
     zlocalization_uwb_enabled = LaunchConfiguration("zlocalization_uwb_enabled")
     zlocalization_prior_map = LaunchConfiguration("zlocalization_prior_map")
@@ -533,6 +535,7 @@ def generate_launch_description():
             "use_zlocalization_backend": use_zlocalization_backend,
             "zlocalization_backend_config": zlocalization_backend_config,
             "zlocalization_prior_enabled": zlocalization_prior_enabled,
+            "zlocalization_prior_initialization_only": zlocalization_prior_initialization_only,
             "zlocalization_loop_enabled": zlocalization_loop_enabled,
             "zlocalization_uwb_enabled": zlocalization_uwb_enabled,
             "zlocalization_prior_map": zlocalization_prior_map,
@@ -852,6 +855,13 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument(
         "zlocalization_prior_enabled", default_value="False",
         description="启用先验配准，独立开关，默认关闭",
+    ))
+    ld.add_action(DeclareLaunchArgument(
+        "zlocalization_prior_initialization_only", default_value="False",
+        description=(
+            "先验只在初始化时匹配一次；首次匹配成功后 map->odom 冻结，"
+            "定位完全由前端 ZLIO 里程计传播（需要 zlocalization_prior_enabled:=True）"
+        ),
     ))
     ld.add_action(DeclareLaunchArgument(
         "zlocalization_loop_enabled", default_value="False",
