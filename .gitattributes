@@ -1,2 +1,4 @@
 *.sh text eol=lf
 *.py text eol=lf
+maps/pcd/rmuc_2027*_mapframe.pcd filter=lfs diff=lfs merge=lfs -text
+maps/pcd/rmul_2027*_mapframe.pcd filter=lfs diff=lfs merge=lfs -text

@@ -92,6 +92,12 @@ sentry_*/
 # 上限，push 会被 pre-receive 直接拒收）。默认只留本地，需要版本化的请走
 # Release 附件或 Git LFS。注：此规则只拦新增文件，已跟踪的老文件不受影响。
 maps/pcd/*.pcd
+!maps/pcd/rmuc_2027_mapframe.pcd
+!maps/pcd/rmuc_2027_structure_mapframe.pcd
+!maps/pcd/rmuc_2027_full_mapframe.pcd
+!maps/pcd/rmul_2027_mapframe.pcd
+!maps/pcd/rmul_2027_structure_mapframe.pcd
+!maps/pcd/rmul_2027_full_mapframe.pcd
 # 先验/定位地图包（maps/pcd/map_bundles/<场地>/，含 keyframes + clouds）同理不入库。
 maps/pcd/map_bundles/
 
