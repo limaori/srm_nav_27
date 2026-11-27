@@ -137,12 +137,10 @@ nav2_behaviors::Status BackUpFreeSpace::onRun(
     stopRobot();
     return nav2_behaviors::Status::FAILED;
   }
-  while (!costmap_client_->wait_for_service(std::chrono::seconds(1))) {
-    if (!rclcpp::ok()) {
-      RCLCPP_ERROR(logger_, "Interrupted while waiting for the service. Exiting.");
-      return nav2_behaviors::Status::FAILED;
-    }
-    RCLCPP_WARN(logger_, "service not available, waiting again...");
+  if (!costmap_client_->wait_for_service(std::chrono::seconds(1))) {
+    RCLCPP_ERROR(logger_, "Costmap service unavailable");
+    stopRobot();
+    return nav2_behaviors::Status::FAILED;
   }
 
   auto request = std::make_shared<nav2_msgs::srv::GetCostmap::Request>();
