@@ -20,6 +20,8 @@ struct ObservationEntry {
     std::string label;
     InnovationTerm innovation;
     bool accepted = false;
+    /// 越过创新门也强制接纳（累计锚点"一致证据放行"用；见 backend/correction_anchor.hpp）。
+    bool forced_accept = false;
 };
 
 /// 同周期证据对定位健康状态的影响，不直接修改状态机。

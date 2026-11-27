@@ -371,7 +371,6 @@ def generate_launch_description():
     map_to_odom_yaw = LaunchConfiguration("map_to_odom_yaw")
     # Z-Localization backend 实验模式（默认关闭）：只透传，接线在 localization_launch。
     use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
-    backend_stabilized_body = LaunchConfiguration("backend_stabilized_body")
     zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
     zlocalization_prior_enabled = LaunchConfiguration("zlocalization_prior_enabled")
     zlocalization_prior_initialization_only = LaunchConfiguration(
@@ -454,10 +453,6 @@ def generate_launch_description():
             "map_to_odom_y": map_to_odom_y,
             "map_to_odom_yaw": map_to_odom_yaw,
             "use_zlocalization_backend": use_zlocalization_backend,
-            # 2026-11-27：实车云台正常导航时持续自转、自瞄时小幅摆。backend 必须吃
-            # 稳定体坐标系（gimbal_yaw_fake）的位姿/点云，否则 body-rate 闸门会把云台
-            # 自转当车体自转，整段跳过先验观测，云台停下后超累计锚点 → LOST。
-            "backend_stabilized_body": backend_stabilized_body,
             "zlocalization_backend_config": zlocalization_backend_config,
             "zlocalization_prior_enabled": zlocalization_prior_enabled,
             "zlocalization_prior_initialization_only": zlocalization_prior_initialization_only,
@@ -777,17 +772,6 @@ def generate_launch_description():
                 "用 srm27_zlocalization_backend 发布 map->odom（实验模式，默认关闭）。"
                 "要求 use_lio_odometry:=True + odometry_frontend:=zlio；先验/回环/UWB 独立选择；"
                 "与 use_pcd_localization / 静态 map->odom / slam 互斥"
-            ),
-        )
-    )
-    ld.add_action(
-        DeclareLaunchArgument(
-            "backend_stabilized_body",
-            default_value="True",
-            description=(
-                "backend 输入改用导航稳定体（gimbal_yaw_fake）：位姿取 odom 朝向、"
-                "点云取世界点云相对车体。实车云台持续自转/自瞄时必须打开；"
-                "A/B 时可显式传 false 回退到前端原始 lidar 系"
             ),
         )
     )

@@ -77,7 +77,7 @@
 #   ./scripts/bringup/start_real_nav.sh --no-yastar-planner     # 全局规划器退回 ThetaStar
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin 0.3     # 决策层小陀螺：rotation_cmd -> mux -> 底盘
 #   ./scripts/bringup/start_real_nav.sh --behavior rmul_2027  # 同时起决策行为树
-#   ./scripts/bringup/start_real_nav.sh --test-behavior       # 测试树: 导航中 2 rad/s, 到点/无目标原地 5 rad/s
+#   ./scripts/bringup/start_real_nav.sh --test-behavior       # 测试树: 导航中 -6 rad/s, 到点/无目标原地 -2 rad/s
 #   ./scripts/bringup/start_real_nav.sh --chassis-spin --gimbal-spin   # 与仿真同一条命令（云台参数只告警）
 #   ./scripts/bringup/start_real_nav.sh --yaw-mode xy_only    # 默认值（导航只出平移）
 #   ./scripts/bringup/start_real_nav.sh --no-mux              # 不经 mux (出口 = cmd_vel_nav_body, 需自行重映射)
@@ -193,7 +193,7 @@
 #                                底盘自转请用 --chassis-spin 或决策层的 rotation_cmd。
 #       --chassis-spin [rad/s]  底盘小陀螺（默认 2.0, 负值反向）:
 #                               ⚠ 首跑请架起车辆或用 0.3 这种小转速先确认方向；
-#                               mux 的 wz_max 首跑限在 1.5 rad/s。
+#                               mux 的 wz_max 上限是 12.0 rad/s（见 speed_limits.yaml 的 mux 段）。
 #       --chassis-spin-sine [max]  正弦小陀螺（与 --chassis-spin 互斥）:
 #                               wz(t) = (max+min)/2 + (max-min)/2 * sin(2*pi*t/T)
 #                               --chassis-spin-sine 后可跟正峰值（负峰值取相反数）；
@@ -2302,8 +2302,8 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
        "$SCRIPT_DIR/../manual/spin_control.sh" sine "$SPIN_SINE_MAX" "$SPIN_SINE_MIN" "$SPIN_SINE_PERIOD"; then
       printf '底盘自转  : 正弦 max %s / min %s rad/s, T=%ss 已下发 (50 Hz)；停转: %s/../manual/spin_control.sh off\n' \
         "$SPIN_SINE_MAX" "$SPIN_SINE_MIN" "$SPIN_SINE_PERIOD" "$SCRIPT_DIR"
-      if awk -v a="$SPIN_ABS" -v m="1.5" 'BEGIN{ exit !(a > m) }'; then
-        echo "[提示] 峰值 ${SPIN_ABS} rad/s 超过 mux 的 wz_max(首跑 1.5)，实际会被限幅。"
+      if awk -v a="$SPIN_ABS" -v m="12.0" 'BEGIN{ exit !(a > m) }'; then
+        echo "[提示] 峰值 ${SPIN_ABS} rad/s 超过 mux 的 wz_max(12.0)，实际会被限幅。"
       fi
     else
       echo "[警告] spin_control.sh sine 失败，底盘不会自转。" >&2
@@ -2312,8 +2312,8 @@ if [ "$MINCO_FAKEYAW_CHAIN" = "1" ] \
      "$SCRIPT_DIR/../manual/spin_control.sh" on "$CHASSIS_SPIN_WZ"; then
     printf '底盘自转  : %s rad/s 已下发 (20 Hz)；停转: %s/../manual/spin_control.sh off\n' \
       "$CHASSIS_SPIN_WZ" "$SCRIPT_DIR"
-    if awk -v a="$SPIN_ABS" -v m="1.5" 'BEGIN{ exit !(a > m) }'; then
-      echo "[提示] 请求 ${CHASSIS_SPIN_WZ} rad/s 超过 mux 的 wz_max(首跑 1.5)，实际会被限幅。"
+    if awk -v a="$SPIN_ABS" -v m="12.0" 'BEGIN{ exit !(a > m) }'; then
+      echo "[提示] 请求 ${CHASSIS_SPIN_WZ} rad/s 超过 mux 的 wz_max(12.0)，实际会被限幅。"
     fi
   else
     echo "[警告] spin_control.sh on 失败，底盘不会自转。" >&2

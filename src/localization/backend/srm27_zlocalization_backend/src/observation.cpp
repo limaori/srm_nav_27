@@ -137,6 +137,12 @@ struct GlobalObservationTransaction {
     PoseSqrtInformation prior_information_right;
     ObservationBatch observations;
     bool publish_state = false;
+    /// 本次先验观测是"累计锚点一致证据放行"换来的：提交端要重落锚，证据也会写进 reason。
+    bool prior_released = false;
+    /// 放行时的越界幅度（相对锚点），只用于日志。
+    double released_translation = 0.0;
+    double released_rotation_rad = 0.0;
+    int released_pending_frames = 0;
 };
 
 namespace {
@@ -209,9 +215,18 @@ void ObservationBatch::classify(const InnovationBatchAssessment& assessment,
         // 联合冲突仅隔离唯一通过的来源；多个单项合理时不任意挑选其中一个。
         entry.accepted = joint_accepted || (entries.size() > 1U && passing_count == 1 &&
                                             passesInnovation(individual, rejection_probability));
+        // 一致证据放行的先验观测：越界到超过 NIS 门不是"配准错了"，而是"预测错了"
+        // （累计锚点已经用连续 5 帧一致性证明过这一点）。这里强制接纳一次，
+        // 让位姿被拉回测量值，提交后再重落锚；否则只会把 conflict 从锚点换到 NIS，
+        // 状态机照样冻结 —— 2026-11-27 19:39 包就是这么死的。
+        std::string release_note;
+        if (entry.forced_accept && !entry.accepted) {
+            entry.accepted = true;
+            release_note = ", accepted by consistent-evidence release";
+        }
         std::ostringstream evidence;
         evidence << entry.label << " NIS=" << individual.nis << "/" << individual.degrees_of_freedom
-                 << ", p=" << individual.upper_tail_probability;
+                 << ", p=" << individual.upper_tail_probability << release_note;
         if (entry.accepted)
             accepted_evidence.push_back(evidence.str());
         else
@@ -254,18 +269,39 @@ void Localization::collectGlobalInnovationsLocked(const GlobalObservationWork& w
         // （闸门比的是当前预测，上一次吃进去的错误已经变成新基准）。这里用不随错误移动的
         // 锚点判**累计**偏差，越界即当作冲突证据，让状态机走 conflict → SUSPECT 冻结，
         // 而不是一路把 map->odom 转过去。判据见 backend/correction_anchor.hpp。
+        //
+        // 只有绝对预算会死锁（真实漂移一旦超过 0.8 m 就再没有"安静帧"可以重落锚，
+        // 2026-11-27 19:39 包冻结 70 s 就是这么来的），所以再看一道"一致证据放行"：
+        // 连续 release_frames 帧彼此一致且幅度有界时放行一次，提交后重落锚。
         const Eigen::Matrix4d candidate_T_map_odom =
             prior_observation.measured_map_pose * work.runtime.odom_pose.inverse();
-        if (!poses_.acceptsCorrection(candidate_T_map_odom)) {
+        const AnchorDecision decision = poses_.judgeCorrection(candidate_T_map_odom);
+        if (decision.verdict == AnchorVerdict::Reject) {
             const CorrectionAnchor& anchor = poses_.correctionAnchor();
             std::ostringstream reason;
             reason << "prior scan-to-map over cumulative correction anchor: delta_r_deg="
-                   << anchor.rotationFromAnchor(candidate_T_map_odom) * 180.0 / M_PI << " (limit "
+                   << decision.rotation_rad * 180.0 / M_PI << " (limit "
                    << anchor.config().max_rotation_rad * 180.0 / M_PI << "), delta_t="
-                   << anchor.translationFromAnchor(candidate_T_map_odom) << "m (limit "
-                   << anchor.config().max_translation << "m";
+                   << decision.translation << "m (limit " << anchor.config().max_translation
+                   << "m)";
+            if (anchor.config().release_enabled) {
+                reason << ", consistent " << decision.pending_frames << "/"
+                       << std::max(1, anchor.config().release_frames) << " frames";
+                if (!decision.within_release_cap) {
+                    reason << " (outside release cap " << anchor.config().release_max_translation
+                           << "m / " << anchor.config().release_max_rotation_rad * 180.0 / M_PI
+                           << "deg)";
+                }
+            }
             transaction.observations.conflicts.push_back(reason.str());
         } else {
+            const bool released = decision.verdict == AnchorVerdict::Release;
+            if (released) {
+                transaction.prior_released = true;
+                transaction.released_translation = decision.translation;
+                transaction.released_rotation_rad = decision.rotation_rad;
+                transaction.released_pending_frames = decision.pending_frames;
+            }
             transaction.prior_information_right = leftToRightPoseSqrtInformation(
                 prior_observation.registration.source_to_target,
                 prior_observation.registration.measurement_information.sqrt_information);
@@ -274,8 +310,11 @@ void Localization::collectGlobalInnovationsLocked(const GlobalObservationWork& w
                                              prior_observation.measured_map_pose,
                                              transaction.prior_information_right);
             if (term.valid) {
-                transaction.observations.entries.push_back(
-                    {ObservationSource::PriorMap, "prior scan-to-map", std::move(term)});
+                ObservationEntry entry{ObservationSource::PriorMap, "prior scan-to-map",
+                                       std::move(term)};
+                // 放行是一次性的：越过 NIS 门也要让它进图，否则 conflict 只是换个理由而已。
+                entry.forced_accept = released;
+                transaction.observations.entries.push_back(std::move(entry));
             } else {
                 transaction.observations.unavailable.push_back(
                     "prior scan-to-map innovation unavailable: " + term.invalid_reason);
@@ -356,8 +395,22 @@ void Localization::applyGlobalObservationFactorsLocked(const GlobalObservationWo
         commit.applied_correction = updateGraphLocked(/*global_factor_added=*/true);
         // 锚点只在"安静"的修正后前移：正常小抖动/缓慢真实漂移会跟随，
         // 连续同向的大步修正不追认，累计到上限就停。
+        // 例外是"一致证据放行"的那一次：不跟着挪，下一帧就会被同一道闸再拦一次。
+        const bool released = transaction.prior_released && commit.prior_accepted;
         poses_.noteCorrection(poses_.transform(), commit.applied_correction.rotation_rad,
-                              commit.applied_correction.translation);
+                              commit.applied_correction.translation, released);
+        if (released) {
+            BACKEND_WARN_STREAM(
+                "prior scan-to-map accepted by consistent-evidence release after "
+                << transaction.released_pending_frames << " agreeing frames: delta_t="
+                << transaction.released_translation << "m, delta_r_deg="
+                << transaction.released_rotation_rad * 180.0 / M_PI
+                << " (anchor limits " << poses_.correctionAnchor().config().max_translation
+                << "m / " << poses_.correctionAnchor().config().max_rotation_rad * 180.0 / M_PI
+                << "deg); applied_t=" << commit.applied_correction.translation << "m, applied_r_deg="
+                << commit.applied_correction.rotation_rad * 180.0 / M_PI
+                << "; anchor re-seated, release count=" << poses_.correctionAnchor().releaseCount());
+        }
     }
     // 一次性先验：若初始位姿来自 UWB 等其它来源，首次被验收的先验观测同样会锁存，
     // 此后跟踪周期不再产生先验观测。

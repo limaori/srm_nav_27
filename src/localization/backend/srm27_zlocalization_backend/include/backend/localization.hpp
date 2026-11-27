@@ -196,8 +196,9 @@ private:
     /// 校验恢复任务身份并提交完整位姿锚或累计恢复失败。
     void commit(const RecoveryWork& work, const struct RecoveryResult& result);
     /// 在已校验身份的事务内安装恢复锚、定位状态及当前可信输出。
+    /// @param released 本次恢复是累计锚点"一致证据放行"换来的：提交后强制重落锚。
     PoseCorrectionDelta applyRecoveryLocked(const RecoveryWork& work, const RecoveryResult& result,
-                                            LocalizationTransition& transition);
+                                            LocalizationTransition& transition, bool released);
     /// 将通过联合创新检验的回环写入图及可视化历史。
     LoopCommitSummary commit(const LoopWork& work, const LoopVerificationBatch& result);
 

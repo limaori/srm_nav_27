@@ -209,6 +209,16 @@ void Localization::initialize() {
                             << "m, reseat=" << config_.correction_anchor.reseat_rotation_rad * 180.0 / M_PI
                             << "deg/" << config_.correction_anchor.reseat_translation << "m x"
                             << config_.correction_anchor.reseat_quiet_frames << " frames");
+        // 一致证据放行：没有它，真实漂移一旦超过上面的预算就永久冻结（见 correction_anchor.hpp）。
+        BACKEND_INFO_STREAM("map->odom consistent-evidence release: enabled="
+                            << std::boolalpha << config_.correction_anchor.release_enabled
+                            << ", frames=" << config_.correction_anchor.release_frames
+                            << ", agree="
+                            << config_.correction_anchor.release_agree_translation << "m/"
+                            << config_.correction_anchor.release_agree_rotation_rad * 180.0 / M_PI
+                            << "deg, cap=" << config_.correction_anchor.release_max_translation
+                            << "m/" << config_.correction_anchor.release_max_rotation_rad * 180.0 / M_PI
+                            << "deg");
         // 自转闸：现场要能一眼确认它开着（0 = 关闭，等于退化为"转起来就冲突"）。
         BACKEND_INFO_STREAM("prior scan-to-map body-rate gate: "
                             << (config_.tracking.max_body_angular_rate_rad > 0.0

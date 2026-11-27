@@ -210,7 +210,8 @@ bool Localization::recoveryCorrectionWithinBudgetLocked(const PoseCorrectionDelt
 /// 安装恢复位姿锚，并把匹配期间的新里程计运动传播到当前可信输出。
 PoseCorrectionDelta Localization::applyRecoveryLocked(const RecoveryWork& work,
                                                       const RecoveryResult& result,
-                                                      LocalizationTransition& transition) {
+                                                      LocalizationTransition& transition,
+                                                      const bool released) {
     PoseCorrectionDelta applied_correction;
     Eigen::Matrix4d output_pose_before = poses_.transform() * frames_.latest().odom_pose;
     if (poses_.trusted().hasPose()) {
@@ -252,8 +253,10 @@ PoseCorrectionDelta Localization::applyRecoveryLocked(const RecoveryWork& work,
         applied_correction.rotation_rad = rotationAngleFromMatrix(correction);
     }
     // 累计预算的锚点：人工重定位是"我知道车在哪"的显式声明，提交成功后强制重落锚；
-    // 自动恢复只在本次修正"安静"时按连续帧数前移（大步修正不追认，否则连续错解会被追认）。
-    if (work.identity.manual_request_id != 0) {
+    // "一致证据放行"的这一次也一样必须重落锚 —— 否则下一轮恢复又被同一道闸拦下，
+    // 等于放行了个寂寞（2026-11-27 19:39 包：70 s 内 0 次提交）；
+    // 其它自动恢复只在本次修正"安静"时按连续帧数前移（大步修正不追认）。
+    if (work.identity.manual_request_id != 0 || released) {
         poses_.reseatCorrectionAnchor(poses_.transform());
     } else {
         poses_.noteCorrection(poses_.transform(), applied_correction.rotation_rad,
@@ -274,6 +277,12 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
     bool budget_overridden = false;
     // 被"累计锚点"拦下的那次（区别于单次幅度越限）。
     bool anchor_rejected = false;
+    // 被锚点拦下时，连续一致的越界帧数（现场判断"快放行了"还是"一直被拒"）。
+    int anchor_pending_frames = 0;
+    // 这台车有没有开"一致证据放行"（没开时 pending 永远是 0，别误读）。
+    bool anchor_release_enabled = false;
+    // 本次恢复是"一致证据放行"换来的（日志要写清楚，否则会被当成普通恢复）。
+    bool anchor_released = false;
     PoseCorrectionDelta budget_delta;
     bool accepted = false;
     if (!withOutputCommit([&] {
@@ -293,9 +302,14 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                 const auto prospective = prospectiveRecoveryCorrectionLocked(work, result);
                 // 两道闸：单次幅度（相对冻结位姿）+ 累计幅度（相对不随错误移动的锚点）。
                 // 后者才是"跳一次 20°、再跳一次 20°"的拦口，见 backend/correction_anchor.hpp。
+                // 累计闸带"一致证据放行"：真实漂移一旦超过预算，靠它才不会永久冻结
+                // （2026-11-27 19:39 包：7 次一致 1.2 m 的恢复全被拒，70 s 没能提交一次）。
                 const Eigen::Matrix4d candidate_T_map_odom =
                     result.pose * work.frame.odom_pose.inverse();
-                const bool within_anchor_budget = poses_.acceptsCorrection(candidate_T_map_odom);
+                const AnchorDecision anchor_decision = poses_.judgeCorrection(candidate_T_map_odom);
+                const bool within_anchor_budget =
+                    anchor_decision.verdict != AnchorVerdict::Reject;
+                const bool released = anchor_decision.verdict == AnchorVerdict::Release;
                 const bool within_single_budget =
                     !prospective || recoveryCorrectionWithinBudgetLocked(*prospective);
                 const bool within_budget = within_single_budget && within_anchor_budget;
@@ -303,10 +317,8 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                     budget_delta = *prospective;
                 } else {
                     PoseCorrectionDelta anchor_delta;
-                    anchor_delta.rotation_rad =
-                        poses_.correctionAnchor().rotationFromAnchor(candidate_T_map_odom);
-                    anchor_delta.translation =
-                        poses_.correctionAnchor().translationFromAnchor(candidate_T_map_odom);
+                    anchor_delta.rotation_rad = anchor_decision.rotation_rad;
+                    anchor_delta.translation = anchor_decision.translation;
                     budget_delta = anchor_delta;
                 }
                 if (gated && !within_budget) {
@@ -315,6 +327,8 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                     // 靠"残差好看"骗过验收的（2026-11-26 实车：+45 / +11 / +30 m）。
                     budget_rejected = true;
                     anchor_rejected = !within_anchor_budget;
+                    anchor_pending_frames = anchor_decision.pending_frames;
+                    anchor_release_enabled = poses_.correctionAnchor().config().release_enabled;
                     if (manual)
                         clearManualRelocalizationRequestLocked();
                     transition = state_.onRecoveryRelocalizationFailure(
@@ -328,7 +342,8 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                     // manual_bypasses_correction_budget 命中：人工请求越过预算，照常提交。
                     budget_overridden = true;
                 }
-                applied_correction = applyRecoveryLocked(work, result, transition);
+                applied_correction = applyRecoveryLocked(work, result, transition, released);
+                anchor_released = released;
                 estimator_failed_ = false;
                 accepted = true;
             } else {
@@ -359,6 +374,16 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                             << ", source_span=" << work.source_span_seconds
                             << "s, delta_t=" << applied_correction.translation << "m, delta_r_deg="
                             << applied_correction.rotation_rad * 180.0 / M_PI << ")");
+        if (anchor_released) {
+            BACKEND_WARN_STREAM("recovery accepted by consistent-evidence release: source="
+                                << result.source << ", delta_t=" << budget_delta.translation
+                                << "m, delta_r_deg=" << budget_delta.rotation_rad * 180.0 / M_PI
+                                << " (anchor limits " << poses_.correctionAnchor().config().max_translation
+                                << "m / "
+                                << poses_.correctionAnchor().config().max_rotation_rad * 180.0 / M_PI
+                                << "deg); anchor re-seated, release count="
+                                << poses_.correctionAnchor().releaseCount());
+        }
     } else {
         if (budget_rejected) {
             // 两个闸的限值不一样：单次幅度是 2.5 m / 20°，累计锚点是 0.8 m / 8°。
@@ -377,6 +402,15 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                                 << "deg, anchor limit " << anchor_config.max_translation << "m / "
                                 << anchor_config.max_rotation_rad * 180.0 / M_PI
                                 << "deg); keeping the frozen pose");
+            if (anchor_rejected && anchor_release_enabled) {
+                BACKEND_WARN_STREAM("  consistent-evidence release progress: "
+                                    << anchor_pending_frames << "/"
+                                    << std::max(1, anchor_config.release_frames)
+                                    << " agreeing frames (release cap "
+                                    << anchor_config.release_max_translation << "m / "
+                                    << anchor_config.release_max_rotation_rad * 180.0 / M_PI
+                                    << "deg)");
+            }
         }
         BACKEND_WARN_STREAM("localization recovery pending: " << transition.reason);
         if (transition.current == LocalizationStatus::Lost)

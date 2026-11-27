@@ -55,6 +55,28 @@ void IntensityVoxelLayer::onInitialize()
   mark_threshold_ = node->declare_parameter(name_ + ".mark_threshold", 0);
   publish_voxel_ = node->declare_parameter(name_ + ".publish_voxel_map", false);
 
+  // ---- 2026-11-27：判定收紧（默认值与旧行为逐位一致）----
+  // min_obstacle_points：同一 0.05 m 格在本周期至少要有 N 个点才标致命格。
+  //   旧行为 = 1（单点即障碍）：地面拖点、自车回波、多径噪点都会成片进图。
+  //   墙/实物在同一格里通常有多个点（同一帧多点/多个高度），取 3 仍能保留。
+  const auto min_points = node->declare_parameter(name_ + ".min_obstacle_points", 1);
+  min_obstacle_points_ = min_points > 0 ? static_cast<unsigned int>(min_points) : 1U;
+  // self_filter_radius：车体坐标系原点 R 内的点不参与障碍判定（自车回波）。
+  //   0（默认）= 不启用；0.45 ≈ 车体角 0.39 + 余量。
+  self_filter_radius_ = node->declare_parameter(name_ + ".self_filter_radius", 0.0);
+  if (!std::isfinite(self_filter_radius_) || self_filter_radius_ < 0.0) {
+    RCLCPP_WARN(
+      node->get_logger(), "IntensityVoxelLayer[%s]: self_filter_radius %.3f 非法，按 0 处理",
+      name_.c_str(), self_filter_radius_);
+    self_filter_radius_ = 0.0;
+  }
+  if (min_obstacle_points_ > 1 || self_filter_radius_ > 0.0) {
+    RCLCPP_INFO(
+      node->get_logger(),
+      "IntensityVoxelLayer[%s]: 判定收紧 min_obstacle_points=%u self_filter_radius=%.2f m",
+      name_.c_str(), min_obstacle_points_, self_filter_radius_);
+  }
+
   // 残影保持：0（默认）＝旧语义（每周期重建、无记忆）；> 0 ＝超过该时长未再被观测才擦除。
   hold_time_ = node->declare_parameter(name_ + ".hold_time", 0.0);
   const auto hold_max_cells = node->declare_parameter(name_ + ".hold_max_cells", 200000);
@@ -102,6 +124,8 @@ void IntensityVoxelLayer::matchSize()
 {
   ObstacleLayer::matchSize();
   voxel_grid_.resize(size_x_, size_y_, size_z_);
+  // 本周期每格点数（min_obstacle_points 用）；尺寸随图层一起变。
+  cell_hits_.assign(static_cast<std::size_t>(size_x_) * size_y_, 0U);
 
   // 尺寸或分辨率变化后旧的世界格键不再对应同一块空间，整表作废。
   if (
@@ -201,6 +225,10 @@ void IntensityVoxelLayer::updateBounds(
 
   // reset maps each iteration
   resetMaps();
+  // 本周期每格点数清零（只在 min_obstacle_points > 1 时使用）。
+  if (min_obstacle_points_ > 1 && !cell_hits_.empty()) {
+    std::fill(cell_hits_.begin(), cell_hits_.end(), 0U);
+  }
 
   // Include the old observation bounds so LayeredCostmap clears and recombines every
   // layer in that region, even when the latest cloud is empty or smaller.
@@ -293,6 +321,15 @@ void IntensityVoxelLayer::updateBounds(
         continue;
       }
 
+      // 自车回波：车体原点 R 内的点不参与判定（0=不启用，默认）。
+      if (self_filter_radius_ > 0.0) {
+        const double dx = px - robot_x;
+        const double dy = py - robot_y;
+        if (dx * dx + dy * dy < self_filter_radius_ * self_filter_radius_) {
+          continue;
+        }
+      }
+
       // now we need to compute the map coordinates for the observation
       unsigned int mx, my, mz;
       if (pz < origin_z_) {
@@ -303,8 +340,19 @@ void IntensityVoxelLayer::updateBounds(
         continue;
       }
 
+      // 判定收紧：同一格至少命中 min_obstacle_points 个点才标致命格（默认 1 = 旧行为）。
+      bool mark = false;
+      if (min_obstacle_points_ <= 1) {
+        mark = voxel_grid_.markVoxelInMap(mx, my, mz, mark_threshold_);
+      } else {
+        voxel_grid_.markVoxelInMap(mx, my, mz, mark_threshold_);
+        unsigned int & hits = cell_hits_[static_cast<std::size_t>(my) * size_x_ + mx];
+        ++hits;
+        mark = (hits == min_obstacle_points_);
+      }
+
       // mark the cell in the voxel grid and check if we should also mark it in the costmap
-      if (voxel_grid_.markVoxelInMap(mx, my, mz, mark_threshold_)) {
+      if (mark) {
         costmap_[getIndex(mx, my)] = LETHAL_OBSTACLE;
         touch(px, py, &current_min_x, &current_min_y, &current_max_x, &current_max_y);
         if (keep_history) {

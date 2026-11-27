@@ -188,5 +188,112 @@ TEST(CorrectionAnchor, NonFiniteCandidateRejected) {
     EXPECT_FALSE(anchor.accepts(nan));
 }
 
+// ---------------------------------------------------------------------------
+// 一致证据放行（2026-11-27 19:39 包：绝对预算把恢复路径锁死 70 s）
+// ---------------------------------------------------------------------------
+
+/// 真实漂移稳定在 1.2 m：前 4 帧拒（只累计证据），第 5 帧放行。
+/// 数字直接取 real_zloc_1127_193946 包里 47.3~50.9 s 那 7 次被拒的观测
+/// （delta_t=1.1673~1.2799 m / delta_r=3.4006~3.6974°）。
+TEST(CorrectionAnchor, ConsistentDriftReleasesAfterEnoughAgreeingFrames) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    const double recorded_t[7] = {1.21864, 1.27991, 1.24547, 1.16730,
+                                  1.18117, 1.23473, 1.20933};
+    const double recorded_r_deg[7] = {3.44537, 3.69741, 3.57608, 3.42868,
+                                      3.40063, 3.51418, 3.41720};
+    for (int i = 0; i < 7; ++i) {
+        const auto decision = anchor.judge(pose(0.0, recorded_r_deg[i], recorded_t[i], 0.0));
+        EXPECT_EQ(decision.pending_frames, i + 1) << "frame " << i;
+        if (i < 4) {
+            EXPECT_EQ(decision.verdict, AnchorVerdict::Reject) << "frame " << i;
+        } else {
+            EXPECT_EQ(decision.verdict, AnchorVerdict::Release) << "frame " << i;
+            EXPECT_TRUE(decision.within_release_cap);
+        }
+    }
+}
+
+/// 幅度超过放行半径时，一致得再多也不放 —— 传送（+45 m）不会被这条出口捞进来。
+TEST(CorrectionAnchor, ReleaseIsCappedByMagnitude) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    for (int i = 0; i < 20; ++i) {
+        const auto decision = anchor.judge(pose(0.0, 3.5, 3.0, 0.0));  // 3 m > 1.6 m 放行半径
+        EXPECT_EQ(decision.verdict, AnchorVerdict::Reject) << "frame " << i;
+        EXPECT_FALSE(decision.within_release_cap);
+    }
+    // 45 m 的对称走廊传送同理。
+    EXPECT_EQ(anchor.judge(pose(0.0, 0.0, 45.0, 0.0)).verdict, AnchorVerdict::Reject);
+}
+
+/// 逐帧长大的偏差（积分饱和）不算"一致"：每帧长 1.5° > 1° 容差，计数一直重开。
+TEST(CorrectionAnchor, GrowingDriftNeverReleases) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    int releases = 0;
+    // 从 9° 起（已经越过 8° 预算），每帧再长 1.5°：这是 2026-11-26 "每帧 15°、2 Hz" 的缩影。
+    for (int step = 1; step <= 20; ++step) {
+        const auto decision = anchor.judge(pose(0.0, 8.0 + 1.5 * step, 0.0, 0.0));
+        if (decision.verdict == AnchorVerdict::Release)
+            ++releases;
+        EXPECT_EQ(decision.pending_frames, 1) << "step " << step;
+    }
+    EXPECT_EQ(releases, 0);
+}
+
+/// 预算内的候选会清空待定队列：中间插一帧正常观测，就不能算"连续一致"。
+TEST(CorrectionAnchor, AcceptResetsPendingEvidence) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_EQ(anchor.judge(pose(0.0, 0.0, 1.2, 0.0)).verdict, AnchorVerdict::Reject);
+    EXPECT_EQ(anchor.judge(pose(0.0, 0.0, 0.2, 0.0)).verdict, AnchorVerdict::Accept);
+    const auto decision = anchor.judge(pose(0.0, 0.0, 1.2, 0.0));
+    EXPECT_EQ(decision.verdict, AnchorVerdict::Reject);
+    EXPECT_EQ(decision.pending_frames, 1);
+}
+
+/// 放行后的提交必须重落锚：否则下一帧又被同一道闸拦下（19:39 包就是这么冻结的）。
+TEST(CorrectionAnchor, ReleaseCommitReseatsAnchor) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    for (int i = 0; i < 4; ++i)
+        anchor.judge(pose(0.0, 0.0, 1.2, 0.0));
+    ASSERT_EQ(anchor.judge(pose(0.0, 0.0, 1.2, 0.0)).verdict, AnchorVerdict::Release);
+
+    const Eigen::Matrix4d committed = pose(0.0, 0.0, 1.2, 0.0);
+    anchor.observe(committed, 1.2, 0.0, /*released=*/true);
+    EXPECT_EQ(anchor.releaseCount(), 1);
+    EXPECT_NEAR(anchor.translationFromAnchor(committed), 0.0, 1e-9);
+    // 放行之后同一位置就是"预算内"，不会再被拒（不会每帧都放行一次）。
+    EXPECT_EQ(anchor.judge(committed).verdict, AnchorVerdict::Accept);
+    EXPECT_EQ(anchor.judge(pose(0.0, 0.0, 1.4, 0.0)).verdict, AnchorVerdict::Accept);
+}
+
+/// 关掉放行开关就退回"只有绝对预算"的旧行为（现场 A/B 用）。
+TEST(CorrectionAnchor, DisabledReleaseKeepsHardBudget) {
+    CorrectionAnchor anchor;
+    auto config = realProfileConfig();
+    config.release_enabled = false;
+    anchor.configure(config);
+    anchor.observe(pose(0.0, 0.0, 0.0, 0.0), 0.0, 0.0);
+    for (int i = 0; i < 20; ++i)
+        EXPECT_EQ(anchor.judge(pose(0.0, 0.0, 1.2, 0.0)).verdict, AnchorVerdict::Reject);
+    EXPECT_EQ(anchor.releaseCount(), 0);
+}
+
+/// 冷启动/复位后没有锚点，任何候选都直接接受（不能因为放行机制反而变严）。
+TEST(CorrectionAnchor, ReleaseNeverBlocksColdStart) {
+    CorrectionAnchor anchor;
+    anchor.configure(realProfileConfig());
+    EXPECT_EQ(anchor.judge(pose(0.0, 170.0, 40.0, 0.0)).verdict, AnchorVerdict::Accept);
+}
+
 }  // namespace
 }  // namespace backend

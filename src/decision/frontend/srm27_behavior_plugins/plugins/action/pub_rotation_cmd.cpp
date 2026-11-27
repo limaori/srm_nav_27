@@ -33,7 +33,9 @@ PublishRotationCmdAction::PublishRotationCmdAction(
 BT::PortsList PublishRotationCmdAction::providedPorts()
 {
   return providedBasicPorts({
-    BT::InputPort<double>("spin_speed", 0.0, "Angular Z velocity on rotation_cmd (rad/s)"),
+    BT::InputPort<double>(
+      "spin_speed", 0.0,
+      "Angular Z velocity on rotation_cmd (rad/s); negative = reverse direction"),
     BT::InputPort<bool>("randomize", false, "Use positive nonperiodic spin for HP-drop evasion"),
     BT::InputPort<std::string>("spin_mode", "", "Optional label recorded in behavior/spin_state"),
     BT::InputPort<std::shared_ptr<NavigationSpinTracker>>(
@@ -48,10 +50,14 @@ bool PublishRotationCmdAction::setMessage(geometry_msgs::msg::Twist & msg)
   getInput("spin_speed", spin_speed);
   getInput("spin_mode", spin_mode);
   const bool randomize = getInput<bool>("randomize").value();
-  if (!std::isfinite(spin_speed) || spin_speed < 0.0) {
-    RCLCPP_ERROR(node_->get_logger(), "Spin speed must be finite and nonnegative");
+  if (!std::isfinite(spin_speed)) {
+    RCLCPP_ERROR(node_->get_logger(), "Spin speed must be finite");
     return false;
   }
+  // 负值 = 反向自转（俯视顺时针）。方向与幅值分开处理：SpinReference 是只接受非负
+  // 幅值的五次多项式参考，喂进去必须取 |spin_speed|，符号只作用在最终 angular.z 上。
+  const double direction = (spin_speed < 0.0) ? -1.0 : 1.0;
+  const double magnitude = std::abs(spin_speed);
 
   std::shared_ptr<NavigationSpinTracker> tracker;
   if (getInput("tracker_port", tracker) && tracker) {
@@ -61,14 +67,14 @@ bool PublishRotationCmdAction::setMessage(geometry_msgs::msg::Twist & msg)
     if (randomize || tracker->evasion_smoothing) {
       int epoch = 0;
       (void)config().blackboard->rootBlackboard()->get("match_epoch", epoch);
-      const double request = spin_speed;
-      spin_speed = tracker->spin_reference.sample(now, request, randomize,
+      const double request = magnitude;
+      spin_speed = direction * tracker->spin_reference.sample(now, request, randomize,
         std::numeric_limits<double>::infinity(), epoch, tracker->spin_seed,
         tracker->spin_max_accel, tracker->spin_max_jerk, tracker->evasion_min_speed);
       tracker->evasion_smoothing = randomize || !tracker->spin_reference.settled(request);
     } else {
-      // 保留普通恒速请求，并作为受击平滑变速的起点。
-      tracker->spin_reference.reset(spin_speed);
+      // 保留普通恒速请求（只记幅值），并作为受击平滑变速的起点。
+      tracker->spin_reference.reset(magnitude);
     }
     tracker->last_cmd_wz = spin_speed;
     if (!spin_mode.empty()) {

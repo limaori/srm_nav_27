@@ -192,6 +192,18 @@ void ParameterReader::loadCorrectionAnchor() {
     anchor.reseat_rotation_rad = degreesToRadians(reseat_rotation_deg);
     getParam("correction_anchor/reseat_translation", anchor.reseat_translation);
     getParam("correction_anchor/reseat_quiet_frames", anchor.reseat_quiet_frames);
+    // 一致证据放行：绝对预算的死锁出口，判据见 backend/correction_anchor.hpp。
+    getParam("correction_anchor/release_enabled", anchor.release_enabled);
+    getParam("correction_anchor/release_frames", anchor.release_frames);
+    getParam("correction_anchor/release_agree_translation", anchor.release_agree_translation);
+    double release_agree_rotation_deg = 1.0;
+    getParam<double>("correction_anchor/release_agree_rotation_deg", release_agree_rotation_deg,
+                     1.0);
+    anchor.release_agree_rotation_rad = degreesToRadians(release_agree_rotation_deg);
+    getParam("correction_anchor/release_max_translation", anchor.release_max_translation);
+    double release_max_rotation_deg = 10.0;
+    getParam<double>("correction_anchor/release_max_rotation_deg", release_max_rotation_deg, 10.0);
+    anchor.release_max_rotation_rad = degreesToRadians(release_max_rotation_deg);
 }
 
 /// 读取 INITIALIZING、SUSPECT 和 LOST 共用的恢复参数。

@@ -111,6 +111,13 @@ private:
   /// \brief 本周期车体 footprint 的世界系包围盒，用来给点数很多的观测做快速排除。
   double fp_min_x_{0.0}, fp_min_y_{0.0}, fp_max_x_{0.0}, fp_max_y_{0.0};
   bool hold_cap_warned_{false};
+  // ---- 2026-11-27：判定收紧（默认值与旧行为逐位一致）----
+  /// \brief 同一 0.05 m 格本周期的点计数；只有 >= min_obstacle_points_ 才标致命格。
+  std::vector<unsigned int> cell_hits_;
+  /// \brief 每格最少点数；1（默认）= 单点即障碍（旧行为）。
+  unsigned int min_obstacle_points_{1};
+  /// \brief 车体原点 R 内的点直接跳过（自车回波）；0（默认）= 不启用。
+  double self_filter_radius_{0.0};
   inline bool worldToMap3DFloat(
     double wx, double wy, double wz, double & mx, double & my, double & mz)
   {

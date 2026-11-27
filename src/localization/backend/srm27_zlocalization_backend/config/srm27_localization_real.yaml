@@ -63,6 +63,23 @@ correction_anchor:
   reseat_rotation_deg: 1.0
   reseat_translation: 0.15
   reseat_quiet_frames: 5
+  #
+  # ↓ 一致证据放行（2026-11-27 19:39 包 real_zloc_1127_193946 之后补的出口）
+  #
+  # 现场数据：47.3 s 起连续 7 次先验观测都报 delta_t=1.17~1.28 m / delta_r=3.4~3.7°
+  # （彼此只差 5 cm / 0.3°），全部被上面 0.8 m 的锚点拒；7 连冲突 → SUSPECT → LOST，
+  # 之后 70 s 内跟踪和恢复都被同一道闸拒，0 次提交，包尾点云相对先验图歪 1.8 m / ≥9.5°。
+  # 绝对预算没有出口就是死锁，所以给"连续一致"的候选一条有界放行通道。
+  release_enabled: true
+  # 5 帧 × 2 Hz = 2.5 s，比 conflicts_before_suspect=7 先到，赶在 SUSPECT 之前放行。
+  release_frames: 5
+  # 一致判据：相邻两次越界候选的差。实测同一个错解只有 5 cm / 0.3° 的抖动，
+  # 取 12 cm / 1° 既容得下抖动，又容不下"每帧长 1.5°"的积分饱和。
+  release_agree_translation: 0.12
+  release_agree_rotation_deg: 1.0
+  # 放行半径：<= 恢复单次闸的 2.5 m，且远小于 2026-11-26 那几次传送（+45/+11/+30 m）。
+  release_max_translation: 1.6
+  release_max_rotation_deg: 10.0
 
 tracking:
   # 云台快速自转时跳过先验观测（2026-11-27 实测：150°/s 时预测与观测差 0.2~0.5 m，

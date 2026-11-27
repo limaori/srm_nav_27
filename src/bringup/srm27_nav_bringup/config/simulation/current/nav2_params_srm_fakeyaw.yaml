@@ -702,8 +702,8 @@ controller_server:
       # （唯一来源，与 Omni 变体、velocity_smoother、srm_cmd_mux 一起定义，改档位只改那一份）。
       # 这里不再写 limits.*，写了会与覆盖层冲突并直接报错。
       # yaw_policy.mode = se2：MPC 的角速度权限生效（= speed_limits.yaml 的
-      # controller_server@minco.limits.max_angular_speed，2026-11-06 起 = 8.5 rad/s）。
-      # 最终执行值还要过 velocity_smoother 与 srm_cmd_mux.wz_max（三层现在同档 8.5），
+      # controller_server@minco.limits.max_angular_speed，2026-11-27 起 = 12.0 rad/s）。
+      # 最终执行值还要过 velocity_smoother 与 srm_cmd_mux.wz_max（三层现在同档 12.0），
       # 谁写小了谁就是瓶颈 —— 用 srm_speed_limits_check.py 看，不用在这里记数字；
       # 被限幅的次数看 mux 诊断的 nav_wz_clamped_count。
       # ⚠ 改限速前请连带看：planning_horizon（视野决定可达峰值 √(a·d)）、

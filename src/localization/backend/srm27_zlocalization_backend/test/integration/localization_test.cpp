@@ -411,6 +411,119 @@ TEST_F(LocalizationFlow, CumulativeAnchorStopsRepeatedSmallRotations) {
     EXPECT_LT(max_yaw_deg, 11.0);
 }
 
+/// 稳定偏差（真实漂移）不能因为超过累计预算就永久冻结：连续够多帧一致后放行一次。
+///
+/// 现场依据（real_zloc_1127_193946）：47.3 s 起连续 7 次先验观测都报
+/// delta_t=1.17~1.28 m / delta_r=3.4~3.7°，全被 0.8 m 的锚点拒；7 连冲突 →
+/// SUSPECT → LOST，之后 70 s 内跟踪与恢复都被同一道闸拒，0 次提交，
+/// 包尾点云相对先验图歪 1.8 m / ≥9.5°。
+///
+/// 这里用**旋转轴**复现同一判据（合成场景的配准对纯平移不敏感：源点云带着
+/// 预测位姿初始化，ICP 一次迭代就"收敛"回预测，实测 delta_t 恒为 0；
+/// 旋转轴的修正则确实会进观测，见 CumulativeAnchorStopsRepeatedSmallRotations）。
+/// 平移轴的同一条判据由单测 ConsistentDriftReleasesAfterEnoughAgreeingFrames 覆盖。
+TEST_F(LocalizationFlow, ConsistentOffsetReleasesTheAnchorInsteadOfFreezing) {
+    constexpr double kDeg = M_PI / 180.0;
+    constexpr double kOffsetDeg = 9.5;  // > 8° 预算，< 10° 放行半径
+    config.startup_hint.T_map_sensor = Eigen::Matrix4d::Identity();
+    config.correction_anchor.enabled = true;
+    config.correction_anchor.max_rotation_rad = 8.0 * kDeg;
+    config.correction_anchor.max_translation = 0.8;
+    config.correction_anchor.reseat_rotation_rad = 1.0 * kDeg;
+    config.correction_anchor.reseat_translation = .15;
+    config.correction_anchor.reseat_quiet_frames = 5;
+    config.correction_anchor.release_enabled = true;
+    config.correction_anchor.release_frames = 5;
+    config.correction_anchor.release_agree_translation = 0.12;
+    config.correction_anchor.release_agree_rotation_rad = 1.0 * kDeg;
+    config.correction_anchor.release_max_translation = 1.6;
+    config.correction_anchor.release_max_rotation_rad = 10.0 * kDeg;
+    // 只看"位姿有没有被拉过去"，不看状态机。
+    config.innovation.conflicts_before_suspect = 1000;
+    start(true);
+
+    double time = 10;
+    ASSERT_TRUE(ingest(frame(time, Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity())));
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+
+    // odom 正常前进，但"扫描落在的位姿"始终比 odom 多 9.5°：这就是稳定漂移。
+    double released_yaw_deg = 0.0;
+    bool saw_conflict = false;
+    bool saw_release = false;
+    for (int index = 1; index <= 6; ++index) {
+        SCOPED_TRACE(index);
+        time += .5;
+        auto odom = testing::scenePose(.1 * index, 0, 0, 0);
+        auto truth = testing::scenePose(.1 * index, 0, 0, kOffsetDeg * kDeg);
+        auto input = frame(time, truth, odom);
+        ASSERT_TRUE(ingest(input));
+        maintain();
+        const auto projection = output(input);
+        ASSERT_TRUE(projection.valid);
+        const double yaw_deg =
+            std::atan2(projection.T_map_odom(1, 0), projection.T_map_odom(0, 0)) / kDeg;
+        const std::string& reason = controller->snapshot().localization.reason;
+        if (index < 5) {
+            // 前 4 帧：越界被拒，但位姿不能被搬走。
+            saw_conflict |= reason.find("over cumulative correction anchor") != std::string::npos;
+            EXPECT_LT(std::fabs(yaw_deg), 3.0) << "第 " << index << " 帧不该放行";
+        } else {
+            saw_release |= reason.find("accepted by consistent-evidence release") !=
+                           std::string::npos;
+            released_yaw_deg = yaw_deg;
+        }
+        // 越界冲突会让状态进 OBS_DEGRADED（正常），但不能升级到 SUSPECT/LOST ——
+        // 那才是"永久冻结"的入口。
+        EXPECT_NE(controller->status(), LocalizationStatus::Suspect);
+        EXPECT_NE(controller->status(), LocalizationStatus::Lost);
+    }
+    EXPECT_TRUE(saw_conflict);
+    EXPECT_TRUE(saw_release) << "第 5 帧必须放行，否则就是永久冻结（现场故障）";
+    // 放行后 map→odom 必须被拉到测量值附近（9.5°），而不是原地不动。
+    EXPECT_NEAR(released_yaw_deg, kOffsetDeg, 2.0);
+}
+
+/// 幅度超过放行半径的偏差仍必须被拒：同构走廊的稳定错解不能靠"一致"混进来。
+TEST_F(LocalizationFlow, OffsetBeyondReleaseCapStaysRejected) {
+    constexpr double kDeg = M_PI / 180.0;
+    constexpr double kOffsetDeg = 14.0;  // > 10° 放行半径
+    config.startup_hint.T_map_sensor = Eigen::Matrix4d::Identity();
+    config.correction_anchor.enabled = true;
+    config.correction_anchor.max_rotation_rad = 8.0 * kDeg;
+    config.correction_anchor.max_translation = 0.8;
+    config.correction_anchor.release_enabled = true;
+    config.correction_anchor.release_frames = 5;
+    config.correction_anchor.release_agree_translation = 0.12;
+    config.correction_anchor.release_agree_rotation_rad = 1.0 * kDeg;
+    config.correction_anchor.release_max_translation = 1.6;
+    config.correction_anchor.release_max_rotation_rad = 10.0 * kDeg;
+    config.innovation.conflicts_before_suspect = 1000;
+    start(true);
+
+    ASSERT_TRUE(ingest(frame(10, Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity())));
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+
+    double max_yaw_deg = 0.0;
+    for (int index = 1; index <= 10; ++index) {
+        SCOPED_TRACE(index);
+        const double time = 10 + .5 * index;
+        const auto odom = testing::scenePose(.1 * index, 0, 0, 0);
+        const auto truth = testing::scenePose(.1 * index, 0, 0, kOffsetDeg * kDeg);
+        auto input = frame(time, truth, odom);
+        ASSERT_TRUE(ingest(input));
+        maintain();
+        const auto projection = output(input);
+        ASSERT_TRUE(projection.valid);
+        max_yaw_deg = std::max(
+            max_yaw_deg,
+            std::fabs(std::atan2(projection.T_map_odom(1, 0), projection.T_map_odom(0, 0)) / kDeg));
+    }
+    // 不管一致多少帧，都不许把车搬过放行半径。
+    EXPECT_LT(max_yaw_deg, 12.0);
+}
+
 /// 快速自转期间必须**跳过**先验观测，而不是让它冲突到冻结。
 /// 判据：整段自转状态保持 NORMAL，且 map→odom 不被改动。
 TEST_F(LocalizationFlow, FastBodySpinSkipsPriorObservationsInsteadOfConflicting) {

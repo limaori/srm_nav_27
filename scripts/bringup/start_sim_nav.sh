@@ -67,7 +67,7 @@
 #   ./scripts/bringup/start_sim_nav.sh --chassis-spin --gimbal-spin     # 两个一起: 底盘 2.0 + 云台 -1.0
 #   ./scripts/bringup/start_sim_nav.sh --chassis-spin 3.0 --gimbal-spin 1.5   # 自己给转速
 #   ./scripts/bringup/start_sim_nav.sh --behavior rmul_2027               # 同时起决策行为树
-#   ./scripts/bringup/start_sim_nav.sh --test-behavior                    # 测试树: 导航中 2 rad/s, 到点/无目标 5 rad/s
+#   ./scripts/bringup/start_sim_nav.sh --test-behavior                    # 测试树: 导航中 -6 rad/s, 到点/无目标 -2 rad/s
 #   ./scripts/bringup/start_sim_nav.sh --yaw-mode xy_only                # 导航只出平移（默认）
 #   ./scripts/bringup/start_sim_nav.sh --verify-spin                     # 一步验证小陀螺导航 (无头 + 自动断言 + 清理)
 #   ./scripts/bringup/start_sim_nav.sh --no-run                          # Gazebo 保持暂停, 手动点播放
@@ -1511,8 +1511,8 @@ else
   CHASSIS_SPIN_ABS="$(awk -v v="$CHASSIS_SPIN_WZ" 'BEGIN{ printf "%.3f", (v < 0) ? -v : v }')"
   # 本地钳位（spin_control.sh 的 SPIN_MAX_WZ）按本次请求放行，否则 --chassis-spin 3
   # 会被静默默认钳回 2.0；真正的上限仍由 mux 的 wz_max 兜底。
-  if awk -v v="$CHASSIS_SPIN_ABS" 'BEGIN{ exit !(v > 6.0) }'; then
-    echo "[提示] 请求 ${CHASSIS_SPIN_WZ} rad/s 超过 mux 的 wz_max（speed_limits.yaml 当前 6.0），实际执行会被限幅。" >&2
+  if awk -v v="$CHASSIS_SPIN_ABS" 'BEGIN{ exit !(v > 12.0) }'; then
+    echo "[提示] 请求 ${CHASSIS_SPIN_WZ} rad/s 超过 mux 的 wz_max（speed_limits.yaml 当前 12.0），实际执行会被限幅。" >&2
   fi
   if [ "$DRY_RUN" = "1" ]; then
     echo "--- [dry-run] 底盘自转: 等 ${CHASSIS_SPIN_TOPIC} 有订阅者(srm_cmd_mux)后执行"

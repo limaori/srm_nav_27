@@ -94,13 +94,13 @@
 
          test_spin_speed :
            没有活动目标（!nav_action_active）、到点（nav_action_arrived）
-           或目标被取消/中止 -> 原地 5 rad/s；
-           Nav2 目标 ACCEPTED/EXECUTING -> 导航中 2 rad/s。
+           或目标被取消/中止 -> 原地 -2 rad/s（反向/俯视顺时针）；
+           Nav2 目标 ACCEPTED/EXECUTING -> 导航中 -6 rad/s。
 
        目标请用 RViz “Nav2 Goal” 或其他节点直接发给 navigate_to_pose；
        服务端订阅 <nav_action_name>/_action/status（默认 navigate_to_pose），
-       外部目标同样能识别。转速 5.0 / 2.0 写死在树里，不受 spin.* 热调参数
-       影响；实际出口仍受 srm_cmd_mux 的 wz_max / wz_ramp 限幅。
+       外部目标同样能识别。转速 -2.0 / -6.0 写死在树里，不受 spin.* 热调参数
+       影响；负值 = 反向自转，|wz| 仍受 srm_cmd_mux 的 wz_max（12.0）/ wz_ramp 限幅。
        入口：start_real_nav.sh / start_sim_nav.sh 的 test-behavior 参数
        （mux 不要求决策许可）；启动方式与观测见包 README。
        ================================================================== -->
@@ -112,12 +112,12 @@
           <Sequence name="AtGoalOrNoGoalFastSpin">
             <ScriptCondition code="!@nav_action_active || @nav_action_arrived"/>
             <PublishRotationCmd _successIf="@dry_run"
-                                spin_speed="5.0"
+                                spin_speed="-2.0"
                                 spin_mode="TEST_HOLD_FAST"
                                 topic_name="rotation_cmd"/>
           </Sequence>
           <PublishRotationCmd _successIf="@dry_run"
-                              spin_speed="2.0"
+                              spin_speed="-6.0"
                               spin_mode="TEST_MOVING_SLOW"
                               topic_name="rotation_cmd"/>
         </Fallback>

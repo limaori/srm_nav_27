@@ -363,46 +363,6 @@ class _Rigid:
         return _Rigid((math.cos(0.5 * yaw), 0.0, 0.0, math.sin(0.5 * yaw)), (self.t[0], self.t[1], 0.0))
 
 
-def _stabilized_body_pose(pose):
-    """稳定体（gimbal_yaw_fake）位姿：位置不变、姿态取 odom 朝向（yaw=0）。
-
-    云台在正常导航时一直在转，`T_odom←gimbal_yaw` 的 yaw 就是云台绝对角；导航真正用的
-    `gimbal_yaw_fake` 把这段 yaw 减掉了。backend 吃这个稳定体位姿，body-rate 闸门看到的
-    才是车体（底盘）运动，而不是云台自转。
-    """
-    return _Rigid(t=pose.t)
-
-
-def _translate_cloud(cloud, translation, frame, stamp, odom_frame):
-    """把 odom 系世界点云平移到以车体为原点（frame = 稳定体系，姿态同 odom）。"""
-    transform = TransformStamped()
-    transform.header.stamp = stamp
-    transform.header.frame_id = odom_frame
-    transform.child_frame_id = frame
-    transform.transform.translation.x = -float(translation[0])
-    transform.transform.translation.y = -float(translation[1])
-    transform.transform.translation.z = -float(translation[2])
-    transform.transform.rotation.w = 1.0
-    out = do_transform_cloud(cloud, transform)
-    out.header.frame_id = frame
-    out.header.stamp = stamp
-    return out
-
-
-def _copy_frame_with_cloud(msg, cloud):
-    """复制一帧 FrontendFrame，只替换点云（给 backend 的稳定体输入用）。"""
-    out = FrontendFrame()
-    out.instance_id = msg.instance_id
-    out.epoch = msg.epoch
-    out.sequence = msg.sequence
-    out.begin = msg.begin
-    out.matches = msg.matches
-    out.lidar_updated = msg.lidar_updated
-    out.odometry = msg.odometry
-    out.cloud = cloud
-    return out
-
-
 class ZlioBridge(Node):
     """把 ZLIO 的 `FrontendFrame` 改写成 `registered_scan` + `lidar_odometry`。
 
@@ -489,14 +449,6 @@ class ZlioBridge(Node):
         self.declare_parameter("backend_prediction_input_topic", "zlio/frontend_odometry")
         # backend 的 common.sensor_frame；空 = 用本节点的 lidar_frame。
         self.declare_parameter("backend_sensor_frame", "")
-        # ★ 2026-11-27：backend 输入改用导航的稳定体坐标系（gimbal_yaw_fake）。
-        # 云台在正常导航时一直在转（2/5 rad/s），自瞄时再小幅左右摆；backend 若直接吃
-        # `T_odom←gimbal_yaw`，它的 body-rate 闸门会把云台自转当车体自转，整段跳过先验
-        # 观测，云台停下后第一次放行就超累计锚点 → LOST。打开后喂给 backend 的是
-        # “位置 = 雷达位置、姿态 = odom 朝向”的 fake 位姿 + “世界点云 - 车体位置”的
-        # 相对点云；输出链（lidar_odometry / registered_scan / TF）不变。
-        self.declare_parameter("backend_stabilized_body", False)
-        self.declare_parameter("backend_stabilized_frame", "gimbal_yaw_fake")
         self.declare_parameter("backend_odom_frame", "")
         # backend 调的重置服务（= backend.yaml 的 reset.service）与它转发到的前端服务。
         self.declare_parameter("backend_reset_service", "zlocalization/reset_frontend")
@@ -540,15 +492,7 @@ class ZlioBridge(Node):
 
         # ---- backend 输入适配的接线参数 ----
         self.backend_enabled = bool(self.get_parameter("backend_enabled").value)
-        self.backend_stabilized_body = bool(
-            self.get_parameter("backend_stabilized_body").value)
-        self.backend_stabilized_frame = str(
-            self.get_parameter("backend_stabilized_frame").value) or "gimbal_yaw_fake"
         backend_sensor_frame = str(self.get_parameter("backend_sensor_frame").value)
-        if self.backend_stabilized_body and not backend_sensor_frame:
-            # 没显式给 sensor_frame 时，稳定体模式下必须用 fake 系，否则 backend
-            # 逐帧校验 `odometry.child_frame_id == common.sensor_frame` 会丢帧。
-            backend_sensor_frame = self.backend_stabilized_frame
         backend_odom_frame = str(self.get_parameter("backend_odom_frame").value)
         backend_frame_topic = str(self.get_parameter("backend_frame_topic").value)
         backend_prediction_topic = str(self.get_parameter("backend_prediction_topic").value)
@@ -680,11 +624,6 @@ class ZlioBridge(Node):
                 "backend 模式已启用：map->odom 的唯一发布者是 backend_node；"
                 "静态 TF / small_gicp / slam_toolbox 必须关闭（launch 已做冲突检查）"
             )
-            if self.backend_stabilized_body:
-                self.get_logger().info(
-                    "backend 稳定体输入已启用: 位姿/点云改用 "
-                    f"{self.backend_stabilized_frame}（云台自转与自瞄不进入 backend）"
-                )
 
         self.get_logger().info(
             f"ZLIO 桥接已启动: 订阅 {frame_topic} / {session_topic}, 用 "
@@ -796,13 +735,6 @@ class ZlioBridge(Node):
         if self.t_off is None:
             return None
         pose = self.t_off * _Rigid.from_pose(raw_pose)
-        # 稳定体输入必须和导航的 gimbal_yaw_fake 用同一个输出位姿（带 pose_body_offset）。
-        # 否则 backend 看到的是带 ZLIO 随体偏置的 raw 位姿，而导航看到的是补偿后的位姿，
-        # 两者差 ~0.26 m；云台一转先验配准就会 NIS 爆表（bag real_zloc_1127_185821）。
-        if self.backend_stabilized_body and self.pose_body_offset is not None:
-            pose = pose * self.pose_body_offset
-        if self.backend_stabilized_body:
-            pose = _stabilized_body_pose(pose)
         return self.t_off, pose, None
 
     def _on_frame(self, msg: FrontendFrame):
@@ -1117,23 +1049,11 @@ class ZlioBridge(Node):
         self.cloud_pub.publish(cloud)
         self.frames += 1
         if self.backend is not None:
+            # backend 必须拿**原始**位姿：它的局部点云是原始系，把 offset 加到位姿上
+            # 会让"预测点云"和"实测点云"差一个随云台转动的常量（云台一转就冲突）。
+            # offset 只走上面的 lidar_odometry/TF 输出链去修发布位姿的圆。
             backend_pose = pose if backend_pose is None else backend_pose
-            if self.backend_stabilized_body:
-                # 稳定体输入：姿态取 odom 朝向、位置 = 导航输出位姿（含 pose_body_offset）；
-                # 点云是 `registered_scan - 输出位姿位置`。必须用 `pose`（输出链的 pose_pub）
-                # 而不是 `cloud_pose`（raw）：导航的 gimbal_yaw_fake 也是带 offset 的输出，
-                # 两者不一致会让先验配准一直差 ~0.26 m（bag real_zloc_1127_185821）。
-                body_pose = _stabilized_body_pose(_Rigid(t=pose.t))
-                body_cloud = _translate_cloud(
-                    cloud, pose.t, self.backend_stabilized_frame,
-                    odometry.header.stamp, self.odom_frame)
-                backend_msg = _copy_frame_with_cloud(msg, body_cloud)
-                self.backend.on_frame(backend_msg, self.t_off, body_pose, None)
-            else:
-                # backend 必须拿**原始**位姿：它的局部点云是原始系，把 offset 加到位姿上
-                # 会让"预测点云"和"实测点云"差一个随云台转动的常量（云台一转就冲突）。
-                # offset 只走上面的 lidar_odometry/TF 输出链去修发布位姿的圆。
-                self.backend.on_frame(msg, self.t_off, backend_pose, None)
+            self.backend.on_frame(msg, self.t_off, backend_pose, None)
         if self.frames == 1 or self.frames % 200 == 0:
             self.get_logger().info(
                 f"已转发 {self.frames} 帧 (丢弃 {self.dropped}), epoch={self.epoch}, "

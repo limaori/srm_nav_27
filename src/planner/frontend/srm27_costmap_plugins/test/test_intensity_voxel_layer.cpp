@@ -80,12 +80,14 @@ class IntensityVoxelLayerTest : public ::testing::Test
 protected:
   void configure(
     bool _rolling = false, bool _persistent_obstacle = false, double _hold_time = 0.0,
-    bool _footprint_clearing = false)
+    bool _footprint_clearing = false, int _min_points = 1, double _self_filter_radius = 0.0)
   {
     rclcpp::NodeOptions options;
     options.parameter_overrides(
       {rclcpp::Parameter("terrain.footprint_clearing_enabled", _footprint_clearing),
        rclcpp::Parameter("terrain.origin_z", 0.0),
+       rclcpp::Parameter("terrain.min_obstacle_points", _min_points),
+       rclcpp::Parameter("terrain.self_filter_radius", _self_filter_radius),
        rclcpp::Parameter("terrain.hold_time", _hold_time)});
     node_ = std::make_shared<nav2_util::LifecycleNode>("intensity_layer_test", "", options);
     tf_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
@@ -258,4 +260,53 @@ TEST_F(IntensityVoxelLayerTest, HoldTimeDoesNotRecordObstacleInsideFootprint)
   layer_->clearStaticObservations(true, false);
   map_->updateMap(1.0, 0, 0);
   EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+// ---- 2026-11-27：判定收紧（min_obstacle_points / self_filter_radius）----
+//
+// 背景：单点即障碍 + 车体原点附近不止回波，把"不该判定为障碍"的点也标成致命格。
+// 两个参数默认值都与旧行为逐位一致（1 / 0），下面同时钉住"默认不变"和"收紧生效"。
+
+TEST_F(IntensityVoxelLayerTest, DefaultSinglePointStillMarksObstacle)
+{
+  configure();
+  observe(2.05, 2.05);
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(IntensityVoxelLayerTest, MinObstaclePointsRequiresMultipleHitsInOneUpdate)
+{
+  configure(false, false, 0.0, false, 3);
+  observe(2.05, 2.05);
+  observe(2.05, 2.05);          // 2 个点 < 3
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::FREE_SPACE);
+
+  // 同一周期内凑够 3 个点才标；不足 3 个点的格子保持自由。
+  layer_->clearStaticObservations(true, false);
+  map_->updateMap(0, 0, 0);
+  observe(2.05, 2.05);
+  observe(2.05, 2.05);
+  observe(2.05, 2.05);
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(2.05, 2.05), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(IntensityVoxelLayerTest, SelfFilterRadiusDropsRobotBodyReturns)
+{
+  configure(false, false, 0.0, false, 1, 0.45);
+  observe(0.35, 0.0);   // 车体原点 0.35 m 内：自车回波，跳过
+  observe(1.05, 0.0);   // 圆外：正常障碍
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(0.35, 0.0), nav2_costmap_2d::FREE_SPACE);
+  EXPECT_EQ(cost(1.05, 0.0), nav2_costmap_2d::LETHAL_OBSTACLE);
+}
+
+TEST_F(IntensityVoxelLayerTest, SelfFilterRadiusZeroKeepsOldBehaviour)
+{
+  configure();
+  observe(0.35, 0.0);
+  map_->updateMap(0, 0, 0);
+  EXPECT_EQ(cost(0.35, 0.0), nav2_costmap_2d::LETHAL_OBSTACLE);
 }

@@ -118,10 +118,15 @@ public:
     bool acceptsCorrection(const Eigen::Matrix4d& T_map_odom) const {
         return correction_anchor_.accepts(T_map_odom);
     }
-    /// 记录一次已提交的修正；只有"安静"的修正才让锚点前移。
+    /// 裁决候选（预算内 / 一致证据放行 / 拒绝）；放行时提交端必须随后重落锚。
+    AnchorDecision judgeCorrection(const Eigen::Matrix4d& T_map_odom) const {
+        return correction_anchor_.judge(T_map_odom);
+    }
+    /// 记录一次已提交的修正；只有"安静"的修正才让锚点前移，`released` 时直接跟随。
     void noteCorrection(const Eigen::Matrix4d& T_map_odom, const double applied_rotation_rad,
-                        const double applied_translation) {
-        correction_anchor_.observe(T_map_odom, applied_rotation_rad, applied_translation);
+                        const double applied_translation, const bool released = false) {
+        correction_anchor_.observe(T_map_odom, applied_rotation_rad, applied_translation,
+                                   released);
     }
     /// 人工重定位提交成功后强制重落锚（显式声明"我知道车在哪"）。
     void reseatCorrectionAnchor(const Eigen::Matrix4d& T_map_odom) {

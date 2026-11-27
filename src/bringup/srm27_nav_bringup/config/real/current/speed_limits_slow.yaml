@@ -2,7 +2,7 @@
 # 实车速度限幅 —— 低速试跑档（新图首跑用）
 # =============================================================================
 # 与 config/real/speed_limits.yaml 同结构，只压数值：
-#   平移 2.60 -> 1.00 m/s，加速度 7.0 -> 2.5 m/s²，wz 8.50 -> 1.00 rad/s。
+#   平移 2.60 -> 1.00 m/s，加速度 7.0 -> 2.5 m/s²，wz 12.00 -> 1.00 rad/s。
 # 用法: ./scripts/bringup/start_real_nav.sh -m <地图> \
 #         --speed-limits $(pwd)/src/bringup/srm27_nav_bringup/config/real/current/speed_limits_slow.yaml
 controller_server@omni:

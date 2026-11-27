@@ -1100,9 +1100,18 @@ local_costmap:
         enabled: true
         track_unknown_space: true
         footprint_clearing_enabled: true
+        # ★ 2026-11-27 判定收紧（默认 1/0 = 旧行为；下面四个键是本次实际取值）：
+        #   min_obstacle_points: 同一 0.05 m 格本周期至少 3 个点才标致命格
+        #     （旧行为单点即障碍：地面拖点/自车回波/多径噪点会成片进图）；
+        #   self_filter_radius: 车体原点 0.45 m 内的点直接跳过（自车回波）；
+        #   mark_threshold: 1 → 同一格至少 2 个高度层有观测；
+        #   min_obstacle_height/intensity 见下。
+        #   回退：删掉 min_obstacle_points / self_filter_radius，mark_threshold 改回 0。
+        min_obstacle_points: 3
+        self_filter_radius: 0.45
         publish_voxel_map: false
         combination_method: 1
-        mark_threshold: 0
+        mark_threshold: 1
         origin_z: 0.0
         unknown_threshold: 5
         z_resolution: 0.05
@@ -1118,9 +1127,11 @@ local_costmap:
         #   0.0 会把它们全部当成障碍，局部/全局代价地图在机器人周围铺出一大片
         #   青/蓝 inscribed/inflated。抬高到 0.10 只保留真正高于地面的障碍点。
         #   （2026-11-23 的 0.0/2.0 回退副作用：南入口 z≈0.01-0.08 地面点成片标记。）
-        min_obstacle_height: 0.10
+        # 2026-11-27：0.10 → 0.15（绝对 odom z）；0.1 → 0.20（离地高度）。
+        # 旧值把贴地/低矮杂波也当障碍；抬高后只保留真正高于地面 20 cm 的点。
+        min_obstacle_height: 0.15
         max_obstacle_height: 2.0
-        min_obstacle_intensity: 0.1
+        min_obstacle_intensity: 0.20
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map
         terrain_map:
@@ -1138,7 +1149,7 @@ local_costmap:
           # 2026-11-27: horizon 6.0 + 局部图 14×14 之后，5.0 会让 5~7 m 段完全盲走；
           #   取 8.0 = horizon 6.0 + 2 m 余量（超出的点会被滚动窗口裁掉）。
           obstacle_max_range: 8.0
-          obstacle_min_range: 0.2
+          obstacle_min_range: 0.30
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
@@ -1179,9 +1190,18 @@ global_costmap:
         enabled: true
         track_unknown_space: true
         footprint_clearing_enabled: true
+        # ★ 2026-11-27 判定收紧（默认 1/0 = 旧行为；下面四个键是本次实际取值）：
+        #   min_obstacle_points: 同一 0.05 m 格本周期至少 3 个点才标致命格
+        #     （旧行为单点即障碍：地面拖点/自车回波/多径噪点会成片进图）；
+        #   self_filter_radius: 车体原点 0.45 m 内的点直接跳过（自车回波）；
+        #   mark_threshold: 1 → 同一格至少 2 个高度层有观测；
+        #   min_obstacle_height/intensity 见下。
+        #   回退：删掉 min_obstacle_points / self_filter_radius，mark_threshold 改回 0。
+        min_obstacle_points: 3
+        self_filter_radius: 0.45
         publish_voxel_map: false
         combination_method: 1
-        mark_threshold: 0
+        mark_threshold: 1
         origin_z: 0.0
         unknown_threshold: 5
         z_resolution: 0.05
@@ -1189,9 +1209,11 @@ global_costmap:
         # ★ 2026-11-27：0 → 2.0（同 local；全局层 5 Hz，0.5~1 s 的遮挡就会让障碍消失）。
         hold_time: 2.0
         # ★ 2026-11-24：0.0 → 0.10（同 local；排除 terrain 的 free-space 网格点）。
-        min_obstacle_height: 0.10
+        # 2026-11-27：0.10 → 0.15（绝对 odom z）；0.1 → 0.20（离地高度）。
+        # 旧值把贴地/低矮杂波也当障碍；抬高后只保留真正高于地面 20 cm 的点。
+        min_obstacle_height: 0.15
         max_obstacle_height: 2.0
-        min_obstacle_intensity: 0.1
+        min_obstacle_intensity: 0.20
         max_obstacle_intensity: 2.0
         observation_sources: terrain_map_ext
         terrain_map_ext:
@@ -1201,7 +1223,7 @@ global_costmap:
           min_obstacle_height: 0.10    # 2026-11-24：与层门槛一致；排除 free-space 网格点
           max_obstacle_height: 2.0     # 2026-11-23 回退：与层门槛一致（6108770 档）
           obstacle_max_range: 10.0
-          obstacle_min_range: 0.2
+          obstacle_min_range: 0.30
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True

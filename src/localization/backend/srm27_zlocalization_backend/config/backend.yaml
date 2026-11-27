@@ -243,6 +243,22 @@ correction_anchor:
   # 连续多少帧"安静"才允许锚点前移。取 5 是为了掐掉"跳一次 → 安静一帧 → 再跳一次"
   # 的锯齿：同向连续错解之间插不进足够的安静帧，锚点就不会被追认。
   reseat_quiet_frames: 5
+  #
+  # ↓ 一致证据放行（2026-11-27 19:39 包之后补的出口）
+  #
+  # 只有上面的绝对预算会死锁：真实漂移一旦超过 0.8 m，就再没有"安静帧"可以让锚点前移，
+  # 跟踪和恢复两条路都被同一道闸拒 —— 实测 real_zloc_1127_193946 连拒 70 s、0 次提交，
+  # 位姿纯递推，包尾点云相对先验图歪 1.8 m / ≥9.5°。
+  # 判据：越界候选连续 release_frames 帧彼此一致（平移差 ≤ 12 cm、旋转差 ≤ 1°）
+  # 且幅度不超过 release_max_*，放行一次；提交后**强制重落锚**。
+  release_enabled: true
+  release_frames: 5
+  release_agree_translation: 0.12
+  release_agree_rotation_deg: 1.0
+  # 放行半径：超过它就只拒不放（"一致得再多也不放"）。必须 <= 单次闸，否则等于绕过
+  # 单次幅度检查 —— config.cpp 会按 recovery.max_*_correction 再夹一次。
+  release_max_translation: 1.6
+  release_max_rotation_deg: 10.0
 uwb:
   # 是否接入 UWB 位置观测，入口 --zloc-uwb 显式开启。
   # 下列外参/时间偏置沿用迁入基线，须按现场硬件核对；开关不代表已完成标定。

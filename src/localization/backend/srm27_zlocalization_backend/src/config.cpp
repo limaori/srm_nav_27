@@ -243,10 +243,29 @@ void normalizeObservationNumerics(Config& c, const Config& d) {
     fields(c.correction_anchor, d.correction_anchor,
            {&CorrectionAnchorConfig::max_rotation_rad, &CorrectionAnchorConfig::max_translation,
             &CorrectionAnchorConfig::reseat_rotation_rad,
-            &CorrectionAnchorConfig::reseat_translation},
+            &CorrectionAnchorConfig::reseat_translation,
+            &CorrectionAnchorConfig::release_agree_translation,
+            &CorrectionAnchorConfig::release_agree_rotation_rad,
+            &CorrectionAnchorConfig::release_max_translation,
+            &CorrectionAnchorConfig::release_max_rotation_rad},
            nonnegativeOr);
     c.correction_anchor.reseat_quiet_frames =
         std::max(1, c.correction_anchor.reseat_quiet_frames);
+    c.correction_anchor.release_frames = std::max(1, c.correction_anchor.release_frames);
+    // 放行半径不得超过对应单次闸：否则"一致证据放行"就等于绕过单次幅度检查，
+    // 一次提交能把车搬过单次预算（那是 2026-11-26 传送事故的拦口）。
+    if (c.correction_anchor.release_max_translation > 0.0 &&
+        c.recovery.max_translation_correction > 0.0) {
+        c.correction_anchor.release_max_translation =
+            std::min(c.correction_anchor.release_max_translation,
+                     c.recovery.max_translation_correction);
+    }
+    if (c.correction_anchor.release_max_rotation_rad > 0.0 &&
+        c.recovery.max_rotation_correction_rad > 0.0) {
+        c.correction_anchor.release_max_rotation_rad =
+            std::min(c.correction_anchor.release_max_rotation_rad,
+                     c.recovery.max_rotation_correction_rad);
+    }
 }
 
 /// 规范化 UWB 时空参数、位置协方差及依赖其数值的启动标定。
