@@ -24,7 +24,9 @@ from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 from rcl_interfaces.srv import SetParametersAtomically
 from ament_index_python.packages import get_package_share_directory
 from btcpp_ros2_interfaces.action import ExecuteTree
+from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
+from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import Twist
 from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
 from nav_msgs.msg import Odometry
@@ -55,7 +57,7 @@ def wait_for(predicate, message, timeout=7):
 
 
 class Arena:
-    def __init__(self, league, scenario="match", navigation="fake", overrides=None):
+    def __init__(self, league, scenario="match", navigation="fake", overrides=None, start_tree=True):
         self.league = league
         self.out = OUT / f"{league}-{scenario}"
         self.events = []
@@ -141,7 +143,8 @@ class Arena:
                    [part for key, value in overrides.items() for part in ("-p", f"{key}:={value}")])
         self.client = ActionClient(self.node, ExecuteTree, "srm27_behavior")
         assert self.client.wait_for_server(timeout_sec=12), "decision server unavailable"
-        self.tree = self.send_tree()
+        if start_tree:
+            self.tree = self.send_tree()
         self.checks = []
 
     def spawn(self, name, command):
@@ -225,8 +228,9 @@ class Arena:
         wait_for(future.done, "ROS request timed out")
         return future.result()
 
-    def send_tree(self):
-        return self.future(self.client.send_goal_async(ExecuteTree.Goal(target_tree=f"rm{self.league}_2027")))
+    def send_tree(self, tree_name=None, payload=""):
+        return self.future(self.client.send_goal_async(
+            ExecuteTree.Goal(target_tree=tree_name or f"rm{self.league}_2027", payload=payload)))
 
     def accepted(self):
         return [e for e in self.events if e["event"] == "accepted"]
@@ -316,6 +320,111 @@ def arena(request, tmp_path):
             overrides["ul_semantic_map_file"] = str(semantic_map)
         a.__init__(request.param, request.node.originalname, overrides=overrides)
         yield a
+    finally:
+        try:
+            if hasattr(a, "executor"):
+                a.close()
+        finally:
+            rclpy.shutdown()
+
+
+@pytest.mark.parametrize(("tree_name", "pose_source"), [
+    ("test_handover_on_arrival", "rviz"),
+    ("test_goto_point_and_handover", "parameter"),
+    ("test_goto_point_and_handover", "payload"),
+])
+def test_handover_on_successful_navigation(tree_name, pose_source):
+    """Use a Nav2 action client like RViz, or a goal supplied to the production BT server."""
+    target = "1.25;-0.5;0.6"
+    init_test_ros()
+    a = Arena.__new__(Arena)
+    try:
+        params = {"target_pose": target} if pose_source == "parameter" else {}
+        a.__init__("ul", f"handover-{pose_source}", overrides=params, start_tree=False)
+        flags, mux_states = [], []
+        a.node.create_subscription(UInt8, "decision/handover_flag", lambda msg: flags.append(msg.data), 10)
+        a.node.create_subscription(
+            DiagnosticArray, "diagnostics",
+            lambda msg: mux_states.extend({kv.key: kv.value for kv in status.values} for status in msg.status),
+            10)
+
+        def send_external_goal(x):
+            goal = NavigateToPose.Goal()
+            goal.pose.header.frame_id = "map"
+            goal.pose.pose.position.x = x
+            goal.pose.pose.orientation.w = 1.0
+            handle = a.future(nav_client.send_goal_async(goal))
+            assert handle.accepted
+            return handle
+
+        if pose_source == "rviz":
+            nav_client = ActionClient(a.node, NavigateToPose, "navigate_to_pose")
+            assert nav_client.wait_for_server(timeout_sec=5)
+            a.succeed = True
+            old_goal = send_external_goal(2.)
+            assert a.future(old_goal.get_result_async()).status == GoalStatus.STATUS_SUCCEEDED
+            a.succeed = False
+        elif pose_source == "payload":
+            assert not a.send_tree(tree_name).accepted
+            invalid = a.send_tree(tree_name, "nan;0;0")
+            assert invalid.accepted
+            assert a.future(invalid.get_result_async()).status == GoalStatus.STATUS_ABORTED
+            assert not a.accepted() and not flags
+            a.check("invalid_target_did_not_dispatch")
+
+        a.tree = a.send_tree(tree_name, target if pose_source == "payload" else "")
+        assert a.tree.accepted
+        wait_for(lambda: a.reports and a.reports[-1]["guard_ready"], "mux guard not ready")
+        wait_for(lambda: a.node.count_publishers("decision/handover_flag") > 0, "flag publisher missing")
+
+        def forwarded():
+            return a.permits and a.permits[-1] and a.outputs and a.outputs[-1].linear.x > 0.1
+
+        if pose_source == "rviz":
+            assert not flags and not any(a.permits), "old Nav2 success armed handover"
+            a.check("ignored_previous_nav2_success")
+            aborted_goal = send_external_goal(3.)
+            wait_for(forwarded, "navigation was not permitted")
+            a.abort = True
+            assert a.future(aborted_goal.get_result_async()).status == GoalStatus.STATUS_ABORTED
+            wait_for(lambda: a.permits and not a.permits[-1], "abort did not revoke permit")
+            assert not flags
+            a.check("no_flag_after_abort")
+            a.abort = False
+            send_external_goal(1.25)
+        else:
+            a.goal(1.25, -0.5)
+
+        wait_for(forwarded, "navigation was not permitted")
+        assert not flags, "flag published before arrival"
+        a.check("motion_permitted_during_navigation")
+        a.x, a.y = 1.25, 0. if pose_source == "rviz" else -0.5
+        time.sleep(.06)  # Deliver the final pose before Nav2 returns success.
+        a.succeed = True
+        wait_for(lambda: flags == [1], "expected a single UInt8 flag with data=1")
+        result = a.future(a.tree.get_result_async())
+        assert result.status == GoalStatus.STATUS_SUCCEEDED
+        wait_for(lambda: any(r["mode"] == "handover" and r["reason"] == "arrived_at_point" and
+                             r["handover_active"] and not r["motion_permit"] for r in a.reports),
+                 "handover state or motion permit did not update")
+        wait_for(lambda: a.permits and not a.permits[-1], "motion permit topic was not revoked")
+        wait_for(lambda: mux_states and mux_states[-1].get("stopped") == "true" and
+                 mux_states[-1].get("decision_required") == "true", "mux did not latch stop")
+
+        # Even if a new permit and Nav2 command arrive, the manual stop remains latched.
+        nav_velocity = Twist()
+        nav_velocity.linear.x = 0.2
+        permit = a.node.create_publisher(Bool, "decision/motion_permit", 1)
+        wait_for(lambda: permit.get_subscription_count() >= 2, "mux permit subscriber missing")
+        after = len(a.outputs)
+        for _ in range(10):
+            permit.publish(Bool(data=True))
+            a.nav_pub.publish(nav_velocity)
+            time.sleep(.02)
+        assert not a.reports[-1]["motion_permit"]
+        assert a.outputs[after:] and all(m.linear.x == m.linear.y == m.angular.z == 0 for m in a.outputs[after:])
+        assert flags == [1]
+        a.check("single_flag_and_latched_zero_output")
     finally:
         try:
             if hasattr(a, "executor"):

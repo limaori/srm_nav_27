@@ -125,4 +125,42 @@
     </KeepRunningUntilFailure>
   </BehaviorTree>
 
+  <BehaviorTree ID="handover_control">
+    <Sequence _successIf="@dry_run">
+      <PublishHandoverFlag/>
+      <MuxStopControl service_name="srm_cmd_mux/stop_all" ignore_unreachable="true"/>
+      <Script code="@motion_allowed := false; @decision_mode := 'handover'; @decision_reason := 'arrived_at_point'"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="test_handover_on_arrival">
+    <Sequence _successIf="@dry_run">
+      <Script code="@decision_mode := 'test'; @decision_reason := 'external_nav_goal'"/>
+      <Inverter>
+        <KeepRunningUntilFailure>
+          <Sequence>
+            <Script code="@motion_allowed := (@handover_nav_state == 1)"/>
+            <ScriptCondition code="!@nav_action_arrived || (@handover_nav_state != 2)"/>
+          </Sequence>
+        </KeepRunningUntilFailure>
+      </Inverter>
+      <SubTree ID="handover_control"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <BehaviorTree ID="test_goto_point_and_handover">
+    <Sequence _successIf="@dry_run">
+      <Script code="@decision_mode := 'test'; @decision_reason := 'goto_handover_point'"/>
+      <RetryUntilSuccessful num_attempts="-1">
+        <Sequence>
+          <Sleep msec="50"/>
+          <ScriptCondition code="@guard_ready"/>
+        </Sequence>
+      </RetryUntilSuccessful>
+      <Script code="@motion_allowed := true"/>
+      <SendNav2Goal goal="{target_pose}" action_name="{@nav_action_name}"/>
+      <SubTree ID="handover_control"/>
+    </Sequence>
+  </BehaviorTree>
+
 </root>

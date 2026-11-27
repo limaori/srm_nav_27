@@ -18,6 +18,7 @@
 #include <behaviortree_cpp/loggers/bt_cout_logger.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr guard_client_;
   rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedFuture guard_future_;
+  std::mutex nav_action_status_mutex_;
+  int64_t handover_started_at_ns_ = 0;
   int64_t last_pose_stamp_ = -1;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

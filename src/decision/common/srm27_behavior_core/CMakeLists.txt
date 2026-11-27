@@ -26,4 +26,4 @@ if(BUILD_TESTING)
 endif()
 
 # header-only：ament_auto_package 负责安装 include/ 并导出 include 与依赖。
-ament_auto_package()
+ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

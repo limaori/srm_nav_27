@@ -27,6 +27,7 @@ set(SRM27_BEHAVIOR_ACTION_PLUGINS
   pub_rotation_cmd
   pub_spin_speed
   pub_twist
+  publish_handover_flag
   send_nav2_goal
   set_sentry_posture
 )
@@ -88,4 +89,4 @@ if(BUILD_TESTING)
     "ROS_HOME=${CMAKE_BINARY_DIR}/ros_home;ROS_LOG_DIR=${CMAKE_BINARY_DIR}/ros_home/log")
 endif()
 
-ament_auto_package()
+ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR)

@@ -14,6 +14,7 @@
 
 #include "srm27_behavior/srm27_behavior_server.hpp"
 #include "srm27_behavior_core/sentry_posture_state.hpp"
+#include "srm27_behavior_core/waypoint_utils.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -44,11 +45,17 @@
 #include "rm_decision_interfaces/msg/switch_position.hpp"
 namespace srm27_behavior
 {
+namespace
+{
+constexpr auto kExternalHandoverTree = "test_handover_on_arrival";
+constexpr auto kTargetHandoverTree = "test_goto_point_and_handover";
+}  // namespace
 
 void SentryBehaviorServer::initBlackboardDefaults()
 {
   auto bb = globalBlackboard();
   bb->set("motion_allowed", false);
+  bb->set("handover_active", false);
   bb->set("guard_ready", false);
   bb->set("decision_mode", std::string("wait"));
   bb->set("decision_reason", std::string("initializing"));
@@ -263,6 +270,7 @@ SentryBehaviorServer::SentryBehaviorServer(const rclcpp::NodeOptions & options)
   bb->set("dry_run", node()->declare_parameter("dry_run", true));
   bb->set("waypoints_calibrated", node()->declare_parameter("waypoints_calibrated", false));
   bb->set("waypoints_file", node()->declare_parameter("waypoints_file", std::string("params/waypoints.yaml")));
+  node()->declare_parameter<std::string>("target_pose", "");
 
   auto declare_scoped_param = [this, bb](
     const std::string & scoped_name, const std::string & legacy_name, auto default_val) {
@@ -323,22 +331,26 @@ void SentryBehaviorServer::initNavActionStatus()
   const auto action_name =
     node()->declare_parameter<std::string>("nav_action_name", "navigate_to_pose");
   auto bb = globalBlackboard();
+  bb->set("nav_action_name", action_name);
   bb->set("nav_action_state", 0);
   bb->set("nav_action_active", false);
   bb->set("nav_action_arrived", false);
+  bb->set("handover_nav_state", 0);
 
   // 外部（RViz / CLI / 其他节点）下发的 Nav2 目标不会经过本树的 SendNav2Goal，
-  // 因此直接跟踪 action 状态，供 test_spin_speed 这类“只看导航状态”的测试树使用。
+  // 因此直接跟踪 action 状态，以及目标接收时间以过滤上轮的状态。
   subscriptions_.push_back(node()->create_subscription<action_msgs::msg::GoalStatusArray>(
     action_name + "/_action/status", rclcpp_action::DefaultActionStatusQoS(),
     [this](const action_msgs::msg::GoalStatusArray::SharedPtr status) {
       int state = 0;
+      int64_t goal_stamp = -1;
       if (!status->status_list.empty()) {
         const auto latest = std::max_element(
           status->status_list.begin(), status->status_list.end(),
           [](const auto & a, const auto & b) {
             return rclcpp::Time(a.goal_info.stamp) < rclcpp::Time(b.goal_info.stamp);
           });
+        goal_stamp = rclcpp::Time(latest->goal_info.stamp).nanoseconds();
         switch (latest->status) {
           case action_msgs::msg::GoalStatus::STATUS_ACCEPTED:
           case action_msgs::msg::GoalStatus::STATUS_EXECUTING:
@@ -354,9 +366,12 @@ void SentryBehaviorServer::initNavActionStatus()
         }
       }
       auto blackboard = globalBlackboard();
+      std::lock_guard<std::mutex> lock(nav_action_status_mutex_);
       blackboard->set("nav_action_state", state);
       blackboard->set("nav_action_active", state == 1);
       blackboard->set("nav_action_arrived", state == 2);
+      // BT Script comparisons convert numbers to double, so compare ROS timestamps here.
+      blackboard->set("handover_nav_state", goal_stamp > handover_started_at_ns_ ? state : 0);
     }));
 }
 
@@ -384,12 +399,41 @@ bool SentryBehaviorServer::onGoalReceived(
   RCLCPP_INFO(
     node()->get_logger(), "onGoalReceived with tree name '%s' with payload '%s'", tree_name.c_str(),
     payload.c_str());
+  if ((tree_name == kExternalHandoverTree || tree_name == kTargetHandoverTree) &&
+    !enforce_mux_guard_)
+  {
+    RCLCPP_ERROR(node()->get_logger(), "Handover tests require enforce_mux_guard=true");
+    return false;
+  }
+  if (tree_name == kTargetHandoverTree && payload.empty() &&
+    node()->get_parameter("target_pose").as_string().empty())
+  {
+    RCLCPP_ERROR(
+      node()->get_logger(), "Set target_pose or ExecuteTree.payload to x;y;yaw before handover");
+    return false;
+  }
   return true;
 }
 
 void SentryBehaviorServer::onTreeCreated(BT::Tree & tree)
 {
-  globalBlackboard()->set<BT::TreeNode *>("navigation_owner", nullptr);
+  auto bb = globalBlackboard();
+  bb->set<BT::TreeNode *>("navigation_owner", nullptr);
+  bb->set("motion_allowed", false);
+  bb->set("handover_active", false);
+  if (treeName() == kExternalHandoverTree) {
+    std::lock_guard<std::mutex> lock(nav_action_status_mutex_);
+    handover_started_at_ns_ = node()->now().nanoseconds();
+    bb->set("handover_nav_state", 0);
+  } else if (treeName() == kTargetHandoverTree) {
+    const auto target_pose = goalPayload().empty() ?
+      node()->get_parameter("target_pose").as_string() : goalPayload();
+    std::vector<geometry_msgs::msg::PoseStamped> poses;
+    if (!parseInlineWaypoints(target_pose, poses, map_frame_) || poses.size() != 1) {
+      throw std::invalid_argument("target_pose must be one finite x;y;yaw pose");
+    }
+    tree.rootBlackboard()->set("target_pose", poses.front());
+  }
   if (use_cout_logger_) {
     logger_cout_ = std::make_shared<BT::StdCoutLogger>(tree);
   }
@@ -435,10 +479,16 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
   }
   std_msgs::msg::Float64 hold;
   bool stationary = false;
-  const bool enabled = !dry_run && bb->get<bool>("guard_ready") && bb->get<bool>("motion_allowed") &&
+  const bool external_handover = treeName() == kExternalHandoverTree;
+  const bool handover_test = external_handover || treeName() == kTargetHandoverTree;
+  const bool handover_active = bb->get<bool>("handover_active");
+  const bool motion_allowed = bb->get<bool>("motion_allowed");
+  const bool match_enabled =
     bb->get<bool>("inputs_ready") && bb->get<bool>("status_valid") && bb->get<bool>("chassis_enabled") &&
     bb->get<int>("hp") > 0 && bb->get<int>("game_progress") == 4 && bb->get<int>("remain_time") > 0;
-  if (enabled) {
+  const bool enabled = !dry_run && bb->get<bool>("guard_ready") && motion_allowed &&
+    !handover_active && (handover_test || match_enabled);
+  if (enabled && !handover_test) {
     std::lock_guard<std::mutex> lock(spin_tracker_->mutex);
     const bool reached = spin_tracker_->nav_goal_finished && spin_tracker_->nav_arrived;
     const bool supplying = spin_tracker_->last_spin_mode == "SUPPLY_HOLD" &&
@@ -448,7 +498,8 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
       hold.data = spin_tracker_->last_cmd_wz;
     }
   }
-  const bool permit = enabled && (bb->get<bool>("navigation_ready") || stationary);
+  const bool permit =
+    enabled && (external_handover || bb->get<bool>("navigation_ready") || stationary);
   if (!dry_run) {
     std_msgs::msg::Bool allowed;
     allowed.data = permit;
@@ -459,6 +510,7 @@ std::optional<BT::NodeStatus> SentryBehaviorServer::onLoopAfterTick(BT::NodeStat
   json << std::boolalpha << "{\"mode\":\"" << bb->get<std::string>("decision_mode")
        << "\",\"reason\":\"" << bb->get<std::string>("decision_reason")
        << "\",\"dry_run\":" << dry_run << ",\"motion_permit\":" << permit
+       << ",\"handover_active\":" << handover_active
        << ",\"guard_ready\":" << bb->get<bool>("guard_ready")
        << ",\"inputs_ready\":" << bb->get<bool>("inputs_ready")
        << ",\"arrived\":" << bb->get<bool>("nav_arrived")

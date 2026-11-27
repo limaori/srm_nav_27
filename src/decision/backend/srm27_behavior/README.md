@@ -168,6 +168,73 @@ ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_s
 `test_spin_speed`。XML 在服务端启动时从 install 目录加载：symlink-install 改完即生效，
 复制式安装需重新构建；`enforce_mux_guard` / `nav_action_name` 是服务端启动参数，改动后需重启服务端。
 
+## 到点移交底盘控制（dev）
+
+两棵联调树都在 `decision_trees/dev_rm.xml` 中。导航期间允许底盘接收导航速度，到点后调用
+`handover_control` 子树，发一次标志位、撤销运动许可并锁停 mux。树执行完即退出。
+
+| 树 | 目标来源 |
+| --- | --- |
+| `test_handover_on_arrival` | 启动后用 RViz 的 **Nav2 Goal** 任选地图上的点。树订阅该 Nav2 action 的状态，仅接受本轮启动后收到的目标。取消或中止时撤销许可，继续等下一个目标。 |
+| `test_goto_point_and_handover` | 从服务端 ROS 参数 `target_pose` 或 `ExecuteTree.payload` 读取 `x;y;yaw`，写入树的 `{target_pose}`，由 `SendNav2Goal` 下发。两者同时提供时优先使用 payload。坐标系由 `map_frame` 指定，默认 `map`。单位为米和弧度，省略 yaw 时取 0。 |
+
+联调保留 mux 门控，使用 `--behavior`。两棵测试树可以在没有裁判输入时运行，
+需要 `enforce_mux_guard=true` 和 `dry_run=false`。在实车终端进入工作区并加载
+`/opt/ros/humble/setup.bash` 和当前工作区的 `install/setup.bash`，再执行下列命令。
+选择经过 mux 的 MINCO 速度链，地图和定位选项沿用当前场地。确认 RViz 中的位置与车的实际位置对应后再点目标。
+
+```bash
+./scripts/bringup/start_real_nav.sh --controller minco --mux --no-joy --no-chassis-spin \
+  --behavior test_handover_on_arrival
+# 仿真可用同一树
+./scripts/bringup/start_sim_nav.sh --behavior test_handover_on_arrival
+```
+
+等 `decision/status` 显示 `reason=external_nav_goal` 且 `guard_ready=true`，再从 RViz 发送
+目标。使用普通 **2D Goal Pose** 工具时，需先确认它通过当前 Nav2 配置产生了
+`navigate_to_pose` 目标。
+
+指定点模式会自动发车。先把包内的参数文件复制到现场配置目录，把 `target_pose` 改成
+当前地图上确认过的坐标。下列命令使用当前目录下已修改的参数副本。
+
+```bash
+./scripts/bringup/start_real_nav.sh --controller minco --mux --no-joy --no-chassis-spin \
+  --behavior test_goto_point_and_handover --behavior-params "$PWD/handover_params.yaml"
+```
+
+手动调用已启动且空闲的决策服务时，也可以在 action 请求中给点。下列坐标仅示意。
+
+```bash
+ros2 action send_goal /srm27_behavior btcpp_ros2_interfaces/action/ExecuteTree \
+  "{target_tree: test_goto_point_and_handover, payload: '1.25;-0.5;0.6'}"
+```
+
+### 电控和串口接口
+
+| 接口 | 约定 |
+| --- | --- |
+| `decision/handover_flag` | `std_msgs/msg/UInt8`，Reliable / Volatile，队列深度 1。默认 `data=1`，表示请求接管。无命名空间时完整话题名是 `/decision/handover_flag`。有命名空间时，订阅同一命名空间下的相对话题。 |
+| `decision/motion_permit` | `std_msgs/msg/Bool`。移交子树撤销许可，mux 同时通过 `srm_cmd_mux/stop_all` 锁停，导航和自转出口保持零速。 |
+| `decision/status` | JSON。发布标志时设置 `handover_active=true`。子树完成时报告 `mode=handover`、`reason=arrived_at_point` 和 `motion_permit=false`。mux 的实际锁停状态可从 `diagnostics` 的 `stopped=true` 核对。 |
+
+串口桥应在开始导航前订阅 flag。这个消息每轮只发一次，无历史补发或自动复位帧。
+插件可用 `topic_name` 和 `flag_value` 端口覆盖默认值，`flag_value` 范围为 0–255。
+复用时注册 `dev_rm.xml`，在已确认到点的分支调用 `<SubTree ID="handover_control"/>`。
+
+flag 先于 mux 停车请求发出。电控可先记录接管请求，待确认 mux 锁停、导航出口归零后
+开始机构调试。缺少停车服务时，子树允许结束，mux 仍按运动许可门控。
+`srm27_nav_protocol` 和下位机还需约定串口位定义、下位机接管确认及零速帧处理。
+联调时可同时观测：
+
+```bash
+ros2 topic echo /decision/handover_flag
+ros2 topic echo /decision/status
+ros2 topic echo /cmd_vel_chassis
+```
+
+电控归还控制权后，可由操作员调用 `ros2 service call /srm_cmd_mux/resume_all std_srvs/srv/Trigger`
+解除停车锁存，并重新运行所需的树。
+
 ## 裁判协议兼容
 
 `EventData` 包含 2027 R/B 阵地控制/激活数组和 `battlefield_valid`，并分别提供 UL 中心激活 `center_gain_point_status`、控制权 `center_control` 及有效位 `center_control_valid`；`AllyRobotHP` 包含 R/B 前哨 HP、双方控制度和 `control_score_valid`，对应通信协议 V1.0.0（2026-10-29）表 1-8/1-9。旧转发包保留原字段，新有效位为 false；速度下行仍为 19 字节。ROS 消息定义更新后，生产者和消费者须一起重新构建，避免混用旧消息类型。
@@ -187,7 +254,8 @@ ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_s
 | `arena_valid` / `score_valid` | 2027 8 字节场地事件 / 24 字节血量控制度，独立超时；R/B 场地标识按原始身份映射 |
 | `match_epoch` / `needs_supply` | 新局清除历史滞回/姿态预算；复活回补锁存 |
 | `nav_arrived` / `nav_goal_finished` | 距离滞回 / Action 成功，二者分别记录 |
-| `nav_action_state` / `nav_action_active` / `nav_action_arrived` | 外部 Nav2 `<nav_action_name>/_action/status`（默认 `navigate_to_pose`）：0=无目标/取消/中止，1=导航中，2=到点；`test_spin_speed` 用 |
+| `nav_action_state` / `nav_action_active` / `nav_action_arrived` | 外部 Nav2 `<nav_action_name>/_action/status`（默认 `navigate_to_pose`）：0=无目标/取消/中止，1=导航中，2=到点。供自转测试和外部目标移交测试使用。 |
+| `handover_active` | `PublishHandoverFlag` 发布前置为 true，开始新的树执行时复位。 |
 
 ## 验证
 
