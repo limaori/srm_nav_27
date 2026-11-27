@@ -45,6 +45,7 @@
 /.revert_scratch/
 /.sim_run/
 /.tmp_diag/
+/.tmp_bags/
 /.tmp_roslog/
 /.roslog/
 /.mapcheck/

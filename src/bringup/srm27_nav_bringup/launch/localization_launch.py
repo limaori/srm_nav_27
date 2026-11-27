@@ -95,6 +95,7 @@ def generate_launch_description():
     # Z-Localization backend 实验模式（默认关闭）。打开后 map->odom 的唯一发布者
     # 由静态 TF / small_gicp 换成 backend_node —— 三者互斥，冲突在启动前就失败。
     use_zlocalization_backend = LaunchConfiguration("use_zlocalization_backend")
+    backend_stabilized_body = LaunchConfiguration("backend_stabilized_body")
     zlocalization_backend_config = LaunchConfiguration("zlocalization_backend_config")
     # 空 = 用包内默认 profile（入口脚本不关心平台细节时不用传）。
     effective_backend_config = PythonExpression(
@@ -214,6 +215,15 @@ def generate_launch_description():
         description=(
             "backend 算法配置（继承包内 backend.yaml；"
             "实车入口默认 srm27_localization_real.yaml，仿真用 sim 那份）"
+        ),
+    )
+    declare_backend_stabilized_body_cmd = DeclareLaunchArgument(
+        "backend_stabilized_body",
+        default_value="False",
+        description=(
+            "backend 输入改用导航的稳定体坐标系（gimbal_yaw_fake）：位姿取 odom 朝向、"
+            "点云取世界点云相对车体。云台持续自转/自瞄时 backend 的 body-rate 闸门"
+            "不再把云台当车体。实车入口默认打开；仿真入口不传（保持原行为）"
         ),
     )
     declare_zlocalization_prior_enabled_cmd = DeclareLaunchArgument(
@@ -431,6 +441,11 @@ def generate_launch_description():
             # backend 输出适配必须长在这个节点里：它和 lidar_odometry 共用同一个
             # T_off，另起一个节点会各自抓"第一帧"，两个 odom 系差一个常量变换。
             {"backend_enabled": ParameterValue(use_zlocalization_backend, value_type=bool)},
+            # 稳定体输入：backend 拿到的位姿/点云已经把云台自转和自瞄去掉。
+            # sensor_frame 仍用前端 body_frame（fake 点云只在 backend 适配层里改名），
+            # backend 的逐帧 frame 校验和 scan-context lidar_height 都不用动。
+            {"backend_stabilized_body":
+                ParameterValue(backend_stabilized_body, value_type=bool)},
             # backend 的 common.sensor_frame 必须等于前端的 body_frame，
             # 否则它逐帧静默丢帧。
             {"backend_sensor_frame": zlio_body_frame},
@@ -643,6 +658,7 @@ def generate_launch_description():
     ld.add_action(declare_map_to_odom_yaw_cmd)
     ld.add_action(declare_use_zlocalization_backend_cmd)
     ld.add_action(declare_zlocalization_backend_config_cmd)
+    ld.add_action(declare_backend_stabilized_body_cmd)
     ld.add_action(declare_zlocalization_prior_enabled_cmd)
     ld.add_action(declare_zlocalization_prior_initialization_only_cmd)
     ld.add_action(declare_zlocalization_loop_enabled_cmd)

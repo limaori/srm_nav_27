@@ -247,7 +247,12 @@ TEST_F(LocalizationFlow, WarmBoundaryCannotMakeLostPriorLocalizationTrusted) {
     EXPECT_EQ(controller->status(), LocalizationStatus::Lost);
     const auto projected = output(current);
     EXPECT_FALSE(projected.pose_trusted);
-    EXPECT_LT((projected.T_map_sensor - trusted.T_map_sensor).norm(), 1e-10);
+    EXPECT_TRUE(projected.map_from_odom_frozen);
+    // 2026-11-27 新语义：暖边界只换算 odom 原点，输出 = 边界的 map→odom × 当前 odom；
+    // 不再把传感器位姿冻在旧的 trusted 上（旧断言见下方被移除的对照）。
+    EXPECT_LT((projected.T_map_odom - boundary_pose).norm(), 1e-10);
+    EXPECT_LT((projected.T_map_sensor - boundary_pose * current.odom_pose).norm(), 1e-10);
+    EXPECT_GT((projected.T_map_sensor - trusted.T_map_sensor).norm(), 1e-6);
 }
 }  // namespace
 }  // namespace backend

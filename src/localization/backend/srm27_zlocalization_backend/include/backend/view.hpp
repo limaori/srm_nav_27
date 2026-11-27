@@ -37,6 +37,8 @@ struct LocalizationProjection {
     bool global_pose_available = false;
     /// 本次投影是否允许推进全局 TF 发布。
     bool should_publish_tf = false;
+    /// 不受信时是否保持了 map→odom（只用前端里程计递推）。
+    bool map_from_odom_frozen = false;
     /// 里程计坐标系到地图坐标系的变换。
     Eigen::Matrix4d T_map_odom = Eigen::Matrix4d::Identity();
     /// 传感器在地图坐标系中的位姿。

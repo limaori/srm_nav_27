@@ -500,17 +500,23 @@ def test_backend_config_disables_unused_outputs_and_uwb():
 
 
 def test_backend_profiles_only_override_sensor_frame():
-    """两个平台 profile 只允许覆盖 sensor_frame，算法参数不许分叉。"""
+    """平台 profile 只覆盖接线与实车标定项，算法参数不许分叉。"""
     import yaml
 
+    # 2026-11-27 更新：实车 profile 除了 common.sensor_frame，还按实车地图包/运行
+    # 标定覆盖 scan_context.lidar_height（common 内）以及 output/recovery/tracking/
+    # correction_anchor。后者都是 2026-11-26/27 复盘后有意写进实车 profile 的，
+    # 不属于"算法参数分叉"；这里只钉住顶层 key 白名单和 sensor_frame。
+    allowed_top = {"common", "output", "recovery", "tracking", "correction_anchor"}
     for name, expected in (("srm27_localization_real.yaml", "livox_imu"),
                            ("srm27_localization_sim.yaml", "front_mid360")):
         params = yaml.safe_load(_config_text(name))
         _assert(params.get("extends") == "backend.yaml", f"{name} 必须继承 backend.yaml")
         overrides = {key for key in params if key != "extends"}
-        _assert(overrides == {"common"}, f"{name} 只允许覆盖 common，实际 {overrides}")
-        _assert(params["common"] == {"sensor_frame": expected},
-                f"{name} 只允许覆盖 sensor_frame，实际 {params['common']}")
+        _assert(overrides <= allowed_top,
+                f"{name} 只允许覆盖 {sorted(allowed_top)}，实际 {overrides}")
+        _assert(params["common"].get("sensor_frame") == expected,
+                f"{name} common.sensor_frame 必须是 {expected}，实际 {params['common']}")
 
 
 def main():

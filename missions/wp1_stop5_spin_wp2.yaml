@@ -1,0 +1,40 @@
+# =============================================================
+# 任务: 起点 → 目标点1 → 停 5 s 原地转 → 目标点2
+#
+# 这个文件里只有**两个导航点**: 目标点1、目标点2。
+#   * "起点"不用写: 车停在哪, 任务就从哪开始。
+#   * "停 5 s + 原地转"也不写在这里, 它是命令行参数 --pause 5 的效果:
+#       到点1之后脚本**不下发任何目标**、干等 5 s; 这 5 s 里导航 action 空闲,
+#       跑着 --test-behavior 的测试树 test_spin_speed 看到"无目标/已到点",
+#       就自己原地 5 rad/s 自转; 5 s 一到脚本再发目标点2。
+#     为什么不用 nav2 的 /spin: 这套栈导航只出平移 (yaw_policy=xy_only),
+#     srm_cmd_mux 会**丢弃**导航侧的 angular.z (见 cmd_mux_node.cpp), 底盘 wz
+#     只认 rotation_cmd 这一路 —— 所以"自转"必须由 test 树/决策层发, 不能在
+#     航点里要求朝向。
+#
+# ⚠ 下面的坐标是占位值 (999, 999 = 地图外的点, 规划必然失败、车不会动),
+#   必须换成实车标定的坐标再跑, 否则要么原地报错要么跑错地方。
+#   航点里的 yaw 在本栈里**不参与控制** (导航不出 wz), 填 0 即可。
+#
+# 两种填坐标的方式 (二选一):
+#   A. RViz 点选后存盘 (推荐, 边看地图边点):
+#        ./scripts/bringup/start_waypoints.sh --save-file missions/wp1_stop5_spin_wp2.yaml
+#        # 工具栏 "2D Goal Pose" 依次点 目标点1、目标点2
+#        ros2 service call /waypoint_mission/save std_srvs/srv/Trigger
+#        # 该服务会用点选结果覆盖本文件 (注释会丢, 但 --pause 在命令行, 不依赖本文件)
+#   B. 直接手改下面的 x/y
+#
+# 运行 (先起栈, 栈里必须带测试树, 否则"停 5 s"期间车只是停着不会转):
+#   ./scripts/bringup/start_real_nav.sh --test-behavior
+#   ./scripts/bringup/start_waypoints.sh --file missions/wp1_stop5_spin_wp2.yaml --pause 5
+#
+# 只核对坐标不下发: 上面第二条加 --record-only
+# =============================================================
+frame_id: map
+waypoints:
+- x: 999.0        # ← 目标点 1 (改成实车标定值)
+  y: 999.0
+  yaw: 0.0
+- x: 999.0        # ← 目标点 2 (改成实车标定值)
+  y: 999.0
+  yaw: 0.0

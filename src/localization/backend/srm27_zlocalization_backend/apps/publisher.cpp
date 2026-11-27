@@ -120,7 +120,8 @@ void Publisher::publishOdometry(const nav_msgs::msg::Odometry& input,
                                       ? projection.pose_covariance
                                       : fallbackFrontendPoseCovariance();
     if (!projection.pose_trusted) {
-        // 冻结位姿只作保守输出，速度清零同时赋予较大方差，避免被解释为高置信静止。
+        // 不可信位姿只作保守输出（2026-11-27 起 map→odom 冻结、位姿按前端里程计递推），
+        // 速度清零并赋予较大方差，避免被解释为高置信运动/静止。
         applyPoseCovarianceFloor(&covariance, 10.0, M_PI);
         output.twist = geometry_msgs::msg::TwistWithCovariance{};
         for (int i = 0; i < 6; ++i)

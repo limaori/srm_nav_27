@@ -23,7 +23,13 @@ TEST_F(LocalizationFlow, InputDiscontinuityFreezesBeforeResetServiceIsAvailable)
     EXPECT_EQ(trajectory.size(), size);
     EXPECT_TRUE(reset.requests.empty());
     const auto later = frame(11, testing::scenePose(3, 0, 0, 0), testing::scenePose(3, 0, 0, 0));
-    EXPECT_LT((output(later).T_map_sensor - before.T_map_sensor).norm(), 1e-12);
+    // 2026-11-27 新语义：不可信时冻结的是 map→odom，位姿按前端里程计递推。
+    // 旧断言 `T_map_sensor == before.T_map_sensor` 对应"冻结传感器位姿"，
+    // 会让传感器/云台一转就把 map→odom 反算成 1:1 反向旋转。
+    const auto later_output = output(later);
+    EXPECT_TRUE(later_output.map_from_odom_frozen);
+    EXPECT_LT((later_output.T_map_odom - before.T_map_odom).norm(), 1e-12);
+    EXPECT_LT((later_output.T_map_sensor - before.T_map_odom * later.odom_pose).norm(), 1e-12);
     reset.available = true;
     controller->notifyFrontendDiscontinuity(0);
     ASSERT_EQ(reset.requests.size(), 1U);

@@ -70,6 +70,44 @@ TEST(PoseOutput, ReframingPreservesPhysicalProjectionAndRetainedGraphUncertainty
     EXPECT_LT((after.pose_covariance - before.pose_covariance).norm(), 1e-12);
 }
 
+/// 不可信时冻结的是 map→odom：传感器/云台自转不能让 map 系反向旋转。
+TEST(PoseOutput, UntrustedOutputHoldsMapFromOdomInsteadOfCounterRotating) {
+    OdometryProcessNoiseConfig noise;
+    PoseOutput poses(noise);
+    poses.initialize();
+    const Eigen::Matrix4d map_from_odom = testing::scenePose(2.0, -1.0, 0.1, 0.3);
+    poses.setTransform(map_from_odom);
+
+    FrontendFrame trusted_frame;
+    trusted_frame.epoch = 0;
+    trusted_frame.timestamp = 10.0;
+    trusted_frame.odom_pose = testing::scenePose(0.4, 0.2, 0.0, 0.1);
+    trusted_frame.pose_covariance = PoseCovariance6d::Identity() * 1e-4;
+    trusted_frame.pose_covariance_valid = true;
+    LocalizationStateSnapshot state;
+    state.status = LocalizationStatus::Normal;
+    const auto trusted = poses.project(trusted_frame, Timestamp::fromSeconds(10.0), state, 0);
+    ASSERT_TRUE(trusted.pose_trusted);
+    EXPECT_LT((trusted.T_map_odom - map_from_odom).norm(), 1e-12);
+    const Eigen::Matrix4d last_sensor = trusted.T_map_sensor;
+
+    // 不可信期间传感器/云台自转 68.8°：map→odom 必须保持不动，
+    // 位姿只按前端里程计递推（旧实现会给出 map_from_odom * spin⁻¹）。
+    const Eigen::Matrix4d spin = testing::scenePose(0.0, 0.0, 0.0, 1.2);
+    FrontendFrame moving = trusted_frame;
+    moving.timestamp = 10.1;
+    moving.odom_pose = trusted_frame.odom_pose * spin;
+    state.status = LocalizationStatus::Lost;
+    const auto lost = poses.project(moving, Timestamp::fromSeconds(10.1), state, 0);
+    EXPECT_FALSE(lost.pose_trusted);
+    EXPECT_TRUE(lost.map_from_odom_frozen);
+    EXPECT_LT((lost.T_map_odom - map_from_odom).norm(), 1e-12);
+    EXPECT_LT((lost.T_map_sensor - map_from_odom * moving.odom_pose).norm(), 1e-12);
+    EXPECT_GT((lost.T_map_odom - map_from_odom * spin.inverse()).norm(), 1e-3);
+    // 同一物理运动下，位姿与最后可信位姿的关系只差这段自转，不在切换处跳变。
+    EXPECT_LT((lost.T_map_sensor - last_sensor * spin).norm(), 1e-12);
+}
+
 /// 无可连接图节点时，停车参考仍独立保存全局协方差并按真实后续运动传播。
 TEST(PoseOutput, ParkedCovarianceAnchorSurvivesWarmBoundariesWithoutGraphNodes) {
     OdometryProcessNoiseConfig noise;

@@ -236,7 +236,9 @@ sensor_scan_generation:
 terrain_analysis:
   ros__parameters:
     scanVoxelSize: 0.05
-    decayTime: 0.5
+    # 2026-11-27: 0.5 → 1.0（与仿真对齐）。0.5 s 的衰减窗比局部图 hold_time 还短，
+    # 自转/遮挡时障碍会先于图层记忆消失；1.0 s 让 terrain_map 本身也稳一点。
+    decayTime: 1.0
     noDecayDis: 0.0
     clearingDis: 0.0
     useSorting: True
@@ -265,7 +267,8 @@ terrain_analysis:
 terrain_analysis_ext:
   ros__parameters:
     scanVoxelSize: 0.1
-    decayTime: 0.2
+    # 2026-11-27: 0.2 → 0.5（与仿真对齐）。全局层 5 Hz，0.2 s 只够一次更新。
+    decayTime: 0.5
     noDecayDis: 0.0
     clearingDis: 20.0
     useSorting: true
@@ -953,6 +956,12 @@ controller_server:
         robot_radius: 0.245                             # 车身包络半径（米）；对应真实净空 0.2804
         clearance_margin: 0.0                           # 硬门槛 = 0.245（ESDF 保守距离）
         unknown_is_obstacle: True                       # 未知区域按不可通行处理
+        # ★ 2026-11-27 口径决定：MINCO 的 ESDF 继续只把 254（LETHAL）当原始障碍
+        #   （srm27_map_adapter 默认 occupied_cost_threshold=253），不把 253 膨胀带
+        #   算成障碍。原因：0.245 是 ESDF 保守距离，真实净空已经是 0.2804，与
+        #   代价图 robot_radius 0.28 对齐；若把 253 也算障碍，0.30 膨胀带变成硬阻挡，
+        #   0.69 m 缝只剩 0.09 m 带宽，窄道会被整条判死 —— 那是牺牲运动性能换安全。
+        #   膨胀带仍由全局规划器（occupancy_threshold 252）和 smoother 守住。
         # 有效制动减速度（米/秒^2）：决定"轨迹有效前缀必须覆盖多长才能停车"。
         # 0 表示退化为使用 limits.max_linear_accel。取小了会把候选轨迹一律判死
         # （实测：0.5 m/s 档要求 1.77 s 尚可通过，1.5 m/s 档要求 5.1 s 就必然失败，
@@ -1057,20 +1066,31 @@ local_costmap:
       # 代价: 栅格数 100×100 → 200×200，ESDF/代价地图每周期开销约 4 倍（实测 esdf_time_ms
       # 仍为 0 ms 量级，可接受；若将来发现规划耗时上升，优先查这里）。
       # 2026-10-10: 与仿真同步 10×10 → 8×8（±4 m）。
-      # planning_horizon 同步降到 3.0 后 ±4 m 仍然够用；但若将来把 horizon 调回 4.0，
-      # 必须同时把这里改回 10（否则局部路径会被 kMapBoundary 截短）。
-      width: 8
-      height: 8
+      # 2026-11-27: 8×8 → 14×14（±7 m）。planning_horizon 在 11-26 已提到 6.0，
+      #   8×8 只有 ±4 m，局部路径每帧都在 ~4 m 处被 LocalPathEnd::kMapBoundary 截短，
+      #   实际视野只有 3.6~4 m（2.6 m/s 下约 1.5 s）。
+      #   不能只取 12×12（±6 m）：local_path.cpp 的 pointFailure 会把"路径点 ±
+      #   required_clearance"一起查，末端还要再查 terminal_speed 的制动走廊
+      #   （0.8 m/s 时约 0.18 m）。±6 m 只剩 ~0.24 m 余量，6 m 末端仍会在
+      #   kMapBoundary 处被截、terminal_speed 归 0，轨迹再次"到视野末端停住"。
+      #   按本文件自己的规则（4 m horizon ↔ ±5 m，留 1 m 余量），6 m 对应 ±7 m。
+      #   栅格数 8×8 → 14×14 是 3.06 倍；若实车 CPU 吃紧，先把 horizon 降到 5.0
+      #   再退回 12×12，不要直接退回 8×8。
+      width: 14
+      height: 14
       resolution: 0.05
       # ★ 2026-11-14 窄道档：0.40 → 0.30（全局/局部一起改）。
-      #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
-      #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
-      #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
+      #   0.8 m 通道那次 0.40 vs 0.38 卡在 0.3809 判死 —— 规划外形不能大于
+      #   控制器硬门槛，否则规划器会给出控制器不敢走的路径。2026-11-27 统一到 0.28。
       # ★ 2026-11-23 回退到 6108770 的障碍档：0.15 → 0.30。
-      #   0.15 是 11-22「现场档2」为过西线 0.75 m 缝压小的；恢复动态障碍层后必须
-      #   同步回到 0.30 —— 规划外形 < 控制器硬门槛（safety.robot_radius 0.245）时，
-      #   规划器会给出控制器判死（validation_failed）的路径。代价：西线缝重新变窄。
-      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（6108770 档）；车体 CAD 外廓 0.2743
+      # ★ 2026-11-27 对齐：0.30 → 0.28。三个数现在描述同一个物理包络：
+      #   CAD 外廓 0.2743 + 0.6 cm ≈ 0.2804；
+      #   控制器 safety.robot_radius 0.245 是 ESDF **保守距离**（已扣
+      #   sqrt(2)*0.05/2 = 0.0354 m），换算真实净空正好 0.2804；
+      #   代价图规划外形取 0.28，别再写成"= 控制器硬门槛 0.30"（那是旧值）。
+      #   inflation_radius 仍留 0.30，多出的 2 cm 只作为软代价带。
+      #   0.69 m 缝的中心线带宽从 0.69-2×0.30=0.09 m 放宽到 ≈0.13 m。
+      robot_radius: 0.28           # 规划用外形 = CAD 0.2743 + 0.6 cm；控制器硬门槛 0.245(ESDF 保守)
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
         plugin: srm27_nav_costmap::IntensityVoxelLayer
@@ -1087,6 +1107,12 @@ local_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
+        # ★ 2026-11-27：0 → 2.0（与仿真对齐）。旧配置每个更新周期 resetMaps() 后
+        #   只按 terrain_analysis 最近 decayTime(0.5 s) 的点重建，图层本身零记忆；
+        #   云台/底盘自转、遮挡或偶尔丢帧时障碍会"看到 0.5 s、丢 1~2 s"地闪。
+        #   hold_time 把"最近一次被观测到"的世界格保留 2 s，有效记忆与重访周期解耦。
+        #   移动目标会留下最多 2 s 拖影，窄道里若发现贴着人走不动再降到 1.0。
+        hold_time: 2.0
         # ★ 2026-11-24：0.0 → 0.10。terrain_analysis 除障碍点外还会发一批
         #   “2D free-space 网格点”（z=vehicleZ≈0、intensity=vehicleHeight），
         #   0.0 会把它们全部当成障碍，局部/全局代价地图在机器人周围铺出一大片
@@ -1109,7 +1135,9 @@ local_costmap:
           # 2026-10-09: 5.0 → 8.0。上面视野放到 4.0 m 之后，若这里仍只收 5 m 内的点，
           # 那 4 m 前瞻的末端几乎贴着“没有障碍数据”的边界，控制器 unknown_is_obstacle=True
           # 会把边界当墙、把局部路径截短。取 8.0 = 视野 4.0 + 一倍余量。
-          obstacle_max_range: 5.0
+          # 2026-11-27: horizon 6.0 + 局部图 14×14 之后，5.0 会让 5~7 m 段完全盲走；
+          #   取 8.0 = horizon 6.0 + 2 m 余量（超出的点会被滚动窗口裁掉）。
+          obstacle_max_range: 8.0
           obstacle_min_range: 0.2
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -1123,11 +1151,11 @@ local_costmap:
         # ★ 2026-11-14：0.1 → 0.30，与 robot_radius 齐平。
         #   inflation_radius < robot_radius 时，膨胀层只把 inflation_radius 内的格子
         #   标成 253，规划器实际只避开这么远 —— 原值 0.1 等于"规划器根本不管净空"。
-        #   取 0.30 = robot_radius，让 ThetaStar 自己就守住控制器的硬门槛 0.30。
-        #   （0.45 那一档试过：253 的硬阻挡带仍是 inscribed 0.33，只是把 0.33~0.45
-        #     加成高代价，0.69 m 缝里整条缝都变高代价，反而更难走。）
         # ★ 2026-11-23 回退：0.16 → 0.30，与 robot_radius 齐平（6108770 档）。
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        # ★ 2026-11-27：robot_radius 对齐到 0.28 后，本值仍留 0.30：
+        #   253 硬阻挡带 = inscribed = robot_radius 0.28，0.28~0.30 只是 1~252 的
+        #   软代价带（YAstar threshold 252 只把 253/254 当障碍）。
+        inflation_radius: 0.30          # 障碍膨胀半径(m)：硬 0.28 + 2 cm 软代价带
       always_send_full_costmap: False
 
 global_costmap:
@@ -1139,11 +1167,9 @@ global_costmap:
       global_frame: map
       robot_base_frame: gimbal_yaw_fake          # 迁移链（见 local_costmap 同项）
       # ★ 2026-11-14 窄道档：0.40 → 0.30（全局/局部一起改）。
-      #   必须 >= 控制器的硬门槛（现在 0.30），否则规划器会给出控制器不敢走的路径
-      #   （0.8 m 通道那次就是 0.40 vs 0.38，卡在 0.3809 判死）。
-      #   0.69 m 缝：可走的中心线带宽 = 0.69 - 2×0.30 = 0.09 m（两侧各 4.5 cm）。
       # ★ 2026-11-23 回退：0.15 → 0.30（6108770 档），与 local 同步。
-      robot_radius: 0.30           # 规划用外形 = 控制器硬门槛 0.30（6108770 档）；车体 CAD 外廓 0.2743
+      # ★ 2026-11-27 对齐：0.30 → 0.28（与 local 同一口径，理由见 local_costmap 同项）。
+      robot_radius: 0.28           # 规划用外形 = CAD 0.2743 + 0.6 cm；控制器硬门槛 0.245(ESDF 保守)
       resolution: 0.05
       track_unknown_space: true
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
@@ -1160,6 +1186,8 @@ global_costmap:
         unknown_threshold: 5
         z_resolution: 0.05
         z_voxels: 16
+        # ★ 2026-11-27：0 → 2.0（同 local；全局层 5 Hz，0.5~1 s 的遮挡就会让障碍消失）。
+        hold_time: 2.0
         # ★ 2026-11-24：0.0 → 0.10（同 local；排除 terrain 的 free-space 网格点）。
         min_obstacle_height: 0.10
         max_obstacle_height: 2.0
@@ -1187,7 +1215,8 @@ global_costmap:
         #   原值 0.25 < robot_radius 0.40 是个矛盾配置：规划器只避 0.25，控制器要 0.38，
         #   中间 13 cm 的"规划器认为能走、控制器不敢走"就是 0.8 m 通道卡死的直接来源。
         # ★ 2026-11-23 回退：0.16 → 0.30，与 robot_radius 齐平（6108770 档）。
-        inflation_radius: 0.30          # 障碍膨胀半径(m)
+        # ★ 2026-11-27：robot_radius 对齐到 0.28 后，本值仍留 0.30（硬 0.28 + 2 cm 软带）。
+        inflation_radius: 0.30          # 障碍膨胀半径(m)：硬 0.28 + 2 cm 软代价带
       always_send_full_costmap: False
 
 # yaml_filename 由 launch 传入
@@ -1423,6 +1452,11 @@ zlio_bridge:
     # ---- Z-Localization backend 实验模式（默认关闭，2026-11-16 迁入）----
     # 只在 launch 的 use_zlocalization_backend:=True 时由 launch 注入
     #   backend_enabled / backend_sensor_frame(= 上面的 lidar_frame)
+    # 2026-11-27：实车 nav_srm_real_launch.py 另外注入 backend_stabilized_body:=True。
+    #   云台正常导航时持续自转（2/5 rad/s）、自瞄时小幅左右摆；backend 改吃
+    #   gimbal_yaw_fake（导航稳定体）的位姿 + “世界点云相对车体”的相对点云，
+    #   body-rate 闸门看到的是车体运动而不是云台自转，先验观测不再被整段跳过。
+    #   输出链（lidar_odometry / registered_scan / TF）不变，仿真入口不打开。
     # 打开后本节点额外发布 frontend/frame|odometry|session 给 backend，并代理 reset 事务
     # （把前端的坐标边界改写成"适配后 odom 连续"的恒等边界）。其余 backend 参数
     # （话题/服务/队列深度）用节点内默认值，见

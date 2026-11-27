@@ -38,7 +38,14 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 
-from zlio_bridge import _Rigid, _clip_below, _quat_inverse, _quat_rotate  # noqa: E402
+from zlio_bridge import (  # noqa: E402
+    _Rigid,
+    _clip_below,
+    _quat_inverse,
+    _quat_rotate,
+    _stabilized_body_pose,
+    _translate_cloud,
+)
 
 
 def _assert(condition, message):
@@ -311,6 +318,44 @@ def _make_cloud(rows, frame_id="odom"):
     )
 
 
+def test_stabilized_body_pose_removes_gimbal_yaw():
+    """backend 稳定体输入：位置不变、姿态取 odom 朝向（yaw=0）。
+
+    实车云台正常导航时一直在转（2/5 rad/s），自瞄时再小幅摆。`T_odom←gimbal_yaw`
+    的 yaw 就是云台绝对角；backend 如果吃它，body-rate 闸门会把云台当车体，整段跳过
+    先验观测，云台停下后第一次放行就超累计锚点 → LOST（bag real_zloc_1127_181723）。
+    """
+    pose = _Rigid(quat_from_rpy(0.0, 0.0, math.radians(123.0)), (4.0, -2.0, 0.3))
+    body = _stabilized_body_pose(pose)
+    _assert(abs(body.q[0] - 1.0) < 1e-12 and abs(body.q[3]) < 1e-12,
+            f"稳定体位姿必须压到 yaw=0，实际 q={body.q}")
+    _assert(body.t == pose.t, f"稳定体位姿不能改位置: {body.t} != {pose.t}")
+
+
+def test_stabilized_cloud_is_world_relative_to_body():
+    """backend 稳定体输入：世界点云减去车体位置，云台自转不再让点云绕车体转。"""
+    from sensor_msgs_py import point_cloud2
+
+    cloud = _make_cloud([
+        (10.0, 20.0, 0.5, 1.0),
+        (11.0, 19.0, 1.5, 2.0),
+    ], frame_id="odom")
+    out = _translate_cloud(cloud, (10.0, 20.0, 0.0), "gimbal_yaw_fake",
+                           cloud.header.stamp, "odom")
+    _assert(out.header.frame_id == "gimbal_yaw_fake",
+            f"稳定体点云 frame 应为 gimbal_yaw_fake, 实际 {out.header.frame_id}")
+    points = list(point_cloud2.read_points(
+        out, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+    _assert(len(points) == 2, f"应保留 2 点, 实际 {len(points)}")
+    _assert(abs(points[0][0]) < 1e-6 and abs(points[0][1]) < 1e-6
+            and abs(points[0][2] - 0.5) < 1e-6,
+            f"第一点应平移到车体原点, 实际 {points[0]}")
+    _assert(abs(points[1][0] - 1.0) < 1e-6 and abs(points[1][1] + 1.0) < 1e-6,
+            f"第二点相对车体应为 (1,-1), 实际 {points[1]}")
+    _assert(points[0][3] == 1.0 and points[1][3] == 2.0,
+            "intensity 字段必须跟着自己的点走")
+
+
 def test_clip_below_drops_floor_reflections_and_keeps_fields():
     """2026-11-27：光面地板的墙面镜像点（z<0）要精确丢掉，intensity 跟着自己的点走。
 
@@ -423,6 +468,8 @@ def main():
         test_planarize_uses_mount_not_t_off,
         test_pose_body_offset_cancels_the_residual,
         test_mapping_and_nav_share_the_same_pose_body_offset,
+        test_stabilized_body_pose_removes_gimbal_yaw,
+        test_stabilized_cloud_is_world_relative_to_body,
         test_clip_below_drops_floor_reflections_and_keeps_fields,
         test_clip_below_disabled_is_a_no_op,
         test_clip_below_all_below_gives_empty_cloud,

@@ -43,20 +43,25 @@ bool TrustedPoseProjector::commitCorrection(const Eigen::Matrix4d& T_map_sensor,
     return true;
 }
 
-/// 在可信状态使用当前全局规范，否则冻结最后可信传感器位姿。
+/// 按定位状态投影：可信时用当前全局规范，不可信时保持 map→odom 不变。
+///
+/// 这里**不能**冻结 `T_map_sensor` 再反算 `T_map_odom = T_map_sensor * T_odom_sensor⁻¹`：
+/// 传感器（本车是云台/底盘）一转，`T_odom_sensor` 就变，反算出来的 `map→odom`
+/// 会以 1:1 的幅值反向旋转。map 系的代价地图、全局路径和 RViz 里的点云都会跟着
+/// 传感器转，而车体本身并没有被校正（bag real_zloc_1127_174433 实测相关系数 -1.000）。
+///
+/// 改成冻结 `map→odom`：不施加新校正，位姿 = 最后可信的 map→odom × 当前里程计。
+/// 换代/重置时调用方已经通过 `reframeOdometry` 把 nominal 换算到新 odom 原点，
+/// 物理位姿仍然连续；恢复成功后照常提交并回到可信状态。
 TrustedPoseProjection TrustedPoseProjector::project(const bool pose_trusted,
                                                     const Eigen::Matrix4d& T_map_odom_nominal,
                                                     const Eigen::Matrix4d& T_odom_sensor) const {
     TrustedPoseProjection out;
-    if (!pose_trusted && has_pose_) {
-        out.T_map_sensor = map_from_sensor_;
-        out.T_map_odom = map_from_sensor_ * T_odom_sensor.inverse();
-        out.frozen_from_cache = true;
-        return out;
-    }
-
     out.T_map_odom = T_map_odom_nominal;
     out.T_map_sensor = T_map_odom_nominal * T_odom_sensor;
+    if (!pose_trusted) {
+        out.map_from_odom_frozen = true;
+    }
     return out;
 }
 
@@ -119,6 +124,7 @@ LocalizationProjection PoseOutput::project(const FrontendFrame& frame, const Tim
         trusted_pose_.project(out.pose_trusted, map_from_odom_, frame.odom_pose);
     out.T_map_odom = projection.T_map_odom;
     out.T_map_sensor = projection.T_map_sensor;
+    out.map_from_odom_frozen = projection.map_from_odom_frozen;
 
     const bool active_frame = frame.epoch == active_epoch;
     if (out.pose_trusted) {
@@ -168,6 +174,7 @@ LocalizationProjection PoseOutput::projectForOutput(
         trusted_pose_.project(out.pose_trusted, map_from_odom_, T_odom_sensor);
     out.T_map_odom = projection.T_map_odom;
     out.T_map_sensor = projection.T_map_sensor;
+    out.map_from_odom_frozen = projection.map_from_odom_frozen;
     if (!out.pose_trusted) {
         out.pose_covariance = trusted_covariance_.value_or(PoseCovariance6d::Zero());
         out.pose_covariance_valid = trusted_covariance_.has_value();

@@ -50,10 +50,15 @@ def compose_2d(a, b):
 
 
 def read_bag(path, body_frame):
-    """读 bag，返回 (map→body, odom→body, speeds, map→odom 帧数)。
+    """读 bag，返回轨迹、速度、cmd_vel 与最后一帧 /plan。
 
-    每行统一为 **(t, x, y, yaw_deg)** —— 列序写错一次就够把 300 m 算成 30 km，
-    所以这里在函数头把约定钉死，下面所有索引都按它来。
+    返回 `(map_body, odom_body, speeds, n_mo, cmd_nav, cmd_chassis, plan_xy, plan_t)`：
+    - `map_body/odom_body` 每行统一为 **(t, x, y, yaw_deg)**；
+    - `speeds` 为 `(t, |v|)`；
+    - `cmd_nav/cmd_chassis` 为 `(t, vx, vy, wz)`，对应 `/cmd_vel_nav_body`、
+      `/cmd_vel_chassis`（Twist，无 header，用 bag 接收时刻）；
+    - `plan_xy` 为最后一帧 `/plan` 的 `(N,2)` map 系路径，没有则为 None。
+    列序写错一次就够把 300 m 算成 30 km，所以这里在函数头把约定钉死。
     """
     import rosbag2_py
     from rclpy.serialization import deserialize_message
@@ -67,6 +72,8 @@ def read_bag(path, body_frame):
         raise SystemExit("[错误] 这个包里没有 /tf，无法还原轨迹")
 
     map_odom, odom_body, speeds = [], [], []
+    cmd_nav, cmd_chassis = [], []
+    plan_xy, plan_t = None, None
     first = None
     while reader.has_next():
         topic, raw, stamp = reader.read_next()
@@ -87,6 +94,16 @@ def read_bag(path, body_frame):
             msg = deserialize_message(raw, get_message(types[topic]))
             tw = msg.twist.twist.linear
             speeds.append((t, math.hypot(tw.x, tw.y)))
+        elif topic in ("/cmd_vel_nav_body", "/cmd_vel_chassis"):
+            msg = deserialize_message(raw, get_message(types[topic]))
+            row = (t, msg.linear.x, msg.linear.y, msg.angular.z)
+            (cmd_nav if topic == "/cmd_vel_nav_body" else cmd_chassis).append(row)
+        elif topic == "/plan":
+            msg = deserialize_message(raw, get_message(types[topic]))
+            if msg.poses:
+                plan_xy = np.asarray(
+                    [(p.pose.position.x, p.pose.position.y) for p in msg.poses], dtype=float)
+                plan_t = t
     if not odom_body:
         raise SystemExit("[错误] 包里没有 odom→%s，无法还原轨迹" % body_frame)
 
@@ -109,7 +126,13 @@ def read_bag(path, body_frame):
         out_yaw, out_x, out_y = compose_2d(base, (yaw, x, y))
         map_body.append((t, out_x, out_y, out_yaw))
     speeds.sort(key=lambda r: r[0])
-    return np.asarray(map_body, dtype=float), np.asarray(odom_body, dtype=float), np.asarray(speeds, dtype=float), len(mo)
+    cmd_nav.sort(key=lambda r: r[0])
+    cmd_chassis.sort(key=lambda r: r[0])
+    return (np.asarray(map_body, dtype=float), np.asarray(odom_body, dtype=float),
+            np.asarray(speeds, dtype=float), len(mo),
+            np.asarray(cmd_nav, dtype=float).reshape(-1, 4),
+            np.asarray(cmd_chassis, dtype=float).reshape(-1, 4),
+            plan_xy, plan_t)
 
 
 def read_pcd_xy(path):
@@ -151,7 +174,8 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    map_body, odom_body, speeds, n_mo = read_bag(args.bag, args.body_frame)
+    (map_body, odom_body, speeds, n_mo,
+     cmd_nav, cmd_chassis, plan_xy, plan_t) = read_bag(args.bag, args.body_frame)
     t = map_body[:, 0]
     path_len = float(np.hypot(np.diff(map_body[:, 1]), np.diff(map_body[:, 2])).sum())
     print("包      : %s" % args.bag)
@@ -162,6 +186,10 @@ def main():
              map_body[-1, 1], map_body[-1, 2], map_body[-1, 3]))
     print("odom 系行程: %.2f m" % float(np.hypot(np.diff(odom_body[:, 1]),
                                                 np.diff(odom_body[:, 2])).sum()))
+    print("指令      : /cmd_vel_nav_body %d 帧, /cmd_vel_chassis %d 帧"
+          % (len(cmd_nav), len(cmd_chassis)))
+    print("全局路径  : %s" % ("最后一帧 /plan %d 点 @ %.1fs" % (len(plan_xy), plan_t)
+                                if plan_xy is not None else "包里没有 /plan"))
 
     # 统一到 10 Hz 再算速率：TF 的到达间隔在 0.1~0.4 s 之间跳，直接 diff 会把
     # "0.4 s 走 60°" 算成 3400°/s 的假尖峰（本工具的 C/D 面板第一版就栽在这）。
@@ -173,9 +201,11 @@ def main():
     rate_u = np.diff(oy) / 0.1
     step_u = np.hypot(np.diff(ox), np.diff(oy2)) / 0.1
 
-    fig, ax = plt.subplots(2, 2, figsize=(17, 13))
-    # A: map 系轨迹 + 先验图
-    a = ax[0][0]
+    fig = plt.figure(figsize=(17, 17))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.35, 1.0, 0.9],
+                          hspace=0.30, wspace=0.22)
+    # A: map 系轨迹 + 先验图 + 最后一帧全局路径
+    a = fig.add_subplot(gs[0, 0])
     # 先按轨迹算窗口：先验图有 51×82 m，全画上去会把 10 m 的轨迹压成一个点。
     pad = 6.0
     x0, x1 = map_body[:, 1].min() - pad, map_body[:, 1].max() + pad
@@ -185,6 +215,9 @@ def main():
         keep = (mx > x0) & (mx < x1) & (my > y0) & (my < y1)
         a.scatter(mx[keep], my[keep], c="0.72", s=2.0, label="prior map (z 0.3~2.5 m)")
     sc = a.scatter(map_body[:, 1], map_body[:, 2], c=t, cmap="viridis", s=6, label="map→body")
+    if plan_xy is not None and len(plan_xy) > 1:
+        a.plot(plan_xy[:, 0], plan_xy[:, 1], color="tab:red", lw=1.2, ls="--",
+               label="global plan (/plan, last @ %.1fs)" % plan_t)
     a.plot(map_body[0, 1], map_body[0, 2], "g^", ms=13, label="start")
     a.plot(map_body[-1, 1], map_body[-1, 2], "rs", ms=11, label="end")
     a.set_xlim(x0, x1); a.set_ylim(y0, y1)
@@ -194,7 +227,7 @@ def main():
     plt.colorbar(sc, ax=a, shrink=.8, label="t [s]")
 
     # B: odom 系轨迹（不受 backend 影响）
-    b = ax[0][1]
+    b = fig.add_subplot(gs[0, 1])
     sc2 = b.scatter(odom_body[:, 1], odom_body[:, 2], c=odom_body[:, 0], cmap="viridis", s=6)
     b.plot(odom_body[0, 1], odom_body[0, 2], "g^", ms=13)
     b.plot(odom_body[-1, 1], odom_body[-1, 2], "rs", ms=11)
@@ -203,7 +236,7 @@ def main():
     plt.colorbar(sc2, ax=b, shrink=.8, label="t [s]")
 
     # C: yaw 走势
-    c = ax[1][0]
+    c = fig.add_subplot(gs[1, 0])
     c.plot(tu[1:], rate_u, lw=.8, label="yaw rate (10 Hz resampled)")
     c.axhline(0, color="0.6", lw=.6)
     c.set_title("C. yaw rate: peak %.0f deg/s, median %.0f deg/s, total %.0f deg (%.1f rev)"
@@ -212,12 +245,29 @@ def main():
     c.set_xlabel("t [s]"); c.set_ylabel("deg/s"); c.grid(alpha=.3); c.legend(loc="best")
 
     # D: 速度
-    d = ax[1][1]
+    d = fig.add_subplot(gs[1, 1])
     d.plot(tu[1:], step_u, lw=.8, label="path speed (10 Hz resampled)")
     if len(speeds):
         d.plot(speeds[:, 0], speeds[:, 1], lw=.6, alpha=.6, label="/odometry twist |v|")
     d.set_title("D. speed: max %.1f m/s, median %.2f m/s" % (step_u.max(), np.median(step_u)))
     d.set_xlabel("t [s]"); d.set_ylabel("m/s"); d.grid(alpha=.3); d.legend(loc="best")
+
+    # E: 指令 vs 实际。拐角那个"反向折弯"看 vx 符号就能分清：
+    #    控制器主动倒车 → /cmd_vel_nav_body vx 变负；底盘没跟上 → 指令一直为正。
+    e = fig.add_subplot(gs[2, :])
+    if len(cmd_nav):
+        e.plot(cmd_nav[:, 0], cmd_nav[:, 1], lw=1.0, label="/cmd_vel_nav_body vx")
+    if len(cmd_chassis):
+        e.plot(cmd_chassis[:, 0], cmd_chassis[:, 1], lw=1.0, label="/cmd_vel_chassis vx")
+        e.plot(cmd_chassis[:, 0], cmd_chassis[:, 3], lw=0.8, alpha=0.65,
+               label="/cmd_vel_chassis wz [rad/s]")
+    e.plot(tu[1:], step_u, lw=0.8, alpha=0.7, label="actual |v| [m/s]")
+    e.axhline(0, color="0.6", lw=0.6)
+    e.set_xlabel("t [s]"); e.set_ylabel("m/s, rad/s")
+    e.set_title("E. command vs actual: negative vx = controller commanded reverse"
+                if (len(cmd_nav) or len(cmd_chassis)) else
+                "E. cmd_vel topics not in bag (record /cmd_vel_nav_body, /cmd_vel_chassis)")
+    e.grid(alpha=0.3); e.legend(loc="best", ncol=2)
 
     fig.suptitle("trajectory from %s" % os.path.basename(args.bag.rstrip("/")), fontsize=13)
     plt.tight_layout()

@@ -21,8 +21,13 @@
 #   /livox/imu                       云台角速度/冲击（对时间轴）
 #   /map                             先验栅格图（后处理对齐用，latched，可能只有 1 帧）
 #   /joint_states /gimbal_joint_angle /chassis_speed   有就收，用于把转速对上
+#   /cmd_vel_nav_body /cmd_vel_chassis /plan
+#                                    导航指令 / mux 最终指令 / 全局路径。
+#                                    拐角"反向折弯"是控制器主动倒车还是底盘没跟上，
+#                                    直接看 cmd_vel 的 vx 符号；/plan 用来对照路径。
 #
-# 体积：实车实测约 0.85~0.9 MB/s（≈50 MB/分钟）。只 /registered_scan 是大头。
+# 体积：实车实测约 0.85~0.9 MB/s（≈50 MB/分钟）。只 /registered_scan 是大头；
+#   cmd_vel（约 200 Hz 的 Twist）+ /plan（10 Hz）只增加几十 KB/s。
 #
 # 用法
 # ====
@@ -45,9 +50,14 @@
 #
 # 录完自动做什么
 # ==============
-#   - diag_map_odom_spin.py --bag   三列判据：0 稳定 / 1 校正被吃 / 2 冻结反算 / 4 锁存
-#   - plot_bag_trajectory.py --bag  map 系与 odom 系轨迹图 + 逐点 CSV
+#   - diag_map_odom_spin.py --bag   四列判据：0 稳定 / 1 校正被吃 / 2 旧冻结反算 /
+#                                   4 锁存 / 5 冻结 map→odom（2026-11-27 后正确行为）/
+#                                   6 甲丁平直但大面积不可信（死推算/状态机在循环）
+#   - plot_bag_trajectory.py --bag  map 系与 odom 系轨迹图 + 全局路径 + cmd_vel/实际速度
+#                                   （拐角反向折弯可直接看指令 vx 符号）+ 逐点 CSV
 #   两者输出都 tee 到 <包>/analysis.txt，图存进 user_test_log/。
+#   注意：diag 的退出码是"判据结论"，不是错误；必须 `|| true` 才不会让 set -e
+#   在第一条分析之后直接退出（旧版就是这样，轨迹段从来没写进 analysis.txt）。
 # =============================================================
 set -eo pipefail
 
@@ -88,6 +98,9 @@ WANTED=(
   /joint_states
   /gimbal_joint_angle
   /chassis_speed
+  /cmd_vel_nav_body
+  /cmd_vel_chassis
+  /plan
 )
 
 # 实车的 start_real_nav.sh 不设 ROS_DOMAIN_ID（默认 0），仿真才是 87。
@@ -189,10 +202,10 @@ if [ "$ANALYZE" = "1" ]; then
   cd "$WS_DIR"
   {
     echo "### diag_map_odom_spin"
-    ./debug_tools/diag_map_odom_spin.py --bag "$OUT" 2>&1 | grep -v '^\[INFO\]'
+    ./debug_tools/diag_map_odom_spin.py --bag "$OUT" 2>&1 | grep -v '^\[INFO\]' || true
     echo
     echo "### plot_bag_trajectory"
-    MPLCONFIGDIR=/tmp/mplcfg ./debug_tools/plot_bag_trajectory.py --bag "$OUT" 2>&1 | grep -v '^\[INFO\]'
+    MPLCONFIGDIR=/tmp/mplcfg ./debug_tools/plot_bag_trajectory.py --bag "$OUT" 2>&1 | grep -v '^\[INFO\]' || true
   } | tee "$OUT/analysis.txt"
 fi
 

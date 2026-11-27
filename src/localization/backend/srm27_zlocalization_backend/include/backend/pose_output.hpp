@@ -37,7 +37,8 @@ inline Eigen::Matrix4d planarMapFromOdom(const Eigen::Matrix4d& map_from_odom) {
 struct TrustedPoseProjection {
     Eigen::Matrix4d T_map_odom = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d T_map_sensor = Eigen::Matrix4d::Identity();
-    bool frozen_from_cache = false;
+    /// 不受信时保持 map→odom 不变（不再施加新校正），位姿随前端里程计递推。
+    bool map_from_odom_frozen = false;
 };
 
 /// 缓存最后可信的地图系传感器位姿，并按定位状态计算全局输出变换。
@@ -62,8 +63,14 @@ public:
     bool commitCorrection(const Eigen::Matrix4d& T_map_sensor, const Timestamp& stamp,
                           std::uint64_t epoch);
 
-    /// 按定位状态计算地图系输出位姿；可信时沿用 T_map_odom_nominal。
-    /// 不可信且有缓存时固定 T_map_sensor，并由当前里程计位姿反算 T_map_odom。
+    /// 按定位状态计算地图系输出位姿。
+    ///
+    /// 可信时沿用 `T_map_odom_nominal`；不可信时**保持 `T_map_odom` 不变**
+    /// （不施加新校正，只用前端里程计递推），而不是冻结 `T_map_sensor`。
+    /// 后者在传感器/云台自转时会让 `map→odom` 1:1 反向旋转，map 系里的
+    /// 代价地图、全局路径和点云会跟着传感器转（实测 bag real_zloc_1127_174433）。
+    /// 换代时调用方会先 `reframeOdometry`，nominal 已换算到新 odom 原点，
+    /// 因此这里直接沿用 nominal 仍能保持物理位姿连续。
     TrustedPoseProjection project(bool pose_trusted, const Eigen::Matrix4d& T_map_odom_nominal,
                                   const Eigen::Matrix4d& T_odom_sensor) const;
 

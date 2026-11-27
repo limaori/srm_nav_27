@@ -874,35 +874,50 @@ cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
 
 ## 8. `diag_map_odom_spin.py` —— `map→odom` 转圈到底是谁干的
 
-现场"点云地图跟着云台转"有两种完全不同的成因，处置相反：
+现场"点云地图跟着云台转"有几种完全不同的成因，处置相反：
 
-| 成因 | 特征 | 处置 |
+| 成因 | 特征（2026-11-27 后） | 处置 |
 | --- | --- | --- |
-| **冻结态反算**（设计行为） | `map→body` 不动，`odom→body` 跟着云台转，`map→odom` 以 **-云台角速度**匀速转；状态串 `pose_trusted=false` / `tf_frozen=true` | 修"为什么进冻结"（观测模型/先验图），不要动 TF 数学 |
-| **校正被吃进地图系** | `map→body` 也大幅摆（车真被转走了） | 查累计闸、恢复提交、图优化 |
+| **冻结 `map→odom`**（新，正确） | 甲 `map→odom` 不动、乙 `odom→sensor` 在转、**丁 `map→nav` 也不动**；`tf_frozen=true` / `pose_trusted=false` | 定位在不可信状态按前端里程计递推；查"为什么进 SUSPECT/LOST" |
+| **旧冻结反算**（bug） | 甲大幅摆、**丁也大幅摆**、甲对乙斜率 ≈ -1；状态不可信 | 修 `pose_output.cpp`：不可信时冻结的是 `T_map_odom`，不是 `T_map_sensor` |
+| **校正被吃进地图系** | 甲和丁都大幅摆，状态多为 `NORMAL` + `recovered via ...` | 查累计闸、恢复提交、图优化 |
+| **锁存/无观测** | 甲和丁都不动，但状态一直 `NORMAL` | 检查 `--zloc-prior-once` / 先验开关；这份包不能复现"地图转" |
 
-`pose_output.cpp::TrustedPoseProjector::project` 在不可信时是
-`T_map_odom = T_map_sensor_frozen · T_odom_sensor⁻¹`，"云台就是车"时 odom 的 yaw
-跟着云台转，于是 `map→odom` 必然以 -云台角速度转。
+`pose_output.cpp::TrustedPoseProjector::project` 在 2026-11-27 之后改为：
+不可信时 `T_map_odom = 最后可信 nominal`、`T_map_sensor = nominal · T_odom_sensor`。
+旧实现是 `T_map_odom = T_map_sensor_frozen · T_odom_sensor⁻¹`，传感器/云台一转，
+`map→odom` 必然以 -云台角速度转。
 
-判据是**三列对照**：甲 `yaw(map→odom)`、乙 `yaw(odom→body)`、丙 `yaw(map→body)`。
+判据是**四列对照**：甲 `yaw(map→odom)`、乙 `yaw(odom→sensor)`、
+丙 `yaw(map→sensor)`（物理位姿，会跟着自转）、
+**丁 `yaw(map→nav)`（导航参考系，代价地图/全局路径看这个）**。
 
 ```bash
 ./debug_tools/diag_map_odom_spin.py                 # 跑 30 s：开起来，转云台/往前开
 ./debug_tools/diag_map_odom_spin.py --duration 60
-./debug_tools/diag_map_odom_spin.py --body-frame body   # 车体系不叫 gimbal_yaw 时
+./debug_tools/diag_map_odom_spin.py --body-frame body      # 传感器系不叫 gimbal_yaw 时
+./debug_tools/diag_map_odom_spin.py --nav-frame my_base    # 导航系不叫 gimbal_yaw_fake 时
 ```
 
-输出示例（2026-11-27 实车嫌疑场景的合成复现）：
+旧实现（2026-11-27 之前）的典型输出：
 
 ```
   甲 yaw(map→odom) 跨度  1785.0°   （平均 150.0°/s）
   乙 yaw(odom→body) 跨度 1785.0°
-  丙 yaw(map→body)  跨度     0.0°   ← 真正的定位结果
-  甲 对 乙 的回归斜率 : -1.00   （冻结反算应 ≈ -1）
+  丙 yaw(map→body)  跨度     0.0°   ← 传感器被冻住（旧行为）
+  甲 对 乙 的回归斜率 : -1.00   （旧冻结反算应 ≈ -1）
   tf_frozen=true 占比 : 100%    pose_trusted=false 占比: 100%
-  reason 命中统计     : 累计锚点拦下×37
-[结论] 冻结态反算（设计行为，不是校正被吃进地图系）
+[结论] 旧冻结反算（bug）：map→odom 与导航参考系一起摆
+```
+
+修复后的预期输出：
+
+```
+  甲 yaw(map→odom) 跨度     0.0°
+  乙 yaw(odom→gimbal_yaw) 跨度 1785.0°
+  丁 yaw(map→gimbal_yaw_fake) 跨度 0.0°  ← 导航参考系稳定
+  tf_frozen=true 占比 : 100%
+[结论] 冻结 map→odom（正确行为）
 ```
 
 `reason 命中统计` 顺带回答"累计修正闸到底有没有开火"（`cumulative correction anchor`）、
@@ -914,8 +929,9 @@ cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
 ./debug_tools/diag_map_odom_spin.py --bag ~/srm_nav_27_data/bags/real_zloc_1127_012727
 ```
 
-退出码：0 = 稳定；1 = 校正被吃进地图系；2 = 冻结态反算；3 = 数据不足；
-4 = `map→odom` 锁存（`--zloc-prior-once` 模式，这份包不能用来复现"地图跟着雷达转"）。
+退出码：0 = 稳定；1 = 校正被吃进地图系；2 = 旧冻结态反算（bug）；3 = 数据不足；
+4 = `map→odom` 锁存（`--zloc-prior-once` 模式）；
+5 = 冻结 `map→odom`（2026-11-27 后的正确行为）。
 
 ---
 
@@ -931,7 +947,16 @@ cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
 ```
 
 输出到 `user_test_log/traj_<包名>_<时间>.png` 与同名 `.csv`（逐点 map/odom 位姿）。
-四个面板：A map 系轨迹叠先验图（自动缩放到轨迹）、B odom 系轨迹、C 角速度、D 速度。
+五个面板：A map 系轨迹叠先验图 + **最后一帧 `/plan` 全局路径**（自动缩放到轨迹）、
+B odom 系轨迹、C 角速度、D 速度、**E `/cmd_vel_nav_body` / `/cmd_vel_chassis` vs 实际速度**。
+
+`/plan`、`/cmd_vel_nav_body`、`/cmd_vel_chassis` 是可选输入；`record_zloc_bag.sh`
+默认会一起录。E 面板是拐角"反向折弯"的判据：
+
+- `/cmd_vel_nav_body` 的 `vx` 变负 → 控制器主动倒车（路径/MPC 行为）；
+- 指令一直是正、实际速度方向却翻了 → 底盘/里程计问题。
+
+没有这三路时 E 面板会显示 `cmd_vel topics not in bag`，其余面板照常。
 
 两个坑（第一版都踩过，留作记录）：
 
@@ -941,3 +966,24 @@ cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
    2026-11-27 那份包的正确结论是：峰值 **265°/s**、中位 143°/s、总转角 16209°（45 圈）。
 
 map→odom 还没有的时间段（初始化之前）会被丢掉，不会拿单位阵硬凑成 map 系轨迹。
+
+---
+
+## 10. `plot_bags_overview.py` —— 多个包叠加总览
+
+一次比较多个包的 map 系轨迹，回答"今天这批包分别跑到哪了、是不是同一个圈"。
+左图把所有轨迹叠在先验点云上（颜色区分、○起点、□终点、图例带时长/轨迹长），
+右图把每条轨迹平移到同一起点、车头对齐，只看形状差异。
+
+```bash
+./debug_tools/plot_bags_overview.py --bags ~/srm_nav_27_data/bags/real_zloc_1127_1[6-9]*
+./debug_tools/plot_bags_overview.py --bags a b c --title "..." --no-map
+```
+
+单包的细节（速度/角速度/指令 vs 实际）仍用第 9 节的 `plot_bag_trajectory.py`。
+坏包（缺 metadata、db3 尾页被截断）会打印 `[跳过]`，不会拖垮整张图；这类包先用
+`ros2 bag reindex` 或逐行抢救出可用部分再喂进来。
+
+注意：轨迹长按 `gimbal_yaw` 帧原点的位移累计。原地转云台时这个点会绕轴画小圆，
+几十秒就能累计出几米"行程"，但底盘速度是 0——看 D 面板的 `/odometry` 或
+`/chassis_speed` 才能分清是"跑了"还是"云台在转"。
