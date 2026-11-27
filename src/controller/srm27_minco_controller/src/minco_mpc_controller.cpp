@@ -1602,7 +1602,7 @@ void MincoMpcController::requestReplan(
   worker_.submit(planning_request);
 }
 
-void MincoMpcController::refreshExternalTrajectory(const State2D &, double now_stamp)
+void MincoMpcController::refreshExternalTrajectory(const State2D & state, double now_stamp)
 {
   const double now_steady = steadyNow();
   if (path_request_.max_linear_speed != limits_.max_linear_speed ||
@@ -1629,7 +1629,7 @@ void MincoMpcController::refreshExternalTrajectory(const State2D &, double now_s
   const double stamp = rclcpp::Time(message->header.stamp).seconds();
   const double valid_until = rclcpp::Time(message->valid_until).seconds();
   if (stamp <= 0.0 || stamp <= last_external_trajectory_stamp_ || stamp > now_stamp ||
-    valid_until <= now_stamp)
+    now_stamp - stamp > trajectory_max_age_ || valid_until <= now_stamp)
   {
     return;
   }
@@ -1653,14 +1653,26 @@ void MincoMpcController::refreshExternalTrajectory(const State2D &, double now_s
   }
   trajectory->generated_stamp = stamp;
   trajectory->valid_after = stamp;
-  trajectory->valid_until = valid_until;
+  trajectory->valid_until = std::min(valid_until, stamp + trajectory_max_age_);
   trajectory->terminal_is_global_goal = message->terminal_is_global_goal;
   trajectory->terminal_requires_stop = message->terminal_requires_stop;
   trajectory->terminal_reason = message->terminal_reason;
 
+  srm27_minco_core::TrajectoryValidationReport report;
+  if (!validator_.validate(*trajectory, *esdf_, state, now_stamp, report)) {
+    diagnostics_.planning_result = "external_trajectory_rejected: " + report.reason;
+    return;
+  }
+  if (report.max_speed > limits_.max_linear_speed * (1.0 + validator_.config().speed_tolerance_ratio) ||
+    report.max_acceleration > limits_.max_linear_accel *
+    (1.0 + validator_.config().accel_tolerance_ratio))
+  {
+    diagnostics_.planning_result = "external_trajectory_exceeds_current_limits";
+    return;
+  }
   std::atomic_store(&trajectory_, std::static_pointer_cast<const Trajectory2D>(trajectory));
   last_external_trajectory_stamp_ = stamp;
-  last_full_revalidation_stamp_ = -1.0;
+  last_full_revalidation_stamp_ = now_stamp;
   reference_builder_.reset();
   stopping_ = false;
   at_goal_stop_ = false;
