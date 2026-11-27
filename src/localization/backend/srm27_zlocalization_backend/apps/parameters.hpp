@@ -33,6 +33,9 @@ private:
     void loadTracking();
     /// 读取状态机恢复路径参数。
     void loadRecovery();
+
+    /// 读取 map→odom 累计修正预算（backend/correction_anchor.hpp）。
+    void loadCorrectionAnchor();
     /// 读取 UWB 测量、外参和在线标定参数。
     void loadUwb();
     /// 读取在线坐标标定开关及固定 UWB 坐标变换。

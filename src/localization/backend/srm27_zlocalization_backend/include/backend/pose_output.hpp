@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "backend/correction_anchor.hpp"
 #include "backend/factors.hpp"
 #include "backend/time.hpp"
 #include "backend/view.hpp"
@@ -100,6 +101,25 @@ public:
     void setOrigin(const Eigen::Vector2d& origin) { map_from_odom_.block<2, 1>(0, 3) = origin; }
     /// 返回输出位姿及协方差的提交版本。
     std::uint64_t revision() const { return pose_revision_; }
+    /// 设置 map→odom 累计修正预算的阈值（启动与复位时由 Localization 注入）。
+    void setCorrectionAnchorConfig(const CorrectionAnchorConfig& config) {
+        correction_anchor_.configure(config);
+    }
+    /// 返回累计修正预算状态，供诊断与状态打印。
+    const CorrectionAnchor& correctionAnchor() const { return correction_anchor_; }
+    /// 候选 map→odom 是否仍在"相对锚点"的累计预算内。
+    bool acceptsCorrection(const Eigen::Matrix4d& T_map_odom) const {
+        return correction_anchor_.accepts(T_map_odom);
+    }
+    /// 记录一次已提交的修正；只有"安静"的修正才让锚点前移。
+    void noteCorrection(const Eigen::Matrix4d& T_map_odom, const double applied_rotation_rad,
+                        const double applied_translation) {
+        correction_anchor_.observe(T_map_odom, applied_rotation_rad, applied_translation);
+    }
+    /// 人工重定位提交成功后强制重落锚（显式声明"我知道车在哪"）。
+    void reseatCorrectionAnchor(const Eigen::Matrix4d& T_map_odom) {
+        correction_anchor_.reseat(T_map_odom);
+    }
     /// 推进输出版本，使旧预测快照失效。
     void advanceRevision() { ++pose_revision_; }
     /// 返回最后可信传感器位姿的只读投影状态。
@@ -132,6 +152,8 @@ private:
                             LocalizationProjection& projection) const;
     OdometryProcessNoiseConfig noise_;
     Eigen::Matrix4d map_from_odom_ = Eigen::Matrix4d::Identity();
+    /// map→odom 的相对锚点：拦住"每帧都合规、累计转过去"的积分饱和。
+    CorrectionAnchor correction_anchor_;
     /// 图关键帧或停车参考帧的协方差传播锚，与最新可信输出拥有独立时间身份。
     struct GraphAnchor {
         PoseCovariance6d covariance = PoseCovariance6d::Zero();

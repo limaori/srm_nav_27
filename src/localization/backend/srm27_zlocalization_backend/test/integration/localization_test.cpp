@@ -365,5 +365,50 @@ TEST_F(LocalizationFlow, UwbBootstrapRejectsAnOutlierOnceThenAcceptsFreshEvidenc
     EXPECT_EQ(controller->status(), LocalizationStatus::Normal);
     EXPECT_TRUE(controller->latestUwbBodyPositionMap());
 }
+
+/// 累计修正预算：逐步 1.5° 的错解（每一步都过得了 NIS 创新门与单次 15° 上限）
+/// 不能一路把 map->odom 转过去。判据见 backend/correction_anchor.hpp。
+///
+/// 步长取 1.5° 是有讲究的：
+/// - 5° 的注入会先被 NIS 创新门拒掉（实测 NIS=80.9），根本走不到累计闸；
+/// - 1.5° 能过 NIS，又高于"安静"阈值 1°（所以锚点不会被追认），正好隔离出累计闸的作用。
+TEST_F(LocalizationFlow, CumulativeAnchorStopsRepeatedSmallRotations) {
+    constexpr double kDeg = M_PI / 180.0;
+    config.startup_hint.T_map_sensor = Eigen::Matrix4d::Identity();
+    config.correction_anchor.enabled = true;
+    config.correction_anchor.max_rotation_rad = 8.0 * kDeg;
+    config.correction_anchor.max_translation = 1.0;
+    config.correction_anchor.reseat_rotation_rad = 1.0 * kDeg;
+    config.correction_anchor.reseat_translation = .15;
+    config.correction_anchor.reseat_quiet_frames = 5;
+    // 把 SUSPECT 推远：本用例只看"位姿有没有被一路转过去"，不看状态机。
+    config.innovation.conflicts_before_suspect = 1000;
+    start(true);
+
+    double time = 10;
+    ASSERT_TRUE(ingest(frame(time, Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity())));
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+
+    // odom 直行且不转；"扫描落在的位姿"每一步多转 1.5°。不加闸时 10 步就是 15°。
+    double max_yaw_deg = 0.0;
+    for (int index = 1; index <= 10; ++index) {
+        SCOPED_TRACE(index);
+        time += .5;
+        auto odom = testing::scenePose(.1 * index, 0, 0, 0);
+        auto truth = testing::scenePose(.1 * index, 0, 0, 1.5 * kDeg * index);
+        auto input = frame(time, truth, odom);
+        ASSERT_TRUE(ingest(input));
+        maintain();
+        const auto projection = output(input);
+        const double yaw =
+            std::atan2(projection.T_map_odom(1, 0), projection.T_map_odom(0, 0)) / kDeg;
+        max_yaw_deg = std::max(max_yaw_deg, std::fabs(yaw));
+    }
+    // 下界：证明前几步确实被接受并转过（否则这个用例什么也没验证）；
+    // 上界：8° 预算 + 图优化余量，远小于不设闸时的 15°。
+    EXPECT_GT(max_yaw_deg, 3.0);
+    EXPECT_LT(max_yaw_deg, 11.0);
+}
 }  // namespace
 }  // namespace backend

@@ -244,6 +244,14 @@ PoseCorrectionDelta Localization::applyRecoveryLocked(const RecoveryWork& work,
         applied_correction.translation = correction.block<3, 1>(0, 3).norm();
         applied_correction.rotation_rad = rotationAngleFromMatrix(correction);
     }
+    // 累计预算的锚点：人工重定位是"我知道车在哪"的显式声明，提交成功后强制重落锚；
+    // 自动恢复只在本次修正"安静"时按连续帧数前移（大步修正不追认，否则连续错解会被追认）。
+    if (work.identity.manual_request_id != 0) {
+        poses_.reseatCorrectionAnchor(poses_.transform());
+    } else {
+        poses_.noteCorrection(poses_.transform(), applied_correction.rotation_rad,
+                              applied_correction.translation);
+    }
     return applied_correction;
 }
 
@@ -257,6 +265,8 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
     // 幅度预算的裁决结果，供锁外打印：rejected=拒绝提交，overridden=手动请求越过预算。
     bool budget_rejected = false;
     bool budget_overridden = false;
+    // 被"累计锚点"拦下的那次（区别于单次幅度越限）。
+    bool anchor_rejected = false;
     PoseCorrectionDelta budget_delta;
     bool accepted = false;
     if (!withOutputCommit([&] {
@@ -274,25 +284,42 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                 const bool gated =
                     !manual || !config_.recovery.manual_bypasses_correction_budget;
                 const auto prospective = prospectiveRecoveryCorrectionLocked(work, result);
-                const bool within_budget =
+                // 两道闸：单次幅度（相对冻结位姿）+ 累计幅度（相对不随错误移动的锚点）。
+                // 后者才是"跳一次 20°、再跳一次 20°"的拦口，见 backend/correction_anchor.hpp。
+                const Eigen::Matrix4d candidate_T_map_odom =
+                    result.pose * work.frame.odom_pose.inverse();
+                const bool within_anchor_budget = poses_.acceptsCorrection(candidate_T_map_odom);
+                const bool within_single_budget =
                     !prospective || recoveryCorrectionWithinBudgetLocked(*prospective);
+                const bool within_budget = within_single_budget && within_anchor_budget;
+                if (prospective) {
+                    budget_delta = *prospective;
+                } else {
+                    PoseCorrectionDelta anchor_delta;
+                    anchor_delta.rotation_rad =
+                        poses_.correctionAnchor().rotationFromAnchor(candidate_T_map_odom);
+                    anchor_delta.translation =
+                        poses_.correctionAnchor().translationFromAnchor(candidate_T_map_odom);
+                    budget_delta = anchor_delta;
+                }
                 if (gated && !within_budget) {
                     // 恢复结果会把冻结位姿一次性搬走太远：判为一次失败，等更强的证据
                     // 或人工介入，而不是直接 commit —— 对称场景的 180° 混叠正是这样
                     // 靠"残差好看"骗过验收的（2026-11-26 实车：+45 / +11 / +30 m）。
                     budget_rejected = true;
-                    budget_delta = *prospective;
+                    anchor_rejected = !within_anchor_budget;
                     if (manual)
                         clearManualRelocalizationRequestLocked();
                     transition = state_.onRecoveryRelocalizationFailure(
                         config_.recovery.suspect_failures_before_lost,
-                        result.source + " over correction budget");
+                        result.source +
+                            (within_single_budget ? " over cumulative correction anchor"
+                                                  : " over correction budget"));
                     return true;
                 }
                 if (!within_budget) {
                     // manual_bypasses_correction_budget 命中：人工请求越过预算，照常提交。
                     budget_overridden = true;
-                    budget_delta = *prospective;
                 }
                 applied_correction = applyRecoveryLocked(work, result, transition);
                 estimator_failed_ = false;
@@ -327,7 +354,9 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                             << applied_correction.rotation_rad * 180.0 / M_PI << ")");
     } else {
         if (budget_rejected) {
-            BACKEND_WARN_STREAM("recovery rejected by correction budget: source="
+            BACKEND_WARN_STREAM("recovery rejected by "
+                                << (anchor_rejected ? "cumulative correction anchor" : "correction budget")
+                                << ": source="
                                 << result.source << ", delta_t=" << budget_delta.translation
                                 << "m (limit " << config_.recovery.max_translation_correction
                                 << "m), delta_r_deg=" << budget_delta.rotation_rad * 180.0 / M_PI

@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "backend/correction_anchor.hpp"
 #include "backend/covariance.hpp"
 #include "backend/math.hpp"
 
@@ -297,6 +298,8 @@ struct Config {
     TrackingConfig tracking;
     InnovationConfig innovation;
     RecoveryConfig recovery;
+    /// map→odom 相对锚点的累计修正预算（见 backend/correction_anchor.hpp）。
+    CorrectionAnchorConfig correction_anchor;
     UwbConfig uwb;
     LoopConfig loop;
     ResetConfig reset;

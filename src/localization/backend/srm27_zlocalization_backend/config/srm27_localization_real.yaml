@@ -45,3 +45,21 @@ recovery:
   max_translation_correction: 2.5
   max_rotation_correction_deg: 20.0
   # 车被搬动/推走超过预算时，先调大上面两项或手动 relocalize（人工请求默认绕过预算）。
+
+correction_anchor:
+  # ★ 2026-11-27 实车：换 227to219_1125 后 map→odom 会**跳**（不是缓慢漂），
+  #   状态机上对应 SUSPECT/LOST → "recovered via Scan Context + scan-to-map"。
+  #   根因是这张图 51×82 m、1960 关键帧，且描述子实测已不可分（任意两处距离≈0.000，
+  #   见 debug_tools/check_sc_separability.py），检索本质上是随机挑候选。
+  #
+  #   逐次上限（上面 2.5 m / 20°）拦不住"跳一次 20°、再跳一次"，所以这里再叠一道
+  #   **累计**闸：相对不随错误移动的锚点，累计旋转不超过 8°、累计平移不超过 0.8 m。
+  #   越界的恢复不提交，TF 保持冻结（宁可"停住等人"，不要"转过去再错"）。
+  enabled: true
+  max_rotation_deg: 8.0
+  max_translation: 0.8
+  # 单次修正 <= 1° / 0.15 m 算"安静"；连续 5 帧安静才让锚点前移，
+  # 这样"跳一次 → 安静一帧 → 再跳一次"的锯齿也没法把锚点追认过去。
+  reseat_rotation_deg: 1.0
+  reseat_translation: 0.15
+  reseat_quiet_frames: 5

@@ -5,6 +5,7 @@ find_package(launch_testing_ament_cmake REQUIRED)
 ament_add_gtest(backend_fusion_test unit/fusion_test.cpp)
 ament_add_gtest(backend_measurement_test unit/measurement_test.cpp)
 ament_add_gtest(backend_recovery_budget_test unit/recovery_budget_test.cpp)
+ament_add_gtest(backend_correction_anchor_test unit/correction_anchor_test.cpp)
 ament_add_gtest(backend_lifecycle_test unit/lifecycle_test.cpp unit/frontend_session_test.cpp
     ../apps/frontend_session.cpp)
 ament_add_gtest(backend_graph_test integration/graph_test.cpp)
@@ -24,6 +25,7 @@ ament_add_gtest(backend_storage_test integration/storage_test.cpp)
 target_link_options(backend_storage_test PRIVATE "LINKER:--wrap=fsync")
 ament_add_gtest(backend_cleanup_test tools/cleanup_test.cpp)
 foreach(target backend_fusion_test backend_measurement_test backend_recovery_budget_test
+               backend_correction_anchor_test
                backend_lifecycle_test backend_graph_test
                backend_storage_test backend_cleanup_test backend_innovation_test backend_uwb_factor_test
                backend_relocalization_test backend_localization_test backend_descriptor_test

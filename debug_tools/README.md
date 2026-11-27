@@ -869,3 +869,75 @@ cd debug_tools && python3 -m unittest test_capture_gimbal_cloud_rotation -v
 - 工具启动前/就绪前的历史补不回来；要覆盖完整动作请先开工具再转云台。
 - 点云按 `header.stamp` 查 TF；超过 `--tf-cache`（默认按 `--duration+30 s`，最少 90 s）的帧会跳过。
 - 一个数据包约 70 MB/分钟（5 路 × 5 Hz × 4000 点）；长时间录请用 `--no-pcd` 或减 `--max-topics`。
+
+---
+
+## 8. `diag_map_odom_spin.py` —— `map→odom` 转圈到底是谁干的
+
+现场"点云地图跟着云台转"有两种完全不同的成因，处置相反：
+
+| 成因 | 特征 | 处置 |
+| --- | --- | --- |
+| **冻结态反算**（设计行为） | `map→body` 不动，`odom→body` 跟着云台转，`map→odom` 以 **-云台角速度**匀速转；状态串 `pose_trusted=false` / `tf_frozen=true` | 修"为什么进冻结"（观测模型/先验图），不要动 TF 数学 |
+| **校正被吃进地图系** | `map→body` 也大幅摆（车真被转走了） | 查累计闸、恢复提交、图优化 |
+
+`pose_output.cpp::TrustedPoseProjector::project` 在不可信时是
+`T_map_odom = T_map_sensor_frozen · T_odom_sensor⁻¹`，"云台就是车"时 odom 的 yaw
+跟着云台转，于是 `map→odom` 必然以 -云台角速度转。
+
+判据是**三列对照**：甲 `yaw(map→odom)`、乙 `yaw(odom→body)`、丙 `yaw(map→body)`。
+
+```bash
+./debug_tools/diag_map_odom_spin.py                 # 跑 30 s：开起来，转云台/往前开
+./debug_tools/diag_map_odom_spin.py --duration 60
+./debug_tools/diag_map_odom_spin.py --body-frame body   # 车体系不叫 gimbal_yaw 时
+```
+
+输出示例（2026-11-27 实车嫌疑场景的合成复现）：
+
+```
+  甲 yaw(map→odom) 跨度  1785.0°   （平均 150.0°/s）
+  乙 yaw(odom→body) 跨度 1785.0°
+  丙 yaw(map→body)  跨度     0.0°   ← 真正的定位结果
+  甲 对 乙 的回归斜率 : -1.00   （冻结反算应 ≈ -1）
+  tf_frozen=true 占比 : 100%    pose_trusted=false 占比: 100%
+  reason 命中统计     : 累计锚点拦下×37
+[结论] 冻结态反算（设计行为，不是校正被吃进地图系）
+```
+
+`reason 命中统计` 顺带回答"累计修正闸到底有没有开火"（`cumulative correction anchor`）、
+"是不是恢复在提交"（`recovered via`）、"是不是观测模型失效"（`observation model invalid`）。
+
+离线吃包（不开 ROS，直接给已录的包；分析完的包不用再跑一遍现场）：
+
+```bash
+./debug_tools/diag_map_odom_spin.py --bag ~/srm_nav_27_data/bags/real_zloc_1127_012727
+```
+
+退出码：0 = 稳定；1 = 校正被吃进地图系；2 = 冻结态反算；3 = 数据不足；
+4 = `map→odom` 锁存（`--zloc-prior-once` 模式，这份包不能用来复现"地图跟着雷达转"）。
+
+---
+
+## 9. `plot_bag_trajectory.py` —— 从包还原轨迹并叠到先验点云
+
+"定位飘了"只看 TF 数字看不出所以然，得把轨迹画在地图上。工具同时给 odom 系与 map 系
+两条轨迹，形状一致但整体错位/错角 → 错的是 `map→odom`；形状本身变形 → 错的是前端。
+
+```bash
+./debug_tools/plot_bag_trajectory.py --bag ~/srm_nav_27_data/bags/real_zloc_1127_012727
+./debug_tools/plot_bag_trajectory.py --bag ... --map-pcd maps/pcd/map_bundles/227to219_1125/map.pcd
+./debug_tools/plot_bag_trajectory.py --bag ... --no-map          # 只画轨迹
+```
+
+输出到 `user_test_log/traj_<包名>_<时间>.png` 与同名 `.csv`（逐点 map/odom 位姿）。
+四个面板：A map 系轨迹叠先验图（自动缩放到轨迹）、B odom 系轨迹、C 角速度、D 速度。
+
+两个坑（第一版都踩过，留作记录）：
+
+1. **列序**：轨迹行统一存 `(t, x, y, yaw)`。yaw 和 x 换位会让 300 m 算成 30 km。
+2. **采样间隔不均**：TF 到达间隔在 0.1~0.4 s 之间跳，直接 `Δyaw/Δt` 会把
+   "0.4 s 转 60°" 算成 **3400°/s** 的假尖峰。工具内部统一重采样到 10 Hz 再算速率。
+   2026-11-27 那份包的正确结论是：峰值 **265°/s**、中位 143°/s、总转角 16209°（45 圈）。
+
+map→odom 还没有的时间段（初始化之前）会被丢掉，不会拿单位阵硬凑成 map 系轨迹。

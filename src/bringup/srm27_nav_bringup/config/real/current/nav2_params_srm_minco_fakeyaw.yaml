@@ -1435,6 +1435,16 @@ zlio_bridge:
     max_frame_jump_pos: 1.0
     max_frame_jump_yaw: 0.5
     min_matches_warn: 30
+    # 2026-11-27：光面地板把走廊侧墙镜像到地面以下（实车 01:27 bag 实测：过道中段 4035
+    # 个点落在 z<0，按 z→−z 翻上去到真实墙面点的 3D 距离中位数 4.2 cm、100% < 15 cm）。
+    # RViz 的 registered_scan 里就是"过道中零星几个不存在的点"；全在 z<0，代价地图
+    # min_obstacle_height=0.10 本来就会丢，但会给 scan-to-map 添外点。
+    # ground_frame 补偿后 odom 的 z=0 就是地面，留 0.15 m 余量不会切到真实地面/墙脚；
+    # 坡道场地或地面标定偏了就关掉或改 floor_z。建图 mapping_params.yaml 必须同值。
+    floor_clip_enabled: True
+    floor_z: 0.0
+    floor_clip_margin: 0.15
+    floor_clip_warn_ratio: 0.5
     planarize_pose: False
     reject_implausible_jump: False
     # 前端随体偏置补偿（米，雷达/IMU 体坐标系）。默认 0 = 不补偿。

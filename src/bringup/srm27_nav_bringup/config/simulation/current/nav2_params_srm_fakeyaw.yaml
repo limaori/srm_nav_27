@@ -262,6 +262,11 @@ zlio_bridge:
     #     姿态"卡住"而不是"飞走" —— 更安全但会掩盖真实问题，只在演示/比赛保命时打开。
     matches_topic: "zlio_bridge/matches"
     min_matches_warn: 30
+    # 地面以下裁剪（2026-11-27）：真车光面地板会有墙面镜像的多径点；仿真没有，保持关。
+    # 参数含义见 srm27_localization_adapter/scripts/zlio_bridge.py 的模块 docstring。
+    floor_clip_enabled: False
+    floor_z: 0.0
+    floor_clip_margin: 0.15
     max_frame_jump_pos: 1.0
     max_frame_jump_yaw: 0.5
     reject_implausible_jump: False

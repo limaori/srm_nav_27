@@ -217,6 +217,28 @@ recovery:
   suspect_failures_before_lost: 3
   # LOST 状态是否持续自动尝试全局恢复。
   automatic_when_lost: true
+correction_anchor:
+  # ★ 本工作区新增：map→odom 的**累计**修正预算。
+  #
+  # 为什么逐次上限不够：tracking.max_rotation_correction_deg=15 与 correction_period=0.5 s
+  # 等价于允许 30°/s 的稳态旋转（180° 只要 6 秒）；恢复路径 20°/次、一秒内能连提多次
+  # （2026-11-26 实车 2.8 s 内 3 次）。根因是闸门比较的是"本次测量 vs 当前预测"，而预测是
+  # 拿当前 map→odom 算的，上一次吃进去的错误变成了下一次的基准（积分饱和）。
+  # 这里改用**不随错误移动的锚点**判累计偏差，判据见 backend/correction_anchor.hpp。
+  enabled: true
+  # 相对锚点允许的累计旋转，度；0 表示该轴不检查。
+  # 10° 的依据：正常跟踪期的逐次修正都在 1° 量级，10° 足够吸收真实漂移；
+  # 而对"同构走廊选错位置"这类错解，10° 会在 1~2 次提交内撞线。
+  max_rotation_deg: 10.0
+  # 相对锚点允许的累计平移，米；0 表示该轴不检查。
+  max_translation: 1.0
+  # 单次实际修正量不超过它才算"安静"，此时锚点可以前移。
+  reseat_rotation_deg: 1.0
+  # 单次实际平移修正不超过它才算"安静"，米。
+  reseat_translation: 0.15
+  # 连续多少帧"安静"才允许锚点前移。取 5 是为了掐掉"跳一次 → 安静一帧 → 再跳一次"
+  # 的锯齿：同向连续错解之间插不进足够的安静帧，锚点就不会被追认。
+  reseat_quiet_frames: 5
 uwb:
   # 是否接入 UWB 位置观测，入口 --zloc-uwb 显式开启。
   # 下列外参/时间偏置沿用迁入基线，须按现场硬件核对；开关不代表已完成标定。

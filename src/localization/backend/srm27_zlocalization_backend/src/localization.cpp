@@ -198,6 +198,17 @@ void Localization::initialize() {
         odometry_connected_ = !config_.prior_map_enabled && !config_.uwb.enabled;
         active_epoch_ = 0;
         poses_.initialize();
+        // initialize() 会清掉锚点；阈值必须重新注入，否则累计预算会退化成默认值。
+        poses_.setCorrectionAnchorConfig(config_.correction_anchor);
+        // 现场第一件事是确认这道闸到底有没有生效，所以启动时把生效值打出来。
+        BACKEND_INFO_STREAM("map->odom cumulative correction anchor: enabled="
+                            << std::boolalpha << config_.correction_anchor.enabled
+                            << ", max_rotation_deg="
+                            << config_.correction_anchor.max_rotation_rad * 180.0 / M_PI
+                            << ", max_translation=" << config_.correction_anchor.max_translation
+                            << "m, reseat=" << config_.correction_anchor.reseat_rotation_rad * 180.0 / M_PI
+                            << "deg/" << config_.correction_anchor.reseat_translation << "m x"
+                            << config_.correction_anchor.reseat_quiet_frames << " frames");
         next_manual_relocalization_request_id_ = 0;
         clearManualRelocalizationRequestLocked();
         frames_.clear();

@@ -106,6 +106,24 @@ ZLIO 在输入中断后会自己换代冷启动（`coordinated_reset: false`）�
 取值不用手算：`debug_tools/capture_gimbal_spin.py` 会把建议值直接打印成
 `pose_body_offset_xyz: [x, y, z]`。默认全零时本节点行为与改造前逐位一致。
 
+地面以下裁剪（`floor_clip_*`，2026-11-27）
+========================================
+光面地板会把墙面/隔断镜像到地面以下（Livox 多径回波）。2026-11-27 实车 bag 实测：过道
+中段有 4035 个点落在 z<0，把它们按 z→−z 翻上去，到真实墙面点的 3D 距离中位数 4.2 cm、
+100% < 15 cm —— 它们是墙关于地面 z=0 的**精确镜像**，不是随机噪声（见
+`user_test_log/20261127_registered_scan_floor_reflection.png`）。这些点对导航无害
+（代价地图 `min_obstacle_height: 0.10` 本来就会丢），但 RViz 的 `registered_scan` 里像
+"过道中零星几个不存在的点"，也会给 scan-to-map 添外点。
+
+`floor_clip_enabled`（默认 False）打开后，在点云变换到 odom 之后按
+
+    z < floor_z - floor_clip_margin        （默认 0.0 - 0.15 = -0.15）
+
+丢掉点。`ground_frame` 补偿后 odom 的 z=0 就是地面；margin 留 0.15 m 余量，不会切到
+真实地面/墙脚。坡道场地、或地面标定偏了，就关掉或调 `floor_z`。
+`floor_clip_warn_ratio`（默认 0.5）是保护：单帧丢点超过这个比例就节流告警，基本只会
+在 `floor_z` 填错时触发。
+
 输出字段
 ========
 ZLIO 的点云只有 `x/y/z`，而本仓库下游（`terrain_analysis` / `terrain_analysis_ext`）用
@@ -248,6 +266,47 @@ def _with_intensity(cloud, value=0.0):
     )
 
 
+def _clip_below(cloud, min_z):
+    """丢掉 odom 系里 z < min_z 的点；返回 `(点云, 丢弃数, 原始点数)`。
+
+    2026-11-27：光面地板把墙面镜像到地面以下（见模块 docstring 的"地面以下裁剪"）。
+    只在点云**已经变换到 odom** 之后调用 —— 局部雷达系里 z 不是重力方向。
+
+    按 `point_step` 过滤原始行，保留 xyz 之外的字段（当前是 intensity），不重新打包。
+    `min_z` 为 None/NaN 时原样返回（参数默认关）。
+    """
+    if min_z is None or not math.isfinite(min_z):
+        return cloud, 0, 0
+    step = int(cloud.point_step)
+    count = int(cloud.width) * int(cloud.height)
+    if step <= 0 or count <= 0:
+        return cloud, 0, 0
+    z_offset = next((int(field.offset) for field in cloud.fields if field.name == "z"), None)
+    if z_offset is None or z_offset + 4 > step:
+        return cloud, 0, 0
+    raw = np.frombuffer(cloud.data, dtype=np.uint8)
+    usable = min(count, raw.size // step)
+    if usable <= 0:
+        return cloud, 0, 0
+    rows = raw[: usable * step].reshape(usable, step)
+    z = rows[:, z_offset:z_offset + 4].copy().view(np.float32).ravel()
+    keep = np.isfinite(z) & (z >= min_z)
+    removed = int(usable - int(keep.sum()))
+    if removed == 0:
+        return cloud, 0, usable
+    clipped = PointCloud2()
+    clipped.header = cloud.header
+    clipped.height = 1
+    clipped.width = int(keep.sum())
+    clipped.fields = list(cloud.fields)
+    clipped.is_bigendian = cloud.is_bigendian
+    clipped.point_step = step
+    clipped.row_step = step * clipped.width
+    clipped.is_dense = cloud.is_dense
+    clipped.data = rows[keep].tobytes()
+    return clipped, removed, usable
+
+
 class _Rigid:
     """刚体变换：`q` 为 (w, x, y, z)，`t` 为 (x, y, z)。"""
 
@@ -355,6 +414,12 @@ class ZlioBridge(Node):
         self.declare_parameter("pcd_voxel_leaf", 0.10)      # 米；0 = 不降采样
         self.declare_parameter("pcd_merge_frames", 200)     # 每 N 帧合并一次体素，限制内存
         self.declare_parameter("pcd_save_min_points", 1000)  # 少于这个数不落盘（八成是没数据）
+        # ---- 地面以下裁剪（2026-11-27）：光面地板把墙面镜像到 z<0，见模块 docstring ----
+        # 默认关，行为与改造前逐位一致；实车导航/建图两份配置里显式打开。
+        self.declare_parameter("floor_clip_enabled", False)
+        self.declare_parameter("floor_z", 0.0)              # odom 系地面高度（ground_frame 补偿后 = 0）
+        self.declare_parameter("floor_clip_margin", 0.15)   # 允许低于地面的余量（米）
+        self.declare_parameter("floor_clip_warn_ratio", 0.5)  # 单帧丢点比例超过它就告警
         self.declare_parameter("matches_topic", "zlio_bridge/matches")
         self.declare_parameter("min_matches_warn", 30)
         self.declare_parameter("max_frame_jump_pos", 1.0)      # m/帧：20 Hz 下 = 20 m/s
@@ -441,6 +506,20 @@ class ZlioBridge(Node):
         self.pcd_voxel_leaf = float(self.get_parameter("pcd_voxel_leaf").value)
         self.pcd_merge_frames = max(1, int(self.get_parameter("pcd_merge_frames").value))
         self.pcd_save_min_points = int(self.get_parameter("pcd_save_min_points").value)
+        self.floor_clip_enabled = bool(self.get_parameter("floor_clip_enabled").value)
+        self.floor_z = float(self.get_parameter("floor_z").value)
+        self.floor_clip_margin = float(self.get_parameter("floor_clip_margin").value)
+        self.floor_clip_warn_ratio = float(self.get_parameter("floor_clip_warn_ratio").value)
+        if not math.isfinite(self.floor_z):
+            raise ValueError("floor_z must be finite")
+        if not math.isfinite(self.floor_clip_margin) or self.floor_clip_margin < 0.0:
+            raise ValueError("floor_clip_margin must be finite and >= 0")
+        if not 0.0 < self.floor_clip_warn_ratio <= 1.0:
+            raise ValueError("floor_clip_warn_ratio must be in (0, 1]")
+        # None = 不裁剪；数值 = 低于它的点全丢。
+        self.floor_clip_min_z = (
+            self.floor_z - self.floor_clip_margin if self.floor_clip_enabled else None
+        )
         self._pcd_chunks = []
         self._pcd_points = None
         self._pcd_frames = 0
@@ -470,6 +549,8 @@ class ZlioBridge(Node):
         self.jump_events = 0        # 单帧跳变超阈值的次数（发散的直接证据）
         self.rejected_jumps = 0     # 其中被 reject_implausible_jump 拦下的次数
         self.low_match_frames = 0   # 匹配点过少/更新被拒的帧数
+        self.clipped_points = 0     # 地面以下裁剪累计丢弃的点数
+        self.clip_total_points = 0  # 参与过裁剪的原始点数（只用于算比例）
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -557,6 +638,12 @@ class ZlioBridge(Node):
                 )
             )
         )
+        if self.floor_clip_min_z is not None:
+            self.get_logger().info(
+                f"地面以下裁剪已启用: 丢弃 z < {self.floor_clip_min_z:.3f} m "
+                f"(odom, floor_z={self.floor_z:.3f}, "
+                f"margin={self.floor_clip_margin:.3f}) 的点"
+            )
 
     # -- 日志节流（sim time 下也能用；rclpy 的 throttle 依赖 wall clock 与版本）------
     def _warn_throttle(self, key, message):
@@ -925,6 +1012,21 @@ class ZlioBridge(Node):
         # "Failed to find match for field 'intensity'" 把终端刷满（见该函数注释）。
         cloud = _with_intensity(cloud)
 
+        # 地面以下裁剪（2026-11-27）：光面地板把墙面镜像到 z<0，见模块 docstring。
+        # 放在 intensity 补全之后、累积/发布之前 —— 落盘 PCD 与 RViz 同时干净。
+        if self.floor_clip_min_z is not None:
+            cloud, clipped, total = _clip_below(cloud, self.floor_clip_min_z)
+            if clipped:
+                self.clipped_points += clipped
+                self.clip_total_points += total
+                if total > 0 and clipped > self.floor_clip_warn_ratio * total:
+                    self._warn_throttle(
+                        "floor_clip",
+                        f"地面以下裁剪丢掉 {clipped}/{total} 点 "
+                        f"(> {self.floor_clip_warn_ratio:.0%}): 检查 floor_z="
+                        f"{self.floor_z:.2f} / floor_clip_margin={self.floor_clip_margin:.2f}",
+                    )
+
         if self.pcd_save_en:
             self._accumulate(cloud)
 
@@ -942,6 +1044,11 @@ class ZlioBridge(Node):
                 f"已转发 {self.frames} 帧 (丢弃 {self.dropped}), epoch={self.epoch}, "
                 f"匹配点过少 {self.low_match_frames} 帧, 单帧跳变 {self.jump_events} 次"
                 + (f" (拦下 {self.rejected_jumps})" if self.rejected_jumps else "")
+                + (
+                    f", 地面下裁剪 {self.clipped_points}/{self.clip_total_points} 点"
+                    if self.clipped_points
+                    else ""
+                )
                 + f", odom←lidar t=({pose.t[0]:.3f}, {pose.t[1]:.3f}, {pose.t[2]:.3f})"
             )
         return True

@@ -67,6 +67,8 @@ void PoseOutput::initialize() {
     graph_anchor_.reset();
     trusted_covariance_.reset();
     trusted_pose_.clear();
+    // 复位后 map->odom 要重新建立，旧锚点没有意义：回到"未落锚"，首次提交直接落锚。
+    correction_anchor_.clear();
     last_tf_epoch_ = 0;
     last_tf_stamp_ = Timestamp();
 }
@@ -75,6 +77,9 @@ void PoseOutput::reframeOdometry(const Eigen::Matrix4d& old_from_new,
                                  const std::uint64_t source_epoch,
                                  const std::uint64_t target_epoch) {
     map_from_odom_ = (map_from_odom_ * old_from_new).eval();
+    // 换代只是换 odom 原点，物理位姿没变：累计预算的锚点必须同步换算，
+    // 否则换代后第一个候选就会被判越界，把整条跟踪路径误杀成 SUSPECT。
+    correction_anchor_.reframe(old_from_new);
     if (graph_anchor_ && graph_anchor_->epoch == source_epoch) {
         graph_anchor_->odom_pose = old_from_new.inverse() * graph_anchor_->odom_pose;
         graph_anchor_->epoch = target_epoch;

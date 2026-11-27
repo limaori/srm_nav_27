@@ -175,18 +175,36 @@ void Localization::collectGlobalInnovationsLocked(const GlobalObservationWork& w
     if (prior.configured && prior.disposition == ObservationDisposition::Conflict) {
         transaction.observations.conflicts.push_back(prior.reason);
     } else if (prior.configured && prior.disposition == ObservationDisposition::Measurement) {
-        transaction.prior_information_right = leftToRightPoseSqrtInformation(
-            prior_observation.registration.source_to_target,
-            prior_observation.registration.measurement_information.sqrt_information);
-        InnovationTerm term =
-            graph_.linearizeAbsolutePose(work.runtime.index, prior_observation.measured_map_pose,
-                                         transaction.prior_information_right);
-        if (term.valid) {
-            transaction.observations.entries.push_back(
-                {ObservationSource::PriorMap, "prior scan-to-map", std::move(term)});
+        // 累计预算：逐次上限只约束"这一步"，挡不住"每帧 15°、2 Hz 就 30°/s"的稳态旋转
+        // （闸门比的是当前预测，上一次吃进去的错误已经变成新基准）。这里用不随错误移动的
+        // 锚点判**累计**偏差，越界即当作冲突证据，让状态机走 conflict → SUSPECT 冻结，
+        // 而不是一路把 map->odom 转过去。判据见 backend/correction_anchor.hpp。
+        const Eigen::Matrix4d candidate_T_map_odom =
+            prior_observation.measured_map_pose * work.runtime.odom_pose.inverse();
+        if (!poses_.acceptsCorrection(candidate_T_map_odom)) {
+            const CorrectionAnchor& anchor = poses_.correctionAnchor();
+            std::ostringstream reason;
+            reason << "prior scan-to-map over cumulative correction anchor: delta_r_deg="
+                   << anchor.rotationFromAnchor(candidate_T_map_odom) * 180.0 / M_PI << " (limit "
+                   << anchor.config().max_rotation_rad * 180.0 / M_PI << "), delta_t="
+                   << anchor.translationFromAnchor(candidate_T_map_odom) << "m (limit "
+                   << anchor.config().max_translation << "m";
+            transaction.observations.conflicts.push_back(reason.str());
         } else {
-            transaction.observations.unavailable.push_back(
-                "prior scan-to-map innovation unavailable: " + term.invalid_reason);
+            transaction.prior_information_right = leftToRightPoseSqrtInformation(
+                prior_observation.registration.source_to_target,
+                prior_observation.registration.measurement_information.sqrt_information);
+            InnovationTerm term =
+                graph_.linearizeAbsolutePose(work.runtime.index,
+                                             prior_observation.measured_map_pose,
+                                             transaction.prior_information_right);
+            if (term.valid) {
+                transaction.observations.entries.push_back(
+                    {ObservationSource::PriorMap, "prior scan-to-map", std::move(term)});
+            } else {
+                transaction.observations.unavailable.push_back(
+                    "prior scan-to-map innovation unavailable: " + term.invalid_reason);
+            }
         }
     } else if (prior.configured && !prior.reason.empty()) {
         transaction.observations.unavailable.push_back(prior.reason);
@@ -261,6 +279,10 @@ void Localization::applyGlobalObservationFactorsLocked(const GlobalObservationWo
     }
     if (!transaction.observations.accepted_evidence.empty()) {
         commit.applied_correction = updateGraphLocked(/*global_factor_added=*/true);
+        // 锚点只在"安静"的修正后前移：正常小抖动/缓慢真实漂移会跟随，
+        // 连续同向的大步修正不追认，累计到上限就停。
+        poses_.noteCorrection(poses_.transform(), commit.applied_correction.rotation_rad,
+                              commit.applied_correction.translation);
     }
     // 一次性先验：若初始位姿来自 UWB 等其它来源，首次被验收的先验观测同样会锁存，
     // 此后跟踪周期不再产生先验观测。

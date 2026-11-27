@@ -58,6 +58,7 @@
 - [2026-11-24 决策模块 common/frontend/backend 分层](records/2026-11-24-decision-module-layering.md) —— 决策共享底座 `srm27_behavior_core`、BT 插件 `srm27_behavior_plugins`、服务端 `srm27_behavior`；插件改从独立包目录加载。
 - [2026-11-24 tdt_nav_kit 拆包并入 planner 前后端](records/2026-11-24-tdt-merge-into-planner.md) —— 规划前端 `srm27_nav_planner` / 后端 `srm27_nav_smoother` / 共用 `srm27_nav_common`，插件 ID 与 launch 开关改名、装配资产收口、验证证据。
 - [2026-11-24 云台点云平移绕圈定位记录](records/2026-11-24-云台点云平移绕圈%28ai%29.md) —— yaw 稳定但世界点云 R≈9.6 cm 绕圈；`pose_body_offset` 被带到点云，`apply_to_cloud` 改 false。
+- [2026-11-27 map→odom 累计修正预算](records/2026-11-27-map-odom-累计修正预算.md) —— 换图后 `map→odom` 跳着转：描述子实测不可分（任意两处≈0.000）+ 逐次上限挡不住累计旋转；新增锚定累计闸与端到端用例。
 - [2026-11-26 仓库清理：诊断目录与样例图](records/2026-11-26-repo-cleanup.md) —— `.diag_tmp`/`.dsh_run` 等一次性诊断目录出索引、零引用示例图删除、`.gitignore` 去重分栏；索引 1442 → 1246。
 - [MINCO 迁移实施记录](records/minco迁移实施记录%28ai%29.md)
 - [MINCO 实车迁移实施记录与上电验收清单](records/minco实车迁移实施记录%28ai%29.md)

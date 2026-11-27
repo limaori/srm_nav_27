@@ -38,7 +38,7 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 
-from zlio_bridge import _Rigid, _quat_inverse, _quat_rotate  # noqa: E402
+from zlio_bridge import _Rigid, _clip_below, _quat_inverse, _quat_rotate  # noqa: E402
 
 
 def _assert(condition, message):
@@ -291,6 +291,129 @@ def test_mapping_and_nav_share_the_same_pose_body_offset():
             "registered_scan R≈9.6 cm、车位姿 R≈1.8 cm），正式配置应为 false")
 
 
+def _make_cloud(rows, frame_id="odom"):
+    """`[(x, y, z, intensity), ...]` → PointCloud2；布局与 bridge 输出一致（xyz+intensity）。"""
+    from std_msgs.msg import Header
+    from sensor_msgs.msg import PointCloud2, PointField
+    from sensor_msgs_py import point_cloud2
+
+    header = Header()
+    header.frame_id = frame_id
+    return point_cloud2.create_cloud(
+        header,
+        [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1),
+        ],
+        rows,
+    )
+
+
+def test_clip_below_drops_floor_reflections_and_keeps_fields():
+    """2026-11-27：光面地板的墙面镜像点（z<0）要精确丢掉，intensity 跟着自己的点走。
+
+    实车 01:27 bag：过道中段 4035 个点在 z<0，按 z→−z 翻上去到真实墙面点的 3D 距离
+    中位数 4.2 cm、100% < 15 cm —— 墙关于地面 z=0 的镜像，不是噪声。这就是这条裁剪
+    要吃掉的东西。判据：
+      * 阈值取 `floor_z - margin`，恰好等于阈值的点**保留**（>=）；
+      * NaN 的 z 一并丢掉（本来就是无效点）；
+      * 除 xyz 外的字段（intensity）、header、point_step 原样保留。
+    """
+    from sensor_msgs_py import point_cloud2
+
+    cloud = _make_cloud([
+        (1.0, 2.0, -0.60, 1.0),        # 反射点
+        (1.0, 2.0, -0.20, 2.0),        # 反射点
+        (1.0, 2.0, float("nan"), 6.0),  # 无效点：一并丢
+        (1.0, 2.0, -0.15, 3.0),        # 边界：>= 阈值 → 保留
+        (1.0, 2.0, 0.02, 4.0),         # 地面
+        (1.0, 2.0, 1.50, 5.0),         # 墙
+    ])
+    clipped, removed, total = _clip_below(cloud, -0.15)
+    _assert(
+        removed == 3 and total == 6 and clipped.width == 3,
+        f"应丢 3/6 点，实际 {removed}/{total} → width {clipped.width}",
+    )
+    points = list(point_cloud2.read_points(
+        clipped, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+    kept_z = [p[2] for p in points]
+    _assert(
+        len(kept_z) == 3
+        and all(abs(a - b) < 1e-6 for a, b in zip(kept_z, (-0.15, 0.02, 1.50))),
+        f"保留的 z 不对: {kept_z}",
+    )
+    _assert(
+        [p[3] for p in points] == [3.0, 4.0, 5.0],
+        f"intensity 没有跟着自己的点走: {[p[3] for p in points]}",
+    )
+    _assert(
+        clipped.header.frame_id == "odom"
+        and clipped.point_step == 16
+        and len(clipped.fields) == 4
+        and clipped.height == 1,
+        "裁剪后必须保留 header / 字段布局 / point_step",
+    )
+
+
+def test_clip_below_disabled_is_a_no_op():
+    """默认关（None/NaN）时逐位返回原点云 —— 不能悄悄改变现网行为。"""
+    cloud = _make_cloud([(0.0, 0.0, -5.0, 0.0), (0.0, 0.0, 1.0, 0.0)])
+    for value in (None, float("nan")):
+        out, removed, total = _clip_below(cloud, value)
+        _assert(out is cloud and removed == 0 and total == 0,
+                f"min_z={value!r} 时不应改点云")
+
+
+def test_clip_below_all_below_gives_empty_cloud():
+    """整帧都在地面以下（如掉进地下的极端帧）→ 宽度 0，但不能返回 None。"""
+    cloud = _make_cloud([(0.0, 0.0, -1.0, 0.0), (0.0, 0.0, -0.5, 0.0)])
+    out, removed, total = _clip_below(cloud, -0.15)
+    _assert(
+        removed == 2 and total == 2 and out.width == 0 and out.height == 1
+        and out.row_step == 0 and len(out.data) == 0,
+        "全丢时应该是合法的空点云（width=0, height=1）",
+    )
+
+
+def test_clip_below_keeps_cloud_when_nothing_is_below():
+    """没有点在地面以下 → 返回原对象，不做无谓的拷贝（20 Hz 下别白搬数据）。"""
+    cloud = _make_cloud([(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0)])
+    out, removed, total = _clip_below(cloud, -0.15)
+    _assert(out is cloud and removed == 0 and total == 2,
+            f"没有可丢的点时应原样返回（实际 removed={removed}, total={total}）")
+
+
+def test_floor_clip_config_matches_between_mapping_and_nav():
+    """建图与导航的地面以下裁剪必须同值：地图里固化的与导航实时丢的必须是同一刀。
+
+    建图时打开：避免光面地板的墙面镜像被累积进先验 PCD；导航时打开：RViz/scan-to-map
+    干净。两边 floor_z/margin 不一致会在建图与导航之间制造一个常量高度差，和
+    `pose_body_offset_xyz` 一样属于"必须成对"的参数。
+    """
+    import yaml
+
+    workspace_root = PACKAGE_ROOT.parents[3]
+    real_dir = workspace_root / "src" / "bringup" / "srm27_nav_bringup" / "config" / "real" / "current"
+
+    def clip(name):
+        with open(real_dir / name, encoding="utf-8") as stream:
+            document = yaml.safe_load(stream)
+        section = (document.get("zlio_bridge") or {}).get("ros__parameters") or {}
+        return (
+            bool(section.get("floor_clip_enabled", False)),
+            float(section.get("floor_z", 0.0)),
+            float(section.get("floor_clip_margin", 0.15)),
+        )
+
+    nav = clip("nav2_params_srm_minco_fakeyaw.yaml")
+    mapping = clip("mapping_params.yaml")
+    _assert(nav == mapping, f"建图/导航地面以下裁剪不一致: nav={nav} mapping={mapping}")
+    _assert(nav[0], "实车导航应打开地面以下裁剪（2026-11-27 光面地板镜像）")
+    _assert(nav[2] > 0.0, "floor_clip_margin 应 > 0，否则会切到真实地面/墙脚")
+
+
 def main():
     tests = [
         test_first_frame_pose_is_identity,
@@ -300,6 +423,11 @@ def main():
         test_planarize_uses_mount_not_t_off,
         test_pose_body_offset_cancels_the_residual,
         test_mapping_and_nav_share_the_same_pose_body_offset,
+        test_clip_below_drops_floor_reflections_and_keeps_fields,
+        test_clip_below_disabled_is_a_no_op,
+        test_clip_below_all_below_gives_empty_cloud,
+        test_clip_below_keeps_cloud_when_nothing_is_below,
+        test_floor_clip_config_matches_between_mapping_and_nav,
     ]
     for test in tests:
         test()

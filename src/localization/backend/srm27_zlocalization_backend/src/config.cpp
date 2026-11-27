@@ -236,6 +236,16 @@ void normalizeObservationNumerics(Config& c, const Config& d) {
     source(c.recovery.source, d.recovery.source);
     source(c.loop.source, d.loop.source);
     c.recovery.global_fallback_candidates = std::max(0, c.recovery.global_fallback_candidates);
+
+    // 累计修正预算：两个上限 0 表示"该轴不检查"，两个 reseat 阈值 0 表示"永不跟随"，
+    // 都是非负语义，因此统一走 nonnegativeOr（非有限值退回默认）。
+    fields(c.correction_anchor, d.correction_anchor,
+           {&CorrectionAnchorConfig::max_rotation_rad, &CorrectionAnchorConfig::max_translation,
+            &CorrectionAnchorConfig::reseat_rotation_rad,
+            &CorrectionAnchorConfig::reseat_translation},
+           nonnegativeOr);
+    c.correction_anchor.reseat_quiet_frames =
+        std::max(1, c.correction_anchor.reseat_quiet_frames);
 }
 
 /// 规范化 UWB 时空参数、位置协方差及依赖其数值的启动标定。

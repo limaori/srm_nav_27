@@ -22,6 +22,7 @@ NodeConfig ParameterReader::load() {
     loadMapTrajectoryAndRegistration();
     loadTracking();
     loadRecovery();
+    loadCorrectionAnchor();
     loadUwb();
     loadLoopAndGraph();
     loadResetAndStartup();
@@ -167,6 +168,26 @@ void ParameterReader::loadTracking() {
              parameters_.runtime.innovation.rejection_probability);
     getParam("innovation/conflicts_before_suspect",
              parameters_.runtime.innovation.conflicts_before_suspect);
+}
+
+/// 读取 map→odom 相对锚点的累计修正预算。
+///
+/// 逐次上限（tracking/recovery 里的 max_*_correction_deg）只约束"这一步"，
+/// 挡不住"每帧 15°、2 Hz 就 30°/s"这种稳态旋转。这里读的是**累计**口径：
+/// 相对一个不随错误移动的锚点，总偏差超过 max_rotation_deg / max_translation 就拒。
+/// 锚点只在单次修正量 <= reseat_* 时才前移，所以正常的小幅抖动与缓慢真实漂移不受影响。
+void ParameterReader::loadCorrectionAnchor() {
+    auto& anchor = parameters_.runtime.correction_anchor;
+    getParam("correction_anchor/enabled", anchor.enabled);
+    double max_rotation_deg = 10.0;
+    getParam<double>("correction_anchor/max_rotation_deg", max_rotation_deg, 10.0);
+    anchor.max_rotation_rad = degreesToRadians(max_rotation_deg);
+    getParam("correction_anchor/max_translation", anchor.max_translation);
+    double reseat_rotation_deg = 1.0;
+    getParam<double>("correction_anchor/reseat_rotation_deg", reseat_rotation_deg, 1.0);
+    anchor.reseat_rotation_rad = degreesToRadians(reseat_rotation_deg);
+    getParam("correction_anchor/reseat_translation", anchor.reseat_translation);
+    getParam("correction_anchor/reseat_quiet_frames", anchor.reseat_quiet_frames);
 }
 
 /// 读取 INITIALIZING、SUSPECT 和 LOST 共用的恢复参数。
