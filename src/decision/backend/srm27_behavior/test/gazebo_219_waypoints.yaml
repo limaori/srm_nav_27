@@ -1,0 +1,7 @@
+# 219_1121 Gazebo only. Coordinates from simulation/goals.json and sim.yaml.
+frame_id: map
+named_waypoints:
+  rmul_center: {x: 0.69, y: 0.04, yaw: 0.0}
+  rmul_supply: {x: 0.985, y: 0.885, yaw: 0.0}
+  rmul_supply_shelter: {x: 0.985, y: 0.885, yaw: 0.0}
+  rmul_center_fallback: {x: 0.985, y: 0.885, yaw: 0.0}

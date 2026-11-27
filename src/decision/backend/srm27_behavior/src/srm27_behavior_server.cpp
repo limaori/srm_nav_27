@@ -32,6 +32,7 @@
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
+#include "rclcpp_action/qos.hpp"
 #include "rm_decision_interfaces/msg/ally_robot_hp.hpp"
 #include "rm_decision_interfaces/msg/buff.hpp"
 #include "rm_decision_interfaces/msg/event_data.hpp"
@@ -329,7 +330,7 @@ void SentryBehaviorServer::initNavActionStatus()
   // 外部（RViz / CLI / 其他节点）下发的 Nav2 目标不会经过本树的 SendNav2Goal，
   // 因此直接跟踪 action 状态，供 test_spin_speed 这类“只看导航状态”的测试树使用。
   subscriptions_.push_back(node()->create_subscription<action_msgs::msg::GoalStatusArray>(
-    action_name + "/_action/status", rclcpp::QoS(10),
+    action_name + "/_action/status", rclcpp_action::DefaultActionStatusQoS(),
     [this](const action_msgs::msg::GoalStatusArray::SharedPtr status) {
       int state = 0;
       if (!status->status_list.empty()) {

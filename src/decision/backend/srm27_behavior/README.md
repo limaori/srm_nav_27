@@ -191,6 +191,9 @@ ros2 topic echo /cmd_vel_chassis                     # 实车；仿真看 /red_s
 
 ## 验证
 
+[YAstar、MinimumSnap 和规划端 MINCO 联调记录](NAV2_MINCO_INTEGRATION.md)包含模式切换、
+`219_1121` Gazebo 复现命令和验证结果。
+
 ```bash
 # 本机没有 ROS：首次会构建 Humble 镜像
 ./src/decision/backend/srm27_behavior/scripts/validate_decision.sh --docker

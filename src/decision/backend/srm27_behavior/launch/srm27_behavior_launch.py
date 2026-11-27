@@ -20,7 +20,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace, SetRemap
-from launch_ros.descriptions import ParameterFile
+from launch_ros.descriptions import ParameterFile, ParameterValue
 from nav2_common.launch import RewrittenYaml
 
 
@@ -40,7 +40,6 @@ def generate_launch_description():
     param_substitutions = {
         "use_sim_time": use_sim_time,
         "target_tree": target_tree,
-        "enforce_mux_guard": enforce_mux_guard,
     }
 
     configured_params = ParameterFile(
@@ -104,7 +103,10 @@ def generate_launch_description():
                 executable="srm27_behavior_server",
                 name="srm27_behavior_server",
                 output="screen",
-                parameters=[configured_params],
+                parameters=[
+                    configured_params,
+                    {"enforce_mux_guard": ParameterValue(enforce_mux_guard, value_type=bool)},
+                ],
                 arguments=["--ros-args", "--log-level", log_level],
             ),
             Node(

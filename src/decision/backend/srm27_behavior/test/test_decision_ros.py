@@ -509,6 +509,7 @@ def test_navigation_failure_paths(arena):
     wait_for(lambda: any(e["event"] == "aborted" for e in a.events), "abort result lost")
     a.abort = False
     a.goal(*target, after=len(a.accepted()))
+    assert any(report["nav_fault"] == "navigation_failed" for report in a.reports)
     a.check("immediate_abort_and_recovery")
     # Interrupt while the next goal response is pending, rather than after acceptance.
     a.accept_delay = .35
@@ -912,7 +913,7 @@ def test_observation_and_calibration_never_command_motion(dry_run, calibrated):
         a.__init__('ul', f'observe-{dry_run}-{calibrated}',
                    overrides={'dry_run': dry_run, 'waypoints_calibrated': calibrated})
         a.game.game_progress = 4
-        wait_for(lambda: bool(a.reports), 'status stream missing')
+        wait_for(lambda: bool(a.reports) and bool(a.outputs), 'decision or mux stream missing')
         time.sleep(.4)
         assert not a.accepted() and not a.postures
         assert all(not value for value in a.permits)

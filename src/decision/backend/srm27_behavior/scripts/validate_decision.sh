@@ -29,7 +29,7 @@ if (( DOCKER )); then
   ARGS=()
   (( BUILD )) || ARGS+=(--no-build)
   (( ! NAV2 )) || ARGS+=(--nav2)
-  exec docker run --rm --user "$(id -u):$(id -g)" \
+  exec docker run --rm --init --shm-size=512m --user "$(id -u):$(id -g)" \
     -v "$ROOT:/workspaces/srm_nav_27" -w /workspaces/srm_nav_27 \
     --entrypoint /bin/bash "$IMAGE" src/decision/backend/srm27_behavior/scripts/validate_decision.sh "${ARGS[@]}"
 fi

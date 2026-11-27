@@ -95,6 +95,9 @@ private:
     if (result == BT::NodeStatus::FAILURE) {
       resetChild();
       clear_tracker_goal();
+      if (bb->get<std::string>("nav_fault").empty()) {
+        bb->set("nav_fault", std::string("navigation_failed"));
+      }
       retry_after_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
       return BT::NodeStatus::RUNNING;
     }
