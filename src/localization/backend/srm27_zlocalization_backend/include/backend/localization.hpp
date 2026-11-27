@@ -179,6 +179,9 @@ private:
     void execute(std::optional<Work> (Localization::*capture)(), Matcher& matcher);
     /// 冻结当前可信关键帧及其全局观测所需的因果输入。
     std::optional<GlobalObservationWork> captureTracking();
+    /// 以里程计路径长度估计车体角速度，并维护带迟滞的自转闸门。
+    /// 调用方须持有 mutex_。
+    bool bodyRateGateLocked();
     /// 冻结当前恢复任务的身份、源历史及位置先验。
     std::optional<RecoveryWork> captureRecovery();
     /// 按冷却与缓存身份捕获回环候选及完整轨迹快照。
@@ -333,6 +336,10 @@ private:
     EpochAnchor pending_epoch_anchor_;
 
     double last_recovery_timestamp_ = -std::numeric_limits<double>::infinity();
+    /// 自转闸门的锁定期截止时间（秒，前端时间轴）；0 = 未锁定。
+    double body_rate_gate_until_ = 0.0;
+    /// 闸门锁定所对应的前端代次；换代时时间轴可能重启，必须清零截止时间。
+    std::uint64_t body_rate_gate_epoch_ = 0;
     int last_lidar_observation_runtime_index_ = -1;
     Timestamp last_global_observation_cycle_time_;
     Timestamp last_recovery_cycle_time_;

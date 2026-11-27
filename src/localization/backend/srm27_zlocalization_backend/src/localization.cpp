@@ -209,10 +209,20 @@ void Localization::initialize() {
                             << "m, reseat=" << config_.correction_anchor.reseat_rotation_rad * 180.0 / M_PI
                             << "deg/" << config_.correction_anchor.reseat_translation << "m x"
                             << config_.correction_anchor.reseat_quiet_frames << " frames");
+        // 自转闸：现场要能一眼确认它开着（0 = 关闭，等于退化为"转起来就冲突"）。
+        BACKEND_INFO_STREAM("prior scan-to-map body-rate gate: "
+                            << (config_.tracking.max_body_angular_rate_rad > 0.0
+                                    ? std::to_string(static_cast<long>(std::lround(
+                                          config_.tracking.max_body_angular_rate_rad * 180.0 /
+                                          M_PI))) +
+                                          " deg/s (skip observation)"
+                                    : std::string("disabled (0 = always observe)")));
         next_manual_relocalization_request_id_ = 0;
         clearManualRelocalizationRequestLocked();
         frames_.clear();
         uwb_.resetAll();
+        body_rate_gate_until_ = 0.0;
+        body_rate_gate_epoch_ = 0;
         last_lidar_observation_runtime_index_ = -1;
         last_global_observation_cycle_time_ = Timestamp();
         last_recovery_cycle_time_ = Timestamp();

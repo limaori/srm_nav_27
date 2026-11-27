@@ -94,7 +94,13 @@ ZLIO 在输入中断后会自己换代冷启动（`coordinated_reset: false`）�
 
     pose_pub = pose · T(offset)
 
-作用范围由 `pose_body_offset_apply_to_cloud` 决定（2026-11-24 起正式配置 = **false**）：
+**2026-11-27 起：offset 只作用于输出链**（`lidar_odometry` → `sensor_scan_generation`
+→ `odom→gimbal_yaw` → TF）。发给 backend 的 `frontend/frame` 位姿用**原始**
+`T_odom_lidar`，与它收到的原始局部点云同系；否则云台一转，offset 在 odom 里画圆，
+预测与观测差 0.2~0.47 m，NIS 爆表（bag real_zloc_1127_161502）。
+
+输出链里世界点云是否也挪，由 `pose_body_offset_apply_to_cloud` 决定
+（2026-11-24 起正式配置 = **false**）：
 
   * **false（正式）**：只改**位姿**；世界点云仍用 ZLIO 原始雷达位姿。2026-11-24 实车实测：
     true 时 `registered_scan` 相对锚点有 R≈9.6 cm 的平移绕圈（`sensor_scan` 9.2、
@@ -717,17 +723,19 @@ class ZlioBridge(Node):
     def _backend_pose_provider(self, raw_pose):
         """给 backend 适配层提供当帧 `(T_off, 适配位姿, 随体偏置)`。
 
-        位姿与 `_publish()` 里发布的 `lidar_odometry` 用**同一个** `self.t_off`
-        与同一段随体偏置补偿，因此 backend 算出的 map→odom 与本节点的 odom 系
-        严格同源。还没抓到 T_off 时返回 None（适配层据此丢帧，绝不发单位变换）。
+        **不**在这里乘 `pose_body_offset`（2026-11-27 修正）：backend 的因子图必须用
+        "原始 sensor 位姿 + 原始局部点云"（适配层发的 cloud 就是原始系）。offset 是
+        一个随云台转角在 odom 里画圆的 body 常量；若只乘进 backend 位姿、不进点云，
+        云台一转预测与观测就差 0.2~0.5 m，NIS 爆表（bag real_zloc_1127_161502）。
+        它只在 `_publish()` 的输出链（`lidar_odometry` → `sensor_scan_generation`
+        → `odom→gimbal_yaw` → TF）上应用，用来修发布位姿的圆。
+
+        还没抓到 T_off 时返回 None（适配层据此丢帧，绝不发单位变换）。
         """
         if self.t_off is None:
             return None
         pose = self.t_off * _Rigid.from_pose(raw_pose)
-        offset = self.pose_body_offset
-        if offset is not None:
-            pose = pose * offset
-        return self.t_off, pose, None if offset is None else offset.t
+        return self.t_off, pose, None
 
     def _on_frame(self, msg: FrontendFrame):
         stamp = Time.from_msg(msg.odometry.header.stamp)
@@ -865,12 +873,15 @@ class ZlioBridge(Node):
             # 已经不是安装外参了。
             pose = (pose * self.mount.inverse()).planar() * self.mount
 
-        # 前端随体偏置补偿：把 `odom→gimbal_yaw` 上那个半径 0.15~0.26 m 的圆减掉。
-        # 默认位姿+点云一起改（链条自洽、避障不受影响）；`apply_to_cloud=false` 只改位姿，
-        # 仅供 A/B 诊断 —— 见参数注释里的取舍。
+        # 前端随体偏置补偿：把 `odom→gimbal_yaw` 上那个半径 0.15~0.27 m 的圆减掉。
+        # 只作用在**输出链**（lidar_odometry/TF）；backend 的因子图用原始位姿
+        # （见 `_backend_pose_provider`）。`apply_to_cloud` 决定世界点云是否也挪：
+        # 正式配置 false（与先验 PCD 同口径），true 仅供 A/B。
         pose_pub = pose if self.pose_body_offset is None else pose * self.pose_body_offset
         cloud_pose = pose_pub if self.pose_body_offset_apply_to_cloud else pose
-        self._publish(msg, pose_pub, stamp, cloud_pose=cloud_pose)
+        # backend 拿**原始** pose（不含 offset），与适配层发的原始局部点云保持一致；
+        # offset 只作用于 pose_pub 这条输出链。
+        self._publish(msg, pose_pub, stamp, cloud_pose=cloud_pose, backend_pose=pose)
 
     # -- 关键数学 --------------------------------------------------------------
     def _capture_offset(self, stamp):
@@ -958,8 +969,12 @@ class ZlioBridge(Node):
         self.epoch_pub.publish(epoch_msg)
 
     # -- 输出 ------------------------------------------------------------------
-    def _publish(self, msg: FrontendFrame, pose: _Rigid, stamp: Time, cloud_pose=None):
+    def _publish(self, msg: FrontendFrame, pose: _Rigid, stamp: Time, cloud_pose=None,
+                 backend_pose=None):
         """发布 registered_scan + lidar_odometry；backend 模式下再发一份适配观测。
+
+        `pose` 是**输出**位姿（含 `pose_body_offset`，走 lidar_odometry/TF 链）；
+        `backend_pose` 是给 backend 的**原始**位姿（不含 offset，与局部点云同系）。
 
         返回 True 表示这一帧确实发布了（点云变换失败时返回 False，backend 侧也不发，
         避免"导航没有、backend 有"的两套观测）。
@@ -1034,11 +1049,11 @@ class ZlioBridge(Node):
         self.cloud_pub.publish(cloud)
         self.frames += 1
         if self.backend is not None:
-            # 位姿传的就是上面发出去的 pose（含 pose_body_offset），协方差按同一个
-            # R_off 旋转；点云仍是局部系，由 backend 自己搬到 map 系。
-            self.backend.on_frame(
-                msg, self.t_off, pose,
-                None if self.pose_body_offset is None else self.pose_body_offset.t)
+            # backend 必须拿**原始**位姿：它的局部点云是原始系，把 offset 加到位姿上
+            # 会让"预测点云"和"实测点云"差一个随云台转动的常量（云台一转就冲突）。
+            # offset 只走上面的 lidar_odometry/TF 输出链去修发布位姿的圆。
+            backend_pose = pose if backend_pose is None else backend_pose
+            self.backend.on_frame(msg, self.t_off, backend_pose, None)
         if self.frames == 1 or self.frames % 200 == 0:
             self.get_logger().info(
                 f"已转发 {self.frames} 帧 (丢弃 {self.dropped}), epoch={self.epoch}, "

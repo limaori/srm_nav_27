@@ -747,3 +747,10 @@ ros2 bag record -o ~/srm_nav_27_data/bags/real_zloc_$(date +%m%d_%H%M%S) \
   /backend_node/localization_state /backend_node/localization_pose \
   /mapw
   ```
+# 2026-11-27
+### 实车录车
+```bash
+./scripts/bringup/record_zloc_bag.sh --list     # 先确认话题在线
+
+./scripts/bringup/record_zloc_bag.sh            # 开录，Ctrl-C 结束
+```

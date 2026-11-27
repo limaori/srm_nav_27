@@ -174,6 +174,17 @@ struct TrackingConfig {
     SourceAccumulationConfig source;
     double max_translation_correction = 1.5;
     double max_rotation_correction_rad = 15.0 * M_PI / 180.0;
+    /// 车体角速度超过它时**跳过**先验观测（0 = 关闭），rad/s。
+    ///
+    /// 为什么需要：2026-11-27 实车实测，云台转到 ~150°/s 时先验 scan-to-map 用的
+    /// 预测位姿本身就不可信 —— 平移差 0.2~0.5 m 而旋转只差 0.3°，NIS 冲到 88~326，
+    /// 连续 7 次冲突后冻结。把累积窗口从 0.4 s 收到 0.1 s 也没用（NIS 依旧），
+    /// 说明不是点云糊，是"快速自转时预测与观测对不齐"。
+    ///
+    /// 这里选择**跳过而不是拒绝**：跳过不产生观测、不计冲突，状态机保持 NORMAL，
+    /// 定位按 odom 递推，转完自动恢复纠正。拒绝才会把状态推到 SUSPECT/LOST。
+    /// 注意与 `suspicious_angular_speed`（直接进 SUSPECT 的阈值）语义不同。
+    double max_body_angular_rate_rad = 0.0;
     double suspicious_linear_speed = 4.0;
     double suspicious_angular_speed = 3.0;
 };

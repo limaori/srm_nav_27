@@ -410,5 +410,68 @@ TEST_F(LocalizationFlow, CumulativeAnchorStopsRepeatedSmallRotations) {
     EXPECT_GT(max_yaw_deg, 3.0);
     EXPECT_LT(max_yaw_deg, 11.0);
 }
+
+/// 快速自转期间必须**跳过**先验观测，而不是让它冲突到冻结。
+/// 判据：整段自转状态保持 NORMAL，且 map→odom 不被改动。
+TEST_F(LocalizationFlow, FastBodySpinSkipsPriorObservationsInsteadOfConflicting) {
+    constexpr double kDeg = M_PI / 180.0;
+    config.startup_hint.T_map_sensor = Eigen::Matrix4d::Identity();
+    config.tracking.max_body_angular_rate_rad = 60.0 * kDeg;  // 实车 profile 的阈值
+    start(true);
+
+    double time = 10.0;
+    ASSERT_TRUE(ingest(frame(time, Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity())));
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+    const auto baseline = output(frame(time, Eigen::Matrix4d::Identity(),
+                                       Eigen::Matrix4d::Identity())).T_map_odom;
+
+    // 每 0.1 s 转 30° = 300°/s，远高于 60°/s 的闸门；跑 20 帧（2 s，约 600°）。
+    for (int index = 1; index <= 20; ++index) {
+        SCOPED_TRACE(index);
+        time += 0.1;
+        const auto pose = testing::scenePose(0, 0, 0, 30.0 * kDeg * index);
+        auto input = frame(time, pose, pose);
+        ASSERT_TRUE(ingest(input));
+        maintain();
+        // 跳过观测不会推进状态机：全程不许进 SUSPECT/LOST。
+        EXPECT_EQ(controller->status(), LocalizationStatus::Normal);
+    }
+    // 没有观测被提交，map->odom 必须和自转前一模一样。
+    const auto after = output(frame(time, testing::scenePose(0, 0, 0, 30.0 * kDeg * 20),
+                                    testing::scenePose(0, 0, 0, 30.0 * kDeg * 20))).T_map_odom;
+    EXPECT_LT((after - baseline).norm(), 1e-9);
+}
+
+/// 云台反向扫动：0.1 s 一帧、在 +20°/-20° 之间来回。首尾净转角经常接近 0，
+/// 但 0.5 s 内的路径长度始终约 400°/s。旧实现（0.1 s 净转角）会在反向窗口放行
+/// 观测并冲突；2026-11-27 实车 bag 就是这样把状态推到 SUSPECT/LOST 的。
+TEST_F(LocalizationFlow, BodySpinGateUsesPathLengthNotNetRotation) {
+    constexpr double kDeg = M_PI / 180.0;
+    config.startup_hint.T_map_sensor = Eigen::Matrix4d::Identity();
+    config.tracking.max_body_angular_rate_rad = 60.0 * kDeg;  // 实车 profile 的阈值
+    start(true);
+
+    double time = 10.0;
+    ASSERT_TRUE(ingest(frame(time, Eigen::Matrix4d::Identity(), Eigen::Matrix4d::Identity())));
+    maintain();
+    ASSERT_EQ(controller->status(), LocalizationStatus::Normal);
+    const auto baseline = output(frame(time, Eigen::Matrix4d::Identity(),
+                                       Eigen::Matrix4d::Identity())).T_map_odom;
+
+    for (int index = 1; index <= 40; ++index) {
+        SCOPED_TRACE(index);
+        time += 0.1;
+        const double yaw = (index % 2 == 0 ? 20.0 : -20.0) * kDeg;
+        const auto pose = testing::scenePose(0, 0, 0, yaw);
+        ASSERT_TRUE(ingest(frame(time, pose, pose)));
+        maintain();
+        // 闸门必须全程跳过观测：不许进 SUSPECT/LOST，也不许改 map->odom。
+        EXPECT_EQ(controller->status(), LocalizationStatus::Normal);
+    }
+    const auto after = output(frame(time, testing::scenePose(0, 0, 0, 20.0 * kDeg),
+                                    testing::scenePose(0, 0, 0, 20.0 * kDeg))).T_map_odom;
+    EXPECT_LT((after - baseline).norm(), 1e-9);
+}
 }  // namespace
 }  // namespace backend

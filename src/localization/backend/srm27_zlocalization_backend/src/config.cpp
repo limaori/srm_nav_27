@@ -218,6 +218,7 @@ void normalizeObservationNumerics(Config& c, const Config& d) {
         {&TrackingConfig::correction_period, &TrackingConfig::target_radius,
          &TrackingConfig::nearest_reference_radius, &TrackingConfig::target_hysteresis_distance,
          &TrackingConfig::max_translation_correction, &TrackingConfig::max_rotation_correction_rad,
+         &TrackingConfig::max_body_angular_rate_rad,
          &TrackingConfig::suspicious_linear_speed, &TrackingConfig::suspicious_angular_speed},
         nonnegativeOr);
     c.tracking.target_keyframes = std::max<std::size_t>(1, c.tracking.target_keyframes);

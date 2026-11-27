@@ -38,8 +38,9 @@ backend 需要的位姿是**本仓库的 odom 系**：`T_odom←lidar(k) = T_off
 本模块负责的三件事
 ==================
 1. 位姿/协方差改写。`FrontendFrame.odometry` 与 `FrontendOdometry.odometry` 的
-   位姿左乘 `T_off`（与 bridge 发布的 `lidar_odometry` 逐位一致），协方差按
-   点约定（point convention）旋转：
+   位姿左乘 `T_off`，**不乘 `pose_body_offset`**（2026-11-27 起）：backend 的因子图
+   必须与它收到的原始局部点云同系；offset 只走 bridge 的 `lidar_odometry`/TF 输出链。
+   协方差按点约定（point convention）旋转：
 
        C' = blkdiag(R_off, R_off) · C · blkdiag(R_off, R_off)ᵀ
 
@@ -265,8 +266,9 @@ class BackendInputAdapter:
     def on_frame(self, message, t_off, pose, body_offset=None):
         """用当帧 `T_off` 改写 `FrontendFrame` 并发布给 backend。
 
-        `pose` 是 `zlio_bridge` 已经算好的 `T_odom←lidar`（含 `pose_body_offset`），
-        与它发布的 `lidar_odometry` 逐位一致 —— 这是"TF owner 唯一"的前提。
+        `pose` 是 `zlio_bridge` 算好的 `T_odom←lidar`，**不含** `pose_body_offset`
+        （backend 因子图必须与原始局部点云同系）。`body_offset` 参数保留给显式需要
+        参考点平移的调用方；当前 bridge 传 None。TF owner 的唯一性仍由 `T_off` 保证。
         """
         adapted = FrontendFrame()
         adapted.instance_id = message.instance_id

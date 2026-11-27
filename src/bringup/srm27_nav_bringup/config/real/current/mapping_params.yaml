@@ -53,6 +53,8 @@ zlio_bridge:
     base_frame: gimbal_yaw
     ground_frame: base_link
     lidar_frame: livox_imu
+    # 2026-11-27：与导航同值。offset 只修输出位姿链，不影响落盘点云（世界点云走原始位姿），
+    # 所以建图几何不变；必须与 nav2_params 同值（回归测试钉住）。
     pose_body_offset_xyz: [0.009, -0.226, -0.130]
     # 2026-11-24 起正式配置：只补位姿（世界点云走原始位姿）；原因和实测见
     # nav2_params_srm_minco_fakeyaw.yaml 的 zlio_bridge 注释。

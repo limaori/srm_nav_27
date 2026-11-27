@@ -14,6 +14,76 @@
 #include "backend/measurement.hpp"
 
 namespace backend {
+/// 以最近 0.5 s 里程计的**路径长度**估计车体角速度，并维护带迟滞的自转闸门。
+///
+/// 2026-11-27 实车（real_zloc_1127_161502）复盘：旧实现只看 `t-0.1 s` 的**净转角**。
+/// 云台扫到 ±180° 反向时，0.1 s 内正反转抵消、净转角≈0，但实际仍以 ~200°/s 在摆；
+/// 同时 9.3 Hz 的前端帧让 `poseAt(t-0.1, 0.05)` 约 13% 返回 nullopt（样本间隔
+/// 0.107 s，最近样本最大差 0.054 s > 0.05）。两个洞叠加，自转 57 s 里仍有约 22% 的
+/// 观测被放行 → 连续冲突 → 冻结 → 冻结投影让 map→odom 跟着云台转。
+///
+/// 这里改成：
+///   * 0.5 s 窗口内逐段求 |Δθ| 再求和（路径长度），反向不会把已转过的角度抵消；
+///   * 采样容差放宽到 0.2 s，稀疏/抖动的前端帧不再让闸门静默失效；
+///   * 迟滞：超过阈值后至少锁 0.5 s，速度降到阈值一半以下且锁定到期才重新开闸。
+///
+/// 调用方须持有 mutex_；读的是里程计历史（至少保留 2 s），不是会被裁剪的 frame_history。
+bool Localization::bodyRateGateLocked() {
+    const double high = config_.tracking.max_body_angular_rate_rad;
+    if (high <= 0.0 || !frames_.hasLatest()) {
+        return false;
+    }
+    const FrontendFrame& newest = frames_.latest();
+    // 前端换代时时间轴可能重启：旧的截止时间在新时间轴里可能是"很久以后"，
+    // 不清零会把闸门永久锁死。
+    if (newest.epoch != body_rate_gate_epoch_) {
+        body_rate_gate_epoch_ = newest.epoch;
+        body_rate_gate_until_ = 0.0;
+    }
+    constexpr double kWindowSeconds = 0.5;
+    constexpr int kIntervals = 5;
+    constexpr double kStepSeconds = kWindowSeconds / kIntervals;
+    constexpr double kSampleToleranceSeconds = 0.2;
+    constexpr double kHoldoffSeconds = 0.5;
+
+    const TimedPoseBuffer& odom = frames_.odometry();
+    double path_rad = 0.0;
+    double elapsed_seconds = 0.0;
+    bool have_previous = false;
+    Eigen::Matrix4d previous = Eigen::Matrix4d::Identity();
+    for (int index = kIntervals; index >= 0; --index) {
+        const auto pose =
+            odom.poseAt(newest.timestamp - index * kStepSeconds, kSampleToleranceSeconds);
+        if (!pose.has_value()) {
+            continue;
+        }
+        if (have_previous) {
+            const Eigen::Matrix4d relative = previous.inverse() * *pose;
+            if (relative.allFinite()) {
+                path_rad += rotationAngleFromMatrix(relative);
+                elapsed_seconds += kStepSeconds;
+            }
+        }
+        previous = *pose;
+        have_previous = true;
+    }
+    if (elapsed_seconds <= 1.0e-6) {
+        return false;
+    }
+
+    const double rate = path_rad / elapsed_seconds;
+    if (rate > high) {
+        body_rate_gate_until_ = newest.timestamp + kHoldoffSeconds;
+        return true;
+    }
+    // 迟滞：还在锁定期内且速度没有降到阈值一半以下，继续锁；否则按到期时间自然开闸。
+    if (newest.timestamp < body_rate_gate_until_ && rate > 0.5 * high) {
+        body_rate_gate_until_ = newest.timestamp + kHoldoffSeconds;
+        return true;
+    }
+    return newest.timestamp < body_rate_gate_until_;
+}
+
 /// 冻结当前可信关键帧及其全局观测所需的因果输入。
 std::optional<GlobalObservationWork> Localization::captureTracking() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -24,10 +94,15 @@ std::optional<GlobalObservationWork> Localization::captureTracking() {
     }
     work.state_generation = state_.generation();
     work.runtime = trajectory_.latest();
+    // 快速自转期间跳过先验观测（见 TrackingConfig::max_body_angular_rate_rad）：
+    // 这时预测位姿本身对不齐，scan-to-map 会以 NIS 88~326 全线冲突，连 7 次就把状态
+    // 推到 SUSPECT 并冻结。跳过只是"这一周期不产生观测"，不计冲突、不推进状态机，
+    // 定位继续按 odom 递推；转速降下来后自动恢复纠正。
+    const bool spinning_too_fast = bodyRateGateLocked();
     // initialization_only：首次先验匹配验收后，先验不再参与任何全局观测；
     // 若同时启用了 UWB 等独立来源，跟踪周期仍可为它们运行。
     const bool prior_observations_allowed =
-        config_.prior_map_enabled &&
+        config_.prior_map_enabled && !spinning_too_fast &&
         !(config_.prior_map_initialization_only && prior_initialization_only_done_);
     work.prior_input.configured =
         prior_observations_allowed && work.runtime.index != last_lidar_observation_runtime_index_;

@@ -140,6 +140,13 @@ std::optional<RecoveryWork> Localization::captureRecovery() {
     if (manual_request_.has_value() && !manualRequestAllowsFrameLocked(frames_.latest())) {
         return std::nullopt;
     }
+    // 云台快速自转时恢复配准同样不可信：自动恢复直接跳过（不是失败，等转完再试）。
+    // 人工 relocalize 是"我知道车在哪"的显式声明，不受此闸限制；
+    // INITIALIZING 不闸，避免开机云台还没停就永远起不来。
+    if (!manual_request_ && current != LocalizationStatus::Initializing &&
+        bodyRateGateLocked()) {
+        return std::nullopt;
+    }
     if (std::abs(frames_.latest().timestamp - last_recovery_timestamp_) < 1.0e-9) {
         return std::nullopt;
     }
@@ -354,15 +361,22 @@ void Localization::commit(const RecoveryWork& work, const RecoveryResult& result
                             << applied_correction.rotation_rad * 180.0 / M_PI << ")");
     } else {
         if (budget_rejected) {
+            // 两个闸的限值不一样：单次幅度是 2.5 m / 20°，累计锚点是 0.8 m / 8°。
+            // 只打其中一个会把"到底是谁拦的"看错（2026-11-27 现场日志就踩过：
+            // 明明是被单次闸拦的 180°，却因为文案写着"anchor"被误读），所以两个都打。
+            const auto& anchor_config = poses_.correctionAnchor().config();
             BACKEND_WARN_STREAM("recovery rejected by "
-                                << (anchor_rejected ? "cumulative correction anchor" : "correction budget")
-                                << ": source="
-                                << result.source << ", delta_t=" << budget_delta.translation
-                                << "m (limit " << config_.recovery.max_translation_correction
-                                << "m), delta_r_deg=" << budget_delta.rotation_rad * 180.0 / M_PI
-                                << " (limit "
+                                << (anchor_rejected ? "cumulative correction anchor"
+                                                    : "correction budget")
+                                << ": source=" << result.source
+                                << ", delta_t=" << budget_delta.translation << "m, delta_r_deg="
+                                << budget_delta.rotation_rad * 180.0 / M_PI
+                                << " (single-shot limit "
+                                << config_.recovery.max_translation_correction << "m / "
                                 << config_.recovery.max_rotation_correction_rad * 180.0 / M_PI
-                                << "); keeping the frozen pose");
+                                << "deg, anchor limit " << anchor_config.max_translation << "m / "
+                                << anchor_config.max_rotation_rad * 180.0 / M_PI
+                                << "deg); keeping the frozen pose");
         }
         BACKEND_WARN_STREAM("localization recovery pending: " << transition.reason);
         if (transition.current == LocalizationStatus::Lost)

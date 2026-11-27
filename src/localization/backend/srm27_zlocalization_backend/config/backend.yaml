@@ -164,6 +164,10 @@ tracking:
   max_translation_correction: 1.5
   # 常规全局校正允许的最大旋转变化，单位为度；0 表示不限。
   max_rotation_correction_deg: 15.0
+  # 车体角速度超过它时**跳过**先验观测（0 = 关闭），单位度每秒。
+  # 与 suspicious_angular_speed（直接进 SUSPECT）不同：这里是"这一周期不观测"，
+  # 状态机保持 NORMAL，定位按 odom 递推。实车 profile 打开（60°/s）。
+  max_body_angular_rate_deg: 0.0
   # 直接进入 SUSPECT 的线速度阈值，单位为米每秒。
   suspicious_linear_speed: 10.0
   # 直接进入 SUSPECT 的角速度阈值，单位为弧度每秒。

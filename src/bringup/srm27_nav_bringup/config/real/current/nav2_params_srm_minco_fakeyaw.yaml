@@ -1464,6 +1464,11 @@ zlio_bridge:
     #   (−0.007, −0.226, −0.131) / (+0.024, −0.225, −0.130)，差 <2%，取平均。
     #   改完再采一次，**位姿**锁相残差应从 0.26 掉到 <0.04 m（工具会直接判 PASS/FAIL）。
     # ⚠ 建图那份 config/real/mapping_params.yaml 必须同值（回归测试钉住）。
+    # 2026-11-27 最终形态：offset **只作用在输出链**（lidar_odometry → sensor_scan_generation
+    #   → odom→gimbal_yaw → TF），不再乘进 backend 的 frontend/frame 位姿 —— 后者必须
+    #   与适配层发的原始局部点云同系，否则云台一转预测与观测差 0.2~0.47 m、NIS 爆表
+    #   （bag real_zloc_1127_161502）。清零 A/B 已确认：backend 一致性由这个分离保证，
+    #   而发布位姿的 ~0.27 m 圆周晃动要靠这里重新打开 offset 修掉。
     pose_body_offset_xyz: [0.009, -0.226, -0.130]
     # 2026-11-24 起正式配置：只补位姿；原因/实测见上。
     pose_body_offset_apply_to_cloud: False

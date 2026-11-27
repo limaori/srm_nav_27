@@ -159,6 +159,10 @@ void ParameterReader::loadTracking() {
     getParam<double>("tracking/max_rotation_correction_deg", max_rotation_correction_deg, 15.0);
     parameters_.runtime.tracking.max_rotation_correction_rad =
         degreesToRadians(max_rotation_correction_deg);
+    double tracking_max_body_angular_rate_deg = 0.0;
+    getParam<double>("tracking/max_body_angular_rate_deg", tracking_max_body_angular_rate_deg, 0.0);
+    parameters_.runtime.tracking.max_body_angular_rate_rad =
+        degreesToRadians(tracking_max_body_angular_rate_deg);
     getParam("tracking/suspicious_linear_speed",
              parameters_.runtime.tracking.suspicious_linear_speed);
     getParam("tracking/suspicious_angular_speed",
