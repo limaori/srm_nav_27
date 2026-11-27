@@ -302,7 +302,11 @@ class SimPlannerSmootherParams(RewrittenYaml):
         if use_minisnap:
             smoother = config.get("smoother_server", {}).get("ros__parameters", {})
             smoother["smoother_plugins"] = [MINISNAP_SMOOTHER_INSTANCE]
-            smoother[MINISNAP_SMOOTHER_INSTANCE] = dict(MINISNAP_SMOOTHER_OVERRIDE)
+            existing = smoother.get(MINISNAP_SMOOTHER_INSTANCE) or {}
+            merged = dict(MINISNAP_SMOOTHER_OVERRIDE)
+            if existing.get("plugin") == merged["plugin"]:
+                merged.update(existing)
+            smoother[MINISNAP_SMOOTHER_INSTANCE] = merged
             # 行为树没有 SmoothPath 节点时 smoother_server 根本不会被调用
             # （2026-11-16 教训），所以打开平滑器时把两份 BT 一起切到平滑版。
             bt = config.get("bt_navigator", {}).get("ros__parameters", {})
@@ -636,12 +640,11 @@ def generate_launch_description():
     ld.add_action(
         DeclareLaunchArgument(
             "odometry_frontend",
-            # 2026-11-05 切换：仿真链默认 ZLIO（这里改，导航栈/实车入口的默认值保持
-            # point_lio —— 实车的 ZLIO 参数不同，见方案 §10，不该被仿真默认值带跑）。
-            # 回退：odometry_frontend:=point_lio 或脚本开关 --lio-frontend point_lio。
-            default_value="zlio",
+            default_value=PythonExpression([
+                "'zlio' if '", use_lio_odometry, "'.lower() in ('true', '1') else 'point_lio'",
+            ]),
             description=(
-                "里程计前端: zlio (默认, z-localization 的 frontend 包) 或 point_lio (回退)。"
+                "纯 LIO 仿真默认用 zlio；真值/GICP 模式默认用 point_lio。"
                 "zlio 只在 use_lio_odometry:=True 时生效，并会同时起 zlio_bridge "
                 "做坐标系改写与换代锚定。启动脚本开关: --lio-frontend"
             ),

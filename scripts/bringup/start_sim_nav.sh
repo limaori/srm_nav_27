@@ -163,6 +163,7 @@
 #       --rviz-config <路径>      用自定义 .rviz 配置 (默认包内 rviz/nav2_default_view.rviz)。
 #                                 例: --rviz-config viz/cloud_only.rviz —— 只看 3D 点云,
 #                                 不显示二维地图与代价地图
+#       --sim-config <绝对路径>   加载地图配套的 Gazebo 场景配置与出生位姿
 #       --gui / --no-gui          Gazebo 是否带 GUI (默认带)
 #       --run / --no-run          Gazebo 是否直接开始运行 (默认直接运行, 即 gz sim -r;
 #                                 --no-run 则保持暂停等你点播放)
@@ -177,6 +178,7 @@
 #       --behavior <树名>          同时起决策行为树（srm27_behavior）；mux 要求决策许可
 #       --test-behavior [树名]     测试行为树模式：默认 test_spin_speed；mux 不要求
 #                                  决策许可，无裁判输入也能动
+#       --behavior-params <绝对路径>   决策参数文件，含当前地图对应的航点与语义区配置
 #       --no-behavior              不起决策行为树
 #
 # 环境变量:
@@ -265,6 +267,8 @@ GIMBAL_SPIN_DEFAULT="-1.0"                     # --gimbal-spin 不带数值时�
 # 自定义 RViz 配置（留空 = 用包内 rviz/nav2_default_view.rviz；--rviz-config 覆盖）
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
+BEHAVIOR_PARAMS_FILE=""
+SIM_CONFIG_OVERRIDE=""
 # 1 = --test-behavior：起测试行为树，并让 mux 不要求决策许可（无裁判输入也能动）。
 BEHAVIOR_TEST="${BEHAVIOR_TEST:-0}"
 TEST_BEHAVIOR_TREE="${TEST_BEHAVIOR_TREE:-test_spin_speed}"
@@ -362,6 +366,7 @@ while [ $# -gt 0 ]; do
     --no-rviz)    USE_RVIZ="False"; shift ;;
     --rviz-config) RVIZ_CONFIG="${2:?--rviz-config 需要 .rviz 文件绝对路径}"; shift 2 ;;
     --gui)        USE_GUI="true"; shift ;;
+    --sim-config) SIM_CONFIG_OVERRIDE="${2:?--sim-config 需要绝对路径}"; shift 2 ;;
     --no-gui)     USE_GUI="false"; shift ;;
     --run)        RUN_IMMEDIATELY="true"; shift ;;
     --no-run)     RUN_IMMEDIATELY="false"; shift ;;
@@ -397,12 +402,25 @@ while [ $# -gt 0 ]; do
                   else
                     BEHAVIOR_TREE="$TEST_BEHAVIOR_TREE"; shift
                   fi ;;
+    --behavior-params) BEHAVIOR_PARAMS_FILE="${2:?--behavior-params 需要绝对路径}"; shift 2 ;;
     --no-behavior) BEHAVIOR_TREE=""; BEHAVIOR_TEST=0; shift ;;
     --verify-spin) VERIFY_SPIN=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$BEHAVIOR_PARAMS_FILE" ]; then
+  if [[ "$BEHAVIOR_PARAMS_FILE" != /* || ! -f "$BEHAVIOR_PARAMS_FILE" || -z "$BEHAVIOR_TREE" ]]; then
+    echo "[错误] --behavior-params 需要使用 --behavior/--test-behavior 并传入存在的绝对路径。" >&2
+    exit 2
+  fi
+fi
+
+if [ -n "$SIM_CONFIG_OVERRIDE" ] && [[ "$SIM_CONFIG_OVERRIDE" != /* || ! -f "$SIM_CONFIG_OVERRIDE" ]]; then
+  echo "[错误] --sim-config 需要传入存在的绝对路径。" >&2
+  exit 2
+fi
 
 # --test-behavior：测试树直接进 mux，不依赖裁判/决策许可。安全提示必须在启动任何节点前打印。
 if [ "$BEHAVIOR_TEST" = "1" ] && [ -n "$BEHAVIOR_TREE" ]; then
@@ -554,8 +572,14 @@ if [ "$DRY_RUN" != "1" ]; then
   if [ "$USE_ZLOC" = "true" ]; then
     WS_CHECK_PKGS+=(srm27_zlocalization_backend srm27_localization_adapter)
   fi
+  if [ -n "$BEHAVIOR_TREE" ]; then
+    WS_CHECK_PKGS+=(srm27_behavior srm27_behavior_plugins)
+  fi
   if [ "$USE_YASTAR_PLANNER" = "True" ]; then
     WS_CHECK_PKGS+=(srm27_nav_planner)
+  fi
+  if [ "$USE_MINISNAP_SMOOTHER" = "True" ]; then
+    WS_CHECK_PKGS+=(srm27_nav_smoother)
   fi
   for _pkg in "${WS_CHECK_PKGS[@]}"; do
     require_pkg_from_ws "$_pkg" || exit 1
@@ -617,6 +641,7 @@ SIM_CONFIG="$SIM_SRC/config/srm_sim.yaml"
 if [ ! -f "$SIM_CONFIG" ]; then
   SIM_CONFIG="$WS_DIR/install/srm27_gazebo_simulator/share/srm27_gazebo_simulator/config/srm_sim.yaml"
 fi
+SIM_CONFIG="${SIM_CONFIG_OVERRIDE:-$SIM_CONFIG}"
 GZ_WORLD=""
 if [ -f "$SIM_CONFIG" ]; then
   GZ_WORLD="$(sed -n 's/^world:[[:space:]]*//p' "$SIM_CONFIG" | head -n 1)"
@@ -728,6 +753,16 @@ if [ -z "$MAP_FILE" ]; then
 fi
 
 MAP_FILE="$(resolve_map "$MAP_FILE")" || exit 1
+if [ "$(basename "$MAP_FILE")" = "219_1121.yaml" ] && [ -z "$SIM_CONFIG_OVERRIDE" ]; then
+  echo "[错误] 219_1121 地图需要配套场景：--sim-config $MAPS_DIR/219_1121/simulation/sim.yaml" >&2
+  exit 2
+fi
+
+if [ "$BEHAVIOR_TEST" != "1" ] && [ -z "$BEHAVIOR_PARAMS_FILE" ] &&
+   [[ "$BEHAVIOR_TREE" == rm?*_2027 && "$(basename "$MAP_FILE")" == 219_1121.yaml ]]; then
+  echo "[错误] 219_1121 的赛制决策需要 --behavior-params 指向为该地图配置的航点和语义区。" >&2
+  exit 2
+fi
 
 if [ ! -f "$PARAMS_FILE" ]; then
   echo "[错误] 参数文件不存在: $PARAMS_FILE" >&2
@@ -836,8 +871,24 @@ if [ "$USE_ZLOC" = "true" ]; then
     exit 2
   fi
 fi
-# map->odom 的平移/航向（真值模式下恒为 0；LIO 模式下 = 出生点）
-MAP2ODOM_X="${MAP2ODOM_X:-0}"; MAP2ODOM_Y="${MAP2ODOM_Y:-0}"; MAP2ODOM_YAW="${MAP2ODOM_YAW:-0}"
+# 地图对齐由场景清单声明；默认场景的 map 与 odom 同原点。
+SCENE_MAP_TO_ODOM="0 0 0"
+if [ -n "$SIM_CONFIG_OVERRIDE" ]; then
+  SCENE_MAP_TO_ODOM="$(python3 - "$SIM_CONFIG" <<'PYEOF'
+import math
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    pose = yaml.safe_load(stream).get("map_to_odom", {})
+values = [float(pose.get(key, 0.0)) for key in ("x", "y", "yaw")]
+if not all(math.isfinite(value) for value in values):
+    sys.exit("map_to_odom 必须是三个有限数值")
+print(*values)
+PYEOF
+)" || exit 2
+fi
+read -r MAP2ODOM_X MAP2ODOM_Y MAP2ODOM_YAW <<< "$SCENE_MAP_TO_ODOM"
 if [ "$USE_GICP" = "true" ] && [ "$USE_LIO_ODOMETRY" = "true" ] && [ "$LIO_CLI_GIVEN" = "1" ]; then
   echo "[错误] --gicp 与 --lio 互斥: --gicp 本身就用 LIO + 先验点云重定位。" >&2
   echo "       想要纯 LIO 就只给 --lio; 想要重定位就只给 --gicp --prior-pcd <pcd>。" >&2
@@ -1001,6 +1052,9 @@ else
     # 与 use_lio_odometry:=False 冲突 → 导航栈启动即失败（RViz 也跟着不出现）。
     NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS use_lio_odometry:=False odometry_frontend:=${LIO_FRONTEND}"
     NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS use_zlocalization_backend:=False"
+  fi
+  if [ "$USE_ZLOC" != "true" ]; then
+    NAV_EXTRA_ARGS="$NAV_EXTRA_ARGS map_to_odom_x:=$MAP2ODOM_X map_to_odom_y:=$MAP2ODOM_Y map_to_odom_yaw:=$MAP2ODOM_YAW"
   fi
 fi
 
@@ -1283,6 +1337,10 @@ prekill_leftovers
 # start_simulation 默认 False，不走那条路），漏了就永远是 0 = 云台锁死。
 SIM_CMD="ros2 launch srm27_gazebo_simulator srm_sim.launch.py world:=${WORLD} gui:=${USE_GUI} run_immediately:=${RUN_IMMEDIATELY} gimbal_spin_rate:=${GIMBAL_SPIN_WZ} gimbal_driver:=${GIMBAL_DRIVER} velocity_command_frame:=gimbal odom_link:=gimbal_yaw"
 
+if [ -n "$SIM_CONFIG_OVERRIDE" ]; then
+  SIM_CMD="$SIM_CMD config_file:=$(printf '%q' "$SIM_CONFIG_OVERRIDE")"
+fi
+
 if [ "$DRY_RUN" != "1" ]; then
   mkdir -p "$(dirname "$GAZEBO_LOCK_FILE")"
   echo "[1/3] 启动 SRM Gazebo 仿真..."
@@ -1362,6 +1420,9 @@ start_once "SRM27 导航 + 速度出口 + RViz" "$NAV_PATTERN" "$NAV_CMD"
 
 if [ -n "$BEHAVIOR_TREE" ]; then
   BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py namespace:=${ROBOT_NS} use_sim_time:=True target_tree:=${BEHAVIOR_TREE}"
+  if [ -n "$BEHAVIOR_PARAMS_FILE" ]; then
+    BEHAVIOR_CMD="$BEHAVIOR_CMD params_file:=$(printf '%q' "$BEHAVIOR_PARAMS_FILE")"
+  fi
   # 测试模式：服务端不要再把 mux 的 decision_required 改回 true。
   [ "$BEHAVIOR_TEST" = "1" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD enforce_mux_guard:=false"
   start_once "SRM27 决策行为树 (${BEHAVIOR_TREE})" "$BEHAVIOR_PATTERN" "$BEHAVIOR_CMD"
@@ -1629,7 +1690,7 @@ from rclpy.node import Node
 NS, SPIN_WZ, GOAL_DIST, GOAL_TIMEOUT = (
     sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
 )
-# 真值模式恒为 0；LIO 模式下 odom 原点在出生点，所以 map 位姿 = odom 位姿 + 该偏移。
+# odom 原点在出生点；map 位姿由场景的 map→odom 变换换算。
 MAP2ODOM_X, MAP2ODOM_Y, MAP2ODOM_YAW = (
     float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])
 )

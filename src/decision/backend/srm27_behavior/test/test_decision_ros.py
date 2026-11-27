@@ -954,13 +954,18 @@ def test_serial_referee_2027_and_legacy_frames():
     import sys
     import tty
     sys.path.insert(0, str(Path(__file__).resolve().parents[5] / 'scripts/test'))
-    from test_chassis_speed_feedback import build_frame
+    from test_chassis_speed_feedback import build_frame, crc16
     init_test_ros()
     master, slave = os.openpty()
     tty.setraw(master)
     tty.setraw(slave)
     node = rclpy.create_node('referee_serial_test')
     received_event, received_hp = [], []
+    speed_pub = node.create_publisher(Twist, 'cmd_vel_chassis', 10)
+    speed_command = None
+    downlink = []
+    downlink_buffer = bytearray()
+
     subscriptions = [
         node.create_subscription(EventData, 'referee/event_data', received_event.append, 10),
         node.create_subscription(AllyRobotHP, 'referee/ally_robot_hp', received_hp.append, 10),
@@ -975,6 +980,8 @@ def test_serial_referee_2027_and_legacy_frames():
     log = (out / 'protocol.log').open('w')
     process = subprocess.Popen([
         'ros2', 'run', 'srm27_nav_protocol', 'srm27_nav_protocol_node', '--ros-args',
+        '-r', '__node:=srm27_nav_protocol', '--params-file',
+        str(Path(get_package_share_directory('srm27_nav_protocol')) / 'config/srm27_nav_protocol.yaml'),
         '-p', f'device_name:={os.ttyname(slave)}', '-p', 'baud_rate:=115200',
         '-p', 'flow_control:=none', '-p', 'parity:=none', "-p", "stop_bits:='1'",
         '-r', '/srm/sefdefined:=test/serial_identity',
@@ -986,10 +993,18 @@ def test_serial_referee_2027_and_legacy_frames():
     def feed():
         while not stopping.wait(.05):
             os.write(master, frames[0])
-            # Drain the node's zero-speed downlink so the PTY cannot fill.
+            if speed_command is not None:
+                speed_pub.publish(speed_command)
             import select
             if select.select([master], [], [], 0)[0]:
-                os.read(master, 4096)
+                downlink_buffer.extend(os.read(master, 4096))
+                while len(downlink_buffer) >= 19:
+                    frame = bytes(downlink_buffer[:19])
+                    if frame[:3] != b'\xa5\x0c\x00' or crc16(frame[:-2]) != int.from_bytes(frame[-2:], 'little'):
+                        del downlink_buffer[0]
+                        continue
+                    downlink.append(struct.unpack_from('<fff', frame, 5))
+                    del downlink_buffer[:19]
     feeder = threading.Thread(target=feed, daemon=True)
     feeder.start()
     try:
@@ -1013,8 +1028,22 @@ def test_serial_referee_2027_and_legacy_frames():
         time.sleep(.2)
         assert counts == (len(received_event), len(received_hp)), 'invalid payload length published state'
         assert process.poll() is None
+        command = Twist()
+        command.linear.x = command.linear.y = 10.
+        command.angular.z = 20.
+        start = len(downlink)
+        speed_command = command
+        wait_for(lambda: len(downlink) > start and downlink[-1][2] > 8.49 and
+                 math.hypot(*downlink[-1][:2]) > 2.59, 'serial output did not reach the configured caps')
+        applied = downlink[start:]
+        assert all(math.hypot(vx, vy) <= 2.601 and abs(wz) <= 8.501 for vx, vy, wz in applied)
+        assert math.isclose(applied[-1][0], applied[-1][1], abs_tol=.001)
+        assert any(0. < wz < 8. for _, _, wz in applied), 'serial output skipped the ramp'
+        speed_command = None
+        wait_for(lambda: downlink[-1] == (0., 0., 0.), 'serial watchdog did not stop output')
         (out / 'manifest.json').write_text(json.dumps({'checks': [
-            '2027_crc_serial_to_ros', 'legacy_frames_keep_control_invalid', 'wrong_lengths_rejected']}, indent=2))
+            '2027_crc_serial_to_ros', 'legacy_frames_keep_control_invalid', 'wrong_lengths_rejected',
+            'serial_exit_caps_and_watchdog']}, indent=2))
     finally:
         os.killpg(process.pid, signal.SIGINT)
         try:

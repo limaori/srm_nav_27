@@ -476,6 +476,12 @@ bool MincoPlanner::updateOdometryVelocity()
     return false;
   }
   const double stamp = rclcpp::Time(last_odom_.header.stamp).seconds();
+  const double age = clock_->now().seconds() - stamp;
+  if (stamp <= 0.0 || age < 0.0 || age > state_timeout_) {
+    last_odom_stamp_ = 0.0;
+    odom_velocity_.setZero();
+    return false;
+  }
   const Eigen::Vector2d position(
     last_odom_.pose.pose.position.x, last_odom_.pose.pose.position.y);
   if (last_odom_stamp_ > 0.0 && stamp > last_odom_stamp_) {
@@ -495,7 +501,7 @@ bool MincoPlanner::updateOdometryVelocity()
         std::sin(yaw) * velocity.x() + std::cos(yaw) * velocity.y());
       odom_velocity_ = rotated;
     } catch (const tf2::TransformException &) {
-      odom_velocity_ = velocity;
+      return false;
     }
   }
   previous_odom_position_ = position;

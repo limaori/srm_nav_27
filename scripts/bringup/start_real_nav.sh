@@ -125,6 +125,7 @@
 #       --behavior <树名>        同时起决策行为树（如 rmul_2027）；mux 要求决策许可
 #       --test-behavior [树名]   测试行为树模式：默认 test_spin_speed；mux 不要求
 #                                决策许可，无裁判输入也能动（空场/架起车辆使用）
+#       --behavior-params <绝对路径>   决策参数文件，含当前地图对应的航点与语义区配置
 #       --no-behavior            不起决策行为树
 #       --chassis-spin [rad/s] / --no-chassis-spin   底盘小陀螺（默认 2.0 rad/s）
 #       --chassis-spin-sine [max] [--spin-min <min>] [--spin-period <s>]
@@ -372,6 +373,7 @@ WORLD_ARG="${WORLD:-}"
 # 自定义 RViz 配置（与 start_sim_nav.sh 同名）。
 RVIZ_CONFIG="${RVIZ_CONFIG:-}"
 BEHAVIOR_TREE="${BEHAVIOR_TREE:-}"
+BEHAVIOR_PARAMS_FILE=""
 # 1 = --test-behavior：起测试行为树，并让 mux 不要求决策许可（无裁判输入也能动）。
 BEHAVIOR_TEST="${BEHAVIOR_TEST:-0}"
 TEST_BEHAVIOR_TREE="${TEST_BEHAVIOR_TREE:-test_spin_speed}"
@@ -848,6 +850,7 @@ while [ $# -gt 0 ]; do
                       else
                         BEHAVIOR_TREE="$TEST_BEHAVIOR_TREE"; shift
                       fi ;;
+    --behavior-params) BEHAVIOR_PARAMS_FILE="${2:?--behavior-params 需要绝对路径}"; shift 2 ;;
     --no-behavior)    BEHAVIOR_TREE=""; BEHAVIOR_TEST=0; shift ;;
     --gimbal-joint-topic) GIMBAL_JOINT_TOPIC="${2:?--gimbal-joint-topic 需要话题}"
                       GIMBAL_JOINT_TOPIC_GIVEN=1; shift 2 ;;
@@ -855,6 +858,9 @@ while [ $# -gt 0 ]; do
     --lio-frontend)   LIO_FRONTEND="${2:?--lio-frontend 需要 point_lio|zlio}"
                       LIO_FRONTEND_CLI_GIVEN=1; shift 2 ;;
     # --- 与 start_sim_nav.sh 对齐的参数面（同一条命令两边通用）---
+    --sim-config)    : "${2:?--sim-config 需要场景配置路径}"
+                     echo "[提示] 实车忽略 --sim-config，地图由 -m/--map 选择。" >&2
+                     shift 2 ;;
     -w|--world)       WORLD_ARG="${2:?--world 需要一个世界名}"; shift 2 ;;   # 实车忽略
     --gicp)           START_RELOC=1; NO_RELOC=0; MODE_GIVEN=1; shift ;;     # = --reloc
     --no-gicp)        START_RELOC=0; NO_RELOC=1; MODE_GIVEN=1; shift ;;     # = --no-reloc(LIO)
@@ -877,6 +883,13 @@ while [ $# -gt 0 ]; do
     *) echo "[错误] 未知参数: $1 (用 -h 查看用法)" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$BEHAVIOR_PARAMS_FILE" ]; then
+  if [[ "$BEHAVIOR_PARAMS_FILE" != /* || ! -f "$BEHAVIOR_PARAMS_FILE" || -z "$BEHAVIOR_TREE" ]]; then
+    echo "[错误] --behavior-params 需要使用 --behavior/--test-behavior 并传入存在的绝对路径。" >&2
+    exit 2
+  fi
+fi
 
 # --test-behavior：测试树直接进 mux，不依赖裁判/决策许可。安全提示必须在启动任何节点前打印。
 if [ "$BEHAVIOR_TEST" = "1" ] && [ -n "$BEHAVIOR_TREE" ]; then
@@ -1627,6 +1640,9 @@ if [ "$DRY_RUN" != "1" ]; then
   else
     WS_CHECK_PKGS+=(point_lio loam_interface sensor_scan_generation)
   fi
+  if [ -n "$BEHAVIOR_TREE" ]; then
+    WS_CHECK_PKGS+=(srm27_behavior srm27_behavior_plugins)
+  fi
   for _pkg in "${WS_CHECK_PKGS[@]}"; do
     require_pkg_from_ws "$_pkg" || exit 1
   done
@@ -1763,6 +1779,12 @@ else
     list_maps >&2
     exit 1
   fi
+fi
+
+if [ "$BEHAVIOR_TEST" != "1" ] && [ -z "$BEHAVIOR_PARAMS_FILE" ] &&
+   [[ "$BEHAVIOR_TREE" == rm?*_2027 && "$(basename "$MAP_YAML")" == 219_1121.yaml ]]; then
+  echo "[错误] 219_1121 的赛制决策需要 --behavior-params 指向为该地图配置的航点和语义区。" >&2
+  exit 2
 fi
 
 # 先验点云: 仅重定位需要
@@ -2012,6 +2034,9 @@ if [ -n "$BEHAVIOR_TREE" ]; then
   BEHAVIOR_CMD="ros2 launch srm27_behavior srm27_behavior_launch.py"
   [ -n "$NS_ARG" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD $NS_ARG"
   BEHAVIOR_CMD="$BEHAVIOR_CMD use_sim_time:=False target_tree:=${BEHAVIOR_TREE} log_level:=$LOG_LEVEL"
+  if [ -n "$BEHAVIOR_PARAMS_FILE" ]; then
+    BEHAVIOR_CMD="$BEHAVIOR_CMD params_file:=$(q "$BEHAVIOR_PARAMS_FILE")"
+  fi
   # 测试模式：服务端不要再把 mux 的 decision_required 改回 true。
   [ "$BEHAVIOR_TEST" = "1" ] && BEHAVIOR_CMD="$BEHAVIOR_CMD enforce_mux_guard:=false"
 fi

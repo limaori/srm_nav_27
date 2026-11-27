@@ -45,6 +45,7 @@ REAL_SCRIPT = SCRIPT_DIR / "start_real_nav.sh"
 
 #: 允许"接受但不执行"的参数（实车侧只提示/拒绝，不能报未知参数）。
 REAL_ACCEPTS_ONLY = {
+    "--sim-config": "Gazebo 场景配置，实车忽略",
     "--gui": "Gazebo GUI 开关，实车忽略",
     "--no-gui": "Gazebo GUI 开关，实车忽略",
     "--run": "Gazebo 立即运行开关，实车忽略",

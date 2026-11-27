@@ -83,6 +83,10 @@ def _launch_setup(context):
     pkg_share = get_package_share_directory("srm27_gazebo_simulator")
     config_file = LaunchConfiguration("config_file").perform(context)
     config = _load_config(pkg_share, config_file)
+    if config_file and config.get("world_sdf"):
+        config["world_sdf"] = os.path.join(
+            os.path.dirname(os.path.abspath(config_file)), config["world_sdf"]
+        )
 
     world_sdf = _resolve_world_sdf(
         pkg_share,

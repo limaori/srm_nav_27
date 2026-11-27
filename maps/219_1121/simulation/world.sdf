@@ -65,7 +65,7 @@
         <collision name="map_collision">
           <geometry>
             <mesh>
-              <uri>file:///home/srm/nav_ws/srm_nav_27_tdt/maps/219_1121/simulation/occupied_cells.stl</uri>
+              <uri>occupied_cells.stl</uri>
               <scale>1 1 1</scale>
             </mesh>
           </geometry>
@@ -73,7 +73,7 @@
         <visual name="map_visual">
           <geometry>
             <mesh>
-              <uri>file:///home/srm/nav_ws/srm_nav_27_tdt/maps/219_1121/simulation/occupied_cells.stl</uri>
+              <uri>occupied_cells.stl</uri>
               <scale>1 1 1</scale>
             </mesh>
           </geometry>

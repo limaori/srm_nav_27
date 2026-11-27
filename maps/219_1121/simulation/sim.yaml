@@ -1,7 +1,8 @@
 world: srm_empty
-world_sdf: /home/srm/nav_ws/srm_nav_27_tdt/maps/219_1121/simulation/world.sdf
+world_sdf: world.sdf
 gui_config: ''
 gui: false
+map_to_odom: {x: 0.985, y: 0.885, yaw: 0.0}
 robot:
   name: red_standard_robot1
   x: 0.9850000000000001

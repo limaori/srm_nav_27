@@ -357,7 +357,7 @@ def test_nav2_stack_frontend_validation():
 
 
 def test_frontend_defaults():
-    """默认值契约（2026-11-05 切换）：仿真入口默认 zlio，其余入口保持 point_lio。
+    """纯 LIO 仿真入口默认 zlio，其余入口及真值仿真使用 point_lio。
 
     为什么只切仿真入口：`frontend` 的算法参数是**仿真专用**的（`imu_acceleration_scale: 1.0`、
     `body_frame: front_mid360`、`lidar_topic: velodyne_points`），实车不一样（方案 §10）。
@@ -382,6 +382,7 @@ def test_frontend_defaults():
             if not isinstance(entity, DeclareLaunchArgument):
                 continue
             context = LaunchContext()
+            context.launch_configurations["use_lio_odometry"] = "True"
             name = perform_substitutions(
                 context, normalize_to_list_of_substitutions(entity.name)
             )
@@ -389,6 +390,11 @@ def test_frontend_defaults():
                 found[name] = perform_substitutions(
                     context, normalize_to_list_of_substitutions(entity.default_value)
                 )
+                if filename == "nav_srm_simulation_launch.py":
+                    context.launch_configurations["use_lio_odometry"] = "False"
+                    _assert(perform_substitutions(
+                        context, normalize_to_list_of_substitutions(entity.default_value)
+                    ) == "point_lio", "真值仿真不应请求 ZLIO")
         _assert(
             found.get("odometry_frontend") == want,
             f"{filename} 的 odometry_frontend 默认值应是 {want}, 实际 {found}",
