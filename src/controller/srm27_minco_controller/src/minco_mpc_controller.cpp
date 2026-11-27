@@ -169,6 +169,16 @@ void MincoMpcController::configure(
     throw MincoMpcControllerError("MincoMpcController: replan manager: " + reason);
   }
 
+  if (trajectory_source_ == "topic") {
+    path_request_.path_version = static_cast<std::uint64_t>(steadyNow() * 1.0e9);
+    path_request_pub_ =
+      node->create_publisher<srm27_minco_interfaces::msg::MincoPathRequest>(path_request_topic_, 1);
+    external_trajectory_sub_ = node->create_subscription<srm27_minco_interfaces::msg::MincoTrajectory>(
+      trajectory_topic_, 1,
+      [this](srm27_minco_interfaces::msg::MincoTrajectory::ConstSharedPtr message) {
+        std::atomic_store(&external_trajectory_, std::move(message));
+      });
+  }
   trajectory_pub_ =
     node->create_publisher<nav_msgs::msg::Path>(plugin_name_ + "/minco_trajectory", rclcpp::QoS(1));
   prediction_pub_ =
@@ -204,11 +214,12 @@ void MincoMpcController::configure(
     node->get_logger(),
     "MincoMpcController 已配置: planning_frame=%s base_frame=%s command_frame=%s(%s) "
     "horizon=%.2f m replan=%.1f Hz v_max=%.2f m/s a_max=%.2f m/s^2 yaw_mode=%s "
-    "wz 权限=%.3f rad/s spin_request=%s(超时 %.2f s)",
+    "wz 权限=%.3f rad/s spin_request=%s(超时 %.2f s) trajectory_source=%s",
     planning_frame_.c_str(), base_frame_.c_str(), command_frame_.c_str(),
     toString(command_frame_mode_), planning_horizon_, replan_frequency_,
     limits_.max_linear_speed, limits_.max_linear_accel, yaw_policy_.modeName(),
-    limits_.max_angular_speed, spin_request_topic_.c_str(), spin_request_timeout_);
+    limits_.max_angular_speed, spin_request_topic_.c_str(), spin_request_timeout_,
+    trajectory_source_.c_str());
   if (command_frame_mode_ == CommandFrameMode::kOdomAlignedFake) {
     RCLCPP_INFO(
       node->get_logger(),
@@ -262,6 +273,9 @@ bool MincoMpcController::loadParameters(std::string * _reason)
       node, name + "." + _suffix, rclcpp::ParameterValue(_default_value));
   };
 
+  declare("trajectory_source", std::string("internal"));
+  declare("trajectory_topic", std::string("planning/minco_trajectory"));
+  declare("path_request_topic", std::string("planning/follow_path"));
   declare("planning_frame", std::string("odom"));
   declare("base_frame", std::string("base_link"));
   // 速度命令的坐标系（方案 §3.2）：
@@ -392,6 +406,15 @@ bool MincoMpcController::loadParameters(std::string * _reason)
   declare("recovery.repeat_guard_angle_deg", 120.0);
   declare("recovery.publish_visualization", true);
 
+  node->get_parameter(name + ".trajectory_source", trajectory_source_);
+  node->get_parameter(name + ".trajectory_topic", trajectory_topic_);
+  node->get_parameter(name + ".path_request_topic", path_request_topic_);
+  if (trajectory_source_ != "internal" && trajectory_source_ != "topic") {
+    return fail("trajectory_source must be internal or topic");
+  }
+  if (trajectory_source_ == "topic" && (trajectory_topic_.empty() || path_request_topic_.empty())) {
+    return fail("topic trajectory source requires trajectory_topic and path_request_topic");
+  }
   node->get_parameter(name + ".planning_frame", planning_frame_);
   node->get_parameter(name + ".base_frame", base_frame_);
   node->get_parameter(name + ".command_frame", command_frame_);
@@ -729,12 +752,19 @@ void MincoMpcController::activate()
       (parent_.lock())->get_logger(),
       "MincoMpcController: QP 预热未成功 (%s)，将在控制周期内冷启动", warm_reason.c_str());
   }
-  worker_.start();
+  if (path_request_pub_) {
+    path_request_pub_->on_activate();
+  } else {
+    worker_.start();
+  }
 }
 
 void MincoMpcController::deactivate()
 {
   active_ = false;
+  if (path_request_pub_) {
+    path_request_pub_->on_deactivate();
+  }
   // 先停掉工作线程，保证退出后不再回写结果，再作废授权与轨迹。
   worker_.stop();
   worker_.clear();
@@ -768,6 +798,8 @@ void MincoMpcController::cleanup()
 {
   deactivate();
   worker_.clear();
+  path_request_pub_.reset();
+  external_trajectory_sub_.reset();
   trajectory_pub_.reset();
   prediction_pub_.reset();
   planning_input_pub_.reset();
@@ -797,6 +829,11 @@ void MincoMpcController::setPlan(const nav_msgs::msg::Path & _path)
   const double now_stamp = node ? node->now().seconds() : 0.0;
   const geometry_msgs::msg::Point & new_goal_point = _path.poses.back().pose.position;
 
+  if (path_request_pub_) {
+    path_request_.path = _path;
+    ++path_request_.path_version;
+    last_path_request_steady_ = -1.0;
+  }
   bool new_goal = false;
   std::string change_reason;
   double previous_distance = 0.0;
@@ -991,6 +1028,13 @@ void MincoMpcController::refreshMap(double _stamp, const ControllerDiagnostics &
 void MincoMpcController::invalidateTrajectory(const std::string & _reason, double _now_stamp)
 {
   std::atomic_store(&trajectory_, std::shared_ptr<const Trajectory2D>());
+  if (path_request_pub_) {
+    ++path_request_.path_version;
+    last_path_request_steady_ = -1.0;
+    last_external_trajectory_stamp_ = -1.0;
+    std::atomic_store(
+      &external_trajectory_, srm27_minco_interfaces::msg::MincoTrajectory::ConstSharedPtr{});
+  }
   has_warm_start_ = false;
   warm_inner_points_.clear();
   warm_durations_.clear();
@@ -1558,6 +1602,74 @@ void MincoMpcController::requestReplan(
   worker_.submit(planning_request);
 }
 
+void MincoMpcController::refreshExternalTrajectory(const State2D &, double now_stamp)
+{
+  const double now_steady = steadyNow();
+  if (path_request_.max_linear_speed != limits_.max_linear_speed ||
+    path_request_.max_linear_accel != limits_.max_linear_accel)
+  {
+    ++path_request_.path_version;
+    last_path_request_steady_ = -1.0;
+  }
+  if (now_steady - last_path_request_steady_ >= 0.1) {
+    path_request_.goal_epoch = goal_epoch_;
+    path_request_.max_linear_speed = limits_.max_linear_speed;
+    path_request_.max_linear_accel = limits_.max_linear_accel;
+    path_request_pub_->publish(path_request_);
+    last_path_request_steady_ = now_steady;
+  }
+  const auto message = std::atomic_exchange(
+    &external_trajectory_, srm27_minco_interfaces::msg::MincoTrajectory::ConstSharedPtr{});
+  if (!message || message->header.frame_id != planning_frame_ ||
+    message->path_version != path_request_.path_version || message->goal_epoch != goal_epoch_)
+  {
+    return;
+  }
+
+  const double stamp = rclcpp::Time(message->header.stamp).seconds();
+  const double valid_until = rclcpp::Time(message->valid_until).seconds();
+  if (stamp <= 0.0 || stamp <= last_external_trajectory_stamp_ || stamp > now_stamp ||
+    valid_until <= now_stamp)
+  {
+    return;
+  }
+
+  auto trajectory = std::make_shared<Trajectory2D>();
+  const auto pieces = message->piece_durations.size();
+  constexpr std::size_t coefficients = Trajectory2D::kCoefficientCount;
+  if (pieces == 0 || pieces > 128 || message->x_coefficients.size() != pieces * coefficients ||
+    message->y_coefficients.size() != pieces * coefficients)
+  {
+    return;
+  }
+  trajectory->reserve(pieces);
+  for (std::size_t i = 0; i < pieces; ++i) {
+    Trajectory2D::Coefficients x, y;
+    std::copy_n(message->x_coefficients.begin() + i * coefficients, coefficients, x.begin());
+    std::copy_n(message->y_coefficients.begin() + i * coefficients, coefficients, y.begin());
+    if (!trajectory->addPiece(x, y, message->piece_durations[i])) {
+      return;
+    }
+  }
+  trajectory->generated_stamp = stamp;
+  trajectory->valid_after = stamp;
+  trajectory->valid_until = valid_until;
+  trajectory->terminal_is_global_goal = message->terminal_is_global_goal;
+  trajectory->terminal_requires_stop = message->terminal_requires_stop;
+  trajectory->terminal_reason = message->terminal_reason;
+
+  std::atomic_store(&trajectory_, std::static_pointer_cast<const Trajectory2D>(trajectory));
+  last_external_trajectory_stamp_ = stamp;
+  last_full_revalidation_stamp_ = -1.0;
+  reference_builder_.reset();
+  stopping_ = false;
+  at_goal_stop_ = false;
+  build_start_stamp_ = -1.0;
+  diagnostics_.planning_result = "external_trajectory";
+  diagnostics_.trajectory_id = ++trajectory_id_;
+  diagnostics_.switched_trajectory_count = ++switched_trajectory_count_;
+}
+
 void MincoMpcController::harvestPlanningResult(const State2D & _state, double _now_stamp)
 {
   PlanningResult result;
@@ -1846,7 +1958,11 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 平移限速仍由上面的配置上限与下面的净空限幅负责。
 
   // 5) 取回后台结果（失败会触发脱困判定，所以需要当前状态）。
-  harvestPlanningResult(state, now_stamp);
+  if (path_request_pub_) {
+    refreshExternalTrajectory(state, now_stamp);
+  } else {
+    harvestPlanningResult(state, now_stamp);
+  }
 
   // 5.5) 脱困接管：判成功 / 判超时；未退出则本周期输出逃逸速度并直接返回。
   //
@@ -1865,6 +1981,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   // 6) 已提交轨迹在最新地图上的复验（版本变化或按固定周期）。
   auto trajectory = std::atomic_load(&trajectory_);
   if (trajectory) {
+    if (path_request_pub_ && diagnostics_.planning_result == "idle") {
+      diagnostics_.planning_result = "external_trajectory";
+    }
     diagnostics_.terminal_reason = trajectory->terminal_reason;
     diagnostics_.terminal_speed = trajectory->endVelocity().norm();
     diagnostics_.trajectory_age = std::max(0.0, now_stamp - trajectory->generated_stamp);
@@ -1886,7 +2005,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
   }
 
   // 7) 重规划请求。
-  requestReplan(state, planar, now_stamp, control_begin);
+  if (!path_request_pub_) {
+    requestReplan(state, planar, now_stamp, control_begin);
+  }
 
   // 8) 终点停车必须使用 Nav2 实测位姿，与目标检查器的成功区域一致。
   // MPC 使用的 state 已按延迟外推，不能用它提前锁停；滞回也不能把车锁在
@@ -1939,7 +2060,9 @@ geometry_msgs::msg::TwistStamped MincoMpcController::computeVelocityCommands(
     }
     return fail("no validated trajectory available yet");
   }
-  if (diagnostics_.trajectory_age > trajectory_max_age_) {
+  if (diagnostics_.trajectory_age > trajectory_max_age_ ||
+    (path_request_pub_ && trajectory->valid_until <= now_stamp))
+  {
     invalidateTrajectory("trajectory is older than trajectory_max_age", now_stamp);
     return fail("trajectory expired before it could be executed");
   }

@@ -554,6 +554,9 @@ if [ "$DRY_RUN" != "1" ]; then
   if [ "$USE_ZLOC" = "true" ]; then
     WS_CHECK_PKGS+=(srm27_zlocalization_backend srm27_localization_adapter)
   fi
+  if [ "$USE_YASTAR_PLANNER" = "True" ]; then
+    WS_CHECK_PKGS+=(srm27_nav_planner)
+  fi
   for _pkg in "${WS_CHECK_PKGS[@]}"; do
     require_pkg_from_ws "$_pkg" || exit 1
   done
@@ -736,22 +739,27 @@ if [ "${PARAMS_FILE#/}" = "$PARAMS_FILE" ]; then
 fi
 
 # ---------- 局部控制器判定 (auto 由文件内容认, 显式指定则校验文件是否对得上) ----------
-# 判据与 start_real_nav.sh 一致: 参数文件里有没有 MINCO 的 FollowPath 插件。
-if [ "$CONTROLLER" = "auto" ]; then
-  if grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
-    CONTROLLER="minco"
-  else
-    CONTROLLER="omni"
-  fi
-fi
+FOLLOWPATH_SETTINGS="$(python3 - "$PARAMS_FILE" <<'PYEOF'
+import sys
+import yaml
 
-# 唯一链路要求 MINCO 插件 + fakeyaw 参数文件: 两者缺一就直接失败, 不跑"半条链"。
-if ! grep -q "$MINCO_PLUGIN_NAME" "$PARAMS_FILE"; then
+with open(sys.argv[1], encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+follow = config.get("controller_server", {}).get("ros__parameters", {}).get("FollowPath", {})
+print(follow.get("plugin", "missing"), follow.get("trajectory_source", "internal"))
+PYEOF
+)" || exit 2
+read -r FOLLOWPATH_PLUGIN TRAJECTORY_SOURCE <<< "$FOLLOWPATH_SETTINGS"
+if [ "$FOLLOWPATH_PLUGIN" != "$MINCO_PLUGIN_NAME" ]; then
   echo "[错误] 参数文件里没有 $MINCO_PLUGIN_NAME:" >&2
   echo "[错误]   $PARAMS_FILE" >&2
   echo "[提示] 唯一链路是 MINCO + fakeyaw: 用 -p .../nav2_params_srm_fakeyaw.yaml" >&2
   echo "       (不给 -p 时默认就是它)。Omni/旧链参数文件已随独立自转链一起删除。" >&2
   exit 1
+fi
+CONTROLLER="minco"
+if [ "$DRY_RUN" != "1" ] && [ "$TRAJECTORY_SOURCE" = "topic" ]; then
+  require_pkg_from_ws srm27_minco_planner || exit 1
 fi
 if ! grep -q "gimbal_yaw_fake" "$PARAMS_FILE"; then
   echo "[错误] 参数文件不是云台系 fakeyaw 变体 (找不到 gimbal_yaw_fake): $PARAMS_FILE" >&2
@@ -1197,12 +1205,8 @@ printf '========== SRM27 仿真 NAV 导航 (世界: %s) ==========\n' "$WORLD"
 printf '工作空间  : %s\n' "$WS_DIR"
 printf '地图      : %s\n' "$MAP_FILE"
 printf '参数文件  : %s\n' "$PARAMS_FILE"
-# FollowPath 实际用的插件直接从参数文件里读出来打印 —— 比按名字猜可靠, 选错文件时一眼可见。
-FOLLOWPATH_PLUGIN="$(grep -A3 -E '^[[:space:]]*FollowPath:' "$PARAMS_FILE" 2>/dev/null \
-  | grep -m1 -E '^[[:space:]]*plugin:' \
-  | sed -e 's/^[^"]*"//' -e 's/".*$//')"
-printf '控制器    : %s%s\n' "$CONTROLLER" \
-  "$([ -n "$FOLLOWPATH_PLUGIN" ] && printf '  (FollowPath = %s)' "$FOLLOWPATH_PLUGIN")"
+printf '控制器    : %s  (FollowPath = %s, trajectory_source = %s)\n' \
+  "$CONTROLLER" "$FOLLOWPATH_PLUGIN" "$TRAJECTORY_SOURCE"
 if [ "$USE_ZLOC" = "true" ]; then
   printf '定位方式  : Z-Localization backend (map->odom 由 backend_node 发布, 实验模式)\n'
   printf '先验地图包: %s\n' "$ZLOC_MAP"

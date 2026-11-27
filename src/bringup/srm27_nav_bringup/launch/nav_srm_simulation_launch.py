@@ -287,7 +287,9 @@ class SimPlannerSmootherParams(RewrittenYaml):
                     "use_yastar_planner requires planner_server with a single "
                     "GridBased planner")
             existing = planner.get("GridBased") or {}
-            if existing.get("plugin") == YASTAR_PLANNER_OVERRIDE["plugin"]:
+            if existing.get("plugin") == "srm27_minco_planner::MincoPlanner":
+                pass  # Keep the selected wrapper and its nested YAstar configuration.
+            elif existing.get("plugin") == YASTAR_PLANNER_OVERRIDE["plugin"]:
                 # 参数文件本身就是 YAstar（例如 maps/<图>/simulation/nav2_params_yastar.yaml）：
                 # 那份文件是调参现场，只补它没写的键，不用硬编码整段覆盖。
                 merged = dict(YASTAR_PLANNER_OVERRIDE)

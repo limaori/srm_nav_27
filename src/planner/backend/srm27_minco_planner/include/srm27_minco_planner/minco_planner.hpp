@@ -40,6 +40,7 @@
 #include "srm27_minco_core/trajectory_validator.hpp"
 #include "srm27_minco_core/types.hpp"
 #include "srm27_minco_interfaces/msg/minco_trajectory.hpp"
+#include "srm27_minco_interfaces/msg/minco_path_request.hpp"
 #include "srm27_minco_pipeline/planning_worker.hpp"
 #include "srm27_nav_planner/yastar_global_planner.hpp"
 #include "tf2_ros/buffer.h"
@@ -117,6 +118,7 @@ private:
   std::string map_frame_{"map"};
   std::string base_frame_{"gimbal_yaw"};
   std::string output_frame_{"odom"};
+  std::string follow_path_topic_;
   std::string smoothed_topic_{"plan_smoothed"};
   std::string odom_topic_{"odometry"};
   std::string trajectory_topic_{"planning/minco_trajectory"};
@@ -140,6 +142,9 @@ private:
 
   // ---- 运行期状态 ----
   mutable std::mutex mutex_;
+  srm27_minco_interfaces::msg::MincoPathRequest::ConstSharedPtr follow_path_request_;
+  double follow_path_received_{-1.0};
+  rclcpp::Subscription<srm27_minco_interfaces::msg::MincoPathRequest>::SharedPtr follow_path_sub_;
   nav_msgs::msg::Path latest_plan_{};    ///< createPlan 的结果（map）
   double latest_plan_stamp_{0.0};
   nav_msgs::msg::Path smoothed_path_{};  ///< smoother_server 的输出（map）

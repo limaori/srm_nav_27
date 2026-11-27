@@ -38,6 +38,8 @@
 #include "srm27_map_adapter/costmap_adapter.hpp"
 #include "srm27_minco_controller/diagnostics.hpp"
 #include "srm27_minco_pipeline/planning_worker.hpp"
+#include "srm27_minco_interfaces/msg/minco_path_request.hpp"
+#include "srm27_minco_interfaces/msg/minco_trajectory.hpp"
 #include "srm27_minco_controller/state_adapter.hpp"
 #include "srm27_minco_controller/terminal_stop.hpp"
 #include "srm27_minco_controller/yaw_policy.hpp"
@@ -115,6 +117,7 @@ private:
   /// \brief 取回并提交后台规划结果。
   ///
   /// `_state` 只用于规划失败时的脱困分诊（读自身净空），不参与轨迹提交。
+  void refreshExternalTrajectory(const srm27_minco_core::State2D & state, double now_stamp);
   void harvestPlanningResult(const State2D & _state, double _now_stamp);
 
   /// \brief 把里程计坐标系下的路径转换到规划坐标系。
@@ -326,6 +329,17 @@ private:
   std::uint64_t trajectory_id_{0};
 
   std::shared_ptr<const srm27_minco_core::Trajectory2D> trajectory_{};
+  std::string trajectory_source_{"internal"};
+  std::string trajectory_topic_{"planning/minco_trajectory"};
+  std::string path_request_topic_{"planning/follow_path"};
+  srm27_minco_interfaces::msg::MincoPathRequest path_request_;
+  double last_path_request_steady_{-1.0};
+  double last_external_trajectory_stamp_{-1.0};
+  rclcpp_lifecycle::LifecyclePublisher<srm27_minco_interfaces::msg::MincoPathRequest>::SharedPtr
+    path_request_pub_;
+  rclcpp::Subscription<srm27_minco_interfaces::msg::MincoTrajectory>::SharedPtr
+    external_trajectory_sub_;
+  srm27_minco_interfaces::msg::MincoTrajectory::ConstSharedPtr external_trajectory_;
   std::shared_ptr<srm27_map_core::Esdf2D> esdf_{};
   double esdf_received_steady_{0.0};
   std::uint64_t map_version_{0};

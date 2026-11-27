@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import sys
+
+import yaml
 
 from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
@@ -44,6 +47,54 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from srm_speed_limits import AUTO, SpeedLimitParams  # noqa: E402
+
+
+class MincoPlannerParams(RewrittenYaml):
+    """Bind the planner and controller to the same active path in topic mode."""
+
+    def perform(self, context):
+        path = super().perform(context)
+        with open(path, encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        follow = config.get("controller_server", {}).get("ros__parameters", {}).get("FollowPath", {})
+        if follow.get("trajectory_source") != "topic":
+            return path
+
+        planner = config.get("planner_server", {}).get("ros__parameters", {})
+        grid = planner.get("GridBased", {})
+        yastar_plugin = "srm27_nav_planner::YAstarGlobalPlanner"
+        minco_plugin = "srm27_minco_planner::MincoPlanner"
+        if (planner.get("planner_plugins") != ["GridBased"]
+                or grid.get("plugin") not in (yastar_plugin, minco_plugin)
+                or follow.get("plugin") != "srm27_minco_controller::MincoMpcController"):
+            raise RuntimeError("MINCO topic mode requires GridBased YAstar/MINCO and FollowPath MINCO/MPC")
+
+        if grid["plugin"] == yastar_plugin:
+            planner["yastar"] = grid
+            grid = dict(planner.pop("MincoPlanner", {}))
+            planner["GridBased"] = grid
+            grid["plugin"] = minco_plugin
+            grid["yastar_plugin_name"] = "yastar"
+
+        # Copy the effective settings. Shared YAML objects would emit aliases that rcl rejects.
+        for key in (
+            "base_frame", "odom_topic", "planning_horizon", "path_centering_max_displacement",
+            "terminal_reached_radius", "goal_change_tolerance", "state_timeout",
+            "limits", "safety", "minco", "validator",
+        ):
+            if key in follow:
+                grid[key] = copy.deepcopy(follow[key])
+        grid["state_timeout"] = max(0.3, grid.get("state_timeout", 0.5))
+        grid["opt_frequency"] = follow.get("replan_frequency", 10.0)
+        grid["output_frame"] = follow.get("planning_frame", "odom")
+        grid["follow_path_topic"] = follow.get("path_request_topic", "planning/follow_path")
+        grid["trajectory_topic"] = follow.get("trajectory_topic", "planning/minco_trajectory")
+        if not grid["follow_path_topic"] or not grid["trajectory_topic"]:
+            raise RuntimeError("MINCO topic mode requires nonempty path and trajectory topics")
+
+        with open(path, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(config, stream)
+        return path
 
 
 def generate_launch_description():
@@ -108,7 +159,9 @@ def generate_launch_description():
     # nav2_params_srm*.yaml 生效）；传 "" 可关闭合并（见 scripts/srm_speed_limits.py）。
     # ⚠ 必须放在 ReplaceString 之前：ReplaceString 会把参数文件先落到 /tmp 的临时文件上，
     #   那时"按文件名认 mode"的自动查找就失效了（文件名不再是 nav2_params_srm*.yaml）。
-    params_file = SpeedLimitParams(params_file, speed_limits_file)
+    params_file = MincoPlannerParams(
+        source_file=SpeedLimitParams(params_file, speed_limits_file), param_rewrites={}
+    )
 
     # Only it applies when `namespace` is not empty.
     # '<robot_namespace>' keyword shall be replaced by 'namespace' launch argument

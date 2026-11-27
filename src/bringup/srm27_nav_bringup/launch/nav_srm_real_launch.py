@@ -310,6 +310,8 @@ class RealPlannerParams(RewrittenYaml):
         if planner.get("planner_plugins") != ["GridBased"] or "GridBased" not in planner:
             raise RuntimeError("use_yastar_planner requires planner_server with a single GridBased planner")
         existing = planner.get("GridBased") or {}
+        if existing.get("plugin") == "srm27_minco_planner::MincoPlanner":
+            return path
         if existing.get("plugin") == REAL_YASTAR_OVERRIDE["plugin"]:
             # 参数文件本身就是 YAstar：那份文件是调参现场，只补它没写的键。
             merged = dict(REAL_YASTAR_OVERRIDE)

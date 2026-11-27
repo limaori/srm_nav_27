@@ -54,6 +54,7 @@
        实车默认参数已使用 srm27_nav_smoother；YAstar 全局规划器由
        use_yastar_planner 开关启用，仿真入口同样支持。 -->
   <exec_depend>srm27_nav_planner</exec_depend>
+  <exec_depend>srm27_minco_planner</exec_depend>
   <exec_depend>srm27_nav_smoother</exec_depend>
   <exec_depend>srm27_minco_vendor</exec_depend>
   <exec_depend>srm27_qpoases_vendor</exec_depend>

@@ -28,6 +28,7 @@
   <depend>std_msgs</depend>
   <depend>srm27_minco_core</depend>
   <depend>srm27_minco_pipeline</depend>
+  <depend>srm27_minco_interfaces</depend>
   <depend>srm27_map_adapter</depend>
   <depend>srm27_map_core</depend>
   <depend>srm27_minco_vendor</depend>

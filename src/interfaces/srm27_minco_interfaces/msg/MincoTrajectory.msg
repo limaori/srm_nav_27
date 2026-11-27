@@ -24,3 +24,11 @@ float64[] y                     # 位置 y（m）
 float64[] yaw                   # 航向（rad，未做 unwrap 时可能跳变；控制器按需插值）
 float64[] vx                    # 速度 x（m/s，坐标系同 header.frame_id）
 float64[] vy                    # 速度 y（m/s）
+
+# Exact executable trajectory. Each segment uses local time and six coefficients
+# per axis in ascending order. The samples above remain available for diagnostics.
+float64[] piece_durations
+float64[] x_coefficients
+float64[] y_coefficients
+builtin_interfaces/Time valid_until
+bool terminal_requires_stop

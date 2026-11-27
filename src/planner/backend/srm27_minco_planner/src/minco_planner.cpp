@@ -103,10 +103,10 @@ void MincoPlanner::configure(
   RCLCPP_INFO(
     node->get_logger(),
     "MincoPlanner 已配置: name=%s map_frame=%s base_frame=%s output=%s opt_freq=%.1f Hz "
-    "horizon=%.2f m v_max=%.2f a_max=%.2f 输入路径=%s（缺省回退 createPlan）",
+    "horizon=%.2f m v_max=%.2f a_max=%.2f 输入路径=%s",
     plugin_name_.c_str(), map_frame_.c_str(), base_frame_.c_str(), output_frame_.c_str(),
     opt_frequency_, planning_horizon_, limits_.max_linear_speed, limits_.max_linear_accel,
-    smoothed_topic_.c_str());
+    (follow_path_topic_.empty() ? smoothed_topic_ : follow_path_topic_).c_str());
   RCLCPP_INFO(
     node->get_logger(),
     "MincoPlanner 权重: w_ref=%.1f w_time=%.1f w_obstacle=%.1f w_vel=%.1f w_acc=%.1f "
@@ -132,6 +132,7 @@ void MincoPlanner::loadParameters()
 
   declare("base_frame", base_frame_);
   declare("output_frame", std::string("odom"));
+  declare("follow_path_topic", std::string(""));
   declare("smooth_path_topic", smoothed_topic_);
   declare("odom_topic", odom_topic_);
   declare("trajectory_topic", trajectory_topic_);
@@ -200,6 +201,7 @@ void MincoPlanner::loadParameters()
 
   get("base_frame", base_frame_);
   get("output_frame", output_frame_);
+  get("follow_path_topic", follow_path_topic_);
   get("smooth_path_topic", smoothed_topic_);
   get("odom_topic", odom_topic_);
   get("trajectory_topic", trajectory_topic_);
@@ -331,14 +333,37 @@ void MincoPlanner::activate()
   path_pub_->on_activate();
   diagnostics_pub_->on_activate();
 
-  smoothed_sub_ = node->create_subscription<nav_msgs::msg::Path>(
-    smoothed_topic_, rclcpp::QoS(1),
-    [this](nav_msgs::msg::Path::ConstSharedPtr _msg) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      smoothed_path_ = *_msg;
-      smoothed_stamp_ = rclcpp::Time(_msg->header.stamp).seconds();
-      smoothed_fresh_ = true;
-    });
+  if (follow_path_topic_.empty()) {
+    smoothed_sub_ = node->create_subscription<nav_msgs::msg::Path>(
+      smoothed_topic_, rclcpp::QoS(1),
+      [this](nav_msgs::msg::Path::ConstSharedPtr _msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        smoothed_path_ = *_msg;
+        smoothed_stamp_ = rclcpp::Time(_msg->header.stamp).seconds();
+        smoothed_fresh_ = true;
+      });
+  } else {
+    follow_path_sub_ =
+      node->create_subscription<srm27_minco_interfaces::msg::MincoPathRequest>(
+      follow_path_topic_, 1,
+      [this](srm27_minco_interfaces::msg::MincoPathRequest::ConstSharedPtr request) {
+        if (request->path.header.frame_id != map_frame_ || request->path.poses.size() < 2 ||
+          !std::isfinite(request->max_linear_speed) || request->max_linear_speed <= 0.0 ||
+          !std::isfinite(request->max_linear_accel) || request->max_linear_accel <= 0.0)
+        {
+          return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const double now = steadyNow();
+        if (!follow_path_request_ || request->goal_epoch != follow_path_request_->goal_epoch ||
+          now - follow_path_received_ > state_timeout_)
+        {
+          has_warm_start_ = false;
+        }
+        follow_path_received_ = now;
+        follow_path_request_ = std::move(request);
+      });
+  }
   odom_sub_ = node->create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_, rclcpp::QoS(10).best_effort(),
     [this](nav_msgs::msg::Odometry::ConstSharedPtr _msg) {
@@ -371,7 +396,10 @@ void MincoPlanner::deactivate()
   path_pub_.reset();
   diagnostics_pub_.reset();
   smoothed_sub_.reset();
+  follow_path_sub_.reset();
   odom_sub_.reset();
+  std::lock_guard<std::mutex> lock(mutex_);
+  follow_path_request_.reset();
 }
 
 void MincoPlanner::cleanup()
@@ -397,7 +425,7 @@ nav_msgs::msg::Path MincoPlanner::createPlan(
   const geometry_msgs::msg::PoseStamped & start, const geometry_msgs::msg::PoseStamped & goal)
 {
   nav_msgs::msg::Path plan = yastar_.createPlan(start, goal);
-  if (plan.poses.empty()) {
+  if (plan.poses.empty() || !follow_path_topic_.empty()) {
     return plan;
   }
 
@@ -556,6 +584,22 @@ void MincoPlanner::publishTrajectory(
   message.terminal_is_global_goal = _trajectory.terminal_is_global_goal;
   message.terminal_speed = _terminal_speed;
   message.terminal_reason = _terminal_reason;
+  message.valid_until = rclcpp::Time(
+    static_cast<int64_t>(_trajectory.valid_until * 1e9), clock_->get_clock_type());
+  message.terminal_requires_stop = _trajectory.terminal_requires_stop;
+  message.piece_durations = _trajectory.durations();
+  for (std::size_t piece = 0; piece < message.piece_durations.size(); ++piece) {
+    const auto & x = _trajectory.xCoefficients()[piece];
+    const auto & y = _trajectory.yCoefficients()[piece];
+    for (std::size_t k = 0; k < x.size(); ++k) {
+      Eigen::Vector2d coefficient = rotation * Eigen::Vector2d(x[k], y[k]);
+      if (k == 0) {
+        coefficient += translation;
+      }
+      message.x_coefficients.push_back(coefficient.x());
+      message.y_coefficients.push_back(coefficient.y());
+    }
+  }
   message.t.resize(times.size());
   message.x.resize(times.size());
   message.y.resize(times.size());
@@ -617,22 +661,26 @@ void MincoPlanner::tick()
     return;
   }
 
-  nav_msgs::msg::Path plan;
   std::vector<Eigen::Vector2d> path;
-  std::uint64_t goal_epoch = 0;
-  std::uint64_t path_version = 0;
+  srm27_minco_interfaces::msg::MincoPathRequest::ConstSharedPtr follow_path;
   srm27_minco_core::VersionSet versions;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!has_goal_ || latest_plan_.poses.size() < 2) {
-      return;
+    if (follow_path_topic_.empty()) {
+      if (!has_goal_ || latest_plan_.poses.size() < 2) {
+        return;
+      }
+      path = selectInputPath(versions.path_version);
+      versions.goal_epoch = goal_epoch_;
+    } else {
+      follow_path = follow_path_request_;
+      if (!follow_path || steadyNow() - follow_path_received_ > state_timeout_) {
+        return;
+      }
+      path = pathToPoints(follow_path->path);
+      versions.path_version = follow_path->path_version;
+      versions.goal_epoch = follow_path->goal_epoch;
     }
-    path = selectInputPath(path_version);
-    goal_epoch = goal_epoch_;
-    versions.goal_epoch = goal_epoch_;
-    versions.path_version = path_version;
-    versions.limits_version = 0;
-    versions.map_version = map_version_;
   }
   if (path.size() < 2) {
     return;
@@ -675,6 +723,14 @@ void MincoPlanner::tick()
   request.minco_config = minco_config_;
   request.initializer_config = initializer_config_;
   request.validator_config = validator_config_;
+  if (follow_path) {
+    request.limits.max_linear_speed = std::min(limits_.max_linear_speed, follow_path->max_linear_speed);
+    request.limits.max_linear_accel = std::min(limits_.max_linear_accel, follow_path->max_linear_accel);
+    request.validator_config.max_linear_speed = request.limits.max_linear_speed;
+    request.validator_config.max_linear_accel = request.limits.max_linear_accel;
+    request.validator_config.braking_deceleration =
+      std::min(validator_config_.braking_deceleration, request.limits.max_linear_accel);
+  }
   request.request_stamp = state.sample_stamp;
   request.request_steady = begin;
   request.local_path_horizon = planning_horizon_;
