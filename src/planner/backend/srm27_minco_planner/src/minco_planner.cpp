@@ -400,6 +400,9 @@ void MincoPlanner::deactivate()
   odom_sub_.reset();
   std::lock_guard<std::mutex> lock(mutex_);
   follow_path_request_.reset();
+  has_goal_ = false;
+  has_odom_ = false;
+  has_warm_start_ = false;
 }
 
 void MincoPlanner::cleanup()
@@ -455,7 +458,8 @@ std::vector<Eigen::Vector2d> MincoPlanner::selectInputPath(std::uint64_t & _path
   _path_version = path_version_;
   // 只接受"本次目标之后收到的"平滑路径；顺带要求它确实通向当前目标，
   // 避免 smoother 失败时沿用上一条路线。
-  if (smoothed_fresh_ && !smoothed_path_.poses.empty()) {
+  if (smoothed_fresh_ && smoothed_stamp_ >= latest_plan_stamp_ &&
+    !smoothed_path_.poses.empty()) {
     const auto & last = smoothed_path_.poses.back().pose.position;
     const Eigen::Vector2d end(last.x, last.y);
     if ((end - goal_).norm() <= std::max(0.5, 2.0 * goal_change_tolerance_)) {
@@ -751,36 +755,42 @@ void MincoPlanner::tick()
   const auto result = srm27_minco_pipeline::PlanningWorker::runOnce(request);
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (follow_path) {
+      if (!follow_path_request_ || follow_path_request_->path_version != versions.path_version ||
+        follow_path_request_->goal_epoch != versions.goal_epoch ||
+        steadyNow() - follow_path_received_ > state_timeout_)
+      {
+        return;
+      }
+    } else if (goal_epoch_ != versions.goal_epoch || path_version_ != versions.path_version) {
+      return;
+    }
     last_result_ = result;
     has_result_ = true;
     last_result_stamp_ = state.sample_stamp;
-  }
 
-  if (!result.success) {
-    if (result.status != "already_at_goal") {
-      RCLCPP_WARN_THROTTLE(
-        node->get_logger(), *clock_, 2000, "MincoPlanner: 规划失败 (%s): %s",
-        result.status.c_str(), result.reason.c_str());
+    if (result.success) {
+      publishTrajectory(
+        result.trajectory, versions, state.sample_stamp, result.terminal_speed,
+        result.terminal_reason);
+      if (use_warm_start_) {
+        const int pieces = result.trajectory.pieceCount();
+        warm_inner_points_.clear();
+        warm_durations_ = result.trajectory.durations();
+        double accumulated = 0.0;
+        for (int i = 0; i + 1 < pieces; ++i) {
+          accumulated += result.trajectory.durations()[static_cast<std::size_t>(i)];
+          warm_inner_points_.push_back(result.trajectory.positionAt(accumulated));
+        }
+        has_warm_start_ = pieces >= 2;
+        warm_start_stamp_ = state.sample_stamp;
+      }
     }
-    return;
   }
-
-  publishTrajectory(
-    result.trajectory, versions, state.sample_stamp, result.terminal_speed,
-    result.terminal_reason);
-
-  if (use_warm_start_) {
-    const int pieces = result.trajectory.pieceCount();
-    std::lock_guard<std::mutex> lock(mutex_);
-    warm_inner_points_.clear();
-    warm_durations_ = result.trajectory.durations();
-    double accumulated = 0.0;
-    for (int i = 0; i + 1 < pieces; ++i) {
-      accumulated += result.trajectory.durations()[static_cast<std::size_t>(i)];
-      warm_inner_points_.push_back(result.trajectory.positionAt(accumulated));
-    }
-    has_warm_start_ = pieces >= 2;
-    warm_start_stamp_ = state.sample_stamp;
+  if (!result.success && result.status != "already_at_goal") {
+    RCLCPP_WARN_THROTTLE(
+      node->get_logger(), *clock_, 2000, "MincoPlanner: 规划失败 (%s): %s",
+      result.status.c_str(), result.reason.c_str());
   }
 
   publishDiagnostics();
